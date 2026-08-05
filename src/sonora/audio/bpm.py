@@ -7,7 +7,7 @@ from pathlib import Path
 from sonora.core.exceptions import AudioProcessingError
 
 try:
-    import librosa
+    import librosa  # type: ignore
     HAS_LIBROSA = True
 except ImportError:
     HAS_LIBROSA = False
@@ -27,7 +27,7 @@ def calculate_bpm(file_path: Path) -> float | None:
     try:
         y, sr = librosa.load(str(file_path), sr=None, duration=120)
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-        if isinstance(tempo, (list, tuple)):
+        if hasattr(tempo, "__getitem__"):
             tempo = tempo[0]
         return round(float(tempo), 1)
     except Exception as e:
