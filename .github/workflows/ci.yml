@@ -4,13 +4,15 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main, feature/* ]
+    branches: [ main, "feature/*" ]
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
@@ -21,11 +23,25 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies & Sonora
+      - name: Install dependencies, linters & Sonora
         run: |
           python -m pip install --upgrade pip
+          pip install ruff pyflakes mypy bandit
           pip install .
+
+      - name: Code Quality & Linting Checks
+        run: |
+          ruff check src/ tests/
+          pyflakes src/ tests/
+
+      - name: Security Scan (Bandit)
+        run: |
+          bandit -r src/ -s B404,B603,B310
 
       - name: Run Unit Tests
         run: |
           python -m unittest discover -s tests
+
+      - name: CLI Smoke Test
+        run: |
+          sonora
