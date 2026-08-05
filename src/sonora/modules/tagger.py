@@ -2,6 +2,7 @@
 Parallel autotagger engine using ThreadPoolExecutor for tagging tracks & albums.
 """
 
+import re
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -124,14 +125,17 @@ def process_single_track(
     # 7. Write metadata tags back to file (AFTER all calculations!)
     write_track_metadata(track_info)
 
-    # 8. Fetch & write .lrc lyrics file
+    # 8. Fetch & write .lrc lyrics file (and .synced.lrc copy if enhanced)
     if fetch_lyrics:
         try:
             lrc = fetch_synced_lyrics(track_info.artist, track_info.title)
             if lrc:
                 lrc_path = file_path.with_suffix(".lrc")
-                with open(lrc_path, "w", encoding="utf-8") as f:
-                    f.write(lrc)
+                lrc_path.write_text(lrc, encoding="utf-8")
+                if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", lrc):
+                    synced_lrc = re.sub(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", "", lrc)
+                    synced_lrc_path = file_path.with_suffix(".synced.lrc")
+                    synced_lrc_path.write_text(synced_lrc, encoding="utf-8")
         except (APIServiceError, OSError):
             pass
 

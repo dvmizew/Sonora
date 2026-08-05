@@ -40,7 +40,7 @@ class TestServicesEngine(unittest.TestCase):
 
         lyrics = fetch_synced_lyrics("Artist", "Title")
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
-        mock_syncedlyrics.search.assert_called_once_with("Artist - Title", plain_only=False, synced_only=False, enhanced=False)
+        mock_syncedlyrics.search.assert_called_once_with("Artist - Title", plain_only=False, synced_only=False, enhanced=True)
 
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics_with_options(self, mock_syncedlyrics):
@@ -191,6 +191,20 @@ class TestServicesEngine(unittest.TestCase):
 
         with self.assertRaises(APIServiceError):
             search_discogs_release("Artist", "Album", user_token="bad_token")
+
+    def test_clean_lyrics_text(self):
+        from sonora.services.lyrics import clean_lyrics_text
+
+        dirty = (
+            "[00:12.34] Valid lyric line\n"
+            "12 Contributors\n"
+            "You might also like\n"
+            "[00:15.00] Second valid line\n"
+            "https://genius.com/some-url\n"
+            "14Embed"
+        )
+        cleaned = clean_lyrics_text(dirty)
+        self.assertEqual(cleaned, "[00:12.34] Valid lyric line\n[00:15.00] Second valid line")
 
 
 if __name__ == "__main__":
