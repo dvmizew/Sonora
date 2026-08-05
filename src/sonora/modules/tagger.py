@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from sonora.audio.bpm import calculate_bpm
-from sonora.audio.metadata import embed_cover_art, read_track_metadata, write_track_metadata
+from sonora.audio.metadata import (
+    embed_cover_art,
+    read_track_metadata,
+    write_track_metadata,
+)
 from sonora.audio.replaygain import calculate_replaygain
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.exceptions import APIServiceError, AudioProcessingError, MetadataError

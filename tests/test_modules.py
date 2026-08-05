@@ -226,6 +226,90 @@ class TestCoreModules(unittest.TestCase):
         with self.assertRaises(AudioProcessingError):
             tag_album_folder(self.tmp_path / "nonexistent_dir_999")
 
+    @patch("sonora.modules.renamer.read_track_metadata")
+    def test_rename_track_file_collision_handling(self, mock_read):
+        f1 = self.tmp_path / "song1.wav"
+        f2 = self.tmp_path / "song2.wav"
+        create_dummy_wav(f1)
+        create_dummy_wav(f2)
+
+        mock_read.side_effect = [
+            TrackInfo(file_path=f1, artist="Artist", title="Title", track_number=1),
+            TrackInfo(file_path=f2, artist="Artist", title="Title", track_number=1),
+        ]
+
+        p1 = rename_track_file(f1)
+        p2 = rename_track_file(f2)
+
+        self.assertEqual(p1.name, "01 - Artist - Title.wav")
+        self.assertEqual(p2.name, "01 - Artist - Title (2).wav")
+
+    def test_organize_library_singles_skips_album_folders(self):
+        album_dir = self.tmp_path / "AlbumFolder"
+        album_dir.mkdir()
+        f1 = album_dir / "01.wav"
+        f2 = album_dir / "02.wav"
+        f3 = album_dir / "03.wav"
+        create_dummy_wav(f1)
+        create_dummy_wav(f2)
+        create_dummy_wav(f3)
+
+        target_dir = self.tmp_path / "Singles"
+
+        with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(file_path=f1, artist="Artist", album="Full Album")
+            moved = organize_library_singles(self.tmp_path, target_dir)
+            self.assertEqual(moved, 0)
+            self.assertTrue(f1.exists())
+            self.assertTrue(f2.exists())
+            self.assertTrue(f3.exists())
+
+    @patch("sonora.modules.tagger.write_track_metadata")
+    @patch("sonora.modules.tagger.search_discogs_release")
+    @patch("sonora.modules.tagger.lookup_acoustid")
+    @patch("sonora.modules.tagger.fetch_track_mbid")
+    @patch("sonora.modules.tagger.read_track_metadata")
+    def test_process_single_track_acoustid_discogs_fallback(
+        self, mock_read, mock_mbid, mock_acoustid, mock_discogs, mock_write
+    ):
+        wav_file = self.tmp_path / "song.wav"
+        create_dummy_wav(wav_file)
+
+        mock_read.return_value = TrackInfo(file_path=wav_file, artist="Artist", title="Title", genre=None)
+        mock_mbid.return_value = None
+        mock_acoustid.return_value = "acoustid-mbid-999"
+        mock_discogs.return_value = {"id": 123, "year": 2024}
+
+        info = process_single_track(
+            wav_file,
+            fetch_bpm=False,
+            fetch_replaygain=False,
+            fetch_lyrics=False,
+            fetch_itunes_art=False,
+            acoustid_api_key="acoustid_key",
+            discogs_user_token="discogs_token",
+        )
+
+        self.assertEqual(info.musicbrainz_trackid, "acoustid-mbid-999")
+        self.assertEqual(info.date, "2024")
+        mock_acoustid.assert_called_once()
+        mock_discogs.assert_called_once()
+
+    @patch("sonora.modules.auditor.is_fake_lossless")
+    @patch("sonora.modules.auditor.verify_flac_checksum")
+    @patch("sonora.modules.auditor.read_track_metadata")
+    def test_audit_library_spectral_check_option(self, mock_read, mock_checksum, mock_spectral):
+        flac_file = self.tmp_path / "song.flac"
+        flac_file.write_bytes(b"FLAC dummy content")
+
+        mock_checksum.return_value = True
+        mock_read.return_value = TrackInfo(file_path=flac_file, artist="Artist", title="Title")
+        mock_spectral.return_value = True
+
+        report = audit_library(self.tmp_path, check_spectral=True)
+        self.assertTrue(any("fake lossless" in issue.lower() for issues in report.issues.values() for issue in issues))
+        mock_spectral.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

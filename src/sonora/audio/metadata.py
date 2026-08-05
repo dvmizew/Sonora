@@ -127,7 +127,7 @@ def write_track_metadata(track_info: TrackInfo) -> None:
         else:
             try:
                 easy_audio: Any = EasyID3(str(track_info.file_path))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 easy_audio = EasyID3()
             easy_audio["artist"] = track_info.artist
             easy_audio["title"] = track_info.title
