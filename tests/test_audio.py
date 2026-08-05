@@ -107,6 +107,36 @@ class TestAudioEngine(unittest.TestCase):
         bpm = calculate_bpm(self.dummy_audio_path)
         self.assertEqual(bpm, 124.5)
 
+    @patch("mutagen.File")
+    def test_read_metadata_unsupported_format(self, mock_file):
+        mock_file.return_value = None
+        with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as f:
+            dummy_path = Path(f.name)
+
+        try:
+            with self.assertRaises(MetadataError):
+                read_track_metadata(dummy_path)
+        finally:
+            if dummy_path.exists():
+                dummy_path.unlink()
+
+    @patch("subprocess.run")
+    def test_checksum_binary_not_found(self, mock_run):
+        mock_run.side_effect = FileNotFoundError()
+        flac_p = Path("/tmp/dummy_flac_check_99.flac")
+        with patch.object(Path, "exists", return_value=True), self.assertRaises(AudioProcessingError):
+            verify_flac_checksum(flac_p)
+
+    @patch("subprocess.run")
+    def test_calculate_replaygain_parse_error(self, mock_run):
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.stderr = "Corrupted FFmpeg output with no loudness"
+        mock_run.return_value = mock_process
+
+        with self.assertRaises(AudioProcessingError):
+            calculate_replaygain(self.dummy_audio_path)
+
 
 if __name__ == "__main__":
     unittest.main()

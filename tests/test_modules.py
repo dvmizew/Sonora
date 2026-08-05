@@ -12,8 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
 
+from sonora.core.exceptions import AudioProcessingError
 from sonora.core.models import TrackInfo
-from sonora.modules.auditor import audit_library, check_brackets_corruption
+from sonora.modules.auditor import audit_file, audit_library, check_brackets_corruption
 from sonora.modules.organizer import is_single_folder, organize_library_singles
 from sonora.modules.renamer import (
     rename_directory_files,
@@ -197,6 +198,33 @@ class TestCoreModules(unittest.TestCase):
 
         results = tag_album_folder(album_dir, max_workers=2)
         self.assertEqual(len(results), 2)
+
+    def test_audit_file_blacklisted_genre(self):
+        wav = self.tmp_path / "song.wav"
+        create_dummy_wav(wav)
+
+        with patch("sonora.modules.auditor.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(
+                file_path=wav,
+                artist="Artist",
+                title="Title",
+                genre="Top 40 Pop"
+            )
+            issues = audit_file(wav)
+            self.assertTrue(any("Blacklisted genre" in issue for issue in issues))
+
+    def test_is_single_folder_empty_dir(self):
+        empty_dir = self.tmp_path / "empty"
+        empty_dir.mkdir()
+        self.assertFalse(is_single_folder(empty_dir))
+
+    def test_audit_library_nonexistent_directory(self):
+        with self.assertRaises(AudioProcessingError):
+            audit_library(self.tmp_path / "nonexistent_dir_999")
+
+    def test_tag_album_folder_nonexistent_directory(self):
+        with self.assertRaises(AudioProcessingError):
+            tag_album_folder(self.tmp_path / "nonexistent_dir_999")
 
 
 if __name__ == "__main__":

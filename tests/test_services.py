@@ -152,6 +152,49 @@ class TestServicesEngine(unittest.TestCase):
         desc = fetch_genius_description("Artist", "Title", api_token="dummy_genius_token")
         self.assertEqual(desc, "Song story description")
 
+    def test_acoustid_no_api_key_returns_none(self):
+        self.assertIsNone(lookup_acoustid(Path(__file__), api_key=""))
+
+    @patch("acoustid.lookup")
+    @patch("acoustid.fingerprint_file")
+    def test_acoustid_low_score_returns_none(self, mock_fp, mock_lookup):
+        mock_fp.return_value = (100.0, "fp_data")
+        mock_lookup.return_value = {}
+        with patch("acoustid.parse_lookup_result") as mock_parse:
+            mock_parse.return_value = [(0.5, "rec-id-low", "Title", "Artist")]  # score 0.5 < 0.8
+            self.assertIsNone(lookup_acoustid(Path(__file__), api_key="dummy_key"))
+
+    def test_lastfm_no_api_key_returns_empty(self):
+        self.assertEqual(fetch_lastfm_tags("Artist", "Title", api_key=None), [])
+
+    @patch("urllib.request.urlopen")
+    def test_genius_rejects_lyrics_unavailable_text(self, mock_urlopen):
+        mock_resp1 = MagicMock()
+        mock_resp1.read.return_value = b'{"response": {"hits": [{"result": {"api_path": "/songs/1"}}]}}'
+        mock_resp1.__enter__.return_value = mock_resp1
+
+        mock_resp2 = MagicMock()
+        mock_resp2.read.return_value = b'{"response": {"song": {"description": {"plain": "Lyrics for this song are unavailable"}}}}'
+        mock_resp2.__enter__.return_value = mock_resp2
+
+        mock_urlopen.side_effect = [mock_resp1, mock_resp2]
+        self.assertIsNone(fetch_genius_description("Artist", "Title", api_token="token"))
+
+    @patch("musicbrainzngs.search_releases")
+    def test_musicbrainz_error_handling(self, mock_search):
+        mock_search.side_effect = Exception("MusicBrainz server 500")
+        with self.assertRaises(APIServiceError):
+            search_musicbrainz_release("Artist", "Album")
+
+    @patch("discogs_client.Client")
+    def test_discogs_error_handling(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.search.side_effect = Exception("Discogs 401 Unauthorized")
+        mock_client_cls.return_value = mock_client
+
+        with self.assertRaises(APIServiceError):
+            search_discogs_release("Artist", "Album", user_token="bad_token")
+
 
 if __name__ == "__main__":
     unittest.main()
