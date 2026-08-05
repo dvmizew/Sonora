@@ -51,7 +51,7 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
         return []
 
     try:
-        url = f"http://ws.audioscrobbler.com/2.0/?{urllib.parse.urlencode(params)}"
+        url = f"https://ws.audioscrobbler.com/2.0/?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "Sonora/0.1.0 (+https://github.com/dvmizew/Sonora)"}

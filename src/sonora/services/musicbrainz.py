@@ -12,6 +12,7 @@ try:
     import musicbrainzngs  # type: ignore
     HAS_MUSICBRAINZ = True
 except ImportError:
+    musicbrainzngs = None
     HAS_MUSICBRAINZ = False
 
 _MB_LOCK = threading.Lock()

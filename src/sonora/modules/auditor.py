@@ -30,7 +30,7 @@ def check_brackets_corruption(name: str) -> list[str]:
     return issues
 
 
-def audit_file(file_path: Path) -> list[str]:
+def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
     """
     Perform audit checks on a single audio file.
     """
@@ -49,12 +49,13 @@ def audit_file(file_path: Path) -> list[str]:
         except AudioProcessingError as e:
             issues.append(f"Checksum check failed: {e}")
 
-        # Check 2: Fake lossless cutoff
-        try:
-            if is_fake_lossless(file_path):
-                issues.append("Possible fake lossless (spectral cutoff below 16kHz).")
-        except AudioProcessingError:
-            pass
+        # Check 2: Fake lossless cutoff (optional, slow)
+        if check_spectral:
+            try:
+                if is_fake_lossless(file_path):
+                    issues.append("Possible fake lossless (spectral cutoff below 16kHz).")
+            except AudioProcessingError:
+                pass
 
     # Check 3: Read metadata tags
     try:
@@ -85,7 +86,11 @@ def audit_file(file_path: Path) -> list[str]:
     return issues
 
 
-def audit_library(folder_path: Path, output_json: Path | None = None) -> AuditReport:
+def audit_library(
+    folder_path: Path,
+    output_json: Path | None = None,
+    check_spectral: bool = False,
+) -> AuditReport:
     """
     Scan an entire music library folder recursively, audit all audio files,
     and generate an AuditReport dataclass (optionally writing to output_json).
@@ -98,7 +103,7 @@ def audit_library(folder_path: Path, output_json: Path | None = None) -> AuditRe
     for path in folder_path.rglob("*"):
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
             report.total_files += 1
-            file_issues = audit_file(path)
+            file_issues = audit_file(path, check_spectral=check_spectral)
 
             if file_issues:
                 report.issues[str(path)] = file_issues

@@ -79,7 +79,12 @@ def rename_track_file(file_path: Path, format_pattern: str = "{track_number:02d}
     new_stem = re.sub(r"\s+", " ", new_stem).strip()
     new_path = file_path.with_name(f"{new_stem}{file_path.suffix}")
 
-    if new_path != file_path and not new_path.exists():
+    if new_path != file_path:
+        if new_path.exists():
+            counter = 2
+            while new_path.exists():
+                new_path = file_path.with_name(f"{new_stem} ({counter}){file_path.suffix}")
+                counter += 1
         file_path.rename(new_path)
 
     # Sync .lrc file if present
@@ -95,13 +100,13 @@ def rename_track_file(file_path: Path, format_pattern: str = "{track_number:02d}
 
 def rename_directory_files(dir_path: Path) -> list[Path]:
     """
-    Scan a directory and rename all supported audio files and their .lrc files.
+    Scan a directory (recursively) and rename all supported audio files and their .lrc files.
     """
     if not dir_path.exists():
         raise AudioProcessingError(f"Directory not found: {dir_path}")
 
     renamed: list[Path] = []
-    for path in sorted(dir_path.glob("*")):
+    for path in sorted(dir_path.rglob("*")):
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
             try:
                 new_p = rename_track_file(path)

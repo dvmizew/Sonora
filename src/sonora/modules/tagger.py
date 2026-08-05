@@ -2,16 +2,20 @@
 Parallel autotagger engine using ThreadPoolExecutor for tagging tracks & albums.
 """
 
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from sonora.audio.bpm import calculate_bpm
-from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.audio.metadata import embed_cover_art, read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_replaygain
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.exceptions import APIServiceError, AudioProcessingError, MetadataError
+from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
+from sonora.services.acoustid import lookup_acoustid
+from sonora.services.discogs import search_discogs_release
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import fetch_synced_lyrics
@@ -43,6 +47,8 @@ def process_single_track(
     fetch_lyrics: bool = True,
     fetch_itunes_art: bool = True,
     lastfm_api_key: str | None = None,
+    acoustid_api_key: str | None = None,
+    discogs_user_token: str | None = None,
 ) -> TrackInfo:
     """
     Process and tag a single audio file with metadata, artwork, lyrics, BPM, and ReplayGain.
@@ -61,7 +67,16 @@ def process_single_track(
     except APIServiceError:
         pass
 
-    # 2. Fetch Last.fm genre/mood tags
+    # 2. AcoustID fingerprint identification fallback
+    if acoustid_api_key and not track_info.musicbrainz_trackid:
+        try:
+            acoustid_mbid = lookup_acoustid(file_path, api_key=acoustid_api_key)
+            if acoustid_mbid:
+                track_info.musicbrainz_trackid = acoustid_mbid
+        except APIServiceError:
+            pass
+
+    # 3. Fetch Last.fm genre/mood tags
     if lastfm_api_key:
         try:
             tags = fetch_lastfm_tags(
@@ -75,7 +90,16 @@ def process_single_track(
         except APIServiceError:
             pass
 
-    # 3. Calculate BPM
+    # 4. Discogs fallback lookup for release metadata
+    if discogs_user_token and not track_info.genre:
+        try:
+            release = search_discogs_release(track_info.artist, track_info.album, user_token=discogs_user_token)
+            if release and release.get("year"):
+                track_info.date = str(release["year"])
+        except APIServiceError:
+            pass
+
+    # 5. Calculate BPM
     if fetch_bpm:
         try:
             bpm = calculate_bpm(file_path)
@@ -84,17 +108,19 @@ def process_single_track(
         except AudioProcessingError:
             pass
 
-    # 4. Write metadata tags back to file
-    write_track_metadata(track_info)
-
-    # 5. Calculate & write ReplayGain if FLAC
+    # 6. Calculate ReplayGain if FLAC
     if fetch_replaygain and file_path.suffix.lower() == ".flac":
         try:
-            calculate_replaygain(file_path)
+            rg = calculate_replaygain(file_path)
+            track_info.replaygain_track_gain = rg.track_gain_db
+            track_info.replaygain_track_peak = rg.track_peak
         except AudioProcessingError:
             pass
 
-    # 6. Fetch & write .lrc lyrics file
+    # 7. Write metadata tags back to file (AFTER all calculations!)
+    write_track_metadata(track_info)
+
+    # 8. Fetch & write .lrc lyrics file
     if fetch_lyrics:
         try:
             lrc = fetch_synced_lyrics(track_info.artist, track_info.title)
@@ -105,11 +131,25 @@ def process_single_track(
         except (APIServiceError, OSError):
             pass
 
-    # 7. Fetch iTunes Cover Art if enabled
+    # 9. Fetch & embed iTunes Cover Art
     if fetch_itunes_art:
         try:
-            fetch_itunes_cover_art_url(track_info.artist, track_info.album)
-        except APIServiceError:
+            art_url = fetch_itunes_cover_art_url(track_info.artist, track_info.album)
+            if art_url and file_path.suffix.lower() == ".flac":
+                req = urllib.request.Request(
+                    art_url,
+                    headers={"User-Agent": "Sonora/0.1.0 (+https://github.com/dvmizew/Sonora)"}
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    img_data = resp.read()
+                temp_img = file_path.with_suffix(".cover.tmp.jpg")
+                temp_img.write_bytes(img_data)
+                try:
+                    embed_cover_art(file_path, temp_img)
+                finally:
+                    if temp_img.exists():
+                        temp_img.unlink()
+        except (APIServiceError, OSError):
             pass
 
     return track_info
@@ -121,13 +161,13 @@ def tag_album_folder(
     **options: Any
 ) -> list[TrackInfo]:
     """
-    Process and tag all audio files in an album folder using a thread pool.
+    Process and tag all audio files in an album folder (recursively) using a thread pool.
     """
     if not folder_path.exists() or not folder_path.is_dir():
         raise AudioProcessingError(f"Album folder not found: {folder_path}")
 
     audio_files = sorted([
-        p for p in folder_path.glob("*")
+        p for p in folder_path.rglob("*")
         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
     ])
 
@@ -141,10 +181,11 @@ def tag_album_folder(
             for file_p in audio_files
         }
         for future in as_completed(future_to_file):
+            file_p = future_to_file[future]
             try:
                 info = future.result()
                 results.append(info)
-            except (AudioProcessingError, MetadataError, APIServiceError):
-                pass
+            except (AudioProcessingError, MetadataError, APIServiceError) as e:
+                LOG.warning(f"Failed to process {file_p}: {e}")
 
     return results
