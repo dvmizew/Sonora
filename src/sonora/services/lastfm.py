@@ -3,28 +3,14 @@ Last.fm API service client for tag and mood/style metadata lookup.
 """
 
 import json
-import threading
-import time
 import urllib.parse
 import urllib.request
 from typing import Any
 
 from sonora.core.exceptions import APIServiceError
+from sonora.core.utils import RateLimiter
 
-_LASTFM_LOCK = threading.Lock()
-_LAST_LASTFM_CALL = 0.0
-_LASTFM_RATE_INTERVAL = 0.25
-
-
-def _wait_lastfm_turn() -> None:
-    """Thread-safe rate limiter for Last.fm API requests."""
-    global _LAST_LASTFM_CALL
-    with _LASTFM_LOCK:
-        now = time.time()
-        elapsed = now - _LAST_LASTFM_CALL
-        if elapsed < _LASTFM_RATE_INTERVAL:
-            time.sleep(_LASTFM_RATE_INTERVAL - elapsed)
-        _LAST_LASTFM_CALL = time.time()
+_LASTFM_LIMITER = RateLimiter(interval_seconds=0.25)
 
 
 def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid: str | None = None) -> list[str]:
@@ -35,7 +21,7 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
     if not api_key:
         return []
 
-    _wait_lastfm_turn()
+    _LASTFM_LIMITER.wait()
     params: dict[str, Any] = {
         "method": "track.getTopTags",
         "api_key": api_key,

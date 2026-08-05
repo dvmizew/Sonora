@@ -34,7 +34,6 @@ class TestServicesEngine(unittest.TestCase):
         url = fetch_itunes_cover_art_url("Beyoncé", "Halo", resolution=1400)
         self.assertEqual(url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg")
 
-    @patch("sonora.services.lyrics.HAS_SYNCEDLYRICS", True)
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics_basic(self, mock_syncedlyrics):
         mock_syncedlyrics.search.return_value = "[00:12.34] Test lyric line"
@@ -43,7 +42,6 @@ class TestServicesEngine(unittest.TestCase):
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
         mock_syncedlyrics.search.assert_called_once_with("Artist - Title", plain_only=False, synced_only=False, enhanced=False)
 
-    @patch("sonora.services.lyrics.HAS_SYNCEDLYRICS", True)
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics_with_options(self, mock_syncedlyrics):
         mock_syncedlyrics.search.return_value = "<00:12.34> Enhanced lyric line"
@@ -66,7 +64,6 @@ class TestServicesEngine(unittest.TestCase):
             lang="en"
         )
 
-    @patch("sonora.services.lyrics.HAS_SYNCEDLYRICS", True)
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics_raises_api_service_error_on_failure(self, mock_syncedlyrics):
         mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
@@ -76,7 +73,6 @@ class TestServicesEngine(unittest.TestCase):
     def test_synced_lyrics_empty_query_returns_none(self):
         self.assertIsNone(fetch_synced_lyrics("", ""))
 
-    @patch("sonora.services.musicbrainz.HAS_MUSICBRAINZ", True)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_fetch_track_mbid(self, mock_mb):
         mock_mb.search_recordings.return_value = {
@@ -86,7 +82,6 @@ class TestServicesEngine(unittest.TestCase):
         mbid = fetch_track_mbid("Artist", "Title")
         self.assertEqual(mbid, "12345678-1234-1234-1234-123456789abc")
 
-    @patch("sonora.services.musicbrainz.HAS_MUSICBRAINZ", True)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_search_musicbrainz_release(self, mock_mb):
         mock_mb.search_releases.return_value = {
@@ -97,7 +92,6 @@ class TestServicesEngine(unittest.TestCase):
         if release:
             self.assertEqual(release["title"], "Lemonade")
 
-    @patch("sonora.services.discogs.HAS_DISCOGS", True)
     @patch("sonora.services.discogs.discogs_client")
     def test_search_discogs_release(self, mock_discogs_mod):
         mock_client = MagicMock()
@@ -116,7 +110,6 @@ class TestServicesEngine(unittest.TestCase):
     def test_search_discogs_without_token_returns_none(self):
         self.assertIsNone(search_discogs_release("Artist", "Album", user_token=None))
 
-    @patch("sonora.services.acoustid.HAS_ACOUSTID", True)
     @patch("sonora.services.acoustid.acoustid")
     def test_lookup_acoustid(self, mock_acoustid):
         mock_acoustid.fingerprint_file.return_value = (120.0, "fingerprint_data_str")
@@ -160,7 +153,6 @@ class TestServicesEngine(unittest.TestCase):
     def test_acoustid_no_api_key_returns_none(self):
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key=""))
 
-    @patch("sonora.services.acoustid.HAS_ACOUSTID", True)
     @patch("sonora.services.acoustid.acoustid")
     def test_acoustid_low_score_returns_none(self, mock_acoustid):
         mock_acoustid.fingerprint_file.return_value = (100.0, "fp_data")
@@ -185,14 +177,12 @@ class TestServicesEngine(unittest.TestCase):
         mock_urlopen.side_effect = [mock_resp1, mock_resp2]
         self.assertIsNone(fetch_genius_description("Artist", "Title", api_token="token"))
 
-    @patch("sonora.services.musicbrainz.HAS_MUSICBRAINZ", True)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_error_handling(self, mock_mb):
         mock_mb.search_releases.side_effect = Exception("MusicBrainz server 500")
         with self.assertRaises(APIServiceError):
             search_musicbrainz_release("Artist", "Album")
 
-    @patch("sonora.services.discogs.HAS_DISCOGS", True)
     @patch("sonora.services.discogs.discogs_client")
     def test_discogs_error_handling(self, mock_discogs_mod):
         mock_client = MagicMock()

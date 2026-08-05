@@ -17,14 +17,7 @@ from sonora.core.exceptions import (
     SonoraError,
     ValidationError,
 )
-from sonora.core.logger import (
-    CONSOLE,
-    HAS_RICH,
-    log_error,
-    log_info,
-    log_success,
-    log_warning,
-)
+from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import AlbumInfo, AuditReport, TrackInfo
 from sonora.core.utils import normalize_str, sanitize_name
 
@@ -35,7 +28,7 @@ __all__ = [
     "FLAC_CMD",
     "GENRE_BLACKLIST",
     "GENRE_MAP",
-    "HAS_RICH",
+    "LOG",
     "METAFLAC_CMD",
     "PROTECTED_ARTISTS",
     "SOX_CMD",
@@ -49,10 +42,6 @@ __all__ = [
     "SonoraError",
     "TrackInfo",
     "ValidationError",
-    "log_error",
-    "log_info",
-    "log_success",
-    "log_warning",
     "normalize_str",
     "sanitize_name",
 ]

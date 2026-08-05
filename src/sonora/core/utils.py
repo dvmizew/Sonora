@@ -3,6 +3,8 @@ Core text processing and filesystem path sanitization utilities.
 """
 
 import re
+import threading
+import time
 import unicodedata
 
 
@@ -37,3 +39,20 @@ def sanitize_name(name: str | None) -> str:
         s = s.replace(char, '')
     s = re.sub(r'\s+', ' ', s).strip().rstrip('.')
     return s or "Unknown"
+
+
+class RateLimiter:
+    """Thread-safe rate limiter for external API requests."""
+
+    def __init__(self, interval_seconds: float) -> None:
+        self.interval = interval_seconds
+        self.lock = threading.Lock()
+        self.last_call = 0.0
+
+    def wait(self) -> None:
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_call
+            if elapsed < self.interval:
+                time.sleep(self.interval - elapsed)
+            self.last_call = time.time()

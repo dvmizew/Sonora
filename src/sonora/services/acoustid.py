@@ -3,15 +3,15 @@ AcoustID and Chromaprint acoustic fingerprint service client.
 """
 
 from pathlib import Path
+from types import ModuleType
 
 from sonora.core.exceptions import APIServiceError
 
+acoustid: ModuleType | None = None
 try:
     import acoustid  # type: ignore
-    HAS_ACOUSTID = True
 except ImportError:
-    acoustid = None
-    HAS_ACOUSTID = False
+    pass
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
@@ -22,7 +22,7 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
     if not file_path.exists():
         raise APIServiceError(f"File not found: {file_path}")
 
-    if not HAS_ACOUSTID:
+    if acoustid is None:
         raise APIServiceError("pyacoustid library is not installed.")
 
     try:
@@ -36,7 +36,7 @@ def lookup_acoustid(file_path: Path, api_key: str) -> str | None:
     """
     Lookup track MBID on AcoustID service using Chromaprint fingerprint.
     """
-    if not api_key:
+    if not api_key or acoustid is None:
         return None
 
     try:

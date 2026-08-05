@@ -2,16 +2,16 @@
 Discogs API service client.
 """
 
+from types import ModuleType
 from typing import Any
 
 from sonora.core.exceptions import APIServiceError
 
+discogs_client: ModuleType | None = None
 try:
     import discogs_client  # type: ignore
-    HAS_DISCOGS = True
 except ImportError:
-    discogs_client = None
-    HAS_DISCOGS = False
+    pass
 
 
 def search_discogs_release(artist: str, album: str, user_token: str | None = None) -> dict[str, Any] | None:
@@ -22,7 +22,7 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
     if not user_token:
         return None
 
-    if not HAS_DISCOGS or not discogs_client:
+    if discogs_client is None:
         raise APIServiceError("discogs-client library is not installed.")
 
     try:

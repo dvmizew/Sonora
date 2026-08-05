@@ -3,15 +3,15 @@ BPM calculation module for audio files using Librosa.
 """
 
 from pathlib import Path
+from types import ModuleType
 
 from sonora.core.exceptions import AudioProcessingError
 
+librosa: ModuleType | None = None
 try:
     import librosa  # type: ignore
-    HAS_LIBROSA = True
 except ImportError:
-    librosa = None
-    HAS_LIBROSA = False
+    pass
 
 
 def calculate_bpm(file_path: Path) -> float | None:
@@ -22,7 +22,7 @@ def calculate_bpm(file_path: Path) -> float | None:
     if not file_path.exists():
         raise AudioProcessingError(f"File not found: {file_path}")
 
-    if not HAS_LIBROSA:
+    if librosa is None:
         raise AudioProcessingError("Librosa library is not installed.")
 
     try:

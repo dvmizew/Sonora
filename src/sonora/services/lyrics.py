@@ -3,33 +3,19 @@ syncedlyrics service client for searching and fetching synchronized LRC lyrics.
 Supports Lrclib, Musixmatch, Genius, NetEase providers.
 """
 
-import threading
-import time
 from pathlib import Path
+from types import ModuleType
 
 from sonora.core.exceptions import APIServiceError
+from sonora.core.utils import RateLimiter
 
+syncedlyrics: ModuleType | None = None
 try:
     import syncedlyrics  # type: ignore
-    HAS_SYNCEDLYRICS = True
 except ImportError:
-    syncedlyrics = None
-    HAS_SYNCEDLYRICS = False
+    pass
 
-_LYRICS_LOCK = threading.Lock()
-_LAST_LYRICS_CALL = 0.0
-_LYRICS_RATE_INTERVAL = 1.0
-
-
-def _wait_lyrics_turn() -> None:
-    """Thread-safe rate limiter for lyrics scraping providers."""
-    global _LAST_LYRICS_CALL
-    with _LYRICS_LOCK:
-        now = time.time()
-        elapsed = now - _LAST_LYRICS_CALL
-        if elapsed < _LYRICS_RATE_INTERVAL:
-            time.sleep(_LYRICS_RATE_INTERVAL - elapsed)
-        _LAST_LYRICS_CALL = time.time()
+_LYRICS_LIMITER = RateLimiter(interval_seconds=1.0)
 
 
 def fetch_synced_lyrics(
@@ -58,11 +44,11 @@ def fetch_synced_lyrics(
     if not artist or not title:
         return None
 
-    if not HAS_SYNCEDLYRICS:
+    if syncedlyrics is None:
         raise APIServiceError("syncedlyrics library is not installed.")
 
     query = f"{artist} - {title}".strip()
-    _wait_lyrics_turn()
+    _LYRICS_LIMITER.wait()
 
     try:
         kwargs: dict[str, object] = {

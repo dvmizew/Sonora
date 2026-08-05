@@ -1,7 +1,6 @@
 import sys
 
 IS_WINDOWS = sys.platform == "win32"
-IS_LINUX = sys.platform == "linux"
 
 FFMPEG_CMD = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
 FLAC_CMD = "flac.exe" if IS_WINDOWS else "flac"
@@ -29,13 +28,13 @@ GENRE_MAP = {
     "Indie Rock": "Indie",
 }
 
-GENRE_BLACKLIST = [
+GENRE_BLACKLIST = frozenset({
     "Billboard", "Hot 100", "Top 40", "Amazon", "Itunes",
     "Unknown", "Release", "Music", "Digital", "Various",
     "Produced By", "Written By"
-]
+})
 
-PROTECTED_ARTISTS = [
+PROTECTED_ARTISTS = frozenset({
     "Play & Win", "Play&Win", "Rauf & Faik", "Rauf&Faik",
     "Simon & Garfunkel", "Earth, Wind & Fire", "Belle & Sebastian",
     "Brooks & Dunn", "Hall & Oates", "Above & Beyond",
@@ -43,4 +42,4 @@ PROTECTED_ARTISTS = [
     "Sly & The Family Stone", "Blood, Sweat & Tears",
     "Emerson, Lake & Palmer", "Crosby, Stills, Nash & Young",
     "Huey Lewis & The News", "KC & The Sunshine Band"
-]
+})

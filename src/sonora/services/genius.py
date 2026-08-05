@@ -4,27 +4,13 @@ Extracted from script.py.
 """
 
 import json
-import threading
-import time
 import urllib.parse
 import urllib.request
 
 from sonora.core.exceptions import APIServiceError
+from sonora.core.utils import RateLimiter
 
-_GENIUS_LOCK = threading.Lock()
-_LAST_GENIUS_CALL = 0.0
-_GENIUS_RATE_INTERVAL = 0.5
-
-
-def _wait_genius_turn() -> None:
-    """Thread-safe rate limiter for Genius API requests."""
-    global _LAST_GENIUS_CALL
-    with _GENIUS_LOCK:
-        now = time.time()
-        elapsed = now - _LAST_GENIUS_CALL
-        if elapsed < _GENIUS_RATE_INTERVAL:
-            time.sleep(_GENIUS_RATE_INTERVAL - elapsed)
-        _LAST_GENIUS_CALL = time.time()
+_GENIUS_LIMITER = RateLimiter(interval_seconds=0.5)
 
 
 def fetch_genius_description(artist: str, title: str, api_token: str | None = None) -> str | None:
@@ -34,7 +20,7 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
     if not api_token or not artist or not title:
         return None
 
-    _wait_genius_turn()
+    _GENIUS_LIMITER.wait()
     try:
         # Step 1: Search for the song
         query = f"{artist} {title}"
@@ -57,7 +43,7 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
                 return None
 
         # Step 2: Fetch song details and plain text description
-        _wait_genius_turn()
+        _GENIUS_LIMITER.wait()
         song_url = f"https://api.genius.com{api_path}"
         req_song = urllib.request.Request(
             song_url,
