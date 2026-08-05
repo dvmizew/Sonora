@@ -4,7 +4,6 @@ Domain data models for Sonora tracks, albums, and audit reports.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 
 @dataclass
@@ -15,26 +14,26 @@ class TrackInfo:
     artist: str = "Unknown Artist"
     title: str = "Unknown Title"
     album: str = "Unknown Album"
-    album_artist: Optional[str] = None
-    track_number: Optional[int] = None
-    disc_number: Optional[int] = 1
-    date: Optional[str] = None
-    genre: Optional[str] = None
-    isrc: Optional[str] = None
-    bpm: Optional[float] = None
-    replaygain_track_gain: Optional[float] = None
-    replaygain_track_peak: Optional[float] = None
-    lyrics: Optional[str] = None
-    synced_lyrics: Optional[str] = None
-    musicbrainz_trackid: Optional[str] = None
-    musicbrainz_albumid: Optional[str] = None
-    acoustid_fingerprint: Optional[str] = None
-    sample_rate: Optional[int] = None
-    bitrate: Optional[int] = None
-    channels: Optional[int] = None
+    album_artist: str | None = None
+    track_number: int | None = None
+    disc_number: int | None = 1
+    date: str | None = None
+    genre: str | None = None
+    isrc: str | None = None
+    bpm: float | None = None
+    replaygain_track_gain: float | None = None
+    replaygain_track_peak: float | None = None
+    lyrics: str | None = None
+    synced_lyrics: str | None = None
+    musicbrainz_trackid: str | None = None
+    musicbrainz_albumid: str | None = None
+    acoustid_fingerprint: str | None = None
+    sample_rate: int | None = None
+    bitrate: int | None = None
+    channels: int | None = None
     is_lossless: bool = True
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> dict[str, str]:
         """Convert metadata attributes to a dictionary."""
         return {
             "artist": self.artist,
@@ -55,11 +54,11 @@ class AlbumInfo:
 
     title: str
     artist: str
-    tracks: List[TrackInfo] = field(default_factory=list)
-    year: Optional[str] = None
-    genre: Optional[str] = None
-    cover_art_path: Optional[Path] = None
-    musicbrainz_albumid: Optional[str] = None
+    tracks: list[TrackInfo] = field(default_factory=list)
+    year: str | None = None
+    genre: str | None = None
+    cover_art_path: Path | None = None
+    musicbrainz_albumid: str | None = None
 
     @property
     def track_count(self) -> int:
@@ -72,8 +71,8 @@ class AuditReport:
 
     file_path: Path
     is_valid: bool = True
-    missing_tags: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    errors: List[str] = field(default_factory=list)
+    missing_tags: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
     is_fake_lossless: bool = False
     md5_verified: bool = False

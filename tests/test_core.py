@@ -4,9 +4,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
+
+from sonora.core.exceptions import AudioProcessingError, SonoraError
+from sonora.core.models import AlbumInfo, AuditReport, TrackInfo
 from sonora.core.utils import normalize_str, sanitize_name
-from sonora.core.models import TrackInfo, AlbumInfo, AuditReport
-from sonora.core.exceptions import SonoraError, AudioProcessingError
 
 
 class TestCoreUtils(unittest.TestCase):

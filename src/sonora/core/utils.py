@@ -4,10 +4,9 @@ Core text processing and filesystem path sanitization utilities.
 
 import re
 import unicodedata
-from typing import Optional
 
 
-def normalize_str(s: Optional[str]) -> str:
+def normalize_str(s: str | None) -> str:
     """
     Converts to lowercase, normalizes NFD diacritics, replaces $ and !,
     replaces non-alphanumeric characters with space, and collapses spaces.
@@ -24,7 +23,7 @@ def normalize_str(s: Optional[str]) -> str:
     return re.sub(r'\s+', ' ', s).strip()
 
 
-def sanitize_name(name: Optional[str]) -> str:
+def sanitize_name(name: str | None) -> str:
     """
     Clean string for safe filesystem paths.
     Replaces / and \\ with _, strips invalid Windows/Linux bad chars (<>:"|?*),

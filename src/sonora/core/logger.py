@@ -2,7 +2,6 @@
 Unified logger and Rich console wrapper for Sonora.
 """
 
-from typing import Optional
 
 try:
     from rich.console import Console
@@ -14,7 +13,7 @@ try:
         "error": "red",
         "success": "green bold"
     })
-    CONSOLE: Optional[Console] = Console(theme=_THEME, force_terminal=True)
+    CONSOLE: Console | None = Console(theme=_THEME, force_terminal=True)
     HAS_RICH = True
 except ImportError:
     CONSOLE = None
