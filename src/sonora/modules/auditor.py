@@ -115,16 +115,32 @@ def audit_library(
                     report.missing_lrc += 1
 
     if output_json:
+        total = report.total_files
+        corrupt = report.corrupt_files
+        missing_meta = report.missing_metadata
+        missing_lrc = report.missing_lrc
+        issue_count = len(report.issues)
+
+        llm_summary = (
+            f"Sonora audited {total} files in '{folder_path}'. "
+            f"Audit status: {corrupt} corrupted files, {missing_meta} missing metadata, "
+            f"{missing_lrc} missing LRCs. Total files with issues: {issue_count}."
+        )
+
         data = {
+            "schema": "audit_report_v1",
+            "generator": "Sonora",
+            "llm_summary": llm_summary,
+            "target_path": str(folder_path.resolve()),
             "summary": {
-                "total_files": report.total_files,
-                "corrupt_files": report.corrupt_files,
-                "missing_metadata": report.missing_metadata,
-                "missing_lrc": report.missing_lrc,
+                "total_files": total,
+                "corrupt_files": corrupt,
+                "missing_metadata": missing_meta,
+                "missing_lrc": missing_lrc,
+                "files_with_issues": issue_count,
             },
             "issues": report.issues,
         }
-        with open(output_json, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        output_json.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return report

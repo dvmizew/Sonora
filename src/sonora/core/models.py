@@ -33,18 +33,27 @@ class TrackInfo:
     channels: int | None = None
     is_lossless: bool = True
 
-    def to_dict(self) -> dict[str, str]:
-        """Convert metadata attributes to a dictionary."""
+    def to_dict(self) -> dict[str, object]:
+        """Convert metadata attributes to a complete dictionary representation."""
         return {
+            "file_path": str(self.file_path),
+            "file_name": self.file_path.name,
             "artist": self.artist,
             "title": self.title,
             "album": self.album,
             "album_artist": self.album_artist or self.artist,
-            "track_number": str(self.track_number) if self.track_number else "",
-            "date": self.date or "",
-            "genre": self.genre or "",
-            "isrc": self.isrc or "",
-            "bpm": f"{self.bpm:.1f}" if self.bpm else "",
+            "track_number": self.track_number,
+            "disc_number": self.disc_number,
+            "date": self.date,
+            "genre": self.genre,
+            "isrc": self.isrc,
+            "bpm": self.bpm,
+            "replaygain_track_gain": self.replaygain_track_gain,
+            "replaygain_track_peak": self.replaygain_track_peak,
+            "musicbrainz_trackid": self.musicbrainz_trackid,
+            "is_lossless": self.is_lossless,
+            "sample_rate": self.sample_rate,
+            "bitrate": self.bitrate,
         }
 
 

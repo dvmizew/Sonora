@@ -52,8 +52,8 @@ class TestCoreModels(unittest.TestCase):
         data = track.to_dict()
         self.assertEqual(data["artist"], "Beyoncé")
         self.assertEqual(data["title"], "HALO")
-        self.assertEqual(data["track_number"], "1")
-        self.assertEqual(data["bpm"], "120.0")
+        self.assertEqual(data["track_number"], 1)
+        self.assertEqual(data["bpm"], 120.0)
 
     def test_album_info_track_count(self):
         t1 = TrackInfo(file_path=Path("/music/1.flac"), title="Track 1")
@@ -76,8 +76,8 @@ class TestCoreModels(unittest.TestCase):
     def test_track_info_to_dict_empty_fields(self):
         track = TrackInfo(file_path=Path("/music/song.flac"))
         data = track.to_dict()
-        self.assertEqual(data["track_number"], "")
-        self.assertEqual(data["bpm"], "")
+        self.assertIsNone(data["track_number"])
+        self.assertIsNone(data["bpm"])
 
     def test_album_info_empty_tracks(self):
         album = AlbumInfo(title="Empty Album", artist="Artist")

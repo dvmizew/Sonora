@@ -39,6 +39,19 @@ class TestCLIInterface(unittest.TestCase):
         self.assertEqual(code, 0)
         mock_tag_folder.assert_called_once()
 
+    @patch("sonora.cli.main.tag_album_folder")
+    def test_handle_tag_subcommand_with_json_report(self, mock_tag_folder):
+        mock_tag_folder.return_value = [
+            TrackInfo(file_path=Path("dummy.flac"), title="Song", artist="Artist", bpm=120.0, genre="Pop")
+        ]
+        json_out = self.tmp_path / "tag_report.json"
+        code = main(["tag", str(self.tmp_path), "--json", str(json_out)])
+        self.assertEqual(code, 0)
+        self.assertTrue(json_out.exists())
+        content = json_out.read_text(encoding="utf-8")
+        self.assertIn("llm_summary", content)
+        self.assertIn('"bpm_calculated_count": 1', content)
+
     @patch("sonora.cli.main.audit_library")
     def test_handle_audit_subcommand(self, mock_audit):
         mock_audit.return_value = AuditReport(total_files=1, corrupt_files=0)

@@ -3,6 +3,8 @@ Command-line interface (CLI) main entrypoint for Sonora.
 """
 
 import argparse
+import datetime
+import json
 import os
 import sys
 from collections.abc import Sequence
@@ -42,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     tag_parser.add_argument("--no-replaygain", action="store_false", dest="fetch_replaygain", help="Disable ReplayGain calculation")
     tag_parser.add_argument("--no-lyrics", action="store_false", dest="fetch_lyrics", help="Disable LRC lyrics fetching")
     tag_parser.add_argument("--no-art", action="store_false", dest="fetch_itunes_art", help="Disable cover art downloading")
+    tag_parser.add_argument("--json", type=Path, default=None, help="Output path to save tagging JSON report with statistics")
     
     # Optional API keys
     tag_parser.add_argument("--lastfm-key", type=str, default=None, help="Last.fm API key for genre/mood lookup")
@@ -90,6 +93,55 @@ def handle_tag(args: argparse.Namespace) -> int:
         discogs_user_token=discogs_token,
     )
     LOG.success(f"Successfully tagged {len(results)} tracks.")
+
+    if args.json:
+        total = len(results)
+        bpm_cnt = sum(1 for t in results if t.bpm is not None)
+        rg_cnt = sum(1 for t in results if t.replaygain_track_gain is not None)
+        mb_cnt = sum(1 for t in results if t.musicbrainz_trackid is not None)
+        genre_cnt = sum(1 for t in results if t.genre is not None)
+
+        bpm_pct = (bpm_cnt / total * 100) if total > 0 else 0.0
+        rg_pct = (rg_cnt / total * 100) if total > 0 else 0.0
+        mb_pct = (mb_cnt / total * 100) if total > 0 else 0.0
+        genre_pct = (genre_cnt / total * 100) if total > 0 else 0.0
+
+        llm_summary = (
+            f"Sonora tagged {total} audio tracks in '{args.path}'. "
+            f"Enrichment summary: BPM {bpm_cnt}/{total} ({bpm_pct:.0f}%), "
+            f"ReplayGain {rg_cnt}/{total} ({rg_pct:.0f}%), "
+            f"MusicBrainz MBID {mb_cnt}/{total} ({mb_pct:.0f}%), "
+            f"Genre {genre_cnt}/{total} ({genre_pct:.0f}%)."
+        )
+
+        report_data = {
+            "schema": "tag_report_v1",
+            "generator": "Sonora",
+            "version": __version__,
+            "llm_summary": llm_summary,
+            "execution": {
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "target_path": str(args.path.resolve()),
+                "workers_used": args.workers,
+            },
+            "statistics": {
+                "total_tracks": total,
+                "enrichment": {
+                    "bpm_calculated_count": bpm_cnt,
+                    "bpm_percentage": round(bpm_pct, 1),
+                    "replaygain_calculated_count": rg_cnt,
+                    "replaygain_percentage": round(rg_pct, 1),
+                    "musicbrainz_matched_count": mb_cnt,
+                    "musicbrainz_percentage": round(mb_pct, 1),
+                    "genre_tagged_count": genre_cnt,
+                    "genre_percentage": round(genre_pct, 1),
+                },
+            },
+            "tracks": [t.to_dict() for t in results],
+        }
+        args.json.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        LOG.info(f"Saved LLM-optimized tagging JSON report to [bold]{args.json}[/bold]")
+
     return 0
 
 
