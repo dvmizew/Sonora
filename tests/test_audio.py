@@ -98,11 +98,11 @@ class TestAudioEngine(unittest.TestCase):
         self.assertEqual(res.track_gain_db, -3.5)
         self.assertGreater(res.track_peak, 0.0)
 
-    @patch("librosa.beat.beat_track")
-    @patch("librosa.load")
-    def test_calculate_bpm_with_mocked_librosa(self, mock_load, mock_beat_track):
-        mock_load.return_value = (None, 44100)
-        mock_beat_track.return_value = (124.5, None)
+    @patch("sonora.audio.bpm.HAS_LIBROSA", True)
+    @patch("sonora.audio.bpm.librosa")
+    def test_calculate_bpm_with_mocked_librosa(self, mock_librosa):
+        mock_librosa.load.return_value = (None, 44100)
+        mock_librosa.beat.beat_track.return_value = (124.5, None)
 
         bpm = calculate_bpm(self.dummy_audio_path)
         self.assertEqual(bpm, 124.5)

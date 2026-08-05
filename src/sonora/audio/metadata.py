@@ -119,11 +119,15 @@ def write_track_metadata(track_info: TrackInfo) -> None:
                 audio["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
             if track_info.musicbrainz_albumid:
                 audio["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
+            if track_info.replaygain_track_gain is not None:
+                audio["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
+            if track_info.replaygain_track_peak is not None:
+                audio["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
             audio.save()
         else:
             try:
                 easy_audio: Any = EasyID3(str(track_info.file_path))
-            except (MetadataError, KeyError, ValueError, AttributeError):
+            except Exception:
                 easy_audio = EasyID3()
             easy_audio["artist"] = track_info.artist
             easy_audio["title"] = track_info.title

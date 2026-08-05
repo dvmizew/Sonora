@@ -13,7 +13,7 @@ def normalize_str(s: str | None) -> str:
     """
     if not s:
         return ""
-    s = str(s).replace('$', 's').replace('!', 'i')
+    s = str(s).replace('$', 's')
     s = s.replace('_', ' ')
     s = ''.join(
         c for c in unicodedata.normalize('NFD', s.lower())

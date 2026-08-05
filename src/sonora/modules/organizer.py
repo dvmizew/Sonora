@@ -54,9 +54,17 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path) -> int:
 
     target_singles_dir.mkdir(parents=True, exist_ok=True)
     moved_count = 0
+    single_folder_cache: dict[Path, bool] = {}
 
     for path in source_dir.rglob("*"):
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
+            parent = path.parent
+            if parent not in single_folder_cache:
+                single_folder_cache[parent] = is_single_folder(parent)
+
+            if not single_folder_cache[parent]:
+                continue  # Skip tracks belonging to full album folders
+
             try:
                 info = read_track_metadata(path)
                 artist_dir = target_singles_dir / sanitize_name(info.artist)

@@ -8,7 +8,7 @@ FLAC_CMD = "flac.exe" if IS_WINDOWS else "flac"
 METAFLAC_CMD = "metaflac.exe" if IS_WINDOWS else "metaflac"
 SOX_CMD = "sox.exe" if IS_WINDOWS else "sox"
 
-SUPPORTED_EXTS = [".flac", ".mp3", ".m4a", ".ogg", ".wav"]
+SUPPORTED_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".wav"})
 
 FEAT_KEYWORDS = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))|×"
 TECH_FEAT = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))"

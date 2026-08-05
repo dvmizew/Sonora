@@ -13,7 +13,7 @@ from sonora.core.utils import normalize_str, sanitize_name
 class TestCoreUtils(unittest.TestCase):
     def test_normalize_str_basic(self):
         self.assertEqual(normalize_str("Hello World"), "hello world")
-        self.assertEqual(normalize_str("$tring!"), "stringi")
+        self.assertEqual(normalize_str("$tring!"), "string")
 
     def test_normalize_str_diacritics_and_symbols(self):
         self.assertEqual(normalize_str("Beyoncé"), "beyonce")
@@ -32,7 +32,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(normalize_str(None), "")
         self.assertEqual(normalize_str(""), "")
         self.assertEqual(normalize_str("   "), "")
-        self.assertEqual(normalize_str("A$AP Rocky!"), "asap rockyi")
+        self.assertEqual(normalize_str("A$AP Rocky!"), "asap rocky")
         self.assertEqual(normalize_str("Beyoncé - Nöél"), "beyonce noel")
 
     def test_sanitize_name_complex_edge_cases(self):

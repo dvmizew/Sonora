@@ -41,6 +41,12 @@ class SonoraLogger:
         else:
             print(f"[WARNING] {message}")
 
+    def debug(self, message: str) -> None:
+        if CONSOLE and HAS_RICH:
+            CONSOLE.print(f"[dim]DEBUG:[/dim] {message}")
+        else:
+            print(f"[DEBUG] {message}")
+
     def error(self, message: str) -> None:
         if CONSOLE and HAS_RICH:
             CONSOLE.print(f"[error]ERROR:[/error] {message}")
@@ -49,6 +55,10 @@ class SonoraLogger:
 
 
 LOG = SonoraLogger()
+
+
+def log_debug(message: str) -> None:
+    LOG.debug(message)
 
 
 def log_info(message: str) -> None:

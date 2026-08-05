@@ -10,6 +10,7 @@ try:
     import librosa  # type: ignore
     HAS_LIBROSA = True
 except ImportError:
+    librosa = None
     HAS_LIBROSA = False
 
 

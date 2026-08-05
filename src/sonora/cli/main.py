@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     
     # Optional API keys
     tag_parser.add_argument("--lastfm-key", type=str, default=None, help="Last.fm API key for genre/mood lookup")
+    tag_parser.add_argument("--acoustid-key", type=str, default=None, help="AcoustID API key for acoustic fingerprinting")
     tag_parser.add_argument("--discogs-token", type=str, default=None, help="Discogs personal user token")
     tag_parser.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel worker threads (default: 4)")
 
@@ -45,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_parser = subparsers.add_parser("audit", help="Audit music library for FLAC integrity, bracket corruption & missing LRCs")
     audit_parser.add_argument("path", type=Path, help="Directory containing music library to audit")
     audit_parser.add_argument("--json", type=Path, default=None, help="Output path to save audit JSON report")
+    audit_parser.add_argument("--spectral", action="store_true", help="Enable deep spectral cutoff analysis for fake lossless detection (slow)")
 
     # Subcommand: rename
     rename_parser = subparsers.add_parser("rename", help="Rename audio files and sync .lrc metadata headers")
@@ -60,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def handle_tag(args: argparse.Namespace) -> int:
     """Handle 'tag' subcommand execution."""
+    from sonora.services.musicbrainz import init_musicbrainz
+
+    init_musicbrainz()
     LOG.info(f"Tagging album directory: [bold]{args.path}[/bold]")
     results = tag_album_folder(
         args.path,
@@ -69,6 +74,8 @@ def handle_tag(args: argparse.Namespace) -> int:
         fetch_lyrics=args.fetch_lyrics,
         fetch_itunes_art=args.fetch_itunes_art,
         lastfm_api_key=args.lastfm_key,
+        acoustid_api_key=args.acoustid_key,
+        discogs_user_token=args.discogs_token,
     )
     LOG.success(f"Successfully tagged {len(results)} tracks.")
     return 0
@@ -77,7 +84,7 @@ def handle_tag(args: argparse.Namespace) -> int:
 def handle_audit(args: argparse.Namespace) -> int:
     """Handle 'audit' subcommand execution."""
     LOG.info(f"Auditing music library: [bold]{args.path}[/bold]")
-    report = audit_library(args.path, output_json=args.json)
+    report = audit_library(args.path, output_json=args.json, check_spectral=args.spectral)
     LOG.success(f"Audit completed: {report.total_files} files scanned, {len(report.issues)} issues identified.")
     return 0
 

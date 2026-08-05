@@ -13,6 +13,7 @@ try:
     import syncedlyrics  # type: ignore
     HAS_SYNCEDLYRICS = True
 except ImportError:
+    syncedlyrics = None
     HAS_SYNCEDLYRICS = False
 
 _LYRICS_LOCK = threading.Lock()
@@ -54,11 +55,11 @@ def fetch_synced_lyrics(
     - lang: Preferred language ISO code (e.g. "en", "ro")
     - save_path: Optional Path destination to write the .lrc file directly
     """
-    if not HAS_SYNCEDLYRICS:
-        raise APIServiceError("syncedlyrics library is not installed.")
-
     if not artist or not title:
         return None
+
+    if not HAS_SYNCEDLYRICS:
+        raise APIServiceError("syncedlyrics library is not installed.")
 
     query = f"{artist} - {title}".strip()
     _wait_lyrics_turn()

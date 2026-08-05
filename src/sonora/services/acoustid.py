@@ -10,6 +10,7 @@ try:
     import acoustid  # type: ignore
     HAS_ACOUSTID = True
 except ImportError:
+    acoustid = None
     HAS_ACOUSTID = False
 
 
