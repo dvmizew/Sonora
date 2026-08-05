@@ -69,7 +69,12 @@ class AlbumInfo:
 class AuditReport:
     """Represents the audit results for a track or directory."""
 
-    file_path: Path
+    file_path: Path | None = None
+    total_files: int = 0
+    corrupt_files: int = 0
+    missing_metadata: int = 0
+    missing_lrc: int = 0
+    issues: dict[str, list[str]] = field(default_factory=dict)
     is_valid: bool = True
     missing_tags: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

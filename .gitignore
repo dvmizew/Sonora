@@ -29,35 +29,27 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-*.manifest
-*.spec
+# Environment variables & secrets
+.env
+*.env
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+# Audit reports & CLI outputs
+report.json
+sonora_report.json
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
 .coverage
 .coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.qual
-.pytest_cache/
-.pytest_cache
+htmlcov/
 
 # Environments
 .venv
 venv/
 ENV/
 env/
-env.bak/
-venv.bak/
 
 # IDE & Editors
 .vscode/

@@ -28,6 +28,16 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(sanitize_name(""), "Unknown")
         self.assertEqual(sanitize_name(None), "Unknown")
 
+    def test_normalize_str_edge_cases(self):
+        self.assertEqual(normalize_str(None), "")
+        self.assertEqual(normalize_str(""), "")
+        self.assertEqual(normalize_str("   "), "")
+        self.assertEqual(normalize_str("A$AP Rocky!"), "asap rockyi")
+        self.assertEqual(normalize_str("Beyoncé - Nöél"), "beyonce noel")
+
+    def test_sanitize_name_complex_edge_cases(self):
+        self.assertEqual(sanitize_name("Artist / Title <HQ>:"), "Artist _ Title HQ")
+
 
 class TestCoreModels(unittest.TestCase):
     def test_track_info_to_dict(self):
@@ -55,6 +65,23 @@ class TestCoreModels(unittest.TestCase):
         report = AuditReport(file_path=Path("/music/1.flac"), is_valid=True)
         self.assertTrue(report.is_valid)
         self.assertEqual(report.missing_tags, [])
+
+    def test_track_info_default_values(self):
+        track = TrackInfo(file_path=Path("/music/song.flac"))
+        self.assertEqual(track.artist, "Unknown Artist")
+        self.assertEqual(track.title, "Unknown Title")
+        self.assertEqual(track.album, "Unknown Album")
+        self.assertTrue(track.is_lossless)
+
+    def test_track_info_to_dict_empty_fields(self):
+        track = TrackInfo(file_path=Path("/music/song.flac"))
+        data = track.to_dict()
+        self.assertEqual(data["track_number"], "")
+        self.assertEqual(data["bpm"], "")
+
+    def test_album_info_empty_tracks(self):
+        album = AlbumInfo(title="Empty Album", artist="Artist")
+        self.assertEqual(album.track_count, 0)
 
 
 class TestCoreExceptions(unittest.TestCase):
