@@ -7,6 +7,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
@@ -17,6 +18,11 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
     Search iTunes Search API for album or track metadata.
     """
     query_term = f"{artist} {term}".strip()
+    cache_key = f"itunes:{artist.lower()}:{term.lower()}:{entity}"
+    cached = get_cached_api(cache_key)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+
     params = {
         "term": query_term,
         "entity": entity,
@@ -32,7 +38,9 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data.get("results", [])
+            results: list[dict[str, Any]] = data.get("results", [])
+            set_cached_api(cache_key, results)
+            return results
     except Exception as e:
         raise APIServiceError(f"iTunes Search API request failed for {query_term}: {e}") from e
 

@@ -5,6 +5,7 @@ Discogs API service client.
 from types import ModuleType
 from typing import Any
 
+from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 
 discogs_client: ModuleType | None = None
@@ -25,16 +26,23 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
     if discogs_client is None:
         raise APIServiceError("discogs-client library is not installed.")
 
+    cache_key = f"discogs:{artist.lower()}:{album.lower()}"
+    cached = get_cached_api(cache_key)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+
     try:
         client = discogs_client.Client("Sonora/0.1.0", user_token=user_token)
         results = client.search(album, artist=artist, type="release")
         if results and len(results) > 0:
             first = results[0]
-            return {
+            res = {
                 "id": getattr(first, "id", None),
                 "title": getattr(first, "title", None),
                 "year": getattr(first, "year", None),
             }
+            set_cached_api(cache_key, res)
+            return res
         return None
     except Exception as e:
         raise APIServiceError(f"Discogs search failed for {artist} - {album}: {e}") from e

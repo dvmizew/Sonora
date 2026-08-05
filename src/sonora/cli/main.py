@@ -3,9 +3,16 @@ Command-line interface (CLI) main entrypoint for Sonora.
 """
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    HAS_DOTENV = True
+except ImportError:
+    HAS_DOTENV = False
 
 from sonora import __version__
 from sonora.core.exceptions import SonoraError
@@ -65,6 +72,11 @@ def handle_tag(args: argparse.Namespace) -> int:
     from sonora.services.musicbrainz import init_musicbrainz
 
     init_musicbrainz()
+
+    lastfm_key = args.lastfm_key or os.environ.get("LASTFM_API_KEY")
+    acoustid_key = args.acoustid_key or os.environ.get("ACOUSTID_API_KEY")
+    discogs_token = args.discogs_token or os.environ.get("DISCOGS_TOKEN")
+
     LOG.info(f"Tagging album directory: [bold]{args.path}[/bold]")
     results = tag_album_folder(
         args.path,
@@ -73,9 +85,9 @@ def handle_tag(args: argparse.Namespace) -> int:
         fetch_replaygain=args.fetch_replaygain,
         fetch_lyrics=args.fetch_lyrics,
         fetch_itunes_art=args.fetch_itunes_art,
-        lastfm_api_key=args.lastfm_key,
-        acoustid_api_key=args.acoustid_key,
-        discogs_user_token=args.discogs_token,
+        lastfm_api_key=lastfm_key,
+        acoustid_api_key=acoustid_key,
+        discogs_user_token=discogs_token,
     )
     LOG.success(f"Successfully tagged {len(results)} tracks.")
     return 0
@@ -107,6 +119,9 @@ def handle_organize(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Main CLI entrypoint."""
+    if HAS_DOTENV:
+        load_dotenv()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

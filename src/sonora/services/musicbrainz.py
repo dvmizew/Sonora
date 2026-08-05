@@ -1,6 +1,7 @@
 from types import ModuleType
 from typing import Any
 
+from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter
 
@@ -19,18 +20,55 @@ def init_musicbrainz(app_name: str = "Sonora", version: str = "0.1.0", contact: 
         musicbrainzngs.set_useragent(app_name, version, contact)
 
 
+def fetch_artist_discography(artist: str) -> list[dict[str, Any]]:
+    """
+    Fetch and cache the entire discography (releases) of an artist from MusicBrainz in a single API call.
+    Returns list of release dicts.
+    """
+    if musicbrainzngs is None or not artist:
+        return []
+
+    cache_key = f"mb_discography:{artist.lower().strip()}"
+    cached = get_cached_api(cache_key)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+
+    _MB_LIMITER.wait()
+    try:
+        result = musicbrainzngs.search_releases(artist=artist, limit=100)
+        releases: list[dict[str, Any]] = result.get("release-list", [])
+        set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
+        return releases
+    except Exception as e:
+        raise APIServiceError(f"MusicBrainz discography fetch failed for {artist}: {e}") from e
+
+
 def search_musicbrainz_release(artist: str, album: str) -> dict[str, Any] | None:
     """Search MusicBrainz for an album release matching artist and album name."""
     if musicbrainzngs is None:
         raise APIServiceError("musicbrainzngs library is not installed.")
 
+    cache_key = f"mb_release:{artist.lower()}:{album.lower()}"
+    cached = get_cached_api(cache_key)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+
+    # Batch strategy: Check artist discography cache first
+    discography = fetch_artist_discography(artist)
+    album_lower = album.lower().strip()
+    for rel in discography:
+        rel_title = str(rel.get("title", "")).lower().strip()
+        if rel_title == album_lower or album_lower in rel_title:
+            set_cached_api(cache_key, rel)
+            return rel
+
     _MB_LIMITER.wait()
     try:
         result = musicbrainzngs.search_releases(artist=artist, release=album, limit=5)
-        releases = result.get("release-list", [])
-        if releases:
-            return releases[0]
-        return None
+        releases: list[dict[str, Any]] = result.get("release-list", [])
+        target_rel: dict[str, Any] | None = releases[0] if releases else None
+        set_cached_api(cache_key, target_rel)
+        return target_rel
     except Exception as e:
         raise APIServiceError(f"MusicBrainz search failed for {artist} - {album}: {e}") from e
 
@@ -40,12 +78,17 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
     if musicbrainzngs is None:
         raise APIServiceError("musicbrainzngs library is not installed.")
 
+    cache_key = f"mb_mbid:{artist.lower()}:{title.lower()}"
+    cached = get_cached_api(cache_key)
+    if cached is not None:
+        return str(cached)
+
     _MB_LIMITER.wait()
     try:
         result = musicbrainzngs.search_recordings(artist=artist, recording=title, limit=5)
         recordings = result.get("recording-list", [])
-        if recordings:
-            return str(recordings[0].get("id"))
-        return None
+        mbid = str(recordings[0].get("id")) if recordings else None
+        set_cached_api(cache_key, mbid)
+        return mbid
     except Exception as e:
         raise APIServiceError(f"MusicBrainz track lookup failed for {artist} - {title}: {e}") from e

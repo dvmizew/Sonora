@@ -7,6 +7,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter
 
@@ -20,6 +21,11 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
     """
     if not api_key:
         return []
+
+    cache_key = f"lastfm:{artist.lower()}:{title.lower()}:{mbid or ''}"
+    cached = get_cached_api(cache_key)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
 
     _LASTFM_LIMITER.wait()
     params: dict[str, Any] = {
@@ -53,7 +59,9 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
             if not res and mbid and artist and title:
                 # Fallback to artist+title if MBID returned 0 tags
                 return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None)
-            return res[:5]
+            final_res = res[:5]
+            set_cached_api(cache_key, final_res)
+            return final_res
     except Exception as e:
         if mbid and artist and title:
             return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None)
