@@ -64,11 +64,12 @@ class TestServicesEngine(unittest.TestCase):
             lang="en"
         )
 
+    @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_raises_api_service_error_on_failure(self, mock_syncedlyrics):
+    def test_fetch_synced_lyrics_raises_api_service_error_on_failure(self, mock_syncedlyrics, mock_cache):
         mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
         with self.assertRaises(APIServiceError):
-            fetch_synced_lyrics("Artist", "Title")
+            fetch_synced_lyrics("FailArtist", "FailTitle")
 
     def test_synced_lyrics_empty_query_returns_none(self):
         self.assertIsNone(fetch_synced_lyrics("", ""))
