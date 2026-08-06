@@ -98,8 +98,10 @@ def process_single_track(
             if release:
                 track_info.musicbrainz_albumid = release.get("id")
                 # Also opportunistically set year/genre if missing
-                if not track_info.date and release.get("date"):
-                    track_info.date = release.get("date")[:4]
+                if not track_info.date:
+                    date_str = release.get("date")
+                    if isinstance(date_str, str) and len(date_str) >= 4:
+                        track_info.date = date_str[:4]
         except APIServiceError as e:
             LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
 
