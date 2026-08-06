@@ -1,63 +1,72 @@
 """
-ReplayGain & EBU R128 loudness analysis using FFmpeg.
+ReplayGain & Album Gain using native metaflac utility.
 """
 
-import re
 import subprocess
-from dataclasses import dataclass
+import shutil
 from pathlib import Path
+from typing import Sequence
 
-from sonora.core.constants import FFMPEG_CMD
-from sonora.core.exceptions import AudioProcessingError
+from mutagen.flac import FLAC
 
-
-@dataclass
-class ReplayGainResult:
-    track_gain_db: float
-    track_peak: float
+from sonora.core.constants import METAFLAC_CMD
+from sonora.core.logger import LOG
 
 
-def calculate_replaygain(file_path: Path, target_loudness_lufs: float = -18.0) -> ReplayGainResult:
+def calculate_album_replaygain(files: Sequence[Path]) -> bool:
     """
-    Analyze audio track loudness using FFmpeg ebur128 filter and compute ReplayGain values.
-    Standard target loudness is -18.0 LUFS which is the ReplayGain 2.0 specification.
+    Use metaflac to calculate both Track and Album ReplayGain for a list of FLAC files.
+    Skips if REPLAYGAIN_ALBUM_GAIN is already present.
+    Safely falls back to track-mode if audio properties (sample rate, channels, bit depth) are mixed.
+    Returns True if ReplayGain was calculated and added, False otherwise.
     """
-    if not file_path.exists():
-        raise AudioProcessingError(f"File not found: {file_path}")
+    flac_files = [str(f) for f in files if f.exists() and f.suffix.lower() == ".flac"]
+    if not flac_files:
+        return False
+        
+    if not shutil.which(METAFLAC_CMD):
+        LOG.warning(f"'{METAFLAC_CMD}' not found in PATH! ReplayGain disabled.")
+        return False
+
+    properties = set()
+    has_album_gain = False
+    
+    try:
+        for f in flac_files:
+            a = FLAC(f)
+            # Sample Rate, Channels, Bits must match for metaflac album mode
+            props = (a.info.sample_rate, a.info.channels, a.info.bits_per_sample)
+            properties.add(props)
+            if not has_album_gain and "REPLAYGAIN_ALBUM_GAIN" in a:
+                has_album_gain = True
+    except Exception as e:
+        LOG.debug(f"Failed to read properties for ReplayGain: {e}")
+        return False
+
+    if has_album_gain:
+        LOG.debug("Album already has ReplayGain tags. Skipping.")
+        return False
 
     try:
-        cmd = [
-            FFMPEG_CMD,
-            "-hide_banner",
-            "-i", str(file_path),
-            "-af", "ebur128=peak=true",
-            "-f", "null",
-            "-"
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=120)
-        if result.returncode != 0:
-            raise AudioProcessingError(f"FFmpeg loudness analysis failed: {result.stderr}")
-
-        # Parse Integrated Loudness (LUFS)
-        integrated_match = re.search(r"Integrated loudness:\s+I:\s+([-\d.]+)\s+LUFS", result.stderr)
-        peak_match = re.search(r"Peak:\s+([-\d.]+)\s+dBFS", result.stderr)
-
-        if not integrated_match:
-            raise AudioProcessingError("Could not parse integrated loudness from FFmpeg output.")
-
-        integrated_lufs = float(integrated_match.group(1))
-        track_gain_db = round(target_loudness_lufs - integrated_lufs, 2)
-
-        track_peak = 1.0
-        if peak_match:
-            peak_db = float(peak_match.group(1))
-            track_peak = round(10 ** (peak_db / 20.0), 6)
-
-        return ReplayGainResult(track_gain_db=track_gain_db, track_peak=track_peak)
-
-    except FileNotFoundError as e:
-        raise AudioProcessingError(f"ReplayGain failed: '{FFMPEG_CMD}' binary not found on system path.") from e
+        is_uniform = len(properties) <= 1
+        if is_uniform:
+            LOG.info("🔊 Calculating ReplayGain (Album Mode)...")
+            cmd = [METAFLAC_CMD, "--add-replay-gain"] + flac_files
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if r.returncode != 0:
+                LOG.error(f"metaflac failed: {r.stderr}")
+                return False
+        else:
+            LOG.warning("⚠️  Mixed audio properties detected. Falling back to Track-only ReplayGain.")
+            for f in flac_files:
+                cmd = [METAFLAC_CMD, "--add-replay-gain", f]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if r.returncode != 0:
+                    LOG.error(f"metaflac failed for {f}: {r.stderr}")
+        return True
+    except subprocess.TimeoutExpired:
+        LOG.error("metaflac timed out while calculating ReplayGain.")
+        return False
     except Exception as e:
-        if isinstance(e, AudioProcessingError):
-            raise
-        raise AudioProcessingError(f"ReplayGain calculation error for {file_path}: {e}") from e
+        LOG.error(f"Failed to calculate ReplayGain: {e}")
+        return False

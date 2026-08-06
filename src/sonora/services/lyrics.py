@@ -98,12 +98,13 @@ def fetch_synced_lyrics(
     if syncedlyrics is None:
         raise APIServiceError("syncedlyrics library is not installed.")
 
-    cache_key = f"lyrics:{artist.lower()}:{title.lower()}:{synced_only}:{enhanced}:{plain_only}"
+    from sonora.core.utils import normalize_str
+    cache_key = f"lyrics:{normalize_str(artist)}:{normalize_str(title)}:{synced_only}:{enhanced}:{plain_only}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
         return cached
 
-    query = f"{artist} - {title}".strip()
+    query = f"{normalize_str(artist)} - {normalize_str(title)}".strip()
     _LYRICS_LIMITER.wait()
 
     def _do_search(en: bool, syn: bool, pl: bool) -> str | None:
@@ -127,16 +128,9 @@ def fetch_synced_lyrics(
         return None
 
     try:
-        # If user explicitly requested a specific mode, use it directly
-        if enhanced or synced_only or plain_only:
-            result = _do_search(enhanced, synced_only, plain_only)
-        else:
-            # Cascading Quality Fallback: Enhanced -> Synced -> Plain
-            result = _do_search(en=True, syn=False, pl=False)
-            if not result:
-                result = _do_search(en=False, syn=True, pl=False)
-            if not result:
-                result = _do_search(en=False, syn=False, pl=False)
+        # The syncedlyrics library already natively handles quality fallbacks (Enhanced -> LRC -> Plain).
+        # We only need to perform ONE search.
+        result = _do_search(en=enhanced or True, syn=synced_only, pl=plain_only)
 
         if result:
             set_cached_api(cache_key, result)

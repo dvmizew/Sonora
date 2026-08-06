@@ -8,7 +8,8 @@ from pathlib import Path
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.exceptions import AudioProcessingError, MetadataError
-from sonora.core.utils import sanitize_name
+from sonora.core.logger import LOG
+from sonora.core.utils import normalize_str, sanitize_name
 
 
 def is_single_folder(folder_path: Path) -> bool:
@@ -35,9 +36,9 @@ def is_single_folder(folder_path: Path) -> bool:
     for p in audio_files:
         try:
             info = read_track_metadata(p)
-            albums.add(info.album.strip().lower())
-        except (MetadataError, OSError):
-            pass
+            albums.add(normalize_str(info.album))
+        except (MetadataError, OSError) as e:
+            LOG.debug(f"Failed to read metadata for singles detection on {p}: {e}")
 
     # If tracks belong to multiple different album names, it's a Singles collection
     return len(albums) > 1
@@ -82,7 +83,7 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path) -> int:
                             shutil.move(str(lrc_path), str(target_lrc))
 
                     moved_count += 1
-            except (MetadataError, OSError):
-                pass
+            except (MetadataError, OSError) as e:
+                LOG.warning(f"Failed to organize track {path}: {e}")
 
     return moved_count

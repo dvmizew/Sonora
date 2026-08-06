@@ -4,22 +4,18 @@ Parallel autotagger engine using ThreadPoolExecutor for tagging tracks & albums.
 
 import re
 import threading
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from sonora.audio.bpm import calculate_bpm
-from sonora.audio.metadata import (
-    embed_cover_art,
-    read_track_metadata,
-    write_track_metadata,
-)
-from sonora.audio.replaygain import calculate_replaygain
+from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.constants import GENRE_MAP, SUPPORTED_EXTS
 from sonora.core.exceptions import APIServiceError, AudioProcessingError, MetadataError
-from sonora.core.logger import LOG
+from sonora.core.logger import LOG, CONSOLE
 from sonora.core.models import TrackInfo
+from sonora.core.utils import normalize_str
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.discogs import search_discogs_release
 from sonora.services.itunes import fetch_itunes_cover_art_url
@@ -42,7 +38,7 @@ ARTIST_ALIASES: dict[str, str] = {
 
 def normalize_artist_alias(artist: str) -> str:
     """Normalize artist name based on ARTIST_ALIASES table."""
-    lowered = artist.strip().lower()
+    lowered = normalize_str(artist)
     return ARTIST_ALIASES.get(lowered, artist.strip())
 
 _cover_locks: dict[Path, threading.Lock] = {}
@@ -50,6 +46,8 @@ _cover_meta_lock = threading.Lock()
 
 def _get_cover_lock(album_dir: Path) -> threading.Lock:
     with _cover_meta_lock:
+        if len(_cover_locks) > 1000:
+            _cover_locks.clear()
         if album_dir not in _cover_locks:
             _cover_locks[album_dir] = threading.Lock()
         return _cover_locks[album_dir]
@@ -74,16 +72,8 @@ def process_single_track(
     track_info = read_track_metadata(file_path)
     track_info.artist = normalize_artist_alias(track_info.artist)
 
-    # 1. Fetch MusicBrainz MBID
-    try:
-        mbid = fetch_track_mbid(track_info.artist, track_info.title)
-        if mbid:
-            track_info.musicbrainz_trackid = mbid
-    except APIServiceError as e:
-        LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {e}")
-
-    # 2. AcoustID fingerprint identification fallback
-    if acoustid_api_key and not track_info.musicbrainz_trackid:
+    # 1. Respect existing MBID or prioritize AcoustID (most exact) over text search
+    if not track_info.musicbrainz_trackid and acoustid_api_key:
         try:
             acoustid_mbid = lookup_acoustid(file_path, api_key=acoustid_api_key)
             if acoustid_mbid:
@@ -91,7 +81,29 @@ def process_single_track(
         except APIServiceError as e:
             LOG.debug(f"AcoustID lookup failed for {track_info.title}: {e}")
 
-    # 3. Fetch Last.fm genre/mood tags
+    # 2. Fallback to MusicBrainz text search by existing tags if AcoustID failed
+    if not track_info.musicbrainz_trackid:
+        try:
+            mbid = fetch_track_mbid(track_info.artist, track_info.title)
+            if mbid:
+                track_info.musicbrainz_trackid = mbid
+        except APIServiceError as e:
+            LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {e}")
+
+    # 3. Fetch MusicBrainz Album ID via Discography Optimization
+    if not track_info.musicbrainz_albumid:
+        try:
+            from sonora.services.musicbrainz import search_musicbrainz_release
+            release = search_musicbrainz_release(track_info.artist, track_info.album)
+            if release:
+                track_info.musicbrainz_albumid = release.get("id")
+                # Also opportunistically set year/genre if missing
+                if not track_info.date and release.get("date"):
+                    track_info.date = release.get("date")[:4]
+        except APIServiceError as e:
+            LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
+
+    # 4. Fetch Last.fm genre/mood tags
     if lastfm_api_key:
         try:
             tags = fetch_lastfm_tags(
@@ -128,19 +140,37 @@ def process_single_track(
         except AudioProcessingError as e:
             LOG.debug(f"BPM calculation failed for {track_info.title}: {e}")
 
-    # 6. Calculate ReplayGain if FLAC
-    if fetch_replaygain and file_path.suffix.lower() == ".flac":
+    # 6. ReplayGain calculation is now deferred to the Album level in tag_album_folder.
+
+    # 7. Fetch iTunes Cover Art (Download only, don't embed yet)
+    cover_jpg = None
+    if fetch_itunes_art and file_path.suffix.lower() == ".flac":
         try:
-            rg = calculate_replaygain(file_path)
-            track_info.replaygain_track_gain = rg.track_gain_db
-            track_info.replaygain_track_peak = rg.track_peak
-        except AudioProcessingError as e:
-            LOG.debug(f"ReplayGain calculation failed for {track_info.title}: {e}")
+            cover_jpg = file_path.parent / "cover.jpg"
+            # Optimization: Do not block all threads on network I/O
+            with _get_cover_lock(file_path.parent):
+                art_downloaded = cover_jpg.exists()
+            
+            if not art_downloaded:
+                art_url = fetch_itunes_cover_art_url(track_info.artist, track_info.album)
+                if art_url:
+                    from sonora.core.http import SESSION
+                    resp = SESSION.get(art_url, timeout=15)
+                    resp.raise_for_status()
+                    
+                    with _get_cover_lock(file_path.parent):
+                        if not cover_jpg.exists():
+                            cover_jpg.write_bytes(resp.content)
+            if not cover_jpg.exists():
+                cover_jpg = None
+        except (APIServiceError, OSError) as e:
+            LOG.debug(f"Cover art downloading failed for {track_info.title}: {e}")
+            cover_jpg = None
 
-    # 7. Write metadata tags back to file (AFTER all calculations!)
-    write_track_metadata(track_info)
+    # 8. Write metadata tags back to file AND embed cover art in one single Disk I/O operation!
+    write_track_metadata(track_info, cover_art_path=cover_jpg)
 
-    # 8. Fetch & write .lrc lyrics file (and .synced.lrc copy if enhanced)
+    # 9. Fetch & write .lrc lyrics file (and .synced.lrc copy if enhanced)
     if fetch_lyrics:
         try:
             lrc = fetch_synced_lyrics(track_info.artist, track_info.title)
@@ -156,29 +186,6 @@ def process_single_track(
         except (APIServiceError, OSError) as e:
             LOG.debug(f"Lyrics fetch failed for {track_info.title}: {e}")
 
-    # 9. Fetch & embed iTunes Cover Art
-    if fetch_itunes_art and file_path.suffix.lower() == ".flac":
-        try:
-            cover_jpg = file_path.parent / "cover.jpg"
-            with _get_cover_lock(file_path.parent):
-                if cover_jpg.exists():
-                    embed_cover_art(file_path, cover_jpg)
-                else:
-                    art_url = fetch_itunes_cover_art_url(track_info.artist, track_info.album)
-                    if art_url:
-                        from sonora.core.constants import USER_AGENT
-                        req = urllib.request.Request(
-                            art_url,
-                            headers={"User-Agent": USER_AGENT}
-                        )
-                        with urllib.request.urlopen(req, timeout=15) as resp:
-                            img_data = resp.read()
-                        if not cover_jpg.exists():
-                            cover_jpg.write_bytes(img_data)
-                        embed_cover_art(file_path, cover_jpg)
-        except (APIServiceError, OSError) as e:
-            LOG.debug(f"Cover art embedding failed for {track_info.title}: {e}")
-
     return track_info
 
 
@@ -190,6 +197,14 @@ def tag_album_folder(
     """
     Process and tag all audio files in an album folder (recursively) using a thread pool.
     """
+    valid_options = {
+        "fetch_bpm", "fetch_replaygain", "fetch_lyrics", "fetch_itunes_art",
+        "lastfm_api_key", "acoustid_api_key", "discogs_user_token"
+    }
+    invalid = set(options.keys()) - valid_options
+    if invalid:
+        raise ValueError(f"Invalid options passed to tag_album_folder: {invalid}")
+
     if not folder_path.exists() or not folder_path.is_dir():
         raise AudioProcessingError(f"Album folder not found: {folder_path}")
 
@@ -202,17 +217,49 @@ def tag_album_folder(
         return []
 
     results: list[TrackInfo] = []
+    
+    # Check if rich is available for progress bar
+    try:
+        from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+        has_rich = True
+    except ImportError:
+        has_rich = False
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_file = {
             executor.submit(process_single_track, file_p, **options): file_p
             for file_p in audio_files
         }
-        for future in as_completed(future_to_file):
-            file_p = future_to_file[future]
-            try:
-                info = future.result()
-                results.append(info)
-            except (AudioProcessingError, MetadataError, APIServiceError) as e:
-                LOG.warning(f"Failed to process {file_p}: {e}")
+        
+        if has_rich and CONSOLE:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeRemainingColumn(),
+                console=CONSOLE
+            ) as progress:
+                task = progress.add_task("[cyan]Tagging tracks...", total=len(audio_files))
+                for future in as_completed(future_to_file):
+                    file_p = future_to_file[future]
+                    try:
+                        info = future.result()
+                        results.append(info)
+                    except (AudioProcessingError, MetadataError, APIServiceError) as e:
+                        LOG.warning(f"Failed to process {file_p.name}: {e}")
+                    progress.advance(task)
+        else:
+            for future in as_completed(future_to_file):
+                file_p = future_to_file[future]
+                try:
+                    info = future.result()
+                    results.append(info)
+                except (AudioProcessingError, MetadataError, APIServiceError) as e:
+                    LOG.warning(f"Failed to process {file_p.name}: {e}")
+
+    # After all tracks are tagged, compute Album ReplayGain (modifies files in-place via metaflac)
+    if options.get("fetch_replaygain", True):
+        calculate_album_replaygain(audio_files)
 
     return results

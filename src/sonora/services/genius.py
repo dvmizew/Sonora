@@ -2,11 +2,7 @@
 Genius API service client for song descriptions and background stories.
 """
 
-import json
-import urllib.parse
-import urllib.request
-
-from sonora.core.constants import USER_AGENT
+from sonora.core.http import SESSION
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter
 
@@ -23,43 +19,39 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
     _GENIUS_LIMITER.wait()
     try:
         # Step 1: Search for the song
-        query = f"{artist} {title}"
-        search_url = f"https://api.genius.com/search?q={urllib.parse.quote(query)}"
-        req = urllib.request.Request(
+        from sonora.core.utils import normalize_str
+        query = f"{normalize_str(artist)} {normalize_str(title)}"
+        search_url = "https://api.genius.com/search"
+        resp = SESSION.get(
             search_url,
-            headers={
-                "Authorization": f"Bearer {api_token}",
-                "User-Agent": USER_AGENT
-            }
+            params={"q": query},
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=5
         )
-
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            hits = data.get("response", {}).get("hits", [])
-            if not hits:
-                return None
-            api_path = hits[0].get("result", {}).get("api_path")
-            if not api_path:
-                return None
+        resp.raise_for_status()
+        data = resp.json()
+        hits = data.get("response", {}).get("hits", [])
+        if not hits:
+            return None
+        api_path = hits[0].get("result", {}).get("api_path")
+        if not api_path:
+            return None
 
         # Step 2: Fetch song details and plain text description
         _GENIUS_LIMITER.wait()
         song_url = f"https://api.genius.com{api_path}"
-        req_song = urllib.request.Request(
+        resp_song = SESSION.get(
             song_url,
-            headers={
-                "Authorization": f"Bearer {api_token}",
-                "User-Agent": USER_AGENT
-            }
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=5
         )
-
-        with urllib.request.urlopen(req_song, timeout=5) as resp_song:
-            data_song = json.loads(resp_song.read().decode("utf-8"))
-            song = data_song.get("response", {}).get("song", {})
-            desc = song.get("description", {}).get("plain", "")
-            if desc and desc.strip() != "?" and "lyrics for this song" not in desc.lower():
-                return desc.strip()
-            return None
+        resp_song.raise_for_status()
+        data_song = resp_song.json()
+        song = data_song.get("response", {}).get("song", {})
+        desc = song.get("description", {}).get("plain", "")
+        if desc and desc.strip() != "?" and "lyrics for this song" not in desc.lower():
+            return desc.strip()
+        return None
 
     except Exception as e:
         raise APIServiceError(f"Genius description fetch failed for {artist} - {title}: {e}") from e

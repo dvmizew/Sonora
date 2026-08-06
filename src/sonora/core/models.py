@@ -58,23 +58,6 @@ class TrackInfo:
 
 
 @dataclass
-class AlbumInfo:
-    """Represents a collection of audio tracks belonging to an album."""
-
-    title: str
-    artist: str
-    tracks: list[TrackInfo] = field(default_factory=list)
-    year: str | None = None
-    genre: str | None = None
-    cover_art_path: Path | None = None
-    musicbrainz_albumid: str | None = None
-
-    @property
-    def track_count(self) -> int:
-        return len(self.tracks)
-
-
-@dataclass
 class AuditReport:
     """Represents the audit results for a track or directory."""
 

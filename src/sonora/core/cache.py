@@ -28,9 +28,9 @@ def get_cache() -> Any:
                 try:
                     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
                     if hasattr(diskcache, "FanoutCache"):
-                        _CACHE_INSTANCE = diskcache.FanoutCache(str(_CACHE_DIR), shards=8)
+                        _CACHE_INSTANCE = diskcache.FanoutCache(str(_CACHE_DIR), shards=8, sqlite_journal_mode="wal", sqlite_synchronous=0)
                     else:
-                        _CACHE_INSTANCE = diskcache.Cache(str(_CACHE_DIR))
+                        _CACHE_INSTANCE = diskcache.Cache(str(_CACHE_DIR), sqlite_journal_mode="wal", sqlite_synchronous=0)
                 except Exception as e:  # noqa: BLE001
                     LOG.debug(f"Cache initialization failed: {e}")
                     _CACHE_INSTANCE = None
@@ -62,11 +62,12 @@ def set_cached_api(key: str, value: Any, expire_seconds: int = 604800) -> None:
 def close_cache() -> None:
     """Close the diskcache to release SQLite connections."""
     global _CACHE_INSTANCE
-    if _CACHE_INSTANCE is not None:
-        try:
-            _CACHE_INSTANCE.close()
-        except Exception as e:  # noqa: BLE001
-            LOG.debug(f"Cache close failed: {e}")
-        _CACHE_INSTANCE = None
+    with _CACHE_LOCK:
+        if _CACHE_INSTANCE is not None:
+            try:
+                _CACHE_INSTANCE.close()
+            except Exception as e:  # noqa: BLE001
+                LOG.debug(f"Cache close failed: {e}")
+            _CACHE_INSTANCE = None
 
 atexit.register(close_cache)

@@ -12,7 +12,9 @@ from sonora.audio.metadata import read_track_metadata
 from sonora.audio.spectral import is_fake_lossless
 from sonora.core.constants import GENRE_BLACKLIST, SUPPORTED_EXTS
 from sonora.core.exceptions import AudioProcessingError, MetadataError
+from sonora.core.logger import LOG
 from sonora.core.models import AuditReport
+from sonora.core.utils import normalize_str
 
 BRACKET_PATTERN = re.compile(r"\[.*?\]|\(.*?\)")
 
@@ -24,7 +26,7 @@ def check_brackets_corruption(name: str) -> list[str]:
     """
     issues = []
     for match in BRACKET_PATTERN.findall(name):
-        lowered = match.lower()
+        lowered = normalize_str(match)
         if any(kw in lowered for kw in ["official", "video", "audio", "flac", "mp3", "320", "hq", "hd", "rip"]):
             issues.append(f"Corrupt bracket metadata: '{match}'")
     return issues
@@ -54,8 +56,8 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             try:
                 if is_fake_lossless(file_path):
                     issues.append("Possible fake lossless (spectral cutoff below 16kHz).")
-            except AudioProcessingError:
-                pass
+            except AudioProcessingError as e:
+                LOG.debug(f"Spectral analysis failed for {file_path}: {e}")
 
     # Check 3: Read metadata tags
     try:
@@ -65,8 +67,7 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
         issues.extend(check_brackets_corruption(track.artist))
         issues.extend(check_brackets_corruption(track.title))
 
-        # Check genre blacklist
-        if track.genre and any(bl.lower() in track.genre.lower() for bl in GENRE_BLACKLIST):
+        if track.genre and any(normalize_str(bl) in normalize_str(track.genre) for bl in GENRE_BLACKLIST):
             issues.append(f"Blacklisted genre tag: '{track.genre}'")
 
         # Check missing basic tags
@@ -107,11 +108,11 @@ def audit_library(
 
             if file_issues:
                 report.issues[str(path)] = file_issues
-                if any("corrupt" in issue.lower() or "checksum" in issue.lower() for issue in file_issues):
+                if any("corrupt" in normalize_str(issue) or "checksum" in normalize_str(issue) for issue in file_issues):
                     report.corrupt_files += 1
-                if any("missing" in issue.lower() and "tag" in issue.lower() for issue in file_issues):
+                if any("missing" in normalize_str(issue) and "tag" in normalize_str(issue) for issue in file_issues):
                     report.missing_metadata += 1
-                if any("missing" in issue.lower() and "lrc" in issue.lower() for issue in file_issues):
+                if any("missing" in normalize_str(issue) and "lrc" in normalize_str(issue) for issue in file_issues):
                     report.missing_lrc += 1
 
     if output_json:

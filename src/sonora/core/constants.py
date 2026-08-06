@@ -1,11 +1,13 @@
-import sys
+import os
 
-IS_WINDOWS = sys.platform == "win32"
+IS_WINDOWS = os.name == 'nt'
 
-FFMPEG_CMD = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
+# Executable definitions
 FLAC_CMD = "flac.exe" if IS_WINDOWS else "flac"
 METAFLAC_CMD = "metaflac.exe" if IS_WINDOWS else "metaflac"
+FFMPEG_CMD = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
 SOX_CMD = "sox.exe" if IS_WINDOWS else "sox"
+BPM_TAG_CMD = "bpm-tag.exe" if IS_WINDOWS else "bpm-tag"
 
 SUPPORTED_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".wav"})
 

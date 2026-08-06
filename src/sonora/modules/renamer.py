@@ -105,12 +105,13 @@ def rename_directory_files(dir_path: Path) -> list[Path]:
     if not dir_path.exists():
         raise AudioProcessingError(f"Directory not found: {dir_path}")
 
+    from sonora.core.logger import LOG
     renamed: list[Path] = []
     for path in sorted(dir_path.rglob("*")):
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
             try:
                 new_p = rename_track_file(path)
                 renamed.append(new_p)
-            except AudioProcessingError:
-                pass
+            except AudioProcessingError as e:
+                LOG.warning(f"Failed to rename file {path}: {e}")
     return renamed

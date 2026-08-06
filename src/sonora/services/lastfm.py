@@ -2,13 +2,11 @@
 Last.fm API service client for tag and mood/style metadata lookup.
 """
 
-import json
-import urllib.parse
-import urllib.request
+from sonora.core.http import SESSION
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
-from sonora.core.utils import RateLimiter
+from sonora.core.utils import RateLimiter, normalize_str
 
 _LASTFM_LIMITER = RateLimiter(interval_seconds=0.25)
 
@@ -21,7 +19,7 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
     if not api_key:
         return []
 
-    cache_key = f"lastfm:{artist.lower()}:{title.lower()}:{mbid or ''}"
+    cache_key = f"lastfm:{normalize_str(artist)}:{normalize_str(title)}:{mbid or ''}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, list):
         return cached
@@ -42,26 +40,22 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
         return []
 
     try:
-        url = f"https://ws.audioscrobbler.com/2.0/?{urllib.parse.urlencode(params)}"
-        from sonora.core.constants import USER_AGENT
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": USER_AGENT}
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            tags = data.get("toptags", {}).get("tag", [])
-            res = [
-                t["name"].title()
-                for t in tags
-                if isinstance(t, dict) and t.get("name") and isinstance(t["name"], str)
-            ]
-            if not res and mbid and artist and title and not _retried:
-                # Fallback to artist+title if MBID returned 0 tags
-                return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None, _retried=True)
-            final_res = res[:5]
-            set_cached_api(cache_key, final_res)
-            return final_res
+        url = "https://ws.audioscrobbler.com/2.0/"
+        resp = SESSION.get(url, params=params, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        tags = data.get("toptags", {}).get("tag", [])
+        res = [
+            t["name"].title()
+            for t in tags
+            if isinstance(t, dict) and t.get("name") and isinstance(t["name"], str)
+        ]
+        if not res and mbid and artist and title and not _retried:
+            # Fallback to artist+title if MBID returned 0 tags
+            return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None, _retried=True)
+        final_res = res[:5]
+        set_cached_api(cache_key, final_res)
+        return final_res
     except Exception as e:
         if mbid and artist and title and not _retried:
             return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None, _retried=True)

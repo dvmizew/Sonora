@@ -2,9 +2,7 @@
 iTunes Search API service client for metadata and high-res cover art.
 """
 
-import json
-import urllib.parse
-import urllib.request
+from sonora.core.http import SESSION
 from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
@@ -17,8 +15,9 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
     """
     Search iTunes Search API for album or track metadata.
     """
+    from sonora.core.utils import normalize_str
     query_term = f"{artist} {term}".strip()
-    cache_key = f"itunes:{artist.lower()}:{term.lower()}:{entity}"
+    cache_key = f"itunes:{normalize_str(artist)}:{normalize_str(term)}:{entity}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, list):
         return cached
@@ -29,19 +28,13 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
         "country": country,
         "limit": "5",
     }
-    url = f"{ITUNES_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-
     try:
-        from sonora.core.constants import USER_AGENT
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": USER_AGENT}
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            results: list[dict[str, Any]] = data.get("results", [])
-            set_cached_api(cache_key, results)
-            return results
+        resp = SESSION.get(ITUNES_SEARCH_URL, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        results: list[dict[str, Any]] = data.get("results", [])
+        set_cached_api(cache_key, results)
+        return results
     except Exception as e:
         raise APIServiceError(f"iTunes Search API request failed for {query_term}: {e}") from e
 

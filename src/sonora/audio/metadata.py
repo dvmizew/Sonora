@@ -3,13 +3,13 @@ Metadata reader and writer using Mutagen for FLAC and audio formats.
 """
 
 from pathlib import Path
-from typing import Any
 
 import mutagen
 from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC, Picture
 
 from sonora.core.exceptions import MetadataError
+from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
 
 
@@ -21,7 +21,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         raise MetadataError(f"File not found: {file_path}")
 
     try:
-        audio: Any = mutagen.File(str(file_path))
+        audio = mutagen.File(str(file_path))
         if audio is None:
             raise MetadataError(f"Unsupported audio format: {file_path}")
 
@@ -48,8 +48,8 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         if raw_track:
             try:
                 track_number = int(str(raw_track).split("/")[0])
-            except ValueError:
-                pass
+            except ValueError as e:
+                LOG.debug(f"Failed to parse track number '{raw_track}': {e}")
 
         # Parse BPM
         raw_bpm = get_tag("bpm") or get_tag("BPM")
@@ -57,8 +57,8 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         if raw_bpm:
             try:
                 bpm = float(raw_bpm)
-            except ValueError:
-                pass
+            except ValueError as e:
+                LOG.debug(f"Failed to parse BPM '{raw_bpm}': {e}")
 
         # Audio stream properties safely accessed for static type checkers
         info = getattr(audio, "info", None)
@@ -89,16 +89,17 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         raise MetadataError(f"Failed to read metadata for {file_path}: {e}") from e
 
 
-def write_track_metadata(track_info: TrackInfo) -> None:
+def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = None) -> None:
     """
     Write metadata tags from TrackInfo back to the audio file.
+    Also embeds cover art in the same I/O operation if cover_art_path is provided, avoiding double file rewrites.
     """
     if not track_info.file_path.exists():
         raise MetadataError(f"File not found: {track_info.file_path}")
 
     try:
         if track_info.file_path.suffix.lower() == ".flac":
-            audio: Any = FLAC(str(track_info.file_path))
+            audio = FLAC(str(track_info.file_path))
             audio["ARTIST"] = [track_info.artist]
             audio["TITLE"] = [track_info.title]
             audio["ALBUM"] = [track_info.album]
@@ -123,11 +124,24 @@ def write_track_metadata(track_info: TrackInfo) -> None:
                 audio["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
             if track_info.replaygain_track_peak is not None:
                 audio["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
+
+            if cover_art_path and cover_art_path.exists():
+                with open(cover_art_path, "rb") as f:
+                    image_data = f.read()
+                picture = Picture()
+                picture.data = image_data
+                picture.type = 3  # Front Cover
+                picture.mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
+                picture.desc = "Cover"
+                audio.clear_pictures()
+                audio.add_picture(picture)
+
             audio.save()
         else:
             try:
-                easy_audio: Any = EasyID3(str(track_info.file_path))
-            except Exception:  # noqa: BLE001
+                easy_audio = EasyID3(str(track_info.file_path))
+            except Exception as e:  # noqa: BLE001
+                LOG.debug(f"EasyID3 parsing failed, creating empty ID3: {e}")
                 easy_audio = EasyID3()
             easy_audio["artist"] = track_info.artist
             easy_audio["title"] = track_info.title
@@ -155,11 +169,11 @@ def embed_cover_art(file_path: Path, image_path: Path) -> None:
         raise MetadataError(f"Image file not found: {image_path}")
 
     try:
-        audio: Any = FLAC(str(file_path))
+        audio = FLAC(str(file_path))
         with open(image_path, "rb") as f:
             image_data = f.read()
 
-        picture: Any = Picture()
+        picture = Picture()
         picture.data = image_data
         picture.type = 3  # Front Cover
         picture.mime = "image/jpeg" if image_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"

@@ -7,42 +7,68 @@ from typing import Any
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 
+from sonora.core.utils import RateLimiter, normalize_str
+
 try:
     import discogs_client
 except ImportError:
     discogs_client = None
 
+_DISCOGS_LIMITER = RateLimiter(interval_seconds=1.1)
+
+import threading
+_discogs_locks: dict[str, threading.Lock] = {}
+_discogs_meta_lock = threading.Lock()
+
+def _get_discogs_lock(artist_key: str) -> threading.Lock:
+    with _discogs_meta_lock:
+        if len(_discogs_locks) > 1000:
+            _discogs_locks.clear()
+        if artist_key not in _discogs_locks:
+            _discogs_locks[artist_key] = threading.Lock()
+        return _discogs_locks[artist_key]
+
+_discogs_client_instance = None
 
 def search_discogs_release(artist: str, album: str, user_token: str | None = None) -> dict[str, Any] | None:
     """
     Search Discogs for album release metadata.
     Requires a Discogs user token.
     """
+    global _discogs_client_instance
     if not user_token:
         return None
 
     if discogs_client is None:
         raise APIServiceError("discogs-client library is not installed.")
 
-    cache_key = f"discogs:{artist.lower()}:{album.lower()}"
-    cached = get_cached_api(cache_key)
-    if isinstance(cached, dict):
-        return cached
-
-    try:
-        from sonora.core.constants import USER_AGENT
-        client = discogs_client.Client(USER_AGENT, user_token=user_token)
-        results = client.search(album, artist=artist, type="release")
-        if results and len(results) > 0:
-            first = results[0]
-            res = {
-                "id": getattr(first, "id", None),
-                "title": getattr(first, "title", None),
-                "year": getattr(first, "year", None),
-                "genres": getattr(first, "genres", []),
-            }
-            set_cached_api(cache_key, res)
-            return res
+    if not album or normalize_str(album) in ["unknown album", "unknown"]:
         return None
-    except Exception as e:
-        raise APIServiceError(f"Discogs search failed for {artist} - {album}: {e}") from e
+
+    artist_key = normalize_str(artist)
+    cache_key = f"discogs:{artist_key}:{normalize_str(album)}"
+    
+    with _get_discogs_lock(artist_key):
+        cached = get_cached_api(cache_key)
+        if isinstance(cached, dict):
+            return cached
+
+        _DISCOGS_LIMITER.wait()
+        try:
+            if _discogs_client_instance is None:
+                from sonora.core.constants import USER_AGENT
+                _discogs_client_instance = discogs_client.Client(USER_AGENT, user_token=user_token)
+            results = _discogs_client_instance.search(album, artist=artist, type="release")
+            if results and len(results) > 0:
+                first = results[0]
+                res = {
+                    "id": getattr(first, "id", None),
+                    "title": getattr(first, "title", None),
+                    "year": getattr(first, "year", None),
+                    "genres": getattr(first, "genres", []),
+                }
+                set_cached_api(cache_key, res)
+                return res
+            return None
+        except Exception as e:
+            raise APIServiceError(f"Discogs search failed for {artist} - {album}: {e}") from e

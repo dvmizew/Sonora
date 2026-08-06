@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import unittest
 
 from sonora.core.exceptions import AudioProcessingError, SonoraError
-from sonora.core.models import AlbumInfo, AuditReport, TrackInfo
+from sonora.core.models import AuditReport, TrackInfo
 from sonora.core.utils import normalize_str, sanitize_name
 
 
@@ -55,11 +55,6 @@ class TestCoreModels(unittest.TestCase):
         self.assertEqual(data["track_number"], 1)
         self.assertEqual(data["bpm"], 120.0)
 
-    def test_album_info_track_count(self):
-        t1 = TrackInfo(file_path=Path("/music/1.flac"), title="Track 1")
-        t2 = TrackInfo(file_path=Path("/music/2.flac"), title="Track 2")
-        album = AlbumInfo(title="Test Album", artist="Test Artist", tracks=[t1, t2])
-        self.assertEqual(album.track_count, 2)
 
     def test_audit_report_initialization(self):
         report = AuditReport(file_path=Path("/music/1.flac"), is_valid=True)
@@ -79,9 +74,6 @@ class TestCoreModels(unittest.TestCase):
         self.assertIsNone(data["track_number"])
         self.assertIsNone(data["bpm"])
 
-    def test_album_info_empty_tracks(self):
-        album = AlbumInfo(title="Empty Album", artist="Artist")
-        self.assertEqual(album.track_count, 0)
 
 
 class TestCoreExceptions(unittest.TestCase):

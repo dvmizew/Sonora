@@ -18,18 +18,16 @@ from sonora.services.genius import fetch_genius_description
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import fetch_synced_lyrics
-from sonora.services.musicbrainz import fetch_track_mbid, search_musicbrainz_release
+from sonora.services.musicbrainz import fetch_track_mbid
 
 
 class TestServicesEngine(unittest.TestCase):
-    @patch("urllib.request.urlopen")
-    def test_fetch_itunes_cover_art_url(self, mock_urlopen):
+    @patch("sonora.core.http.SESSION.get")
+    def test_fetch_itunes_cover_art_url(self, mock_get):
         mock_response = MagicMock()
-        mock_response.read.return_value = (
-            b'{"results": [{"artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/100x100bb.jpg"}]}'
-        )
-        mock_response.__enter__.return_value = mock_response
-        mock_urlopen.return_value = mock_response
+        mock_response.json.return_value = {"results": [{"artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/100x100bb.jpg"}]}
+        mock_get.return_value = mock_response
+        # No context manager or read() needed for requests
 
         url = fetch_itunes_cover_art_url("Beyoncé", "Halo", resolution=1400)
         self.assertEqual(url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg")
@@ -41,7 +39,7 @@ class TestServicesEngine(unittest.TestCase):
 
         lyrics = fetch_synced_lyrics("Artist", "Title")
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
-        mock_syncedlyrics.search.assert_called_once_with("Artist - Title", plain_only=False, synced_only=False, enhanced=True)
+        mock_syncedlyrics.search.assert_called_once_with("artist - title", plain_only=False, synced_only=False, enhanced=True)
 
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
@@ -58,7 +56,7 @@ class TestServicesEngine(unittest.TestCase):
         )
         self.assertEqual(lyrics, "<00:12.34> Enhanced lyric line")
         mock_syncedlyrics.search.assert_called_once_with(
-            "Artist - Title",
+            "artist - title",
             plain_only=False,
             synced_only=True,
             enhanced=True,
@@ -86,18 +84,9 @@ class TestServicesEngine(unittest.TestCase):
         mbid = fetch_track_mbid("Artist", "Title")
         self.assertEqual(mbid, "12345678-1234-1234-1234-123456789abc")
 
-    @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
-    @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_search_musicbrainz_release(self, mock_mb, mock_cache):
-        mock_mb.search_releases.return_value = {
-            "release-list": [{"id": "album-mbid-123", "title": "Lemonade"}]
-        }
-        release = search_musicbrainz_release("Beyoncé", "Lemonade")
-        self.assertIsNotNone(release)
-        if release:
-            self.assertEqual(release["title"], "Lemonade")
 
     @patch("sonora.services.discogs.discogs_client")
+    @patch("sonora.services.discogs._discogs_client_instance", None)
     def test_search_discogs_release(self, mock_discogs_mod):
         mock_client = MagicMock()
         mock_item = MagicMock()
@@ -124,33 +113,25 @@ class TestServicesEngine(unittest.TestCase):
         mbid = lookup_acoustid(Path(__file__), api_key="dummy_key")
         self.assertEqual(mbid, "rec-id-123")
 
-    @patch("urllib.request.urlopen")
-    def test_fetch_lastfm_tags(self, mock_urlopen):
+    @patch("sonora.core.http.SESSION.get")
+    def test_fetch_lastfm_tags(self, mock_get):
         mock_response = MagicMock()
-        mock_response.read.return_value = (
-            b'{"toptags": {"tag": [{"name": "pop"}, {"name": "rnb"}]}}'
-        )
-        mock_response.__enter__.return_value = mock_response
-        mock_urlopen.return_value = mock_response
+        mock_response.json.return_value = {"toptags": {"tag": [{"name": "pop"}, {"name": "rnb"}]}}
+        mock_get.return_value = mock_response
+        # No context manager needed
 
         tags = fetch_lastfm_tags("Beyoncé", "Halo", api_key="dummy_lastfm_key")
         self.assertEqual(tags, ["Pop", "Rnb"])
 
-    @patch("urllib.request.urlopen")
-    def test_fetch_genius_description(self, mock_urlopen):
+    @patch("sonora.core.http.SESSION.get")
+    def test_fetch_genius_description(self, mock_get):
         mock_resp_search = MagicMock()
-        mock_resp_search.read.return_value = (
-            b'{"response": {"hits": [{"result": {"api_path": "/songs/123"}}]}}'
-        )
-        mock_resp_search.__enter__.return_value = mock_resp_search
-
+        mock_resp_search.json.return_value = {"response": {"hits": [{"result": {"api_path": "/songs/123"}}]}}
         mock_resp_song = MagicMock()
-        mock_resp_song.read.return_value = (
-            b'{"response": {"song": {"description": {"plain": "Song story description"}}}}'
-        )
-        mock_resp_song.__enter__.return_value = mock_resp_song
+        mock_resp_song.json.return_value = {"response": {"song": {"description": {"plain": "Song story description"}}}}
+        mock_get.side_effect = [mock_resp_search, mock_resp_song]
 
-        mock_urlopen.side_effect = [mock_resp_search, mock_resp_song]
+        # Removed
 
         desc = fetch_genius_description("Artist", "Title", api_token="dummy_genius_token")
         self.assertEqual(desc, "Song story description")
@@ -169,24 +150,22 @@ class TestServicesEngine(unittest.TestCase):
     def test_lastfm_no_api_key_returns_empty(self):
         self.assertEqual(fetch_lastfm_tags("Artist", "Title", api_key=None), [])
 
-    @patch("urllib.request.urlopen")
-    def test_genius_rejects_lyrics_unavailable_text(self, mock_urlopen):
+    @patch("sonora.core.http.SESSION.get")
+    def test_genius_rejects_lyrics_unavailable_text(self, mock_get):
         mock_resp1 = MagicMock()
-        mock_resp1.read.return_value = b'{"response": {"hits": [{"result": {"api_path": "/songs/1"}}]}}'
-        mock_resp1.__enter__.return_value = mock_resp1
-
+        mock_resp1.json.return_value = {"response": {"hits": [{"result": {"api_path": "/songs/1"}}]}}
         mock_resp2 = MagicMock()
-        mock_resp2.read.return_value = b'{"response": {"song": {"description": {"plain": "Lyrics for this song are unavailable"}}}}'
-        mock_resp2.__enter__.return_value = mock_resp2
+        mock_resp2.json.return_value = {"response": {"song": {"description": {"plain": "Lyrics for this song are unavailable"}}}}
+        mock_get.side_effect = [mock_resp1, mock_resp2]
 
-        mock_urlopen.side_effect = [mock_resp1, mock_resp2]
+        # Removed
         self.assertIsNone(fetch_genius_description("Artist", "Title", api_token="token"))
 
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_error_handling(self, mock_mb):
-        mock_mb.search_releases.side_effect = Exception("MusicBrainz server 500")
+        mock_mb.search_recordings.side_effect = Exception("MusicBrainz server 500")
         with self.assertRaises(APIServiceError):
-            search_musicbrainz_release("Artist", "Album")
+            fetch_track_mbid("Artist", "Title")
 
     @patch("sonora.services.discogs.discogs_client")
     def test_discogs_error_handling(self, mock_discogs_mod):

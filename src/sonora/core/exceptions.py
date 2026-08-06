@@ -18,6 +18,3 @@ class MetadataError(SonoraError):
 class APIServiceError(SonoraError):
     """Raised when external API client operations encounter an error."""
 
-
-class ValidationError(SonoraError):
-    """Raised when track or file integrity audit fails."""
