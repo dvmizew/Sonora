@@ -2,17 +2,15 @@
 Discogs API service client.
 """
 
-from types import ModuleType
 from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 
-discogs_client: ModuleType | None = None
 try:
-    import discogs_client  # type: ignore
+    import discogs_client
 except ImportError:
-    pass
+    discogs_client = None
 
 
 def search_discogs_release(artist: str, album: str, user_token: str | None = None) -> dict[str, Any] | None:
@@ -28,8 +26,8 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
 
     cache_key = f"discogs:{artist.lower()}:{album.lower()}"
     cached = get_cached_api(cache_key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
+    if isinstance(cached, dict):
+        return cached
 
     try:
         client = discogs_client.Client("Sonora/0.1.0", user_token=user_token)

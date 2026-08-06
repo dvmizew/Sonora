@@ -3,16 +3,14 @@ AcoustID and Chromaprint acoustic fingerprint service client.
 """
 
 from pathlib import Path
-from types import ModuleType
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 
-acoustid: ModuleType | None = None
 try:
-    import acoustid  # type: ignore
+    import acoustid
 except ImportError:
-    pass
+    acoustid = None
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:

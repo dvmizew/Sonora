@@ -24,8 +24,8 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
 
     cache_key = f"lastfm:{artist.lower()}:{title.lower()}:{mbid or ''}"
     cached = get_cached_api(cache_key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
+    if isinstance(cached, list):
+        return cached
 
     _LASTFM_LIMITER.wait()
     params: dict[str, Any] = {

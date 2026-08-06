@@ -5,17 +5,15 @@ Supports Lrclib, Musixmatch, Genius, NetEase providers.
 
 import re
 from pathlib import Path
-from types import ModuleType
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter
 
-syncedlyrics: ModuleType | None = None
 try:
-    import syncedlyrics  # type: ignore
+    import syncedlyrics
 except ImportError:
-    pass
+    syncedlyrics = None
 
 _LYRICS_LIMITER = RateLimiter(interval_seconds=1.0)
 

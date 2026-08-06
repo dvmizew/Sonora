@@ -140,23 +140,23 @@ def process_single_track(
             pass
 
     # 9. Fetch & embed iTunes Cover Art
-    if fetch_itunes_art:
+    if fetch_itunes_art and file_path.suffix.lower() == ".flac":
         try:
-            art_url = fetch_itunes_cover_art_url(track_info.artist, track_info.album)
-            if art_url and file_path.suffix.lower() == ".flac":
-                req = urllib.request.Request(
-                    art_url,
-                    headers={"User-Agent": "Sonora/0.1.0 (+https://github.com/dvmizew/Sonora)"}
-                )
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    img_data = resp.read()
-                temp_img = file_path.with_suffix(".cover.tmp.jpg")
-                temp_img.write_bytes(img_data)
-                try:
-                    embed_cover_art(file_path, temp_img)
-                finally:
-                    if temp_img.exists():
-                        temp_img.unlink()
+            cover_jpg = file_path.parent / "cover.jpg"
+            if cover_jpg.exists():
+                embed_cover_art(file_path, cover_jpg)
+            else:
+                art_url = fetch_itunes_cover_art_url(track_info.artist, track_info.album)
+                if art_url:
+                    req = urllib.request.Request(
+                        art_url,
+                        headers={"User-Agent": "Sonora/0.1.0 (+https://github.com/dvmizew/Sonora)"}
+                    )
+                    with urllib.request.urlopen(req, timeout=15) as resp:
+                        img_data = resp.read()
+                    if not cover_jpg.exists():
+                        cover_jpg.write_bytes(img_data)
+                    embed_cover_art(file_path, cover_jpg)
         except (APIServiceError, OSError):
             pass
 

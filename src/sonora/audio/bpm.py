@@ -7,11 +7,11 @@ from types import ModuleType
 
 from sonora.core.exceptions import AudioProcessingError
 
-librosa: ModuleType | None = None
+librosa: ModuleType | None
 try:
-    import librosa  # type: ignore
+    import librosa
 except ImportError:
-    pass
+    librosa = None
 
 
 def calculate_bpm(file_path: Path) -> float | None:

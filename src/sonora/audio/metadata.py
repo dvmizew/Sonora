@@ -5,9 +5,9 @@ Metadata reader and writer using Mutagen for FLAC and audio formats.
 from pathlib import Path
 from typing import Any
 
-import mutagen  # type: ignore
-from mutagen.easyid3 import EasyID3  # type: ignore
-from mutagen.flac import FLAC, Picture  # type: ignore
+import mutagen
+from mutagen.easyid3 import EasyID3
+from mutagen.flac import FLAC, Picture
 
 from sonora.core.exceptions import MetadataError
 from sonora.core.models import TrackInfo

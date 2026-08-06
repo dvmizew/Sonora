@@ -20,8 +20,8 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
     query_term = f"{artist} {term}".strip()
     cache_key = f"itunes:{artist.lower()}:{term.lower()}:{entity}"
     cached = get_cached_api(cache_key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
+    if isinstance(cached, list):
+        return cached
 
     params = {
         "term": query_term,

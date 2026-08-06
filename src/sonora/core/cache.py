@@ -3,16 +3,14 @@ Disk caching layer using diskcache for API response caching.
 """
 
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 from sonora.core.logger import LOG
 
-diskcache: ModuleType | None = None
 try:
-    import diskcache  # type: ignore
+    import diskcache
 except ImportError:
-    pass
+    diskcache = None
 
 
 _CACHE_DIR = Path.home() / ".cache" / "sonora"

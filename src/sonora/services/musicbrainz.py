@@ -1,15 +1,13 @@
-from types import ModuleType
 from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter
 
-musicbrainzngs: ModuleType | None = None
 try:
-    import musicbrainzngs  # type: ignore
+    import musicbrainzngs
 except ImportError:
-    pass
+    musicbrainzngs = None
 
 _MB_LIMITER = RateLimiter(interval_seconds=1.0)
 
@@ -30,8 +28,8 @@ def fetch_artist_discography(artist: str) -> list[dict[str, Any]]:
 
     cache_key = f"mb_discography:{artist.lower().strip()}"
     cached = get_cached_api(cache_key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
+    if isinstance(cached, list):
+        return cached
 
     _MB_LIMITER.wait()
     try:
@@ -50,8 +48,8 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, Any] | None
 
     cache_key = f"mb_release:{artist.lower()}:{album.lower()}"
     cached = get_cached_api(cache_key)
-    if cached is not None:
-        return cached  # type: ignore[no-any-return]
+    if isinstance(cached, dict):
+        return cached
 
     # Batch strategy: Check artist discography cache first
     discography = fetch_artist_discography(artist)
