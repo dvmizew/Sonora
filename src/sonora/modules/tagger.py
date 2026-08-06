@@ -16,7 +16,7 @@ from sonora.audio.metadata import (
     write_track_metadata,
 )
 from sonora.audio.replaygain import calculate_replaygain
-from sonora.core.constants import SUPPORTED_EXTS, GENRE_MAP
+from sonora.core.constants import GENRE_MAP, SUPPORTED_EXTS
 from sonora.core.exceptions import APIServiceError, AudioProcessingError, MetadataError
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo

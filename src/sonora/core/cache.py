@@ -65,8 +65,8 @@ def close_cache() -> None:
     if _CACHE_INSTANCE is not None:
         try:
             _CACHE_INSTANCE.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            LOG.debug(f"Cache close failed: {e}")
         _CACHE_INSTANCE = None
 
 atexit.register(close_cache)
