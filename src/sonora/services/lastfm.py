@@ -2,10 +2,9 @@
 Last.fm API service client for tag and mood/style metadata lookup.
 """
 
-from sonora.core.http import SESSION
-
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
+from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter, normalize_str
 
 _LASTFM_LIMITER = RateLimiter(interval_seconds=0.25)

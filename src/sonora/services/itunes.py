@@ -2,11 +2,11 @@
 iTunes Search API service client for metadata and high-res cover art.
 """
 
-from sonora.core.http import SESSION
 from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
+from sonora.core.http import SESSION
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 

@@ -13,7 +13,7 @@ from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.constants import GENRE_MAP, SUPPORTED_EXTS
 from sonora.core.exceptions import APIServiceError, AudioProcessingError, MetadataError
-from sonora.core.logger import LOG, CONSOLE
+from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import normalize_str
 from sonora.services.acoustid import lookup_acoustid
@@ -220,7 +220,13 @@ def tag_album_folder(
     
     # Check if rich is available for progress bar
     try:
-        from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TextColumn,
+            TimeRemainingColumn,
+        )
         has_rich = True
     except ImportError:
         has_rich = False

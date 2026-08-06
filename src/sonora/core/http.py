@@ -1,7 +1,8 @@
 import requests
-from sonora.core.constants import USER_AGENT
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+from sonora.core.constants import USER_AGENT
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT})

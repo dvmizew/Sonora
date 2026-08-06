@@ -2,8 +2,8 @@
 Genius API service client for song descriptions and background stories.
 """
 
-from sonora.core.http import SESSION
 from sonora.core.exceptions import APIServiceError
+from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter
 
 _GENIUS_LIMITER = RateLimiter(interval_seconds=0.5)

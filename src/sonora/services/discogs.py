@@ -6,7 +6,6 @@ from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
-
 from sonora.core.utils import RateLimiter, normalize_str
 
 try:
@@ -17,6 +16,7 @@ except ImportError:
 _DISCOGS_LIMITER = RateLimiter(interval_seconds=1.1)
 
 import threading
+
 _discogs_locks: dict[str, threading.Lock] = {}
 _discogs_meta_lock = threading.Lock()
 

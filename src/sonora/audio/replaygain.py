@@ -2,10 +2,10 @@
 ReplayGain & Album Gain using native metaflac utility.
 """
 
-import subprocess
 import shutil
+import subprocess
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from mutagen.flac import FLAC
 
@@ -39,7 +39,7 @@ def calculate_album_replaygain(files: Sequence[Path]) -> bool:
             properties.add(props)
             if not has_album_gain and "REPLAYGAIN_ALBUM_GAIN" in a:
                 has_album_gain = True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         LOG.debug(f"Failed to read properties for ReplayGain: {e}")
         return False
 
@@ -52,7 +52,7 @@ def calculate_album_replaygain(files: Sequence[Path]) -> bool:
         if is_uniform:
             LOG.info("🔊 Calculating ReplayGain (Album Mode)...")
             cmd = [METAFLAC_CMD, "--add-replay-gain"] + flac_files
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
             if r.returncode != 0:
                 LOG.error(f"metaflac failed: {r.stderr}")
                 return False
@@ -60,13 +60,13 @@ def calculate_album_replaygain(files: Sequence[Path]) -> bool:
             LOG.warning("⚠️  Mixed audio properties detected. Falling back to Track-only ReplayGain.")
             for f in flac_files:
                 cmd = [METAFLAC_CMD, "--add-replay-gain", f]
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
                 if r.returncode != 0:
                     LOG.error(f"metaflac failed for {f}: {r.stderr}")
         return True
     except subprocess.TimeoutExpired:
         LOG.error("metaflac timed out while calculating ReplayGain.")
         return False
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         LOG.error(f"Failed to calculate ReplayGain: {e}")
         return False

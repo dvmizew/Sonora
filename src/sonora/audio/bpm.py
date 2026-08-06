@@ -33,14 +33,14 @@ def calculate_bpm(file_path: Path) -> float | None:
         try:
             # -f forces analysis ignoring existing tags, -n prints to stderr
             cmd = [BPM_TAG_CMD, "-f", "-n", str(file_path)]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
             combined_output = r.stderr + r.stdout
             m = re.search(r"([\d.]+)\s*BPM", combined_output)
             if m:
                 bpm = float(m.group(1))
                 if bpm > 0:
                     return round(bpm, 1)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             LOG.debug(f"bpm-tag failed for {file_path}: {e}")
 
     # Fallback Path: Python librosa
