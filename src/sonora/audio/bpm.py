@@ -5,7 +5,6 @@ BPM calculation module for audio files using native C binaries (bpm-tag) and Lib
 import re
 import shutil
 import subprocess
-import types
 from pathlib import Path
 
 from sonora.core.constants import BPM_TAG_CMD
