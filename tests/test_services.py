@@ -93,6 +93,7 @@ class TestServicesEngine(unittest.TestCase):
         mock_item.id = 999
         mock_item.title = "Test Album"
         mock_item.year = 2024
+        mock_item.genres = ["Pop"]
         mock_client.search.return_value = [mock_item]
         mock_discogs_mod.Client.return_value = mock_client
 
@@ -161,8 +162,9 @@ class TestServicesEngine(unittest.TestCase):
         # Removed
         self.assertIsNone(fetch_genius_description("Artist", "Title", api_token="token"))
 
+    @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_musicbrainz_error_handling(self, mock_mb):
+    def test_musicbrainz_error_handling(self, mock_mb, mock_cache):
         mock_mb.search_recordings.side_effect = Exception("MusicBrainz server 500")
         with self.assertRaises(APIServiceError):
             fetch_track_mbid("Artist", "Title")

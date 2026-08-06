@@ -12,11 +12,10 @@ from sonora.core.constants import BPM_TAG_CMD
 from sonora.core.exceptions import AudioProcessingError
 from sonora.core.logger import LOG
 
-librosa: types.ModuleType | None
 try:
     import librosa
 except ImportError:
-    librosa = None
+    librosa = None  # type: ignore
 
 
 def calculate_bpm(file_path: Path) -> float | None:
