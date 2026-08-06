@@ -98,10 +98,10 @@ def fetch_synced_lyrics(
     if syncedlyrics is None:
         raise APIServiceError("syncedlyrics library is not installed.")
 
-    cache_key = f"lyrics:{artist.lower()}:{title.lower()}:{synced_only}:{enhanced}"
+    cache_key = f"lyrics:{artist.lower()}:{title.lower()}:{synced_only}:{enhanced}:{plain_only}"
     cached = get_cached_api(cache_key)
-    if cached is not None:
-        return str(cached)
+    if isinstance(cached, str):
+        return cached
 
     query = f"{artist} - {title}".strip()
     _LYRICS_LIMITER.wait()
@@ -122,8 +122,8 @@ def fetch_synced_lyrics(
             kwargs["save_path"] = str(save_path)
 
         res = syncedlyrics.search(query, **kwargs)
-        if res and len(str(res).strip()) > 0:
-            return clean_lyrics_text(str(res).strip())
+        if isinstance(res, str) and res.strip():
+            return clean_lyrics_text(res.strip())
         return None
 
     try:

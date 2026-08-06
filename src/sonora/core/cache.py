@@ -2,6 +2,8 @@
 Disk caching layer using diskcache for API response caching.
 """
 
+import atexit
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,21 +17,23 @@ except ImportError:
 
 _CACHE_DIR = Path.home() / ".cache" / "sonora"
 _CACHE_INSTANCE: Any = None
-
+_CACHE_LOCK = threading.Lock()
 
 def get_cache() -> Any:
     """Lazy initialize and return sharded diskcache.FanoutCache instance for multi-threaded speed."""
     global _CACHE_INSTANCE
     if diskcache is not None and _CACHE_INSTANCE is None:
-        try:
-            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            if hasattr(diskcache, "FanoutCache"):
-                _CACHE_INSTANCE = diskcache.FanoutCache(str(_CACHE_DIR), shards=8)
-            else:
-                _CACHE_INSTANCE = diskcache.Cache(str(_CACHE_DIR))
-        except Exception as e:  # noqa: BLE001
-            LOG.debug(f"Cache initialization failed: {e}")
-            _CACHE_INSTANCE = None
+        with _CACHE_LOCK:
+            if _CACHE_INSTANCE is None:
+                try:
+                    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    if hasattr(diskcache, "FanoutCache"):
+                        _CACHE_INSTANCE = diskcache.FanoutCache(str(_CACHE_DIR), shards=8)
+                    else:
+                        _CACHE_INSTANCE = diskcache.Cache(str(_CACHE_DIR))
+                except Exception as e:  # noqa: BLE001
+                    LOG.debug(f"Cache initialization failed: {e}")
+                    _CACHE_INSTANCE = None
     return _CACHE_INSTANCE
 
 
@@ -54,3 +58,15 @@ def set_cached_api(key: str, value: Any, expire_seconds: int = 604800) -> None:
             cache.set(key, value, expire=expire_seconds)
         except Exception as e:  # noqa: BLE001
             LOG.debug(f"Cache store failed for key '{key}': {e}")
+
+def close_cache() -> None:
+    """Close the diskcache to release SQLite connections."""
+    global _CACHE_INSTANCE
+    if _CACHE_INSTANCE is not None:
+        try:
+            _CACHE_INSTANCE.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _CACHE_INSTANCE = None
+
+atexit.register(close_cache)

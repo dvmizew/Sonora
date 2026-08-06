@@ -9,9 +9,6 @@ SOX_CMD = "sox.exe" if IS_WINDOWS else "sox"
 
 SUPPORTED_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".wav"})
 
-FEAT_KEYWORDS = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))|×"
-TECH_FEAT = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))"
-
 GENRE_MAP = {
     "Hip-Hop": "Hip-Hop/Rap",
     "Hip Hop": "Hip-Hop/Rap",
@@ -34,12 +31,8 @@ GENRE_BLACKLIST = frozenset({
     "Produced By", "Written By"
 })
 
-PROTECTED_ARTISTS = frozenset({
-    "Play & Win", "Play&Win", "Rauf & Faik", "Rauf&Faik",
-    "Simon & Garfunkel", "Earth, Wind & Fire", "Belle & Sebastian",
-    "Brooks & Dunn", "Hall & Oates", "Above & Beyond",
-    "Cardi B & Megan Thee Stallion", "Mumford & Sons", "Kool & The Gang",
-    "Sly & The Family Stone", "Blood, Sweat & Tears",
-    "Emerson, Lake & Palmer", "Crosby, Stills, Nash & Young",
-    "Huey Lewis & The News", "KC & The Sunshine Band"
-})
+from sonora import __version__
+
+USER_AGENT = f"Sonora/{__version__} (+https://github.com/dvmizew/Sonora)"
+
+

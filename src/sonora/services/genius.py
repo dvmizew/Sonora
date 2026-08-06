@@ -1,12 +1,12 @@
 """
 Genius API service client for song descriptions and background stories.
-Extracted from script.py.
 """
 
 import json
 import urllib.parse
 import urllib.request
 
+from sonora.core.constants import USER_AGENT
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter
 
@@ -29,7 +29,7 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
             search_url,
             headers={
                 "Authorization": f"Bearer {api_token}",
-                "User-Agent": "Sonora/0.1.0 (+https://github.com/dvmizew/Sonora)"
+                "User-Agent": USER_AGENT
             }
         )
 
@@ -49,7 +49,7 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
             song_url,
             headers={
                 "Authorization": f"Bearer {api_token}",
-                "User-Agent": "Sonora/0.1.0 (+https://github.com/dvmizew/Sonora)"
+                "User-Agent": USER_AGENT
             }
         )
 
@@ -57,8 +57,8 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
             data_song = json.loads(resp_song.read().decode("utf-8"))
             song = data_song.get("response", {}).get("song", {})
             desc = song.get("description", {}).get("plain", "")
-            if desc and "?" not in desc[:20] and "lyrics for this song" not in desc.lower():
-                return str(desc).strip()
+            if desc and desc.strip() != "?" and "lyrics for this song" not in desc.lower():
+                return desc.strip()
             return None
 
     except Exception as e:

@@ -34,7 +34,7 @@ def calculate_replaygain(file_path: Path, target_loudness_lufs: float = -18.0) -
             "-f", "null",
             "-"
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=120)
         if result.returncode != 0:
             raise AudioProcessingError(f"FFmpeg loudness analysis failed: {result.stderr}")
 

@@ -92,6 +92,21 @@ class TestCoreModules(unittest.TestCase):
         self.assertIn("[ti:Track Title]", content)
         self.assertIn("[00:10.00] Line 1", content)
 
+    def test_sync_lrc_metadata_existing_headers(self):
+        lrc_file = self.tmp_path / "existing.lrc"
+        lrc_file.write_text("[ar:Old Artist]\n[ti:Old Title]\n[00:15.00] Line 2\n", encoding="utf-8")
+
+        info = TrackInfo(file_path=Path("dummy.flac"), artist="New Artist", title="New Title")
+        success = sync_lrc_metadata(lrc_file, info)
+        self.assertTrue(success)
+
+        content = lrc_file.read_text(encoding="utf-8")
+        self.assertIn("[ar:New Artist]", content)
+        self.assertIn("[ti:New Title]", content)
+        self.assertNotIn("[ar:Old Artist]", content)
+        self.assertNotIn("[ti:Old Title]", content)
+        self.assertIn("[00:15.00] Line 2", content)
+
     @patch("sonora.modules.renamer.read_track_metadata")
     def test_rename_track_file(self, mock_read):
         wav_file = self.tmp_path / "old_name.wav"
@@ -154,6 +169,22 @@ class TestCoreModules(unittest.TestCase):
         moved = organize_library_singles(src_dir, target_dir)
         self.assertEqual(moved, 1)
         self.assertTrue((target_dir / "Single Artist" / "single.wav").exists())
+
+    @patch("sonora.modules.organizer.read_track_metadata")
+    def test_organize_library_singles_with_lrc(self, mock_read):
+        src_dir = self.tmp_path / "source_lrc"
+        target_dir = self.tmp_path / "Singles"
+        f1 = src_dir / "single.wav"
+        lrc = src_dir / "single.lrc"
+        create_dummy_wav(f1)
+        lrc.write_text("[00:01.00] lyrics", encoding="utf-8")
+
+        mock_read.return_value = TrackInfo(file_path=f1, artist="Single Artist", title="Single Song")
+
+        moved = organize_library_singles(src_dir, target_dir)
+        self.assertEqual(moved, 1)
+        self.assertTrue((target_dir / "Single Artist" / "single.wav").exists())
+        self.assertTrue((target_dir / "Single Artist" / "single.lrc").exists())
 
     @patch("sonora.modules.auditor.read_track_metadata")
     def test_audit_library(self, mock_read):

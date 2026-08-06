@@ -32,9 +32,10 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
     url = f"{ITUNES_SEARCH_URL}?{urllib.parse.urlencode(params)}"
 
     try:
+        from sonora.core.constants import USER_AGENT
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "Sonora/0.1.0 (+https://github.com/dvmizew/Sonora)"}
+            headers={"User-Agent": USER_AGENT}
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))

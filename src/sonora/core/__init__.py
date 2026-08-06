@@ -1,14 +1,12 @@
 from sonora.core.constants import (
-    FEAT_KEYWORDS,
     FFMPEG_CMD,
     FLAC_CMD,
     GENRE_BLACKLIST,
     GENRE_MAP,
     METAFLAC_CMD,
-    PROTECTED_ARTISTS,
     SOX_CMD,
     SUPPORTED_EXTS,
-    TECH_FEAT,
+    USER_AGENT,
 )
 from sonora.core.exceptions import (
     APIServiceError,
@@ -23,17 +21,15 @@ from sonora.core.utils import normalize_str, sanitize_name
 
 __all__ = [
     "CONSOLE",
-    "FEAT_KEYWORDS",
     "FFMPEG_CMD",
     "FLAC_CMD",
     "GENRE_BLACKLIST",
     "GENRE_MAP",
     "LOG",
     "METAFLAC_CMD",
-    "PROTECTED_ARTISTS",
     "SOX_CMD",
     "SUPPORTED_EXTS",
-    "TECH_FEAT",
+    "USER_AGENT",
     "APIServiceError",
     "AlbumInfo",
     "AudioProcessingError",

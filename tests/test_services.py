@@ -34,16 +34,18 @@ class TestServicesEngine(unittest.TestCase):
         url = fetch_itunes_cover_art_url("Beyoncé", "Halo", resolution=1400)
         self.assertEqual(url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg")
 
+    @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_basic(self, mock_syncedlyrics):
+    def test_fetch_synced_lyrics_basic(self, mock_syncedlyrics, mock_cache):
         mock_syncedlyrics.search.return_value = "[00:12.34] Test lyric line"
 
         lyrics = fetch_synced_lyrics("Artist", "Title")
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
         mock_syncedlyrics.search.assert_called_once_with("Artist - Title", plain_only=False, synced_only=False, enhanced=True)
 
+    @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_with_options(self, mock_syncedlyrics):
+    def test_fetch_synced_lyrics_with_options(self, mock_syncedlyrics, mock_cache):
         mock_syncedlyrics.search.return_value = "<00:12.34> Enhanced lyric line"
 
         lyrics = fetch_synced_lyrics(
@@ -74,8 +76,9 @@ class TestServicesEngine(unittest.TestCase):
     def test_synced_lyrics_empty_query_returns_none(self):
         self.assertIsNone(fetch_synced_lyrics("", ""))
 
+    @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_fetch_track_mbid(self, mock_mb):
+    def test_fetch_track_mbid(self, mock_mb, mock_cache):
         mock_mb.search_recordings.return_value = {
             "recording-list": [{"id": "12345678-1234-1234-1234-123456789abc"}]
         }
@@ -83,8 +86,9 @@ class TestServicesEngine(unittest.TestCase):
         mbid = fetch_track_mbid("Artist", "Title")
         self.assertEqual(mbid, "12345678-1234-1234-1234-123456789abc")
 
+    @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_search_musicbrainz_release(self, mock_mb):
+    def test_search_musicbrainz_release(self, mock_mb, mock_cache):
         mock_mb.search_releases.return_value = {
             "release-list": [{"id": "album-mbid-123", "title": "Lemonade"}]
         }
@@ -206,6 +210,18 @@ class TestServicesEngine(unittest.TestCase):
         )
         cleaned = clean_lyrics_text(dirty)
         self.assertEqual(cleaned, "[00:12.34] Valid lyric line\n[00:15.00] Second valid line")
+
+    def test_clean_lyrics_none(self):
+        from sonora.services.lyrics import clean_lyrics_text
+        self.assertIsNone(clean_lyrics_text(None))
+
+    def test_clean_lyrics_empty(self):
+        from sonora.services.lyrics import clean_lyrics_text
+        self.assertEqual(clean_lyrics_text(""), "")
+
+    def test_clean_lyrics_only_junk(self):
+        from sonora.services.lyrics import clean_lyrics_text
+        self.assertEqual(clean_lyrics_text("12 Contributors\nYou might also like\n14Embed"), "")
 
 
 if __name__ == "__main__":

@@ -23,7 +23,8 @@ def analyze_spectral_cutoff(file_path: Path, cutoff_hz: int = 16000) -> float:
             [SOX_CMD, str(file_path), "-n", "highpass", str(cutoff_hz), "stat"],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            timeout=60
         )
         if result.returncode != 0:
             raise AudioProcessingError(f"SoX execution failed: {result.stderr}")

@@ -3,11 +3,8 @@ BPM calculation module for audio files using Librosa.
 """
 
 from pathlib import Path
-from types import ModuleType
-
 from sonora.core.exceptions import AudioProcessingError
 
-librosa: ModuleType | None
 try:
     import librosa
 except ImportError:

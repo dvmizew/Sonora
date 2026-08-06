@@ -30,7 +30,8 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
         return cached
 
     try:
-        client = discogs_client.Client("Sonora/0.1.0", user_token=user_token)
+        from sonora.core.constants import USER_AGENT
+        client = discogs_client.Client(USER_AGENT, user_token=user_token)
         results = client.search(album, artist=artist, type="release")
         if results and len(results) > 0:
             first = results[0]
@@ -38,6 +39,7 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
                 "id": getattr(first, "id", None),
                 "title": getattr(first, "title", None),
                 "year": getattr(first, "year", None),
+                "genres": getattr(first, "genres", []),
             }
             set_cached_api(cache_key, res)
             return res

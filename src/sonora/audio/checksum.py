@@ -25,7 +25,9 @@ def verify_flac_checksum(file_path: Path) -> bool:
             [FLAC_CMD, "-t", "--silent", str(file_path)],
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            timeout=60
+
         )
         return result.returncode == 0
     except FileNotFoundError as e:
