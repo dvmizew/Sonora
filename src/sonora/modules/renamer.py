@@ -55,7 +55,7 @@ def sync_lrc_metadata(lrc_path: Path, track_info: TrackInfo) -> bool:
         raise AudioProcessingError(f"Failed to sync LRC metadata for {lrc_path}: {e}") from e
 
 
-def rename_track_file(file_path: Path, format_pattern: str = "{track_number:02d} - {artist} - {title}") -> Path:
+def rename_track_file(file_path: Path, format_pattern: str = "{track_number:02d} - {artist} - {title}", options: dict | None = None) -> Path:
     """
     Rename an audio file and its .lrc file based on metadata.
     """
@@ -70,6 +70,9 @@ def rename_track_file(file_path: Path, format_pattern: str = "{track_number:02d}
     num = track_info.track_number or 1
     artist_clean = sanitize_name(track_info.artist)
     title_clean = sanitize_name(track_info.title)
+    
+    options = options or {}
+    dry_run = options.get("dry_run", False)
 
     new_stem = format_pattern.format(
         track_number=num,
@@ -85,20 +88,29 @@ def rename_track_file(file_path: Path, format_pattern: str = "{track_number:02d}
             while new_path.exists():
                 new_path = file_path.with_name(f"{new_stem} ({counter}){file_path.suffix}")
                 counter += 1
-        file_path.rename(new_path)
+        if not dry_run:
+            file_path.rename(new_path)
+        else:
+            from sonora.core.logger import LOG
+            LOG.info(f"[DRY-RUN] Would rename {file_path.name} -> {new_path.name}")
 
     # Sync .lrc file if present
     old_lrc = file_path.with_suffix(".lrc")
     new_lrc = new_path.with_suffix(".lrc")
     if old_lrc.exists():
         if old_lrc != new_lrc and not new_lrc.exists():
-            old_lrc.rename(new_lrc)
-        sync_lrc_metadata(new_lrc, track_info)
+            if not dry_run:
+                old_lrc.rename(new_lrc)
+            else:
+                from sonora.core.logger import LOG
+                LOG.info(f"[DRY-RUN] Would rename LRC {old_lrc.name} -> {new_lrc.name}")
+        if not dry_run:
+            sync_lrc_metadata(new_lrc if not dry_run else old_lrc, track_info)
 
     return new_path
 
 
-def rename_directory_files(dir_path: Path) -> list[Path]:
+def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[Path]:
     """
     Scan a directory (recursively) and rename all supported audio files and their .lrc files.
     """
@@ -110,7 +122,7 @@ def rename_directory_files(dir_path: Path) -> list[Path]:
     for path in sorted(dir_path.rglob("*")):
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
             try:
-                new_p = rename_track_file(path)
+                new_p = rename_track_file(path, options=options)
                 renamed.append(new_p)
             except AudioProcessingError as e:
                 LOG.warning(f"Failed to rename file {path}: {e}")

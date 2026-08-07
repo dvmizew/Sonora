@@ -109,7 +109,8 @@ def fetch_synced_lyrics(
     def _do_search(en: bool, syn: bool, pl: bool) -> str | None:
         if syncedlyrics is None:
             return None
-        kwargs: dict[str, object] = {
+        import typing
+        kwargs: dict[str, typing.Any] = {
             "plain_only": pl,
             "synced_only": syn,
             "enhanced": en,

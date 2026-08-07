@@ -127,12 +127,12 @@ def _get_cover_lock(album_dir: Path) -> threading.Lock:
 def process_single_track(
     file_path: Path,
     fetch_bpm: bool = True,
-    fetch_replaygain: bool = True,
     fetch_lyrics: bool = True,
     fetch_itunes_art: bool = True,
     lastfm_api_key: str | None = None,
     acoustid_api_key: str | None = None,
     discogs_user_token: str | None = None,
+    options: dict | None = None,
 ) -> TrackInfo:
     """
     Process and tag a single audio file with metadata, artwork, lyrics, BPM, and ReplayGain.
@@ -143,8 +143,12 @@ def process_single_track(
     track_info = read_track_metadata(file_path)
     track_info.artist = normalize_artist_alias(track_info.artist)
 
+    options = options or {}
+    force = options.get("force", False)
+    dry_run = options.get("dry_run", False)
+
     # 1. Respect existing MBID or prioritize AcoustID (most exact) over text search
-    if not track_info.musicbrainz_trackid and acoustid_api_key:
+    if (not track_info.musicbrainz_trackid or force) and acoustid_api_key:
         try:
             acoustid_mbid = lookup_acoustid(file_path, api_key=acoustid_api_key)
             if acoustid_mbid:
@@ -153,7 +157,7 @@ def process_single_track(
             LOG.debug(f"AcoustID lookup failed for {track_info.title}: {e}")
 
     # 2. Fallback to MusicBrainz text search by existing tags if AcoustID failed
-    if not track_info.musicbrainz_trackid:
+    if not track_info.musicbrainz_trackid or force:
         try:
             mbid = fetch_track_mbid(track_info.artist, track_info.title)
             if mbid:
@@ -230,10 +234,9 @@ def process_single_track(
             cover_jpg = file_path.parent / "cover.jpg"
             # Optimization: Do not block all threads on network I/O unless necessary
             with _get_cover_lock(file_path.parent):
-                art_downloaded = cover_jpg.exists()
-                if not art_downloaded:
+                art_downloaded = cover_jpg.exists() and not force
+                if not art_downloaded and not dry_run:
                     # Mark as downloaded (or downloading) so other threads skip
-                    # We create an empty file as a placeholder lock
                     cover_jpg.touch()
             
             if not art_downloaded:
@@ -244,26 +247,32 @@ def process_single_track(
                     resp.raise_for_status()
                     
                     with _get_cover_lock(file_path.parent):
-                        cover_jpg.write_bytes(resp.content)
+                        if not dry_run:
+                            cover_jpg.write_bytes(resp.content)
+                        else:
+                            LOG.info(f"[DRY-RUN] Would download cover art to {cover_jpg.name}")
                 else:
                     # Remove placeholder if fetch failed
                     with _get_cover_lock(file_path.parent):
-                        if cover_jpg.exists() and cover_jpg.stat().st_size == 0:
+                        if not dry_run and cover_jpg.exists() and cover_jpg.stat().st_size == 0:
                             cover_jpg.unlink()
             
             # Ensure we only use valid cover jpgs
             with _get_cover_lock(file_path.parent):
-                if not cover_jpg.exists() or cover_jpg.stat().st_size == 0:
+                if not dry_run and (not cover_jpg.exists() or cover_jpg.stat().st_size == 0):
                     cover_jpg = None
         except (APIServiceError, OSError) as e:
             LOG.debug(f"Cover art downloading failed for {track_info.title}: {e}")
             with _get_cover_lock(file_path.parent):
-                if cover_jpg and cover_jpg.exists() and cover_jpg.stat().st_size == 0:
+                if not dry_run and cover_jpg and cover_jpg.exists() and cover_jpg.stat().st_size == 0:
                     cover_jpg.unlink()
             cover_jpg = None
 
     # 9. Write metadata tags back to file AND embed cover art in one single Disk I/O operation!
-    write_track_metadata(track_info, cover_art_path=cover_jpg)
+    if not dry_run:
+        write_track_metadata(track_info, cover_art_path=cover_jpg)
+    else:
+        LOG.info(f"[DRY-RUN] Would write metadata tags to {file_path.name}")
 
     # 10. Fetch & write .lrc lyrics file (and .synced.lrc copy if enhanced)
     if fetch_lyrics:
@@ -273,11 +282,17 @@ def process_single_track(
                 lrc_path = file_path.with_suffix(".lrc")
                 if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", lrc):
                     enhanced_path = file_path.with_suffix(".enhanced.lrc")
-                    enhanced_path.write_text(lrc, encoding="utf-8")
                     plain_lrc = re.sub(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", "", lrc)
-                    lrc_path.write_text(plain_lrc, encoding="utf-8")
+                    if not dry_run:
+                        enhanced_path.write_text(lrc, encoding="utf-8")
+                        lrc_path.write_text(plain_lrc, encoding="utf-8")
+                    else:
+                        LOG.info(f"[DRY-RUN] Would write enhanced lyrics to {enhanced_path.name}")
                 else:
-                    lrc_path.write_text(lrc, encoding="utf-8")
+                    if not dry_run:
+                        lrc_path.write_text(lrc, encoding="utf-8")
+                    else:
+                        LOG.info(f"[DRY-RUN] Would write plain lyrics to {lrc_path.name}")
         except (APIServiceError, OSError) as e:
             LOG.debug(f"Lyrics fetch failed for {track_info.title}: {e}")
 
@@ -294,7 +309,7 @@ def tag_album_folder(
     """
     valid_options = {
         "fetch_bpm", "fetch_replaygain", "fetch_lyrics", "fetch_itunes_art",
-        "lastfm_api_key", "acoustid_api_key", "discogs_user_token"
+        "lastfm_api_key", "acoustid_api_key", "discogs_user_token", "options"
     }
     invalid = set(options.keys()) - valid_options
     if invalid:
@@ -313,26 +328,33 @@ def tag_album_folder(
 
     results: list[TrackInfo] = []
     
-    # Check if rich is available for progress bar
-    try:
-        from rich.progress import (
-            BarColumn,
-            Progress,
-            SpinnerColumn,
-            TextColumn,
-            TimeRemainingColumn,
-        )
-        has_rich = True
-    except ImportError:
-        has_rich = False
+    import importlib.util
+    has_rich = importlib.util.find_spec("rich") is not None
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_file = {
-            executor.submit(process_single_track, file_p, **options): file_p
-            for file_p in audio_files
-        }
+        future_to_file = {}
+        for file_p in audio_files:
+            future = executor.submit(
+                process_single_track, 
+                file_path=file_p,
+                fetch_bpm=options.get("fetch_bpm", True),
+                fetch_lyrics=options.get("fetch_lyrics", True),
+                fetch_itunes_art=options.get("fetch_itunes_art", True),
+                lastfm_api_key=options.get("lastfm_api_key"),
+                acoustid_api_key=options.get("acoustid_api_key"),
+                discogs_user_token=options.get("discogs_user_token"),
+                options=options.get("options")
+            )
+            future_to_file[future] = file_p
         
         if has_rich and CONSOLE:
+            from rich.progress import (
+                BarColumn,
+                Progress,
+                SpinnerColumn,
+                TextColumn,
+                TimeRemainingColumn,
+            )
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -361,6 +383,6 @@ def tag_album_folder(
 
     # After all tracks are tagged, compute Album ReplayGain (modifies files in-place via metaflac)
     if options.get("fetch_replaygain", True):
-        calculate_album_replaygain(audio_files)
+        calculate_album_replaygain(audio_files, options=options)
 
     return results

@@ -60,16 +60,19 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
                 _discogs_client_instance = discogs_client.Client(USER_AGENT, user_token=user_token)
                 _discogs_client_token = user_token
             results = _discogs_client_instance.search(album, artist=artist, type="release")
-            if results and len(results) > 0:
+            try:
                 first = results[0]
-                res = {
-                    "id": getattr(first, "id", None),
-                    "title": getattr(first, "title", None),
-                    "year": getattr(first, "year", None),
-                    "genres": getattr(first, "genres", []),
-                }
-                set_cached_api(cache_key, res)
-                return res
+                if first:
+                    res = {
+                        "id": getattr(first, "id", None),
+                        "title": getattr(first, "title", None),
+                        "year": getattr(first, "year", None),
+                        "genres": getattr(first, "genres", []),
+                    }
+                    set_cached_api(cache_key, res)
+                    return res
+            except (IndexError, TypeError, AttributeError):
+                pass
             return None
         except Exception as e:
             raise APIServiceError(f"Discogs search failed for {artist} - {album}: {e}") from e

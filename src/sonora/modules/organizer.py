@@ -44,7 +44,7 @@ def is_single_folder(folder_path: Path) -> bool:
     return len(albums) > 1
 
 
-def organize_library_singles(source_dir: Path, target_singles_dir: Path) -> int:
+def organize_library_singles(source_dir: Path, target_singles_dir: Path, options: dict | None = None) -> int:
     """
     Scan source_dir, detect single tracks, and move them to target_singles_dir
     organized as target_singles_dir / Artist / Artist - Title.ext.
@@ -53,7 +53,11 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path) -> int:
     if not source_dir.exists():
         raise AudioProcessingError(f"Source directory not found: {source_dir}")
 
-    target_singles_dir.mkdir(parents=True, exist_ok=True)
+    options = options or {}
+    dry_run = options.get("dry_run", False)
+    
+    if not dry_run:
+        target_singles_dir.mkdir(parents=True, exist_ok=True)
     moved_count = 0
     single_folder_cache: dict[Path, bool] = {}
 
@@ -69,24 +73,31 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path) -> int:
             try:
                 info = read_track_metadata(path)
                 artist_dir = target_singles_dir / sanitize_name(info.artist)
-                artist_dir.mkdir(parents=True, exist_ok=True)
+                if not dry_run:
+                    artist_dir.mkdir(parents=True, exist_ok=True)
 
                 target_file = artist_dir / f"{sanitize_name(info.artist)} - {sanitize_name(info.title)}{path.suffix}"
                 if path != target_file and not target_file.exists():
-                    shutil.move(str(path), str(target_file))
+                    if not dry_run:
+                        shutil.move(str(path), str(target_file))
+                    else:
+                        LOG.info(f"[DRY-RUN] Would move {path.name} -> {target_file}")
 
                     # Move accompanying .lrc file if present
                     lrc_path = path.with_suffix(".lrc")
                     if lrc_path.exists():
                         target_lrc = target_file.with_suffix(".lrc")
                         if not target_lrc.exists():
-                            shutil.move(str(lrc_path), str(target_lrc))
+                            if not dry_run:
+                                shutil.move(str(lrc_path), str(target_lrc))
+                            else:
+                                LOG.info(f"[DRY-RUN] Would move LRC {lrc_path.name} -> {target_lrc}")
 
                     moved_count += 1
                     
                     # Cleanup empty parent directories
                     try:
-                        if not any(parent.iterdir()):
+                        if not dry_run and not any(parent.iterdir()):
                             parent.rmdir()
                     except OSError:
                         pass

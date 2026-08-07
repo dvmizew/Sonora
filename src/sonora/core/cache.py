@@ -18,6 +18,12 @@ except ImportError:
 _CACHE_DIR = Path.home() / ".cache" / "sonora"
 _CACHE_INSTANCE: Any = None
 _CACHE_LOCK = threading.Lock()
+_IGNORE_CACHE = False
+
+def set_ignore_cache(ignore: bool) -> None:
+    """Globally bypass reading from cache if True."""
+    global _IGNORE_CACHE
+    _IGNORE_CACHE = ignore
 
 def get_cache() -> Any:
     """Lazy initialize and return sharded diskcache.FanoutCache instance for multi-threaded speed."""
@@ -39,6 +45,9 @@ def get_cache() -> Any:
 
 def get_cached_api(key: str) -> Any | None:
     """Retrieve value from disk cache by key."""
+    if _IGNORE_CACHE:
+        return None
+        
     cache = get_cache()
     if cache is not None:
         try:

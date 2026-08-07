@@ -5,8 +5,20 @@ Metadata reader and writer using Mutagen for FLAC and audio formats.
 from pathlib import Path
 
 from mutagen._file import File
-from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC, Picture
+from mutagen.id3 import ID3
+from mutagen.id3._frames import (
+    APIC,
+    TALB,
+    TBPM,
+    TCON,
+    TDRC,
+    TIT2,
+    TPE1,
+    TPE2,
+    TRCK,
+    TXXX,
+)
 
 from sonora.core.exceptions import MetadataError
 from sonora.core.logger import LOG
@@ -139,20 +151,43 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             audio.save()
         else:
             try:
-                easy_audio = EasyID3(str(track_info.file_path))
+                id3_audio = ID3(str(track_info.file_path))
             except Exception as e:  # noqa: BLE001
-                LOG.debug(f"EasyID3 parsing failed, creating empty ID3: {e}")
-                easy_audio = EasyID3()
-            easy_audio["artist"] = track_info.artist
-            easy_audio["title"] = track_info.title
-            easy_audio["album"] = track_info.album
-            if track_info.genre:
-                easy_audio["genre"] = track_info.genre
-            if track_info.date:
-                easy_audio["date"] = track_info.date
+                LOG.debug(f"ID3 parsing failed, creating empty ID3: {e}")
+                id3_audio = ID3()
+                
+            id3_audio.add(TPE1(encoding=3, text=[track_info.artist]))
+            id3_audio.add(TIT2(encoding=3, text=[track_info.title]))
+            id3_audio.add(TALB(encoding=3, text=[track_info.album]))
+            
+            if track_info.album_artist:
+                id3_audio.add(TPE2(encoding=3, text=[track_info.album_artist]))
             if track_info.track_number is not None:
-                easy_audio["tracknumber"] = str(track_info.track_number)
-            easy_audio.save(str(track_info.file_path))
+                id3_audio.add(TRCK(encoding=3, text=[str(track_info.track_number)]))
+            if track_info.date:
+                id3_audio.add(TDRC(encoding=3, text=[track_info.date]))
+            if track_info.genre:
+                id3_audio.add(TCON(encoding=3, text=[track_info.genre]))
+            if track_info.bpm is not None:
+                id3_audio.add(TBPM(encoding=3, text=[str(round(track_info.bpm))]))
+                
+            # Custom TXXX frames for MusicBrainz and ReplayGain
+            if track_info.musicbrainz_trackid:
+                id3_audio.add(TXXX(encoding=3, desc="MusicBrainz Track Id", text=[track_info.musicbrainz_trackid]))
+            if track_info.musicbrainz_albumid:
+                id3_audio.add(TXXX(encoding=3, desc="MusicBrainz Album Id", text=[track_info.musicbrainz_albumid]))
+            if track_info.replaygain_track_gain is not None:
+                id3_audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=[f"{track_info.replaygain_track_gain:+.2f} dB"]))
+            if track_info.replaygain_track_peak is not None:
+                id3_audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_PEAK", text=[f"{track_info.replaygain_track_peak:.6f}"]))
+                
+            if cover_art_path and cover_art_path.exists():
+                with open(cover_art_path, "rb") as f:
+                    image_data = f.read()
+                mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
+                id3_audio.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=image_data))
+                
+            id3_audio.save(str(track_info.file_path), v2_version=3)
     except Exception as e:
         if isinstance(e, MetadataError):
             raise

@@ -4,17 +4,14 @@ Command-line interface (CLI) main entrypoint for Sonora.
 
 import argparse
 import datetime
+import importlib.util
 import json
 import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-try:
-    from dotenv import load_dotenv
-    HAS_DOTENV = True
-except ImportError:
-    HAS_DOTENV = False
+HAS_DOTENV = importlib.util.find_spec("dotenv") is not None
 
 from sonora import __version__
 from sonora.core.exceptions import SonoraError
@@ -32,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Sonora — Smart FLAC/MP3 music tagging, library auditing, and file organization",
     )
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate actions without modifying files")
 
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
@@ -45,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     tag_parser.add_argument("--no-lyrics", action="store_false", dest="fetch_lyrics", help="Disable LRC lyrics fetching")
     tag_parser.add_argument("--no-art", action="store_false", dest="fetch_itunes_art", help="Disable cover art downloading")
     tag_parser.add_argument("--json", type=Path, default=None, help="Output path to save tagging JSON report with statistics")
+    tag_parser.add_argument("--force", action="store_true", help="Force retagging by ignoring cache and existing MBIDs")
     
     # Optional API keys
     tag_parser.add_argument("--lastfm-key", type=str, default=None, help="Last.fm API key for genre/mood lookup")
@@ -70,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def handle_tag(args: argparse.Namespace) -> int:
+def handle_tag(args: argparse.Namespace, options: dict) -> int:
     """Handle 'tag' subcommand execution."""
     from sonora.services.musicbrainz import init_musicbrainz
 
@@ -91,6 +90,7 @@ def handle_tag(args: argparse.Namespace) -> int:
         lastfm_api_key=lastfm_key,
         acoustid_api_key=acoustid_key,
         discogs_user_token=discogs_token,
+        options=options,
     )
     LOG.success(f"Successfully tagged {len(results)} tracks.")
 
@@ -153,18 +153,18 @@ def handle_audit(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_rename(args: argparse.Namespace) -> int:
+def handle_rename(args: argparse.Namespace, options: dict) -> int:
     """Handle 'rename' subcommand execution."""
     LOG.info(f"Renaming files in directory: [bold]{args.path}[/bold]")
-    renamed = rename_directory_files(args.path)
+    renamed = rename_directory_files(args.path, options=options)
     LOG.success(f"Renamed {len(renamed)} audio files and synchronized .lrc headers.")
     return 0
 
 
-def handle_organize(args: argparse.Namespace) -> int:
+def handle_organize(args: argparse.Namespace, options: dict) -> int:
     """Handle 'organize' subcommand execution."""
     LOG.info(f"Organizing single tracks from {args.path} to {args.target_singles}")
-    count = organize_library_singles(args.path, args.target_singles)
+    count = organize_library_singles(args.path, args.target_singles, options=options)
     LOG.success(f"Organized and moved {count} single tracks.")
     return 0
 
@@ -172,10 +172,20 @@ def handle_organize(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """Main CLI entrypoint."""
     if HAS_DOTENV:
+        from dotenv import load_dotenv
         load_dotenv()
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    
+    options = {
+        "dry_run": args.dry_run,
+        "force": getattr(args, "force", False)
+    }
+    
+    if options["force"]:
+        from sonora.core.cache import set_ignore_cache
+        set_ignore_cache(True)
 
     if not args.command:
         parser.print_help()
@@ -183,13 +193,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.command == "tag":
-            return handle_tag(args)
+            return handle_tag(args, options)
         elif args.command == "audit":
             return handle_audit(args)
         elif args.command == "rename":
-            return handle_rename(args)
+            return handle_rename(args, options)
         elif args.command == "organize":
-            return handle_organize(args)
+            return handle_organize(args, options)
         return 0
     except KeyboardInterrupt:
         LOG.warning("Aborted by user. Shutting down gracefully...")

@@ -209,7 +209,7 @@ class TestCoreModules(unittest.TestCase):
         mock_mbid.return_value = "mbid-12345"
         mock_lyrics.return_value = "[00:01.00] Vers"
 
-        info = process_single_track(wav_file, fetch_bpm=False, fetch_replaygain=False)
+        info = process_single_track(wav_file, fetch_bpm=False)
         self.assertEqual(info.artist, "Nane")
         self.assertEqual(info.musicbrainz_trackid, "mbid-12345")
         mock_write.assert_called_once()
@@ -314,7 +314,6 @@ class TestCoreModules(unittest.TestCase):
         info = process_single_track(
             wav_file,
             fetch_bpm=False,
-            fetch_replaygain=False,
             fetch_lyrics=False,
             fetch_itunes_art=False,
             acoustid_api_key="acoustid_key",
