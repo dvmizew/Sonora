@@ -168,7 +168,7 @@ class TestCoreModules(unittest.TestCase):
 
         moved = organize_library_singles(src_dir, target_dir)
         self.assertEqual(moved, 1)
-        self.assertTrue((target_dir / "Single Artist" / "single.wav").exists())
+        self.assertTrue((target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists())
 
     @patch("sonora.modules.organizer.read_track_metadata")
     def test_organize_library_singles_with_lrc(self, mock_read):
@@ -183,8 +183,8 @@ class TestCoreModules(unittest.TestCase):
 
         moved = organize_library_singles(src_dir, target_dir)
         self.assertEqual(moved, 1)
-        self.assertTrue((target_dir / "Single Artist" / "single.wav").exists())
-        self.assertTrue((target_dir / "Single Artist" / "single.lrc").exists())
+        self.assertTrue((target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists())
+        self.assertTrue((target_dir / "Single Artist" / "Single Artist - Single Song.lrc").exists())
 
     @patch("sonora.modules.auditor.read_track_metadata")
     def test_audit_library(self, mock_read):
