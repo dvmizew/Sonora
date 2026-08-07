@@ -1,3 +1,4 @@
+import threading
 from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
@@ -17,8 +18,6 @@ def init_musicbrainz(app_name: str = "Sonora", version: str = "0.1.0", contact: 
     if musicbrainzngs is not None:
         musicbrainzngs.set_useragent(app_name, version, contact)
         musicbrainzngs.set_rate_limit(limit_or_interval=1.0, new_requests=1)
-
-import threading
 
 _discography_locks: dict[str, threading.Lock] = {}
 _discography_meta_lock = threading.Lock()

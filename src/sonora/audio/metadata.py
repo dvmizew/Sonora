@@ -4,13 +4,14 @@ Metadata reader and writer using Mutagen for FLAC and audio formats.
 
 from pathlib import Path
 
-import mutagen
+from mutagen._file import File
 from mutagen.easyid3 import EasyID3
 from mutagen.flac import FLAC, Picture
 
 from sonora.core.exceptions import MetadataError
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
+from sonora.core.utils import normalize_date, normalize_genre
 
 
 def read_track_metadata(file_path: Path) -> TrackInfo:
@@ -21,7 +22,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         raise MetadataError(f"File not found: {file_path}")
 
     try:
-        audio = mutagen.File(str(file_path))
+        audio = File(str(file_path))
         if audio is None:
             raise MetadataError(f"Unsupported audio format: {file_path}")
 
@@ -38,8 +39,8 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         title = get_tag("title") or get_tag("TITLE") or "Unknown Title"
         album = get_tag("album") or get_tag("ALBUM") or "Unknown Album"
         album_artist = get_tag("albumartist") or get_tag("ALBUMARTIST")
-        date = get_tag("date") or get_tag("DATE") or get_tag("year")
-        genre = get_tag("genre") or get_tag("GENRE")
+        date = normalize_date(get_tag("date") or get_tag("DATE") or get_tag("year"))
+        genre = normalize_genre(get_tag("genre") or get_tag("GENRE"))
         isrc = get_tag("isrc") or get_tag("ISRC")
 
         # Parse track number
@@ -60,11 +61,10 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             except ValueError as e:
                 LOG.debug(f"Failed to parse BPM '{raw_bpm}': {e}")
 
-        # Audio stream properties safely accessed for static type checkers
-        info = getattr(audio, "info", None)
-        sample_rate = getattr(info, "sample_rate", None) if info else None
-        bitrate = getattr(info, "bitrate", None) if info else None
-        channels = getattr(info, "channels", None) if info else None
+        # Audio stream properties
+        sample_rate = getattr(audio.info, "sample_rate", None)
+        bitrate = getattr(audio.info, "bitrate", None)
+        channels = getattr(audio.info, "channels", None)
 
         return TrackInfo(
             file_path=file_path,
@@ -106,7 +106,7 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
 
             if track_info.album_artist:
                 audio["ALBUMARTIST"] = [track_info.album_artist]
-            if track_info.track_number:
+            if track_info.track_number is not None:
                 audio["TRACKNUMBER"] = [str(track_info.track_number)]
             if track_info.date:
                 audio["DATE"] = [track_info.date]
@@ -114,7 +114,7 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 audio["GENRE"] = [track_info.genre]
             if track_info.isrc:
                 audio["ISRC"] = [track_info.isrc]
-            if track_info.bpm:
+            if track_info.bpm is not None:
                 audio["BPM"] = [f"{track_info.bpm:.1f}"]
             if track_info.musicbrainz_trackid:
                 audio["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
@@ -150,37 +150,10 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 easy_audio["genre"] = track_info.genre
             if track_info.date:
                 easy_audio["date"] = track_info.date
-            if track_info.track_number:
+            if track_info.track_number is not None:
                 easy_audio["tracknumber"] = str(track_info.track_number)
             easy_audio.save(str(track_info.file_path))
     except Exception as e:
         if isinstance(e, MetadataError):
             raise
         raise MetadataError(f"Failed to write metadata for {track_info.file_path}: {e}") from e
-
-
-def embed_cover_art(file_path: Path, image_path: Path) -> None:
-    """
-    Embed an image file as front cover art into a FLAC audio file.
-    """
-    if not file_path.exists():
-        raise MetadataError(f"Audio file not found: {file_path}")
-    if not image_path.exists():
-        raise MetadataError(f"Image file not found: {image_path}")
-
-    try:
-        audio = FLAC(str(file_path))
-        with open(image_path, "rb") as f:
-            image_data = f.read()
-
-        picture = Picture()
-        picture.data = image_data
-        picture.type = 3  # Front Cover
-        picture.mime = "image/jpeg" if image_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
-        picture.desc = "Cover"
-
-        audio.clear_pictures()
-        audio.add_picture(picture)
-        audio.save()
-    except Exception as e:
-        raise MetadataError(f"Failed to embed cover art into {file_path}: {e}") from e

@@ -7,7 +7,7 @@ import sys
 import tempfile
 import wave
 from pathlib import Path
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, patch
 
 # Guarantee src/ is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -17,7 +17,6 @@ import unittest
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import (
-    embed_cover_art,
     read_track_metadata,
     write_track_metadata,
 )
@@ -76,21 +75,6 @@ class TestAudioEngine(unittest.TestCase):
         mock_flac_instance.__setitem__.assert_any_call("TITLE", ["Test Track"])
         mock_flac_instance.__setitem__.assert_any_call("REPLAYGAIN_TRACK_GAIN", ["-4.25 dB"])
         mock_flac_instance.__setitem__.assert_any_call("REPLAYGAIN_TRACK_PEAK", ["0.951234"])
-
-    @patch("sonora.audio.metadata.FLAC")
-    def test_embed_cover_art(self, mock_flac_cls):
-        mock_flac_instance = MagicMock()
-        mock_flac_cls.return_value = mock_flac_instance
-
-        flac_path = Path("/tmp/cover_test.flac")
-        img_path = Path("/tmp/cover_test.jpg")
-
-        with patch.object(Path, "exists", return_value=True), patch("builtins.open", mock_open(read_data=b"imgdata")):
-            embed_cover_art(flac_path, img_path)
-
-        mock_flac_instance.clear_pictures.assert_called_once()
-        mock_flac_instance.add_picture.assert_called_once()
-        mock_flac_instance.save.assert_called_once()
 
     def test_read_nonexistent_file_raises_metadata_error(self):
         bogus_path = Path("/tmp/nonexistent_audio_track_9999.flac")

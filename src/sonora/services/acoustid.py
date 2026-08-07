@@ -31,6 +31,10 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
         raise APIServiceError(f"Chromaprint fingerprinting failed for {file_path}: {e}") from e
 
 
+from sonora.core.utils import RateLimiter
+
+_ACOUSTID_LIMITER = RateLimiter(interval_seconds=0.4)
+
 def lookup_acoustid(file_path: Path, api_key: str) -> str | None:
     """
     Lookup track MBID on AcoustID service using Chromaprint fingerprint.
@@ -45,6 +49,7 @@ def lookup_acoustid(file_path: Path, api_key: str) -> str | None:
         if cached is not None:
             return str(cached)
 
+        _ACOUSTID_LIMITER.wait()
         results = acoustid.lookup(api_key, fingerprint, duration)
         for score, recording_id, _title, _artist in acoustid.parse_lookup_result(results):
             if score >= 0.8 and recording_id:

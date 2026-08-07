@@ -7,15 +7,15 @@ from typing import Any
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.http import SESSION
+from sonora.core.utils import RateLimiter, normalize_str
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
-
+_ITUNES_LIMITER = RateLimiter(interval_seconds=3.2)
 
 def search_itunes(artist: str, term: str, entity: str = "album", country: str = "US") -> list[dict[str, Any]]:
     """
     Search iTunes Search API for album or track metadata.
     """
-    from sonora.core.utils import normalize_str
     query_term = f"{artist} {term}".strip()
     cache_key = f"itunes:{normalize_str(artist)}:{normalize_str(term)}:{entity}"
     cached = get_cached_api(cache_key)
@@ -28,6 +28,7 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
         "country": country,
         "limit": "5",
     }
+    _ITUNES_LIMITER.wait()
     try:
         resp = SESSION.get(ITUNES_SEARCH_URL, params=params, timeout=10)
         resp.raise_for_status()

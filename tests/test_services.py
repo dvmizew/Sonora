@@ -39,7 +39,7 @@ class TestServicesEngine(unittest.TestCase):
 
         lyrics = fetch_synced_lyrics("Artist", "Title")
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
-        mock_syncedlyrics.search.assert_called_once_with("artist - title", plain_only=False, synced_only=False, enhanced=True)
+        mock_syncedlyrics.search.assert_called_once_with("artist - title", plain_only=False, synced_only=False, enhanced=False)
 
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")

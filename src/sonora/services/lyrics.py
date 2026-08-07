@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
-from sonora.core.utils import RateLimiter
+from sonora.core.utils import RateLimiter, normalize_str
 
 try:
     import syncedlyrics
@@ -98,7 +98,6 @@ def fetch_synced_lyrics(
     if syncedlyrics is None:
         raise APIServiceError("syncedlyrics library is not installed.")
 
-    from sonora.core.utils import normalize_str
     cache_key = f"lyrics:{normalize_str(artist)}:{normalize_str(title)}:{synced_only}:{enhanced}:{plain_only}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
@@ -128,9 +127,7 @@ def fetch_synced_lyrics(
         return None
 
     try:
-        # The syncedlyrics library already natively handles quality fallbacks (Enhanced -> LRC -> Plain).
-        # We only need to perform ONE search.
-        result = _do_search(en=enhanced or True, syn=synced_only, pl=plain_only)
+        result = _do_search(en=enhanced, syn=synced_only, pl=plain_only)
 
         if result:
             set_cached_api(cache_key, result)

@@ -2,6 +2,7 @@
 Discogs API service client.
 """
 
+import threading
 from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
@@ -15,8 +16,6 @@ except ImportError:
 
 _DISCOGS_LIMITER = RateLimiter(interval_seconds=1.1)
 
-import threading
-
 _discogs_locks: dict[str, threading.Lock] = {}
 _discogs_meta_lock = threading.Lock()
 
@@ -29,13 +28,14 @@ def _get_discogs_lock(artist_key: str) -> threading.Lock:
         return _discogs_locks[artist_key]
 
 _discogs_client_instance = None
+_discogs_client_token = None
 
 def search_discogs_release(artist: str, album: str, user_token: str | None = None) -> dict[str, Any] | None:
     """
     Search Discogs for album release metadata.
     Requires a Discogs user token.
     """
-    global _discogs_client_instance
+    global _discogs_client_instance, _discogs_client_token
     if not user_token:
         return None
 
@@ -55,9 +55,10 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
 
         _DISCOGS_LIMITER.wait()
         try:
-            if _discogs_client_instance is None:
+            if _discogs_client_instance is None or _discogs_client_token != user_token:
                 from sonora.core.constants import USER_AGENT
                 _discogs_client_instance = discogs_client.Client(USER_AGENT, user_token=user_token)
+                _discogs_client_token = user_token
             results = _discogs_client_instance.search(album, artist=artist, type="release")
             if results and len(results) > 0:
                 first = results[0]

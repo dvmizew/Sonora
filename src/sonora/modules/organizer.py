@@ -57,7 +57,7 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path) -> int:
     moved_count = 0
     single_folder_cache: dict[Path, bool] = {}
 
-    for path in source_dir.rglob("*"):
+    for path in list(source_dir.rglob("*")):
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
             parent = path.parent
             if parent not in single_folder_cache:
@@ -71,7 +71,7 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path) -> int:
                 artist_dir = target_singles_dir / sanitize_name(info.artist)
                 artist_dir.mkdir(parents=True, exist_ok=True)
 
-                target_file = artist_dir / path.name
+                target_file = artist_dir / f"{sanitize_name(info.artist)} - {sanitize_name(info.title)}{path.suffix}"
                 if path != target_file and not target_file.exists():
                     shutil.move(str(path), str(target_file))
 
@@ -83,6 +83,14 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path) -> int:
                             shutil.move(str(lrc_path), str(target_lrc))
 
                     moved_count += 1
+                    
+                    # Cleanup empty parent directories
+                    try:
+                        if not any(parent.iterdir()):
+                            parent.rmdir()
+                    except OSError:
+                        pass
+
             except (MetadataError, OSError) as e:
                 LOG.warning(f"Failed to organize track {path}: {e}")
 

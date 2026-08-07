@@ -11,7 +11,7 @@ from typing import Any
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.constants import GENRE_MAP, SUPPORTED_EXTS
+from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.exceptions import APIServiceError, AudioProcessingError, MetadataError
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
@@ -23,16 +23,87 @@ from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import fetch_synced_lyrics
 from sonora.services.musicbrainz import fetch_track_mbid
 
-# Artist alias mappings (e.g. Romanian & international artist variations)
+# Alias Mappings (Real Names to Stage Names)
 ARTIST_ALIASES: dict[str, str] = {
-    "killa fonic": "Killa Fonic",
-    "nane": "Nane",
+    # M.G.L.
+    "matasaru leonard george": "M.G.L.",
+    "matasaru george leonard": "M.G.L.",
+    "mătăsaru leonard george": "M.G.L.",
+    "mătăsaru george leonard": "M.G.L.",
+    "mătăsaru george-leonard": "M.G.L.",
     "m.g.l": "M.G.L.",
     "mgl": "M.G.L.",
+    
+    # Nane
+    "stefan avram cherescu": "Nane",
+    "ștefan avram cherescu": "Nane",
+    "stefan cherescu": "Nane",
+    "ștefan cherescu": "Nane",
+    "nane": "Nane",
+    
+    # Killa Fonic
+    "ionut raducanu": "Killa Fonic",
+    "ionuț răducanu": "Killa Fonic",
+    "ionut rapciug": "Killa Fonic",
+    "ionuț răpciug": "Killa Fonic",
+    "killa fonic": "Killa Fonic",
+    
+    # Ian & Azteca
+    "anghel georgian bogdan": "Ian",
+    "bogdan georgian anghel": "Ian",
     "ian": "Ian",
+    "andrew edward nedelcu": "Azteca",
+    "andrew-edward nedelcu": "Azteca",
+    
+    # Amuly
+    "hameed amil": "Amuly",
+    "alexandru mincu": "Amuly",
+    
+    # Bvcovia & Rava
+    "raduly ioan marian": "Bvcovia",
+    "ioan marian raduly": "Bvcovia",
+    "ravanelli florin oita": "Rava",
+    "ravanelli florin oiță": "Rava",
+    
+    # Noua Unspe
+    "ghinea alexandru daniel": "Noua Unspe",
+    
+    # Satra B.E.N.Z Members
+    "darius vlad cretan": "Nosfe",
+    "darius vlad crețan": "Nosfe",
+    "bogdan david ionita": "Keed",
+    "bogdan david ioniță": "Keed",
+    "catalin guta": "Super ED",
+    "cătălin guță": "Super ED",
+    
+    # Hip-Hop Legends (CTC, etc)
+    "vlad munteanu": "DOC",
+    "vlad-costin munteanu": "DOC",
+    "razvan eremia": "Deliric",
+    "răzvan eremia": "Deliric",
     "deliric": "Deliric",
-    "bug mafia": "B.U.G. Mafia",
+    "marius stelian craciun": "Cedry2k",
+    "marius stelian crăciun": "Cedry2k",
+    "mihai adamescu": "Chimie",
+    "dragos tudorache": "Dragonu'",
+    "dragoș tudorache": "Dragonu'",
     "b.u.g. mafia": "B.U.G. Mafia",
+    "bug mafia": "B.U.G. Mafia",
+    
+    # Pop / Mainstream
+    "stefan mihalache": "Connect-R",
+    "ștefan mihalache": "Connect-R",
+    "laurențiu mocanu": "Guess Who",
+    "laurentiu mocanu": "Guess Who",
+    "gabriel mihai istrate": "Shift",
+    "andrei mihai maria": "Smiley",
+    "andrei tiberiu maria": "Smiley",
+    "elena alexandra apostoleanu": "Inna",
+    "alin emil ghita": "El Nino",
+    "alin emil ghiță": "El Nino",
+    "maria alexandra florea": "Holy Molly",
+    "adriana livia opris": "Olivia Addams",
+    "adriana livia opriș": "Olivia Addams",
 }
 
 
@@ -99,9 +170,10 @@ def process_single_track(
                 track_info.musicbrainz_albumid = release.get("id")
                 # Also opportunistically set year/genre if missing
                 if not track_info.date:
+                    from sonora.core.utils import normalize_date
                     date_str = release.get("date")
                     if isinstance(date_str, str) and len(date_str) >= 4:
-                        track_info.date = date_str[:4]
+                        track_info.date = normalize_date(date_str)
         except APIServiceError as e:
             LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
 
@@ -115,43 +187,54 @@ def process_single_track(
                 mbid=track_info.musicbrainz_trackid,
             )
             if tags:
+                from sonora.core.utils import normalize_genre
                 raw_genre = tags[0]
-                track_info.genre = GENRE_MAP.get(raw_genre, raw_genre)
+                norm_genre = normalize_genre(raw_genre)
+                if norm_genre:
+                    track_info.genre = norm_genre
         except APIServiceError as e:
             LOG.debug(f"Last.fm lookup failed for {track_info.title}: {e}")
 
-    # 4. Discogs fallback lookup for release metadata
+    # 5. Discogs fallback lookup for release metadata
     if discogs_user_token and not track_info.genre:
         try:
             release = search_discogs_release(track_info.artist, track_info.album, user_token=discogs_user_token)
             if release:
-                if release.get("year"):
-                    track_info.date = str(release["year"])
+                if release.get("year") and not track_info.date:
+                    from sonora.core.utils import normalize_date
+                    track_info.date = normalize_date(str(release["year"]))
                 if release.get("genres") and not track_info.genre:
+                    from sonora.core.utils import normalize_genre
                     raw_genre = str(release["genres"][0])
-                    track_info.genre = GENRE_MAP.get(raw_genre, raw_genre)
+                    norm_genre = normalize_genre(raw_genre)
+                    if norm_genre:
+                        track_info.genre = norm_genre
         except APIServiceError as e:
             LOG.debug(f"Discogs lookup failed for {track_info.title}: {e}")
 
-    # 5. Calculate BPM
+    # 6. Calculate BPM
     if fetch_bpm:
         try:
             bpm = calculate_bpm(file_path)
-            if bpm:
+            if bpm is not None:
                 track_info.bpm = bpm
         except AudioProcessingError as e:
             LOG.debug(f"BPM calculation failed for {track_info.title}: {e}")
 
-    # 6. ReplayGain calculation is now deferred to the Album level in tag_album_folder.
+    # 7. ReplayGain calculation is now deferred to the Album level in tag_album_folder.
 
-    # 7. Fetch iTunes Cover Art (Download only, don't embed yet)
+    # 8. Fetch iTunes Cover Art (Download only, don't embed yet)
     cover_jpg = None
     if fetch_itunes_art and file_path.suffix.lower() == ".flac":
         try:
             cover_jpg = file_path.parent / "cover.jpg"
-            # Optimization: Do not block all threads on network I/O
+            # Optimization: Do not block all threads on network I/O unless necessary
             with _get_cover_lock(file_path.parent):
                 art_downloaded = cover_jpg.exists()
+                if not art_downloaded:
+                    # Mark as downloaded (or downloading) so other threads skip
+                    # We create an empty file as a placeholder lock
+                    cover_jpg.touch()
             
             if not art_downloaded:
                 art_url = fetch_itunes_cover_art_url(track_info.artist, track_info.album)
@@ -161,18 +244,28 @@ def process_single_track(
                     resp.raise_for_status()
                     
                     with _get_cover_lock(file_path.parent):
-                        if not cover_jpg.exists():
-                            cover_jpg.write_bytes(resp.content)
-            if not cover_jpg.exists():
-                cover_jpg = None
+                        cover_jpg.write_bytes(resp.content)
+                else:
+                    # Remove placeholder if fetch failed
+                    with _get_cover_lock(file_path.parent):
+                        if cover_jpg.exists() and cover_jpg.stat().st_size == 0:
+                            cover_jpg.unlink()
+            
+            # Ensure we only use valid cover jpgs
+            with _get_cover_lock(file_path.parent):
+                if not cover_jpg.exists() or cover_jpg.stat().st_size == 0:
+                    cover_jpg = None
         except (APIServiceError, OSError) as e:
             LOG.debug(f"Cover art downloading failed for {track_info.title}: {e}")
+            with _get_cover_lock(file_path.parent):
+                if cover_jpg and cover_jpg.exists() and cover_jpg.stat().st_size == 0:
+                    cover_jpg.unlink()
             cover_jpg = None
 
-    # 8. Write metadata tags back to file AND embed cover art in one single Disk I/O operation!
+    # 9. Write metadata tags back to file AND embed cover art in one single Disk I/O operation!
     write_track_metadata(track_info, cover_art_path=cover_jpg)
 
-    # 9. Fetch & write .lrc lyrics file (and .synced.lrc copy if enhanced)
+    # 10. Fetch & write .lrc lyrics file (and .synced.lrc copy if enhanced)
     if fetch_lyrics:
         try:
             lrc = fetch_synced_lyrics(track_info.artist, track_info.title)

@@ -4,7 +4,7 @@ Genius API service client for song descriptions and background stories.
 
 from sonora.core.exceptions import APIServiceError
 from sonora.core.http import SESSION
-from sonora.core.utils import RateLimiter
+from sonora.core.utils import RateLimiter, normalize_str
 
 _GENIUS_LIMITER = RateLimiter(interval_seconds=0.5)
 
@@ -19,7 +19,6 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
     _GENIUS_LIMITER.wait()
     try:
         # Step 1: Search for the song
-        from sonora.core.utils import normalize_str
         query = f"{normalize_str(artist)} {normalize_str(title)}"
         search_url = "https://api.genius.com/search"
         resp = SESSION.get(

@@ -191,6 +191,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "organize":
             return handle_organize(args)
         return 0
+    except KeyboardInterrupt:
+        LOG.warning("Aborted by user. Shutting down gracefully...")
+        return 130
     except SonoraError as e:
         LOG.error(f"Error: {e}")
         return 1

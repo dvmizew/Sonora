@@ -58,11 +58,15 @@ def calculate_album_replaygain(files: Sequence[Path]) -> bool:
                 return False
         else:
             LOG.warning("⚠️  Mixed audio properties detected. Falling back to Track-only ReplayGain.")
+            any_success = False
             for f in flac_files:
                 cmd = [METAFLAC_CMD, "--add-replay-gain", f]
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
                 if r.returncode != 0:
                     LOG.error(f"metaflac failed for {f}: {r.stderr}")
+                else:
+                    any_success = True
+            return any_success
         return True
     except subprocess.TimeoutExpired:
         LOG.error("metaflac timed out while calculating ReplayGain.")

@@ -24,6 +24,40 @@ def normalize_str(s: str | None) -> str:
     s = re.sub(r'[^\w\s]', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
+def normalize_date(d: str | None) -> str | None:
+    """Ensure date is in YYYY-MM-DD format."""
+    if not d: return None
+    d_str = str(d).strip()
+    match = re.search(r'(\d{4}-\d{2}-\d{2})', d_str)
+    if match: return match.group(1)
+    match = re.search(r'(\d{4})', d_str)
+    if match: return match.group(1)
+    return d_str
+
+def normalize_genre(g: str | None) -> str | None:
+    """Clean and standardize genre strings with strict filtering."""
+    if not g: return g
+    from sonora.core.constants import BROAD_GENRE_KEYWORDS, GENRE_BLACKLIST, GENRE_MAP
+    
+    g_raw = str(g).strip()
+    g_title = g_raw.title()
+    g_lower = g_raw.lower()
+
+    try:
+        float(g_raw.replace(',', ''))
+        return None
+    except ValueError:
+        pass
+
+    if any(b.lower() in g_lower for b in GENRE_BLACKLIST) or g_raw.isdigit():
+        return None
+    
+    words = g_title.split()
+    if len(words) >= 2 and not any(kw.lower() in g_lower for kw in BROAD_GENRE_KEYWORDS):
+        return None
+
+    return GENRE_MAP.get(g_title, g_title)
+
 
 def sanitize_name(name: str | None) -> str:
     """
@@ -50,9 +84,12 @@ class RateLimiter:
         self.last_call = 0.0
 
     def wait(self) -> None:
+        sleep_time = 0.0
         with self.lock:
             now = time.time()
             elapsed = now - self.last_call
             if elapsed < self.interval:
-                time.sleep(self.interval - elapsed)
-            self.last_call = time.time()
+                sleep_time = self.interval - elapsed
+            self.last_call = max(now, self.last_call) + sleep_time
+        if sleep_time > 0:
+            time.sleep(sleep_time)
