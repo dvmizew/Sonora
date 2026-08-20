@@ -122,6 +122,9 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
         raise MetadataError(f"File not found: {track_info.file_path}")
 
     try:
+        import typing
+        audio_container: typing.Any = None
+        
         ext = track_info.file_path.suffix.lower()
         if ext in (".flac", ".ogg", ".opus"):
             if ext == ".flac":
@@ -166,7 +169,6 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             audio_container.save()
             
         elif ext in (".mp3", ".wav", ".aiff"):
-            audio_container = None
             if ext == ".mp3":
                 try:
                     audio_container = MP3(str(track_info.file_path))
