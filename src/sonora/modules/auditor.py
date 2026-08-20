@@ -88,6 +88,7 @@ def audit_library(
         TextColumn,
         TimeRemainingColumn,
     )
+
     from sonora.core.logger import CONSOLE
 
     files_to_process = [p for p in folder_path.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]

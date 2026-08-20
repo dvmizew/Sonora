@@ -4,10 +4,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
+
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.constants import SUPPORTED_EXTS
+from sonora.core.constants import ARTIST_ALIASES, SUPPORTED_EXTS
 from sonora.core.exceptions import APIServiceError, AudioProcessingError, MetadataError
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
@@ -18,97 +26,6 @@ from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import fetch_synced_lyrics
 from sonora.services.musicbrainz import fetch_track_mbid
-
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeRemainingColumn,
-)
-
-# Alias Mappings (Real Names to Stage Names)
-ARTIST_ALIASES: dict[str, str] = {
-    # M.G.L.
-    "matasaru leonard george": "M.G.L.",
-    "matasaru george leonard": "M.G.L.",
-    "mătăsaru leonard george": "M.G.L.",
-    "mătăsaru george leonard": "M.G.L.",
-    "mătăsaru george-leonard": "M.G.L.",
-    "m.g.l": "M.G.L.",
-    "mgl": "M.G.L.",
-    
-    # Nane
-    "stefan avram cherescu": "Nane",
-    "ștefan avram cherescu": "Nane",
-    "stefan cherescu": "Nane",
-    "ștefan cherescu": "Nane",
-    "nane": "Nane",
-    
-    # Killa Fonic
-    "ionut raducanu": "Killa Fonic",
-    "ionuț răducanu": "Killa Fonic",
-    "ionut rapciug": "Killa Fonic",
-    "ionuț răpciug": "Killa Fonic",
-    "killa fonic": "Killa Fonic",
-    
-    # Ian & Azteca
-    "anghel georgian bogdan": "Ian",
-    "bogdan georgian anghel": "Ian",
-    "ian": "Ian",
-    "andrew edward nedelcu": "Azteca",
-    "andrew-edward nedelcu": "Azteca",
-    
-    # Amuly
-    "hameed amil": "Amuly",
-    "alexandru mincu": "Amuly",
-    
-    # Bvcovia & Rava
-    "raduly ioan marian": "Bvcovia",
-    "ioan marian raduly": "Bvcovia",
-    "ravanelli florin oita": "Rava",
-    "ravanelli florin oiță": "Rava",
-    
-    # Noua Unspe
-    "ghinea alexandru daniel": "Noua Unspe",
-    
-    # Satra B.E.N.Z Members
-    "darius vlad cretan": "Nosfe",
-    "darius vlad crețan": "Nosfe",
-    "bogdan david ionita": "Keed",
-    "bogdan david ioniță": "Keed",
-    "catalin guta": "Super ED",
-    "cătălin guță": "Super ED",
-    
-    # Hip-Hop Legends (CTC, etc)
-    "vlad munteanu": "DOC",
-    "vlad-costin munteanu": "DOC",
-    "razvan eremia": "Deliric",
-    "răzvan eremia": "Deliric",
-    "deliric": "Deliric",
-    "marius stelian craciun": "Cedry2k",
-    "marius stelian crăciun": "Cedry2k",
-    "mihai adamescu": "Chimie",
-    "dragos tudorache": "Dragonu'",
-    "dragoș tudorache": "Dragonu'",
-    "b.u.g. mafia": "B.U.G. Mafia",
-    "bug mafia": "B.U.G. Mafia",
-    
-    # Pop / Mainstream
-    "stefan mihalache": "Connect-R",
-    "ștefan mihalache": "Connect-R",
-    "laurențiu mocanu": "Guess Who",
-    "laurentiu mocanu": "Guess Who",
-    "gabriel mihai istrate": "Shift",
-    "andrei mihai maria": "Smiley",
-    "andrei tiberiu maria": "Smiley",
-    "elena alexandra apostoleanu": "Inna",
-    "alin emil ghita": "El Nino",
-    "alin emil ghiță": "El Nino",
-    "maria alexandra florea": "Holy Molly",
-    "adriana livia opris": "Olivia Addams",
-    "adriana livia opriș": "Olivia Addams",
-}
 
 
 def normalize_artist_alias(artist: str) -> str:

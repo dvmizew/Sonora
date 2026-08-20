@@ -98,7 +98,8 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
         raise MetadataError(f"File not found: {track_info.file_path}")
 
     try:
-        if track_info.file_path.suffix.lower() == ".flac":
+        ext = track_info.file_path.suffix.lower()
+        if ext == ".flac":
             audio = FLAC(str(track_info.file_path))
             audio["ARTIST"] = [track_info.artist]
             audio["TITLE"] = [track_info.title]
@@ -137,7 +138,8 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 audio.add_picture(picture)
 
             audio.save()
-        else:
+            
+        elif ext == ".mp3":
             try:
                 id3_audio = ID3(str(track_info.file_path))
             except Exception as e:  # noqa: BLE001
@@ -159,7 +161,6 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             if track_info.bpm is not None:
                 id3_audio.add(TBPM(encoding=3, text=[str(round(track_info.bpm))]))
                 
-            # Custom TXXX frames for MusicBrainz and ReplayGain
             if track_info.musicbrainz_trackid:
                 id3_audio.add(TXXX(encoding=3, desc="MusicBrainz Track Id", text=[track_info.musicbrainz_trackid]))
             if track_info.musicbrainz_albumid:
@@ -176,6 +177,69 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 id3_audio.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=image_data))
                 
             id3_audio.save(str(track_info.file_path), v2_version=3)
+            
+        elif ext in (".m4a", ".mp4", ".alac"):
+            from mutagen.mp4 import MP4, MP4Cover
+            audio = MP4(str(track_info.file_path))
+            audio["\xa9ART"] = [track_info.artist]
+            audio["\xa9nam"] = [track_info.title]
+            audio["\xa9alb"] = [track_info.album]
+            if track_info.album_artist: audio["aART"] = [track_info.album_artist]
+            if track_info.track_number is not None: audio["trkn"] = [(track_info.track_number, 0)]
+            if track_info.date: audio["\xa9day"] = [track_info.date]
+            if track_info.genre: audio["\xa9gen"] = [track_info.genre]
+            if track_info.bpm is not None: audio["tmpo"] = [round(track_info.bpm)]
+            
+            if cover_art_path and cover_art_path.exists():
+                with open(cover_art_path, "rb") as f:
+                    image_data = f.read()
+                fmt = MP4Cover.FORMAT_JPEG if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else MP4Cover.FORMAT_PNG
+                audio["covr"] = [MP4Cover(image_data, imageformat=fmt)]
+            audio.save()
+            
+        elif ext in (".ogg", ".opus"):
+            import base64
+
+            from mutagen.oggvorbis import OggVorbis
+            audio = OggVorbis(str(track_info.file_path))
+            audio["ARTIST"] = [track_info.artist]
+            audio["TITLE"] = [track_info.title]
+            audio["ALBUM"] = [track_info.album]
+            if track_info.album_artist: audio["ALBUMARTIST"] = [track_info.album_artist]
+            if track_info.track_number is not None: audio["TRACKNUMBER"] = [str(track_info.track_number)]
+            if track_info.date: audio["DATE"] = [track_info.date]
+            if track_info.genre: audio["GENRE"] = [track_info.genre]
+            if track_info.bpm is not None: audio["BPM"] = [f"{track_info.bpm:.1f}"]
+            
+            if cover_art_path and cover_art_path.exists():
+                with open(cover_art_path, "rb") as f:
+                    image_data = f.read()
+                picture = Picture()
+                picture.data = image_data
+                picture.type = 3
+                picture.mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
+                picture.desc = "Cover"
+                audio["metadata_block_picture"] = [base64.b64encode(picture.write()).decode("ascii")]
+            audio.save()
+            
+        else:
+            LOG.warning(f"Using generic fallback tagger for format {ext}. Some metadata (like Cover Art/ReplayGain) might not be saved.")
+            audio = File(str(track_info.file_path), easy=True)
+            if audio is not None:
+                try:
+                    audio["artist"] = [track_info.artist]
+                    audio["title"] = [track_info.title]
+                    audio["album"] = [track_info.album]
+                    if track_info.album_artist: audio["albumartist"] = [track_info.album_artist]
+                    if track_info.track_number is not None: audio["tracknumber"] = [str(track_info.track_number)]
+                    if track_info.date: audio["date"] = [track_info.date]
+                    if track_info.genre: audio["genre"] = [track_info.genre]
+                    if track_info.bpm is not None: audio["bpm"] = [str(round(track_info.bpm))]
+                    audio.save()
+                except Exception as e:  # noqa: BLE001
+                    LOG.error(f"Generic tagger failed to write to {ext}: {e}")
+            else:
+                LOG.warning(f"Writing metadata to {ext} files is not supported by mutagen.")
     except Exception as e:
         if isinstance(e, MetadataError):
             raise

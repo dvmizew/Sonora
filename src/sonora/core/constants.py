@@ -8,7 +8,7 @@ FFMPEG_CMD = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
 SOX_CMD = "sox.exe" if IS_WINDOWS else "sox"
 BPM_TAG_CMD = "bpm-tag.exe" if IS_WINDOWS else "bpm-tag"
 
-SUPPORTED_EXTS = frozenset({".flac", ".mp3", ".m4a", ".ogg", ".wav"})
+SUPPORTED_EXTS = frozenset({".flac", ".mp3", ".m4a", ".mp4", ".alac", ".ogg", ".opus", ".wav", ".aiff", ".wma"})
 
 GENRE_MAP = {
     "Hip-Hop": "Hip-Hop/Rap",
@@ -58,6 +58,89 @@ SUSPICIOUS_FEATS = frozenset({
     "ce", "când", "cum", "de ce", "pentru", "fără", "peste", "prin", "spre",
     "după", "lângă", "între", "sub", "dinspre", "înspre", "până", "dintre"
 })
+# Alias Mappings (Real Names to Stage Names)
+ARTIST_ALIASES: dict[str, str] = {
+    # M.G.L.
+    "matasaru leonard george": "M.G.L.",
+    "matasaru george leonard": "M.G.L.",
+    "mătăsaru leonard george": "M.G.L.",
+    "mătăsaru george leonard": "M.G.L.",
+    "mătăsaru george-leonard": "M.G.L.",
+    "m.g.l": "M.G.L.",
+    "mgl": "M.G.L.",
+    
+    # Nane
+    "stefan avram cherescu": "Nane",
+    "ștefan avram cherescu": "Nane",
+    "stefan cherescu": "Nane",
+    "ștefan cherescu": "Nane",
+    "nane": "Nane",
+    
+    # Killa Fonic
+    "ionut raducanu": "Killa Fonic",
+    "ionuț răducanu": "Killa Fonic",
+    "ionut rapciug": "Killa Fonic",
+    "ionuț răpciug": "Killa Fonic",
+    "killa fonic": "Killa Fonic",
+    
+    # Ian & Azteca
+    "anghel georgian bogdan": "Ian",
+    "bogdan georgian anghel": "Ian",
+    "ian": "Ian",
+    "andrew edward nedelcu": "Azteca",
+    "andrew-edward nedelcu": "Azteca",
+    
+    # Amuly
+    "hameed amil": "Amuly",
+    "alexandru mincu": "Amuly",
+    
+    # Bvcovia & Rava
+    "raduly ioan marian": "Bvcovia",
+    "ioan marian raduly": "Bvcovia",
+    "ravanelli florin oita": "Rava",
+    "ravanelli florin oiță": "Rava",
+    
+    # Noua Unspe
+    "ghinea alexandru daniel": "Noua Unspe",
+    
+    # Satra B.E.N.Z Members
+    "darius vlad cretan": "Nosfe",
+    "darius vlad crețan": "Nosfe",
+    "bogdan david ionita": "Keed",
+    "bogdan david ioniță": "Keed",
+    "catalin guta": "Super ED",
+    "cătălin guță": "Super ED",
+    
+    # Hip-Hop Legends (CTC, etc)
+    "vlad munteanu": "DOC",
+    "vlad-costin munteanu": "DOC",
+    "razvan eremia": "Deliric",
+    "răzvan eremia": "Deliric",
+    "deliric": "Deliric",
+    "marius stelian craciun": "Cedry2k",
+    "marius stelian crăciun": "Cedry2k",
+    "mihai adamescu": "Chimie",
+    "dragos tudorache": "Dragonu'",
+    "dragoș tudorache": "Dragonu'",
+    "b.u.g. mafia": "B.U.G. Mafia",
+    "bug mafia": "B.U.G. Mafia",
+    
+    # Pop / Mainstream
+    "stefan mihalache": "Connect-R",
+    "ștefan mihalache": "Connect-R",
+    "laurențiu mocanu": "Guess Who",
+    "laurentiu mocanu": "Guess Who",
+    "gabriel mihai istrate": "Shift",
+    "andrei mihai maria": "Smiley",
+    "andrei tiberiu maria": "Smiley",
+    "elena alexandra apostoleanu": "Inna",
+    "alin emil ghita": "El Nino",
+    "alin emil ghiță": "El Nino",
+    "maria alexandra florea": "Holy Molly",
+    "adriana livia opris": "Olivia Addams",
+    "adriana livia opriș": "Olivia Addams",
+}
+
 
 PROTECTED_ARTISTS = frozenset({
     "Play & Win", "Play&Win", "Rauf & Faik", "Rauf&Faik", "Simon & Garfunkel", "Earth, Wind & Fire",

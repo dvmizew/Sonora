@@ -7,11 +7,6 @@ from sonora.core.constants import BPM_TAG_CMD
 from sonora.core.exceptions import AudioProcessingError
 from sonora.core.logger import LOG
 
-try:
-    import librosa
-except ImportError:
-    librosa = None  # type: ignore
-
 
 def calculate_bpm(file_path: Path) -> float | None:
     """
@@ -34,7 +29,10 @@ def calculate_bpm(file_path: Path) -> float | None:
                     return round(bpm, 1)
         except Exception as e:  # noqa: BLE001
             LOG.debug(f"bpm-tag failed for {file_path}: {e}")
-    if librosa is None:
+            
+    try:
+        import librosa
+    except ImportError:
         raise AudioProcessingError("Librosa and bpm-tools are both missing. Cannot calculate BPM.")
 
     try:
