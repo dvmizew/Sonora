@@ -1,92 +1,81 @@
 # Sonora
 
-Sonora is a CLI music management tool for FLAC, MP3, M4A, OGG, and WAV collections. It handles automatic metadata tagging, audio stream integrity auditing, loudness analysis, synchronized lyrics fetching, and library organization.
+CLI tool for managing local music libraries. Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, and WMA.
 
-## Features
+Features:
+- **Tagging**: Fetches metadata, cover art, and mood tags from MusicBrainz, AcoustID, Discogs, Last.fm, and iTunes.
+- **Processing**: 
+  - BPM detection (`bpm-tools` / `librosa`).
+  - EBU R128 loudness & ReplayGain 2.0 (`ffmpeg`).
+  - 16kHz spectral analysis for fake lossless detection (`sox`).
+- **Lyrics**: Downloads synchronized `.lrc` lyrics (Lrclib, Musixmatch, Genius, NetEase).
+- **Auditing**: Validates FLAC MD5 checksums and flags missing/corrupted metadata.
+- **Organization**: Renames files based on metadata and isolates singles into a dedicated directory.
 
-- **Autotagging**: Query MusicBrainz, AcoustID, Discogs, Last.fm, and iTunes Search API for metadata, release dates, mood tags, and high-res cover art.
-- **Audio Processing**: 
-  - Librosa BPM detection.
-  - FFmpeg EBU R128 loudness analysis & ReplayGain 2.0 calculations.
-  - Optional SoX 16kHz spectral analysis for fake lossless detection.
-- **Synchronized Lyrics**: Fetch `.lrc` lyrics via Lrclib, Musixmatch, Genius, and NetEase (`syncedlyrics`).
-- **Integrity Auditing**: Verify native FLAC audio stream MD5 checksums (`flac -t`), detect corrupt bracket metadata (`[HQ]`, `[FLAC]`), and identify missing tags.
-- **Renaming & Organization**: Rename tracks from metadata while updating `.lrc` header tags, and automatically separate standalone singles from full album folders.
+## Dependencies
 
-## System Dependencies
-
-Sonora uses system binaries for low-level audio analysis and verification:
+Requires system packages for audio processing:
 
 ```bash
 # Arch Linux
-sudo pacman -S ffmpeg flac sox
+sudo pacman -S ffmpeg flac sox bpm-tools
 
 # Debian / Ubuntu
-sudo apt install ffmpeg flac sox
-
-# Fedora
-sudo dnf install ffmpeg flac sox
+sudo apt install ffmpeg flac sox bpm-tools
 
 # macOS
-brew install ffmpeg flac sox
+brew install ffmpeg flac sox bpm-tools
 ```
 
-## Installation
+## Build
+
+Compile the portable binary via PyInstaller:
 
 ```bash
 git clone https://github.com/dvmizew/Sonora.git
 cd Sonora
-pip install -e .
+pip install -r requirements.txt
+pyinstaller --name sonora --onefile --clean src/sonora/cli/main.py
+
+./dist/sonora --help
 ```
 
-## CLI Usage
+## Usage
 
-### `sonora tag` — Autotag audio files
-Tags files in a directory using parallel worker threads:
+### `tag`
+Tags files concurrently.
 
 ```bash
-# Tag a folder (all processing engines enabled by default)
 sonora tag /path/to/album
 
-# With API keys and custom thread count
-sonora tag /path/to/album -w 8 --lastfm-key KEY --acoustid-key KEY --discogs-token TOKEN
+# Dry run (preview only)
+sonora tag /path/to/album --dry-run
 
-# Disable specific features
-sonora tag /path/to/album --no-bpm --no-replaygain --no-art
+# Force refresh (ignore MBID cache)
+sonora tag /path/to/album --force
+
+# With API keys and custom threads
+sonora tag /path/to/album -w 8 --lastfm-key KEY --acoustid-key KEY --discogs-token TOKEN
 ```
 
-### `sonora audit` — Audit library integrity
-Scans folders recursively for corrupted FLACs, bad tags, or missing `.lrc` files:
+### `audit`
+Scans for corrupt files and missing tags.
 
 ```bash
-# Basic audit
 sonora audit /path/to/library
 
-# Export JSON report
+# Export JSON
 sonora audit /path/to/library --json report.json
 
-# Include spectral cutoff check (slow)
+# Enable spectral cutoff check (slow)
 sonora audit /path/to/library --spectral
 ```
 
-### `sonora rename` — Rename files & sync LRC headers
-Renames files to `01 - Artist - Title.ext` and keeps `.lrc` header tags (`[ar:]`, `[ti:]`) in sync:
-
+### `rename` & `organize`
 ```bash
+# Rename files & sync LRC headers
 sonora rename /path/to/album
-```
 
-### `sonora organize` — Separate single tracks
-Moves single tracks (folders with <= 2 tracks or mixed album tags) to a dedicated Singles directory:
-
-```bash
+# Move 1-2 track folders to a Singles directory
 sonora organize /path/to/music --target-singles /path/to/Singles
-```
-
-## Development & Testing
-
-Run unit tests:
-
-```bash
-python3 -m unittest discover -s tests
 ```
