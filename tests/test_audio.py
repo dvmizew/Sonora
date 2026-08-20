@@ -114,8 +114,11 @@ class TestAudioEngine(unittest.TestCase):
         self.assertIn("/tmp/1.flac", args)
         self.assertIn("/tmp/2.flac", args)
 
-    @patch("sonora.audio.bpm.librosa")
-    def test_calculate_bpm_with_mocked_librosa(self, mock_librosa):
+    @patch.dict("sys.modules", {"librosa": MagicMock()})
+    @patch("shutil.which", return_value=None)
+    def test_calculate_bpm_with_mocked_librosa(self, mock_which):
+        import sys
+        mock_librosa = sys.modules["librosa"]
         mock_librosa.load.return_value = (None, 44100)
         mock_librosa.beat.beat_track.return_value = (124.5, None)
 
