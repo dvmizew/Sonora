@@ -8,7 +8,7 @@ FFMPEG_CMD = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
 SOX_CMD = "sox.exe" if IS_WINDOWS else "sox"
 BPM_TAG_CMD = "bpm-tag.exe" if IS_WINDOWS else "bpm-tag"
 
-SUPPORTED_EXTS = frozenset({".flac", ".mp3", ".m4a", ".mp4", ".alac", ".ogg", ".opus", ".wav", ".aiff", ".wma"})
+SUPPORTED_EXTS = frozenset({".flac", ".mp3", ".m4a", ".mp4", ".alac", ".ogg", ".opus", ".wav", ".aiff", ".wma", ".ape", ".wv", ".mpc"})
 
 GENRE_MAP = {
     "Hip-Hop": "Hip-Hop/Rap",

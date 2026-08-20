@@ -1,6 +1,6 @@
 # Sonora
 
-CLI tool for managing local music libraries. Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, and WMA.
+CLI tool for managing local music libraries. Fully supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 
 Features:
 - **Tagging**: Fetches metadata, cover art, and mood tags from MusicBrainz, AcoustID, Discogs, Last.fm, and iTunes.

@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from mutagen._file import File
+from mutagen.aiff import AIFF
+from mutagen.asf import ASF
 from mutagen.flac import FLAC, Picture
 from mutagen.id3 import ID3
 from mutagen.id3._frames import (
@@ -15,6 +17,10 @@ from mutagen.id3._frames import (
     TRCK,
     TXXX,
 )
+from mutagen.mp3 import MP3
+from mutagen.mp4 import MP4, MP4Cover
+from mutagen.oggvorbis import OggVorbis
+from mutagen.wave import WAVE
 
 from sonora.core.exceptions import MetadataError
 from sonora.core.logger import LOG
@@ -33,38 +39,56 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         audio = File(str(file_path))
         if audio is None:
             raise MetadataError(f"Unsupported audio format: {file_path}")
-        def get_tag(key: str) -> str | None:
-            val = audio.get(key)
-            if not val:
-                return None
-            if isinstance(val, list):
-                return str(val[0])
-            return str(val)
+        def get_first_of(*keys: str) -> str | None:
+            for k in keys:
+                val = audio.get(k)
+                if val:
+                    if isinstance(val, list):
+                        if len(val) > 0 and val[0] is not None:
+                            # MP4 stores track numbers as a tuple: (track, total_tracks)
+                            if isinstance(val[0], tuple) and len(val[0]) > 0:
+                                return str(val[0][0])
+                            # Generic lists (Vorbis, Atom text arrays)
+                            return str(val[0])
+                    else:
+                        # ID3 frames (e.g. TPE1, TIT2) have a `.text` attribute
+                        if hasattr(val, "text") and isinstance(val.text, list) and len(val.text) > 0:
+                            return str(val.text[0])
+                        return str(val)
+            return None
 
-        artist = get_tag("artist") or get_tag("ARTIST") or "Unknown Artist"
-        title = get_tag("title") or get_tag("TITLE") or "Unknown Title"
-        album = get_tag("album") or get_tag("ALBUM") or "Unknown Album"
-        album_artist = get_tag("albumartist") or get_tag("ALBUMARTIST")
-        date = normalize_date(get_tag("date") or get_tag("DATE") or get_tag("year"))
-        genre = normalize_genre(get_tag("genre") or get_tag("GENRE"))
-        isrc = get_tag("isrc") or get_tag("ISRC")
-        raw_track = get_tag("tracknumber") or get_tag("TRACKNUMBER")
+        artist = get_first_of("TPE1", "ARTIST", "\xa9ART", "artist", "Author", "Artist") or "Unknown Artist"
+        title = get_first_of("TIT2", "TITLE", "\xa9nam", "title", "Title") or "Unknown Title"
+        album = get_first_of("TALB", "ALBUM", "\xa9alb", "album", "WM/AlbumTitle", "Album") or "Unknown Album"
+        album_artist = get_first_of("TPE2", "ALBUMARTIST", "aART", "albumartist", "WM/AlbumArtist", "Album Artist")
+        date_str = get_first_of("TDRC", "DATE", "\xa9day", "date", "year", "WM/Year", "Year")
+        date = normalize_date(date_str)
+        genre = normalize_genre(get_first_of("TCON", "GENRE", "\xa9gen", "genre", "WM/Genre", "Genre"))
+        isrc = get_first_of("TSRC", "ISRC", "isrc", "WM/ISRC")
+        
+        raw_track = get_first_of("TRCK", "TRACKNUMBER", "trkn", "tracknumber", "WM/TrackNumber", "Track")
         track_number = None
         if raw_track:
             try:
+                # Handle ID3 formats like "1/12"
                 track_number = int(str(raw_track).split("/")[0])
             except ValueError as e:
                 LOG.debug(f"Failed to parse track number '{raw_track}': {e}")
-        raw_bpm = get_tag("bpm") or get_tag("BPM")
+                
+        raw_bpm = get_first_of("TBPM", "BPM", "tmpo", "bpm", "WM/BeatsPerMinute")
         bpm = None
         if raw_bpm:
             try:
                 bpm = float(raw_bpm)
             except ValueError as e:
                 LOG.debug(f"Failed to parse BPM '{raw_bpm}': {e}")
+                
         sample_rate = getattr(audio.info, "sample_rate", None)
         bitrate = getattr(audio.info, "bitrate", None)
         channels = getattr(audio.info, "channels", None)
+
+        mb_track = get_first_of("TXXX:MusicBrainz Track Id", "MUSICBRAINZ_TRACKID", "musicbrainz_trackid", "MusicBrainz/Track Id")
+        mb_album = get_first_of("TXXX:MusicBrainz Album Id", "MUSICBRAINZ_ALBUMID", "musicbrainz_albumid", "MusicBrainz/Album Id")
 
         return TrackInfo(
             file_path=file_path,
@@ -80,8 +104,8 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             sample_rate=sample_rate,
             bitrate=bitrate,
             channels=channels,
-            musicbrainz_trackid=get_tag("musicbrainz_trackid"),
-            musicbrainz_albumid=get_tag("musicbrainz_albumid"),
+            musicbrainz_trackid=mb_track,
+            musicbrainz_albumid=mb_album,
         )
     except Exception as e:
         if isinstance(e, MetadataError):
@@ -99,32 +123,27 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
 
     try:
         ext = track_info.file_path.suffix.lower()
-        if ext == ".flac":
-            flac_audio = FLAC(str(track_info.file_path))
-            flac_audio["ARTIST"] = [track_info.artist]
-            flac_audio["TITLE"] = [track_info.title]
-            flac_audio["ALBUM"] = [track_info.album]
+        if ext in (".flac", ".ogg", ".opus"):
+            if ext == ".flac":
+                audio_container = FLAC(str(track_info.file_path))
+            else:
+                audio_container = OggVorbis(str(track_info.file_path))
 
-            if track_info.album_artist:
-                flac_audio["ALBUMARTIST"] = [track_info.album_artist]
-            if track_info.track_number is not None:
-                flac_audio["TRACKNUMBER"] = [str(track_info.track_number)]
-            if track_info.date:
-                flac_audio["DATE"] = [track_info.date]
-            if track_info.genre:
-                flac_audio["GENRE"] = [track_info.genre]
-            if track_info.isrc:
-                flac_audio["ISRC"] = [track_info.isrc]
-            if track_info.bpm is not None:
-                flac_audio["BPM"] = [f"{track_info.bpm:.1f}"]
-            if track_info.musicbrainz_trackid:
-                flac_audio["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
-            if track_info.musicbrainz_albumid:
-                flac_audio["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
-            if track_info.replaygain_track_gain is not None:
-                flac_audio["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
-            if track_info.replaygain_track_peak is not None:
-                flac_audio["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
+            audio_container["ARTIST"] = [track_info.artist]
+            audio_container["TITLE"] = [track_info.title]
+            audio_container["ALBUM"] = [track_info.album]
+            if track_info.album_artist: audio_container["ALBUMARTIST"] = [track_info.album_artist]
+            if track_info.track_number is not None: audio_container["TRACKNUMBER"] = [str(track_info.track_number)]
+            if track_info.date: audio_container["DATE"] = [track_info.date]
+            if track_info.genre: audio_container["GENRE"] = [track_info.genre]
+            if track_info.bpm is not None: audio_container["BPM"] = [f"{track_info.bpm:.1f}"]
+            if track_info.musicbrainz_trackid: audio_container["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
+            if track_info.musicbrainz_albumid: audio_container["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
+
+            if ext == ".flac":
+                if track_info.isrc: audio_container["ISRC"] = [track_info.isrc]
+                if track_info.replaygain_track_gain is not None: audio_container["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
+                if track_info.replaygain_track_peak is not None: audio_container["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
 
             if cover_art_path and cover_art_path.exists():
                 with open(cover_art_path, "rb") as f:
@@ -134,41 +153,57 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 picture.type = 3  # Front Cover
                 picture.mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                 picture.desc = "Cover"
-                flac_audio.clear_pictures()
-                flac_audio.add_picture(picture)
+                
+                if ext == ".flac":
+                    if hasattr(audio_container, "clear_pictures"):
+                        audio_container.clear_pictures()  # type: ignore
+                    if hasattr(audio_container, "add_picture"):
+                        audio_container.add_picture(picture)  # type: ignore
+                else:
+                    import base64
+                    audio_container["metadata_block_picture"] = [base64.b64encode(picture.write()).decode("ascii")]
 
-            flac_audio.save()
+            audio_container.save()
             
-        elif ext == ".mp3":
-            try:
-                id3_audio = ID3(str(track_info.file_path))
-            except Exception as e:  # noqa: BLE001
-                LOG.debug(f"ID3 parsing failed, creating empty ID3: {e}")
-                id3_audio = ID3()
+        elif ext in (".mp3", ".wav", ".aiff"):
+            audio_container = None
+            if ext == ".mp3":
+                try:
+                    audio_container = MP3(str(track_info.file_path))
+                    if audio_container.tags is None:
+                        audio_container.add_tags()
+                    id3_audio = audio_container.tags
+                except Exception as e:  # noqa: BLE001
+                    LOG.debug(f"MP3 ID3 parsing failed: {e}")
+                    id3_audio = ID3()
+            elif ext == ".wav":
+                audio_container = WAVE(str(track_info.file_path))
+                if audio_container.tags is None:
+                    audio_container.add_tags()
+                id3_audio = audio_container.tags
+            else:
+                audio_container = AIFF(str(track_info.file_path))
+                if audio_container.tags is None:
+                    audio_container.add_tags()
+                id3_audio = audio_container.tags
+
+            if id3_audio is None:
+                raise MetadataError(f"Failed to initialize ID3 tags for {track_info.file_path}")
                 
             id3_audio.add(TPE1(encoding=3, text=[track_info.artist]))
             id3_audio.add(TIT2(encoding=3, text=[track_info.title]))
             id3_audio.add(TALB(encoding=3, text=[track_info.album]))
             
-            if track_info.album_artist:
-                id3_audio.add(TPE2(encoding=3, text=[track_info.album_artist]))
-            if track_info.track_number is not None:
-                id3_audio.add(TRCK(encoding=3, text=[str(track_info.track_number)]))
-            if track_info.date:
-                id3_audio.add(TDRC(encoding=3, text=[track_info.date]))
-            if track_info.genre:
-                id3_audio.add(TCON(encoding=3, text=[track_info.genre]))
-            if track_info.bpm is not None:
-                id3_audio.add(TBPM(encoding=3, text=[str(round(track_info.bpm))]))
+            if track_info.album_artist: id3_audio.add(TPE2(encoding=3, text=[track_info.album_artist]))
+            if track_info.track_number is not None: id3_audio.add(TRCK(encoding=3, text=[str(track_info.track_number)]))
+            if track_info.date: id3_audio.add(TDRC(encoding=3, text=[track_info.date]))
+            if track_info.genre: id3_audio.add(TCON(encoding=3, text=[track_info.genre]))
+            if track_info.bpm is not None: id3_audio.add(TBPM(encoding=3, text=[str(round(track_info.bpm))]))
                 
-            if track_info.musicbrainz_trackid:
-                id3_audio.add(TXXX(encoding=3, desc="MusicBrainz Track Id", text=[track_info.musicbrainz_trackid]))
-            if track_info.musicbrainz_albumid:
-                id3_audio.add(TXXX(encoding=3, desc="MusicBrainz Album Id", text=[track_info.musicbrainz_albumid]))
-            if track_info.replaygain_track_gain is not None:
-                id3_audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=[f"{track_info.replaygain_track_gain:+.2f} dB"]))
-            if track_info.replaygain_track_peak is not None:
-                id3_audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_PEAK", text=[f"{track_info.replaygain_track_peak:.6f}"]))
+            if track_info.musicbrainz_trackid: id3_audio.add(TXXX(encoding=3, desc="MusicBrainz Track Id", text=[track_info.musicbrainz_trackid]))
+            if track_info.musicbrainz_albumid: id3_audio.add(TXXX(encoding=3, desc="MusicBrainz Album Id", text=[track_info.musicbrainz_albumid]))
+            if track_info.replaygain_track_gain is not None: id3_audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text=[f"{track_info.replaygain_track_gain:+.2f} dB"]))
+            if track_info.replaygain_track_peak is not None: id3_audio.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_PEAK", text=[f"{track_info.replaygain_track_peak:.6f}"]))
                 
             if cover_art_path and cover_art_path.exists():
                 with open(cover_art_path, "rb") as f:
@@ -176,10 +211,12 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                 id3_audio.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=image_data))
                 
-            id3_audio.save(str(track_info.file_path), v2_version=3)
+            if audio_container is not None:
+                audio_container.save(v2_version=3)
+            else:
+                id3_audio.save(str(track_info.file_path), v2_version=3)
             
         elif ext in (".m4a", ".mp4", ".alac"):
-            from mutagen.mp4 import MP4, MP4Cover
             mp4_audio = MP4(str(track_info.file_path))
             mp4_audio["\xa9ART"] = [track_info.artist]
             mp4_audio["\xa9nam"] = [track_info.title]
@@ -197,49 +234,44 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 mp4_audio["covr"] = [MP4Cover(image_data, imageformat=fmt)]
             mp4_audio.save()
             
-        elif ext in (".ogg", ".opus"):
-            import base64
 
-            from mutagen.oggvorbis import OggVorbis
-            ogg_audio = OggVorbis(str(track_info.file_path))
-            ogg_audio["ARTIST"] = [track_info.artist]
-            ogg_audio["TITLE"] = [track_info.title]
-            ogg_audio["ALBUM"] = [track_info.album]
-            if track_info.album_artist: ogg_audio["ALBUMARTIST"] = [track_info.album_artist]
-            if track_info.track_number is not None: ogg_audio["TRACKNUMBER"] = [str(track_info.track_number)]
-            if track_info.date: ogg_audio["DATE"] = [track_info.date]
-            if track_info.genre: ogg_audio["GENRE"] = [track_info.genre]
-            if track_info.bpm is not None: ogg_audio["BPM"] = [f"{track_info.bpm:.1f}"]
-            
-            if cover_art_path and cover_art_path.exists():
-                with open(cover_art_path, "rb") as f:
-                    image_data = f.read()
-                picture = Picture()
-                picture.data = image_data
-                picture.type = 3
-                picture.mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
-                picture.desc = "Cover"
-                ogg_audio["metadata_block_picture"] = [base64.b64encode(picture.write()).decode("ascii")]
-            ogg_audio.save()
+        elif ext == ".wma":
+            asf_audio = ASF(str(track_info.file_path))
+            asf_audio["Author"] = [track_info.artist]
+            asf_audio["Title"] = [track_info.title]
+            asf_audio["WM/AlbumTitle"] = [track_info.album]
+            if track_info.album_artist: asf_audio["WM/AlbumArtist"] = [track_info.album_artist]
+            if track_info.track_number is not None: asf_audio["WM/TrackNumber"] = [str(track_info.track_number)]
+            if track_info.date: asf_audio["WM/Year"] = [track_info.date]
+            if track_info.genre: asf_audio["WM/Genre"] = [track_info.genre]
+            if track_info.bpm is not None: asf_audio["WM/BeatsPerMinute"] = [str(round(track_info.bpm))]
+            if track_info.musicbrainz_trackid: asf_audio["MusicBrainz/Track Id"] = [track_info.musicbrainz_trackid]
+            if track_info.musicbrainz_albumid: asf_audio["MusicBrainz/Album Id"] = [track_info.musicbrainz_albumid]
+            asf_audio.save()
+
+        elif ext in (".ape", ".wv", ".mpc"):
+            ape_audio = File(str(track_info.file_path))
+            if ape_audio is not None:
+                if ape_audio.tags is None:
+                    ape_audio.add_tags()
+                ape_audio["Artist"] = [track_info.artist]
+                ape_audio["Title"] = [track_info.title]
+                ape_audio["Album"] = [track_info.album]
+                if track_info.album_artist: ape_audio["Album Artist"] = [track_info.album_artist]
+                if track_info.track_number is not None: ape_audio["Track"] = [str(track_info.track_number)]
+                if track_info.date: ape_audio["Year"] = [track_info.date]
+                if track_info.genre: ape_audio["Genre"] = [track_info.genre]
+                if track_info.musicbrainz_trackid: ape_audio["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
+                
+                if cover_art_path and cover_art_path.exists():
+                    with open(cover_art_path, "rb") as f:
+                        image_data = f.read()
+                    filename = cover_art_path.name.encode("utf-8")
+                    ape_audio["Cover Art (Front)"] = filename + b"\0" + image_data
+                ape_audio.save()
             
         else:
-            LOG.warning(f"Using generic fallback tagger for format {ext}. Some metadata (like Cover Art/ReplayGain) might not be saved.")
-            generic_audio = File(str(track_info.file_path), easy=True)
-            if generic_audio is not None:
-                try:
-                    generic_audio["artist"] = [track_info.artist]
-                    generic_audio["title"] = [track_info.title]
-                    generic_audio["album"] = [track_info.album]
-                    if track_info.album_artist: generic_audio["albumartist"] = [track_info.album_artist]
-                    if track_info.track_number is not None: generic_audio["tracknumber"] = [str(track_info.track_number)]
-                    if track_info.date: generic_audio["date"] = [track_info.date]
-                    if track_info.genre: generic_audio["genre"] = [track_info.genre]
-                    if track_info.bpm is not None: generic_audio["bpm"] = [str(round(track_info.bpm))]
-                    generic_audio.save()
-                except Exception as e:  # noqa: BLE001
-                    LOG.error(f"Generic tagger failed to write to {ext}: {e}")
-            else:
-                LOG.warning(f"Writing metadata to {ext} files is not supported by mutagen.")
+            raise MetadataError(f"Writing metadata to {ext} files is not supported.")
     except Exception as e:
         if isinstance(e, MetadataError):
             raise
