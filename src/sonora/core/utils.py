@@ -1,7 +1,3 @@
-"""
-Core text processing and filesystem path sanitization utilities.
-"""
-
 import re
 import threading
 import time

@@ -1,7 +1,3 @@
-"""
-FLAC audio stream MD5 checksum verification utility.
-"""
-
 import subprocess
 from pathlib import Path
 

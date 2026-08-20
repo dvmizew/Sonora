@@ -2,7 +2,6 @@ import sys
 
 IS_WINDOWS = sys.platform == 'win32'
 
-# Executable definitions
 FLAC_CMD = "flac.exe" if IS_WINDOWS else "flac"
 METAFLAC_CMD = "metaflac.exe" if IS_WINDOWS else "metaflac"
 FFMPEG_CMD = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
@@ -100,5 +99,3 @@ PROTECTED_ARTISTS = frozenset({
 from sonora import __version__
 
 USER_AGENT = f"Sonora/{__version__} (+https://github.com/dvmizew/Sonora)"
-
-

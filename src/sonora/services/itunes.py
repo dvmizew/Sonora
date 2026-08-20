@@ -1,7 +1,3 @@
-"""
-iTunes Search API service client for metadata and high-res cover art.
-"""
-
 from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api

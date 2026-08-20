@@ -1,7 +1,3 @@
-"""
-Folder organizer module for separating Singles from full Albums.
-"""
-
 import shutil
 from pathlib import Path
 

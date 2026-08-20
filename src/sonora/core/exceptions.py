@@ -1,8 +1,3 @@
-"""
-Custom exception hierarchy for Sonora.
-"""
-
-
 class SonoraError(Exception):
     """Base exception for all Sonora errors."""
 

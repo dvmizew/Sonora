@@ -1,7 +1,3 @@
-"""
-Domain data models for Sonora tracks, albums, and audit reports.
-"""
-
 from dataclasses import dataclass, field
 from pathlib import Path
 

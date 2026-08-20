@@ -22,6 +22,11 @@ from sonora.services.musicbrainz import fetch_track_mbid
 
 
 class TestServicesEngine(unittest.TestCase):
+    def setUp(self):
+        import sonora.services.discogs
+        sonora.services.discogs._discogs_client_instance = None
+        sonora.services.discogs._discogs_client_token = None
+
     @patch("sonora.core.http.SESSION.get")
     def test_fetch_itunes_cover_art_url(self, mock_get):
         mock_response = MagicMock()
@@ -169,8 +174,9 @@ class TestServicesEngine(unittest.TestCase):
         with self.assertRaises(APIServiceError):
             fetch_track_mbid("Artist", "Title")
 
+    @patch("sonora.services.discogs.get_cached_api", return_value=None)
     @patch("sonora.services.discogs.discogs_client")
-    def test_discogs_error_handling(self, mock_discogs_mod):
+    def test_discogs_error_handling(self, mock_discogs_mod, mock_cache):
         mock_client = MagicMock()
         mock_client.search.side_effect = Exception("Discogs 401 Unauthorized")
         mock_discogs_mod.Client.return_value = mock_client

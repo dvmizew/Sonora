@@ -1,7 +1,3 @@
-"""
-Spectral analysis for detecting fake lossless (upsampled) audio files.
-"""
-
 import re
 import subprocess
 from pathlib import Path

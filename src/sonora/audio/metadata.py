@@ -1,7 +1,3 @@
-"""
-Metadata reader and writer using Mutagen for FLAC and audio formats.
-"""
-
 from pathlib import Path
 
 from mutagen._file import File

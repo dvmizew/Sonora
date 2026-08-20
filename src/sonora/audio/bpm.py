@@ -1,7 +1,3 @@
-"""
-BPM calculation module for audio files using native C binaries (bpm-tag) and Librosa fallback.
-"""
-
 import re
 import shutil
 import subprocess
@@ -46,7 +42,6 @@ def calculate_bpm(file_path: Path) -> float | None:
         raise AudioProcessingError("Librosa and bpm-tools are both missing. Cannot calculate BPM.")
 
     try:
-        # Optimization: Don't decode the entire track at 44.1kHz!
         # Skip intro (30s), read only 60s, and force downsample to 22050 Hz (sufficient for beat detection)
         y, sr = librosa.load(str(file_path), sr=22050, offset=30, duration=60)
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)

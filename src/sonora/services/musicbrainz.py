@@ -14,7 +14,6 @@ _MB_LIMITER = RateLimiter(interval_seconds=1.0)
 
 
 def init_musicbrainz(app_name: str = "Sonora", version: str = "0.1.0", contact: str = "danielradu02@users.noreply.github.com") -> None:
-    """Initialize MusicBrainz User-Agent header and built-in rate limiter."""
     if musicbrainzngs is not None:
         musicbrainzngs.set_useragent(app_name, version, contact)
         musicbrainzngs.set_rate_limit(limit_or_interval=1.0, new_requests=1)
@@ -92,7 +91,6 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, Any] | None
 
 
 def fetch_track_mbid(artist: str, title: str) -> str | None:
-    """Search MusicBrainz for a track Recording ID (MBID)."""
     if musicbrainzngs is None:
         raise APIServiceError("musicbrainzngs library is not installed.")
 

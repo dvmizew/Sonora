@@ -1,8 +1,3 @@
-"""
-syncedlyrics service client for searching and fetching synchronized LRC lyrics.
-Supports Lrclib, Musixmatch, Genius, NetEase providers.
-"""
-
 import re
 from pathlib import Path
 
@@ -46,7 +41,6 @@ def clean_lyrics_text(text: str | None) -> str | None:
     for line in lines:
         s_line = line.strip()
         if not s_line:
-            # Avoid accumulating multiple consecutive empty lines
             if cleaned and cleaned[-1] != "":
                 cleaned.append("")
             continue
@@ -90,7 +84,7 @@ def fetch_synced_lyrics(
 ) -> str | None:
     """
     Search and fetch LRC lyrics for a track using syncedlyrics.
-    Preserves strict quality preference order: Enhanced (word-synced) -> Line-synced -> Plain text.
+    Quality preference order: Enhanced (word-synced) -> Line-synced -> Plain text.
     """
     if not artist or not title:
         return None

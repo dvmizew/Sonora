@@ -1,7 +1,3 @@
-"""
-Discogs API service client.
-"""
-
 import threading
 from typing import Any
 
@@ -42,6 +38,7 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
     if discogs_client is None:
         raise APIServiceError("discogs-client library is not installed.")
 
+    global _discogs_client_instance, _discogs_client_token
     if not album or normalize_str(album) in ["unknown album", "unknown"]:
         return None
 
@@ -75,4 +72,5 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
                 pass
             return None
         except Exception as e:
+            _discogs_client_instance = None
             raise APIServiceError(f"Discogs search failed for {artist} - {album}: {e}") from e

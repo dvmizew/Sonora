@@ -1,7 +1,3 @@
-"""
-File and directory renamer module with synchronized .lrc metadata header updater.
-"""
-
 import re
 from pathlib import Path
 

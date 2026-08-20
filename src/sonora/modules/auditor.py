@@ -1,8 +1,3 @@
-"""
-Library auditor module for checking FLAC checksum integrity, bracket corruption,
-genre compliance, missing LRC lyrics, and generating audit reports.
-"""
-
 import json
 import re
 from pathlib import Path
@@ -33,9 +28,6 @@ def check_brackets_corruption(name: str) -> list[str]:
 
 
 def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
-    """
-    Perform audit checks on a single audio file.
-    """
     issues: list[str] = []
     if not file_path.exists():
         return [f"File not found: {file_path}"]
@@ -94,15 +86,35 @@ def audit_library(
 ) -> AuditReport:
     """
     Scan an entire music library folder recursively, audit all audio files,
-    and generate an AuditReport dataclass (optionally writing to output_json).
+    and generate an AuditReport dataclass.
     """
     if not folder_path.exists():
         raise AudioProcessingError(f"Directory not found: {folder_path}")
 
     report = AuditReport(total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0)
 
-    for path in folder_path.rglob("*"):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeRemainingColumn,
+    )
+    from sonora.core.logger import CONSOLE
+
+    files_to_process = [p for p in folder_path.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeRemainingColumn(),
+        console=CONSOLE
+    ) as progress:
+        task = progress.add_task("[cyan]Auditing library...", total=len(files_to_process))
+        for path in files_to_process:
+            LOG.info(f"Auditing: {path.name}")
             report.total_files += 1
             file_issues = audit_file(path, check_spectral=check_spectral)
 
@@ -114,6 +126,8 @@ def audit_library(
                     report.missing_metadata += 1
                 if any("missing" in normalize_str(issue) and "lrc" in normalize_str(issue) for issue in file_issues):
                     report.missing_lrc += 1
+            
+            progress.advance(task)
 
     if output_json:
         total = report.total_files

@@ -1,7 +1,3 @@
-"""
-Parallel autotagger engine using ThreadPoolExecutor for tagging tracks & albums.
-"""
-
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +18,14 @@ from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import fetch_synced_lyrics
 from sonora.services.musicbrainz import fetch_track_mbid
+
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
 
 # Alias Mappings (Real Names to Stage Names)
 ARTIST_ALIASES: dict[str, str] = {
@@ -225,14 +229,12 @@ def process_single_track(
         except AudioProcessingError as e:
             LOG.debug(f"BPM calculation failed for {track_info.title}: {e}")
 
-    # 7. ReplayGain calculation is now deferred to the Album level in tag_album_folder.
-
-    # 8. Fetch iTunes Cover Art (Download only, don't embed yet)
+    # 7. Fetch iTunes Cover Art (Download only, don't embed yet)
     cover_jpg = None
     if fetch_itunes_art and file_path.suffix.lower() == ".flac":
         try:
             cover_jpg = file_path.parent / "cover.jpg"
-            # Optimization: Do not block all threads on network I/O unless necessary
+            # Do not block all threads on network I/O unless necessary
             with _get_cover_lock(file_path.parent):
                 art_downloaded = cover_jpg.exists() and not force
                 if not art_downloaded and not dry_run:
@@ -268,13 +270,13 @@ def process_single_track(
                     cover_jpg.unlink()
             cover_jpg = None
 
-    # 9. Write metadata tags back to file AND embed cover art in one single Disk I/O operation!
+    # 8. Write metadata tags back to file AND embed cover art in one single Disk I/O operation!
     if not dry_run:
         write_track_metadata(track_info, cover_art_path=cover_jpg)
     else:
         LOG.info(f"[DRY-RUN] Would write metadata tags to {file_path.name}")
 
-    # 10. Fetch & write .lrc lyrics file (and .synced.lrc copy if enhanced)
+    # 9. Fetch & write .lrc lyrics file (and .synced.lrc copy if enhanced)
     if fetch_lyrics:
         try:
             lrc = fetch_synced_lyrics(track_info.artist, track_info.title)
@@ -304,9 +306,6 @@ def tag_album_folder(
     max_workers: int = 4,
     **options: Any
 ) -> list[TrackInfo]:
-    """
-    Process and tag all audio files in an album folder (recursively) using a thread pool.
-    """
     valid_options = {
         "fetch_bpm", "fetch_replaygain", "fetch_lyrics", "fetch_itunes_art",
         "lastfm_api_key", "acoustid_api_key", "discogs_user_token", "options"
@@ -327,9 +326,6 @@ def tag_album_folder(
         return []
 
     results: list[TrackInfo] = []
-    
-    import importlib.util
-    has_rich = importlib.util.find_spec("rich") is not None
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_file = {}
@@ -347,32 +343,15 @@ def tag_album_folder(
             )
             future_to_file[future] = file_p
         
-        if has_rich and CONSOLE:
-            from rich.progress import (
-                BarColumn,
-                Progress,
-                SpinnerColumn,
-                TextColumn,
-                TimeRemainingColumn,
-            )
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeRemainingColumn(),
-                console=CONSOLE
-            ) as progress:
-                task = progress.add_task("[cyan]Tagging tracks...", total=len(audio_files))
-                for future in as_completed(future_to_file):
-                    file_p = future_to_file[future]
-                    try:
-                        info = future.result()
-                        results.append(info)
-                    except (AudioProcessingError, MetadataError, APIServiceError) as e:
-                        LOG.warning(f"Failed to process {file_p.name}: {e}")
-                    progress.advance(task)
-        else:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeRemainingColumn(),
+            console=CONSOLE
+        ) as progress:
+            task = progress.add_task("[cyan]Tagging tracks...", total=len(audio_files))
             for future in as_completed(future_to_file):
                 file_p = future_to_file[future]
                 try:
@@ -380,6 +359,7 @@ def tag_album_folder(
                     results.append(info)
                 except (AudioProcessingError, MetadataError, APIServiceError) as e:
                     LOG.warning(f"Failed to process {file_p.name}: {e}")
+                progress.advance(task)
 
     # After all tracks are tagged, compute Album ReplayGain (modifies files in-place via metaflac)
     if options.get("fetch_replaygain", True):

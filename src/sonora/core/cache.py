@@ -1,7 +1,3 @@
-"""
-Disk caching layer using diskcache for API response caching.
-"""
-
 import atexit
 import threading
 from pathlib import Path
@@ -21,12 +17,10 @@ _CACHE_LOCK = threading.Lock()
 _IGNORE_CACHE = False
 
 def set_ignore_cache(ignore: bool) -> None:
-    """Globally bypass reading from cache if True."""
     global _IGNORE_CACHE
     _IGNORE_CACHE = ignore
 
 def get_cache() -> Any:
-    """Lazy initialize and return sharded diskcache.FanoutCache instance for multi-threaded speed."""
     global _CACHE_INSTANCE
     if diskcache is not None and _CACHE_INSTANCE is None:
         with _CACHE_LOCK:
@@ -44,7 +38,6 @@ def get_cache() -> Any:
 
 
 def get_cached_api(key: str) -> Any | None:
-    """Retrieve value from disk cache by key."""
     if _IGNORE_CACHE:
         return None
         
@@ -69,7 +62,6 @@ def set_cached_api(key: str, value: Any, expire_seconds: int = 604800) -> None:
             LOG.debug(f"Cache store failed for key '{key}': {e}")
 
 def close_cache() -> None:
-    """Close the diskcache to release SQLite connections."""
     global _CACHE_INSTANCE
     with _CACHE_LOCK:
         if _CACHE_INSTANCE is not None:

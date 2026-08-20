@@ -1,7 +1,3 @@
-"""
-AcoustID and Chromaprint acoustic fingerprint service client.
-"""
-
 from pathlib import Path
 
 from sonora.core.cache import get_cached_api, set_cached_api

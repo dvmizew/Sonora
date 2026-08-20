@@ -1,7 +1,3 @@
-"""
-ReplayGain & Album Gain using native metaflac utility.
-"""
-
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -17,7 +13,7 @@ def calculate_album_replaygain(files: Sequence[Path], options: dict | None = Non
     """
     Use metaflac to calculate both Track and Album ReplayGain for a list of FLAC files.
     Skips if REPLAYGAIN_ALBUM_GAIN is already present.
-    Safely falls back to track-mode if audio properties (sample rate, channels, bit depth) are mixed.
+    Falls back to track-mode if audio properties (sample rate, channels, bit depth) are mixed.
     Returns True if ReplayGain was calculated and added, False otherwise.
     """
     flac_files = [str(f) for f in files if f.exists() and f.suffix.lower() == ".flac"]

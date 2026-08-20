@@ -1,7 +1,3 @@
-"""
-Command-line interface (CLI) main entrypoint for Sonora.
-"""
-
 import argparse
 import datetime
 import importlib.util
@@ -23,10 +19,9 @@ from sonora.modules.tagger import tag_album_folder
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build and return the main CLI argument parser with intuitive defaults."""
     parser = argparse.ArgumentParser(
         prog="sonora",
-        description="Sonora — Smart FLAC/MP3 music tagging, library auditing, and file organization",
+        description="Sonora - Music tagging, library auditing, and file organization",
     )
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--dry-run", action="store_true", help="Simulate actions without modifying files")
@@ -70,7 +65,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def handle_tag(args: argparse.Namespace, options: dict) -> int:
-    """Handle 'tag' subcommand execution."""
     from sonora.services.musicbrainz import init_musicbrainz
 
     init_musicbrainz()
@@ -94,18 +88,27 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
     )
     LOG.success(f"Successfully tagged {len(results)} tracks.")
 
+    total = len(results)
+    bpm_cnt = sum(1 for t in results if t.bpm is not None)
+    rg_cnt = sum(1 for t in results if t.replaygain_track_gain is not None)
+    mb_cnt = sum(1 for t in results if t.musicbrainz_trackid is not None)
+    genre_cnt = sum(1 for t in results if t.genre is not None)
+
+    bpm_pct = (bpm_cnt / total * 100) if total > 0 else 0.0
+    rg_pct = (rg_cnt / total * 100) if total > 0 else 0.0
+    mb_pct = (mb_cnt / total * 100) if total > 0 else 0.0
+    genre_pct = (genre_cnt / total * 100) if total > 0 else 0.0
+
+    tag_rows = [
+        ("Total Tracks Processed", str(total), None),
+        ("BPM Calculated", f"{bpm_cnt}/{total} ({bpm_pct:.0f}%)", "green" if bpm_cnt else "white"),
+        ("ReplayGain Calculated", f"{rg_cnt}/{total} ({rg_pct:.0f}%)", "green" if rg_cnt else "white"),
+        ("MusicBrainz Matched", f"{mb_cnt}/{total} ({mb_pct:.0f}%)", "green" if mb_cnt else "white"),
+        ("Genre Tagged", f"{genre_cnt}/{total} ({genre_pct:.0f}%)", "green" if genre_cnt else "white"),
+    ]
+    LOG.summary_table("Tagging Summary", tag_rows)
+
     if args.json:
-        total = len(results)
-        bpm_cnt = sum(1 for t in results if t.bpm is not None)
-        rg_cnt = sum(1 for t in results if t.replaygain_track_gain is not None)
-        mb_cnt = sum(1 for t in results if t.musicbrainz_trackid is not None)
-        genre_cnt = sum(1 for t in results if t.genre is not None)
-
-        bpm_pct = (bpm_cnt / total * 100) if total > 0 else 0.0
-        rg_pct = (rg_cnt / total * 100) if total > 0 else 0.0
-        mb_pct = (mb_cnt / total * 100) if total > 0 else 0.0
-        genre_pct = (genre_cnt / total * 100) if total > 0 else 0.0
-
         llm_summary = (
             f"Sonora tagged {total} audio tracks in '{args.path}'. "
             f"Enrichment summary: BPM {bpm_cnt}/{total} ({bpm_pct:.0f}%), "
@@ -146,31 +149,55 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
 
 
 def handle_audit(args: argparse.Namespace) -> int:
-    """Handle 'audit' subcommand execution."""
     LOG.info(f"Auditing music library: [bold]{args.path}[/bold]")
     report = audit_library(args.path, output_json=args.json, check_spectral=args.spectral)
     LOG.success(f"Audit completed: {report.total_files} files scanned, {len(report.issues)} issues identified.")
+
+    audit_rows = [
+        ("Total Files Scanned", str(report.total_files), None),
+        ("Corrupt Files", str(report.corrupt_files), "red" if report.corrupt_files else "green"),
+        ("Missing Metadata", str(report.missing_metadata), "yellow" if report.missing_metadata else "green"),
+        ("Missing LRC Lyrics", str(report.missing_lrc), "yellow" if report.missing_lrc else "green"),
+        ("Files with Issues", str(len(report.issues)), "red" if report.issues else "green"),
+    ]
+    LOG.summary_table("Validation Summary", audit_rows)
+
+    if report.issues:
+        LOG.warning("Specific issues found:")
+        for fpath, issues in report.issues.items():
+            fname = Path(fpath).name
+            for issue in issues:
+                LOG.error(f"[{fname}] {issue}")
+
     return 0
 
 
 def handle_rename(args: argparse.Namespace, options: dict) -> int:
-    """Handle 'rename' subcommand execution."""
     LOG.info(f"Renaming files in directory: [bold]{args.path}[/bold]")
     renamed = rename_directory_files(args.path, options=options)
     LOG.success(f"Renamed {len(renamed)} audio files and synchronized .lrc headers.")
+
+    rename_rows = [
+        ("Audio Files Processed", str(len(renamed)), None),
+        ("Files Renamed & LRC Synced", str(len(renamed)), "green" if renamed else "white"),
+    ]
+    LOG.summary_table("Renaming Summary", rename_rows)
     return 0
 
 
 def handle_organize(args: argparse.Namespace, options: dict) -> int:
-    """Handle 'organize' subcommand execution."""
     LOG.info(f"Organizing single tracks from {args.path} to {args.target_singles}")
     count = organize_library_singles(args.path, args.target_singles, options=options)
     LOG.success(f"Organized and moved {count} single tracks.")
+
+    organize_rows = [
+        ("Single Tracks Organized", str(count), "green" if count else "white"),
+    ]
+    LOG.summary_table("Organization Summary", organize_rows)
     return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Main CLI entrypoint."""
     if HAS_DOTENV:
         from dotenv import load_dotenv
         load_dotenv()
