@@ -35,8 +35,6 @@ def is_single_folder(folder_path: Path) -> bool:
             albums.add(normalize_str(info.album))
         except (MetadataError, OSError) as e:
             LOG.debug(f"Failed to read metadata for singles detection on {p}: {e}")
-
-    # If tracks belong to multiple different album names, it's a Singles collection
     return len(albums) > 1
 
 
@@ -78,8 +76,6 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                         shutil.move(str(path), str(target_file))
                     else:
                         LOG.info(f"[DRY-RUN] Would move {path.name} -> {target_file}")
-
-                    # Move accompanying .lrc file if present
                     lrc_path = path.with_suffix(".lrc")
                     if lrc_path.exists():
                         target_lrc = target_file.with_suffix(".lrc")
@@ -90,8 +86,6 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                                 LOG.info(f"[DRY-RUN] Would move LRC {lrc_path.name} -> {target_lrc}")
 
                     moved_count += 1
-                    
-                    # Cleanup empty parent directories
                     try:
                         if not dry_run and not any(parent.iterdir()):
                             parent.rmdir()

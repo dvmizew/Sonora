@@ -33,8 +33,6 @@ def sync_lrc_metadata(lrc_path: Path, track_info: TrackInfo) -> bool:
                 ti_found = True
             else:
                 new_lines.append(line)
-
-        # Prepend missing metadata headers at the top
         header_prefix: list[str] = []
         if not ar_found:
             header_prefix.append(f"[ar:{track_info.artist}]\n")
@@ -89,8 +87,6 @@ def rename_track_file(file_path: Path, format_pattern: str = "{track_number:02d}
         else:
             from sonora.core.logger import LOG
             LOG.info(f"[DRY-RUN] Would rename {file_path.name} -> {new_path.name}")
-
-    # Sync .lrc file if present
     old_lrc = file_path.with_suffix(".lrc")
     new_lrc = new_path.with_suffix(".lrc")
     if old_lrc.exists():

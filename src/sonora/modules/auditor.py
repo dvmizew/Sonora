@@ -34,35 +34,25 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
     if file_path.suffix.lower() not in SUPPORTED_EXTS:
         return []
-
-    # Check 1: FLAC stream MD5 integrity
     if file_path.suffix.lower() == ".flac":
         try:
             if not verify_flac_checksum(file_path):
                 issues.append("FLAC audio stream MD5 checksum verification failed (corrupted FLAC).")
         except AudioProcessingError as e:
             issues.append(f"Checksum check failed: {e}")
-
-        # Check 2: Fake lossless cutoff (optional, slow)
         if check_spectral:
             try:
                 if is_fake_lossless(file_path):
                     issues.append("Possible fake lossless (spectral cutoff below 16kHz).")
             except AudioProcessingError as e:
                 LOG.debug(f"Spectral analysis failed for {file_path}: {e}")
-
-    # Check 3: Read metadata tags
     try:
         track = read_track_metadata(file_path)
-
-        # Check bracket corruption in artist or title
         issues.extend(check_brackets_corruption(track.artist))
         issues.extend(check_brackets_corruption(track.title))
 
         if track.genre and any(normalize_str(bl) in normalize_str(track.genre) for bl in GENRE_BLACKLIST):
             issues.append(f"Blacklisted genre tag: '{track.genre}'")
-
-        # Check missing basic tags
         if track.artist == "Unknown Artist":
             issues.append("Missing ARTIST tag.")
         if track.title == "Unknown Title":
@@ -70,8 +60,6 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
     except MetadataError as e:
         issues.append(f"Metadata read error: {e}")
-
-    # Check 4: Missing .lrc file
     lrc_path = file_path.with_suffix(".lrc")
     if not lrc_path.exists():
         issues.append("Missing synchronized lyrics (.lrc) file.")

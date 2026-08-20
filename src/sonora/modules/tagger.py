@@ -360,8 +360,6 @@ def tag_album_folder(
                 except (AudioProcessingError, MetadataError, APIServiceError) as e:
                     LOG.warning(f"Failed to process {file_p.name}: {e}")
                 progress.advance(task)
-
-    # After all tracks are tagged, compute Album ReplayGain (modifies files in-place via metaflac)
     if options.get("fetch_replaygain", True):
         calculate_album_replaygain(audio_files, options=options)
 

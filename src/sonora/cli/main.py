@@ -27,36 +27,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Simulate actions without modifying files")
 
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
-
-    # Subcommand: tag
     tag_parser = subparsers.add_parser("tag", help="Tag audio files and albums automatically with all metadata, artwork, BPM, ReplayGain & lyrics")
     tag_parser.add_argument("path", type=Path, help="Directory containing audio files to tag")
-    
-    # Audio processing flags (enabled by default, use --no-* to disable)
     tag_parser.add_argument("--no-bpm", action="store_false", dest="fetch_bpm", help="Disable BPM calculation")
     tag_parser.add_argument("--no-replaygain", action="store_false", dest="fetch_replaygain", help="Disable ReplayGain calculation")
     tag_parser.add_argument("--no-lyrics", action="store_false", dest="fetch_lyrics", help="Disable LRC lyrics fetching")
     tag_parser.add_argument("--no-art", action="store_false", dest="fetch_itunes_art", help="Disable cover art downloading")
     tag_parser.add_argument("--json", type=Path, default=None, help="Output path to save tagging JSON report with statistics")
     tag_parser.add_argument("--force", action="store_true", help="Force retagging by ignoring cache and existing MBIDs")
-    
-    # Optional API keys
     tag_parser.add_argument("--lastfm-key", type=str, default=None, help="Last.fm API key for genre/mood lookup")
     tag_parser.add_argument("--acoustid-key", type=str, default=None, help="AcoustID API key for acoustic fingerprinting")
     tag_parser.add_argument("--discogs-token", type=str, default=None, help="Discogs personal user token")
     tag_parser.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel worker threads (default: 4)")
-
-    # Subcommand: audit
     audit_parser = subparsers.add_parser("audit", help="Audit music library for FLAC integrity, bracket corruption & missing LRCs")
     audit_parser.add_argument("path", type=Path, help="Directory containing music library to audit")
     audit_parser.add_argument("--json", type=Path, default=None, help="Output path to save audit JSON report")
     audit_parser.add_argument("--spectral", action="store_true", help="Enable deep spectral cutoff analysis for fake lossless detection (slow)")
-
-    # Subcommand: rename
     rename_parser = subparsers.add_parser("rename", help="Rename audio files and sync .lrc metadata headers")
     rename_parser.add_argument("path", type=Path, help="Directory containing audio files to rename")
-
-    # Subcommand: organize
     organize_parser = subparsers.add_parser("organize", help="Organize single tracks into a Singles directory structure")
     organize_parser.add_argument("path", type=Path, help="Source music directory")
     organize_parser.add_argument("--target-singles", type=Path, required=True, help="Destination directory for single tracks")

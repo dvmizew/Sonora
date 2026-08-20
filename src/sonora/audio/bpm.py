@@ -21,8 +21,6 @@ def calculate_bpm(file_path: Path) -> float | None:
     """
     if not file_path.exists():
         raise AudioProcessingError(f"File not found: {file_path}")
-
-    # Fast Path: C-based bpm-tag tool
     if shutil.which(BPM_TAG_CMD):
         try:
             # -f forces analysis ignoring existing tags, -n prints to stderr
@@ -36,8 +34,6 @@ def calculate_bpm(file_path: Path) -> float | None:
                     return round(bpm, 1)
         except Exception as e:  # noqa: BLE001
             LOG.debug(f"bpm-tag failed for {file_path}: {e}")
-
-    # Fallback Path: Python librosa
     if librosa is None:
         raise AudioProcessingError("Librosa and bpm-tools are both missing. Cannot calculate BPM.")
 

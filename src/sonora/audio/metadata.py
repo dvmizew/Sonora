@@ -33,8 +33,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         audio = File(str(file_path))
         if audio is None:
             raise MetadataError(f"Unsupported audio format: {file_path}")
-
-        # Extract standard tags by handling lists returned by Mutagen
         def get_tag(key: str) -> str | None:
             val = audio.get(key)
             if not val:
@@ -50,8 +48,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         date = normalize_date(get_tag("date") or get_tag("DATE") or get_tag("year"))
         genre = normalize_genre(get_tag("genre") or get_tag("GENRE"))
         isrc = get_tag("isrc") or get_tag("ISRC")
-
-        # Parse track number
         raw_track = get_tag("tracknumber") or get_tag("TRACKNUMBER")
         track_number = None
         if raw_track:
@@ -59,8 +55,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 track_number = int(str(raw_track).split("/")[0])
             except ValueError as e:
                 LOG.debug(f"Failed to parse track number '{raw_track}': {e}")
-
-        # Parse BPM
         raw_bpm = get_tag("bpm") or get_tag("BPM")
         bpm = None
         if raw_bpm:
@@ -68,8 +62,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 bpm = float(raw_bpm)
             except ValueError as e:
                 LOG.debug(f"Failed to parse BPM '{raw_bpm}': {e}")
-
-        # Audio stream properties
         sample_rate = getattr(audio.info, "sample_rate", None)
         bitrate = getattr(audio.info, "bitrate", None)
         channels = getattr(audio.info, "channels", None)
