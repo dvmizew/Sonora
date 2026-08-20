@@ -100,31 +100,31 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
     try:
         ext = track_info.file_path.suffix.lower()
         if ext == ".flac":
-            audio = FLAC(str(track_info.file_path))
-            audio["ARTIST"] = [track_info.artist]
-            audio["TITLE"] = [track_info.title]
-            audio["ALBUM"] = [track_info.album]
+            flac_audio = FLAC(str(track_info.file_path))
+            flac_audio["ARTIST"] = [track_info.artist]
+            flac_audio["TITLE"] = [track_info.title]
+            flac_audio["ALBUM"] = [track_info.album]
 
             if track_info.album_artist:
-                audio["ALBUMARTIST"] = [track_info.album_artist]
+                flac_audio["ALBUMARTIST"] = [track_info.album_artist]
             if track_info.track_number is not None:
-                audio["TRACKNUMBER"] = [str(track_info.track_number)]
+                flac_audio["TRACKNUMBER"] = [str(track_info.track_number)]
             if track_info.date:
-                audio["DATE"] = [track_info.date]
+                flac_audio["DATE"] = [track_info.date]
             if track_info.genre:
-                audio["GENRE"] = [track_info.genre]
+                flac_audio["GENRE"] = [track_info.genre]
             if track_info.isrc:
-                audio["ISRC"] = [track_info.isrc]
+                flac_audio["ISRC"] = [track_info.isrc]
             if track_info.bpm is not None:
-                audio["BPM"] = [f"{track_info.bpm:.1f}"]
+                flac_audio["BPM"] = [f"{track_info.bpm:.1f}"]
             if track_info.musicbrainz_trackid:
-                audio["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
+                flac_audio["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
             if track_info.musicbrainz_albumid:
-                audio["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
+                flac_audio["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
             if track_info.replaygain_track_gain is not None:
-                audio["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
+                flac_audio["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
             if track_info.replaygain_track_peak is not None:
-                audio["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
+                flac_audio["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
 
             if cover_art_path and cover_art_path.exists():
                 with open(cover_art_path, "rb") as f:
@@ -134,10 +134,10 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 picture.type = 3  # Front Cover
                 picture.mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                 picture.desc = "Cover"
-                audio.clear_pictures()
-                audio.add_picture(picture)
+                flac_audio.clear_pictures()
+                flac_audio.add_picture(picture)
 
-            audio.save()
+            flac_audio.save()
             
         elif ext == ".mp3":
             try:
@@ -180,36 +180,36 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             
         elif ext in (".m4a", ".mp4", ".alac"):
             from mutagen.mp4 import MP4, MP4Cover
-            audio = MP4(str(track_info.file_path))
-            audio["\xa9ART"] = [track_info.artist]
-            audio["\xa9nam"] = [track_info.title]
-            audio["\xa9alb"] = [track_info.album]
-            if track_info.album_artist: audio["aART"] = [track_info.album_artist]
-            if track_info.track_number is not None: audio["trkn"] = [(track_info.track_number, 0)]
-            if track_info.date: audio["\xa9day"] = [track_info.date]
-            if track_info.genre: audio["\xa9gen"] = [track_info.genre]
-            if track_info.bpm is not None: audio["tmpo"] = [round(track_info.bpm)]
+            mp4_audio = MP4(str(track_info.file_path))
+            mp4_audio["\xa9ART"] = [track_info.artist]
+            mp4_audio["\xa9nam"] = [track_info.title]
+            mp4_audio["\xa9alb"] = [track_info.album]
+            if track_info.album_artist: mp4_audio["aART"] = [track_info.album_artist]
+            if track_info.track_number is not None: mp4_audio["trkn"] = [(track_info.track_number, 0)]
+            if track_info.date: mp4_audio["\xa9day"] = [track_info.date]
+            if track_info.genre: mp4_audio["\xa9gen"] = [track_info.genre]
+            if track_info.bpm is not None: mp4_audio["tmpo"] = [round(track_info.bpm)]
             
             if cover_art_path and cover_art_path.exists():
                 with open(cover_art_path, "rb") as f:
                     image_data = f.read()
                 fmt = MP4Cover.FORMAT_JPEG if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else MP4Cover.FORMAT_PNG
-                audio["covr"] = [MP4Cover(image_data, imageformat=fmt)]
-            audio.save()
+                mp4_audio["covr"] = [MP4Cover(image_data, imageformat=fmt)]
+            mp4_audio.save()
             
         elif ext in (".ogg", ".opus"):
             import base64
 
             from mutagen.oggvorbis import OggVorbis
-            audio = OggVorbis(str(track_info.file_path))
-            audio["ARTIST"] = [track_info.artist]
-            audio["TITLE"] = [track_info.title]
-            audio["ALBUM"] = [track_info.album]
-            if track_info.album_artist: audio["ALBUMARTIST"] = [track_info.album_artist]
-            if track_info.track_number is not None: audio["TRACKNUMBER"] = [str(track_info.track_number)]
-            if track_info.date: audio["DATE"] = [track_info.date]
-            if track_info.genre: audio["GENRE"] = [track_info.genre]
-            if track_info.bpm is not None: audio["BPM"] = [f"{track_info.bpm:.1f}"]
+            ogg_audio = OggVorbis(str(track_info.file_path))
+            ogg_audio["ARTIST"] = [track_info.artist]
+            ogg_audio["TITLE"] = [track_info.title]
+            ogg_audio["ALBUM"] = [track_info.album]
+            if track_info.album_artist: ogg_audio["ALBUMARTIST"] = [track_info.album_artist]
+            if track_info.track_number is not None: ogg_audio["TRACKNUMBER"] = [str(track_info.track_number)]
+            if track_info.date: ogg_audio["DATE"] = [track_info.date]
+            if track_info.genre: ogg_audio["GENRE"] = [track_info.genre]
+            if track_info.bpm is not None: ogg_audio["BPM"] = [f"{track_info.bpm:.1f}"]
             
             if cover_art_path and cover_art_path.exists():
                 with open(cover_art_path, "rb") as f:
@@ -219,23 +219,23 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 picture.type = 3
                 picture.mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                 picture.desc = "Cover"
-                audio["metadata_block_picture"] = [base64.b64encode(picture.write()).decode("ascii")]
-            audio.save()
+                ogg_audio["metadata_block_picture"] = [base64.b64encode(picture.write()).decode("ascii")]
+            ogg_audio.save()
             
         else:
             LOG.warning(f"Using generic fallback tagger for format {ext}. Some metadata (like Cover Art/ReplayGain) might not be saved.")
-            audio = File(str(track_info.file_path), easy=True)
-            if audio is not None:
+            generic_audio = File(str(track_info.file_path), easy=True)
+            if generic_audio is not None:
                 try:
-                    audio["artist"] = [track_info.artist]
-                    audio["title"] = [track_info.title]
-                    audio["album"] = [track_info.album]
-                    if track_info.album_artist: audio["albumartist"] = [track_info.album_artist]
-                    if track_info.track_number is not None: audio["tracknumber"] = [str(track_info.track_number)]
-                    if track_info.date: audio["date"] = [track_info.date]
-                    if track_info.genre: audio["genre"] = [track_info.genre]
-                    if track_info.bpm is not None: audio["bpm"] = [str(round(track_info.bpm))]
-                    audio.save()
+                    generic_audio["artist"] = [track_info.artist]
+                    generic_audio["title"] = [track_info.title]
+                    generic_audio["album"] = [track_info.album]
+                    if track_info.album_artist: generic_audio["albumartist"] = [track_info.album_artist]
+                    if track_info.track_number is not None: generic_audio["tracknumber"] = [str(track_info.track_number)]
+                    if track_info.date: generic_audio["date"] = [track_info.date]
+                    if track_info.genre: generic_audio["genre"] = [track_info.genre]
+                    if track_info.bpm is not None: generic_audio["bpm"] = [str(round(track_info.bpm))]
+                    generic_audio.save()
                 except Exception as e:  # noqa: BLE001
                     LOG.error(f"Generic tagger failed to write to {ext}: {e}")
             else:
