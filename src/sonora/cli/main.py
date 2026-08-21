@@ -3,11 +3,11 @@ import datetime
 import importlib.util
 import json
 import os
+import socket
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-import socket
 socket.setdefaulttimeout(15)
 
 HAS_DOTENV = importlib.util.find_spec("dotenv") is not None

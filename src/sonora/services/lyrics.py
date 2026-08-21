@@ -6,8 +6,8 @@ from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter, normalize_str
 
 try:
-    import syncedlyrics
     import logging
+    import syncedlyrics
     logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
     for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
         logging.getLogger(_provider).setLevel(logging.CRITICAL)

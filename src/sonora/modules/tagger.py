@@ -190,7 +190,7 @@ def process_single_track(
                 desc = fetch_genius_description(track_info.artist, track_info.title, api_token=genius_api_token)
                 if desc:
                     track_info.comment = desc
-                    LOG.info(f"   ∟ 📝 [Genius] Fetched description")
+                    LOG.info("   ∟ 📝 [Genius] Fetched description")
             except APIServiceError as e:
                 LOG.debug(f"Genius lookup failed for {track_info.title}: {e}")
 
@@ -235,7 +235,7 @@ def process_single_track(
                             if not dry_run:
                                 existing_bytes = cover_jpg.read_bytes() if (cover_jpg.exists() and cover_jpg.stat().st_size > 0) else None
                                 if existing_bytes and not check_image_similarity(existing_bytes, new_art_bytes):
-                                    LOG.info(f"   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch")
+                                    LOG.info("   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch")
                                 else:
                                     cover_jpg.write_bytes(new_art_bytes)
                                     LOG.info("   ∟ 🖼️  Downloaded Cover Art")

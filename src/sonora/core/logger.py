@@ -1,5 +1,4 @@
 import logging
-import re
 import threading
 from collections.abc import Sequence
 

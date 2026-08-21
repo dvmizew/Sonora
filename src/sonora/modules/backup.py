@@ -1,10 +1,8 @@
 import datetime
 import gc
 import json
-import sys
 from pathlib import Path
-
-from mutagen.flac import FLAC
+from typing import Any
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
@@ -14,7 +12,7 @@ from sonora.core.logger import LOG
 def backup_library_tags(directory: Path, output_file: Path | None = None) -> Path:
     """
     Stream-based backup: writes JSON line-by-line to avoid RAM overload.
-    Excludes cover art data to keep backup size lightweight (~50MB vs 5GB+).
+    Excludes cover art data to keep backup size lightweight.
     """
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")

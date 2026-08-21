@@ -1,6 +1,5 @@
 import urllib.parse
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.exceptions import APIServiceError
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, normalize_str

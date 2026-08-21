@@ -167,7 +167,7 @@ def cleanup_empty_dirs(path: Path) -> int:
     removed = 0
     if not path.exists() or not path.is_dir():
         return 0
-    for child in sorted(list(path.rglob("*")), reverse=True):
+    for child in sorted(path.rglob("*"), reverse=True):
         if child.is_dir() and child.name not in (".git", ".idea", ".vscode", "__pycache__"):
             try:
                 if not any(child.iterdir()):

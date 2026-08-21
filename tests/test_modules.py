@@ -2,7 +2,6 @@
 Unit tests for Sonora core business logic modules (Auditor, Renamer, Tagger, Organizer).
 """
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -385,6 +384,7 @@ class TestCoreModules(unittest.TestCase):
 
     def test_image_similarity(self):
         import io
+
         from PIL import Image
 
         img1 = Image.new("RGB", (10, 10), color="red")
