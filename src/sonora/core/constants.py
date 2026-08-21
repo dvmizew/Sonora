@@ -179,6 +179,8 @@ PROTECTED_ARTISTS = frozenset({
     "La Familia", "C.A.S.A. Loco", "Radio Killer", "Beach Please!", "Sișu Tudor", "Sișu", "Puffy", "Rava", "Ian", "Azteca", "Keed", "Nosfe", "Super ED", "Abi"
 })
 
+FEAT_KEYWORDS = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))|×"
+TECH_FEAT = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))"
 from sonora import __version__
 
 USER_AGENT = f"Sonora/{__version__} (+https://github.com/dvmizew/Sonora)"

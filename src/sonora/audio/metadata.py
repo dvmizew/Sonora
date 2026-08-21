@@ -41,7 +41,10 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             raise MetadataError(f"Unsupported audio format: {file_path}")
         def get_first_of(*keys: str) -> str | None:
             for k in keys:
-                val = audio.get(k)
+                try:
+                    val = audio.get(k)
+                except (ValueError, KeyError):
+                    continue
                 if val:
                     if isinstance(val, list):
                         if len(val) > 0 and val[0] is not None:
@@ -82,13 +85,65 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 bpm = float(raw_bpm)
             except ValueError as e:
                 LOG.debug(f"Failed to parse BPM '{raw_bpm}': {e}")
-                
+
+        raw_disc = get_first_of("TPOS", "DISCNUMBER", "disk", "discnumber", "WM/PartOfSet", "Disc")
+        disc_number = 1
+        if raw_disc:
+            try:
+                disc_number = int(str(raw_disc).split("/")[0])
+            except ValueError:
+                disc_number = 1
+
+        raw_rg_gain = get_first_of("TXXX:REPLAYGAIN_TRACK_GAIN", "REPLAYGAIN_TRACK_GAIN", "replaygain_track_gain")
+        rg_gain = None
+        if raw_rg_gain:
+            try:
+                rg_gain = float(str(raw_rg_gain).replace(" dB", "").strip())
+            except ValueError:
+                pass
+
+        raw_rg_peak = get_first_of("TXXX:REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_TRACK_PEAK", "replaygain_track_peak")
+        rg_peak = None
+        if raw_rg_peak:
+            try:
+                rg_peak = float(str(raw_rg_peak).strip())
+            except ValueError:
+                pass
+
         sample_rate = getattr(audio.info, "sample_rate", None)
         bitrate = getattr(audio.info, "bitrate", None)
         channels = getattr(audio.info, "channels", None)
 
         mb_track = get_first_of("TXXX:MusicBrainz Track Id", "MUSICBRAINZ_TRACKID", "musicbrainz_trackid", "MusicBrainz/Track Id")
         mb_album = get_first_of("TXXX:MusicBrainz Album Id", "MUSICBRAINZ_ALBUMID", "musicbrainz_albumid", "MusicBrainz/Album Id")
+        mb_rg = get_first_of("TXXX:MusicBrainz Release Group Id", "MUSICBRAINZ_RELEASEGROUPID", "musicbrainz_releasegroupid")
+        mb_art = get_first_of("TXXX:MusicBrainz Artist Id", "MUSICBRAINZ_ARTISTID", "musicbrainz_artistid")
+        mb_work = get_first_of("TXXX:MusicBrainz Work Id", "MUSICBRAINZ_WORKID", "musicbrainz_workid")
+        acoustid_id = get_first_of("TXXX:Acoustid Id", "ACOUSTID_ID", "acoustid_id")
+        discogs_id = get_first_of("TXXX:Discogs Release Id", "DISCOGS_RELEASE_ID", "discogs_release_id")
+        itunes_trackid = get_first_of("ITUNESTRACKID", "ITUNES_TRACK_ID")
+        itunes_collectionid = get_first_of("ITUNESCOLLECTIONID", "ITUNES_COLLECTION_ID")
+        itunes_artistid = get_first_of("ITUNESARTISTID", "ITUNES_ARTIST_ID")
+        album_artist_sort = get_first_of("ALBUMARTISTSORT", "albumartistsort")
+        artist_sort = get_first_of("ARTISTSORT", "artistsort")
+        
+        raw_tot_tracks = get_first_of("TRACKTOTAL", "TOTALTRACKS", "totaltracks")
+        total_tracks = int(raw_tot_tracks) if raw_tot_tracks and raw_tot_tracks.isdigit() else None
+        
+        raw_tot_discs = get_first_of("DISCTOTAL", "TOTALDISCS", "totaldiscs")
+        total_discs = int(raw_tot_discs) if raw_tot_discs and raw_tot_discs.isdigit() else None
+
+        release_type = get_first_of("RELEASETYPE", "releasetype")
+        release_status = get_first_of("RELEASESTATUS", "releasestatus")
+        release_country = get_first_of("RELEASECOUNTRY", "releasecountry", "COUNTRY")
+        label = get_first_of("LABEL", "label", "PUBLISHER")
+        catalog_number = get_first_of("CATALOGNUMBER", "catalognumber")
+        barcode = get_first_of("BARCODE", "barcode")
+        media = get_first_of("MEDIA", "media")
+        comment = get_first_of("COMM", "COMMENT", "comment")
+        advisory = get_first_of("ITUNESADVISORY", "ADVISORY")
+        orig_date = get_first_of("ORIGINALDATE", "originaldate", "ORIGINALYEAR")
+        cuesheet = get_first_of("CUESHEET", "cuesheet")
 
         return TrackInfo(
             file_path=file_path,
@@ -97,15 +152,41 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             album=album,
             album_artist=album_artist,
             track_number=track_number,
+            disc_number=disc_number,
             date=date,
             genre=genre,
             isrc=isrc,
             bpm=bpm,
+            replaygain_track_gain=rg_gain,
+            replaygain_track_peak=rg_peak,
             sample_rate=sample_rate,
             bitrate=bitrate,
             channels=channels,
             musicbrainz_trackid=mb_track,
             musicbrainz_albumid=mb_album,
+            musicbrainz_releasegroupid=mb_rg,
+            musicbrainz_artistid=mb_art,
+            musicbrainz_workid=mb_work,
+            acoustid_id=acoustid_id,
+            discogs_release_id=discogs_id,
+            itunes_trackid=itunes_trackid,
+            itunes_collectionid=itunes_collectionid,
+            itunes_artistid=itunes_artistid,
+            album_artist_sort=album_artist_sort,
+            artist_sort=artist_sort,
+            total_tracks=total_tracks,
+            total_discs=total_discs,
+            release_type=release_type,
+            release_status=release_status,
+            release_country=release_country,
+            label=label,
+            catalog_number=catalog_number,
+            barcode=barcode,
+            media=media,
+            comment=comment,
+            advisory=advisory,
+            original_date=orig_date,
+            cuesheet=cuesheet,
         )
     except Exception as e:
         if isinstance(e, MetadataError):
@@ -136,12 +217,55 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             audio_container["TITLE"] = [track_info.title]
             audio_container["ALBUM"] = [track_info.album]
             if track_info.album_artist: audio_container["ALBUMARTIST"] = [track_info.album_artist]
-            if track_info.track_number is not None: audio_container["TRACKNUMBER"] = [str(track_info.track_number)]
+            if track_info.artist_sort: audio_container["ARTISTSORT"] = [track_info.artist_sort]
+            if track_info.album_artist_sort: audio_container["ALBUMARTISTSORT"] = [track_info.album_artist_sort]
+            
+            tot_tr = str(track_info.total_tracks) if track_info.total_tracks else None
+            if track_info.track_number is not None:
+                tr_str = f"{track_info.track_number}/{tot_tr}" if tot_tr else str(track_info.track_number)
+                audio_container["TRACKNUMBER"] = [tr_str]
+            if tot_tr:
+                audio_container["TRACKTOTAL"] = [tot_tr]
+                audio_container["TOTALTRACKS"] = [tot_tr]
+
+            tot_ds = str(track_info.total_discs) if track_info.total_discs else None
+            if track_info.disc_number is not None:
+                ds_str = f"{track_info.disc_number}/{tot_ds}" if tot_ds else str(track_info.disc_number)
+                audio_container["DISCNUMBER"] = [ds_str]
+            if tot_ds:
+                audio_container["DISCTOTAL"] = [tot_ds]
+                audio_container["TOTALDISCS"] = [tot_ds]
+
             if track_info.date: audio_container["DATE"] = [track_info.date]
             if track_info.genre: audio_container["GENRE"] = [track_info.genre]
             if track_info.bpm is not None: audio_container["BPM"] = [f"{track_info.bpm:.1f}"]
             if track_info.musicbrainz_trackid: audio_container["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
             if track_info.musicbrainz_albumid: audio_container["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
+            if track_info.musicbrainz_releasegroupid: audio_container["MUSICBRAINZ_RELEASEGROUPID"] = [track_info.musicbrainz_releasegroupid]
+            if track_info.musicbrainz_artistid: audio_container["MUSICBRAINZ_ARTISTID"] = [track_info.musicbrainz_artistid]
+            if track_info.musicbrainz_workid: audio_container["MUSICBRAINZ_WORKID"] = [track_info.musicbrainz_workid]
+            if track_info.acoustid_id: audio_container["ACOUSTID_ID"] = [track_info.acoustid_id]
+            if track_info.discogs_release_id: audio_container["DISCOGS_RELEASE_ID"] = [track_info.discogs_release_id]
+            if track_info.itunes_trackid: audio_container["ITUNESTRACKID"] = [track_info.itunes_trackid]
+            if track_info.itunes_collectionid: audio_container["ITUNESCOLLECTIONID"] = [track_info.itunes_collectionid]
+            if track_info.itunes_artistid: audio_container["ITUNESARTISTID"] = [track_info.itunes_artistid]
+            if track_info.release_type: audio_container["RELEASETYPE"] = [track_info.release_type]
+            if track_info.release_status: audio_container["RELEASESTATUS"] = [track_info.release_status]
+            if track_info.release_country:
+                audio_container["RELEASECOUNTRY"] = [track_info.release_country]
+                audio_container["COUNTRY"] = [track_info.release_country]
+            if track_info.label:
+                audio_container["LABEL"] = [track_info.label]
+                audio_container["PUBLISHER"] = [track_info.label]
+            if track_info.catalog_number: audio_container["CATALOGNUMBER"] = [track_info.catalog_number]
+            if track_info.barcode: audio_container["BARCODE"] = [track_info.barcode]
+            if track_info.media: audio_container["MEDIA"] = [track_info.media]
+            if track_info.comment: audio_container["COMMENT"] = [track_info.comment]
+            if track_info.advisory: audio_container["ITUNESADVISORY"] = [track_info.advisory]
+            if track_info.original_date:
+                audio_container["ORIGINALDATE"] = [track_info.original_date]
+                audio_container["ORIGINALYEAR"] = [track_info.original_date[:4]]
+            if track_info.cuesheet: audio_container["CUESHEET"] = [track_info.cuesheet]
 
             if ext == ".flac":
                 if track_info.isrc: audio_container["ISRC"] = [track_info.isrc]

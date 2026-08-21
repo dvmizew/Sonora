@@ -38,10 +38,36 @@ def is_single_folder(folder_path: Path) -> bool:
     return len(albums) > 1
 
 
+def get_primary_artist(artist_name: str | None) -> str:
+    """
+    Extract primary artist from raw artist string by stripping featured artists/delimiters
+    (feat., ft., &, comma, etc.), respecting PROTECTED_ARTISTS. Matches initial/organize_singles.py.
+    """
+    if not artist_name:
+        return "Unknown"
+        
+    raw = str(artist_name).strip()
+    from sonora.core.constants import PROTECTED_ARTISTS
+    is_protected = any(p.lower() == raw.lower() for p in PROTECTED_ARTISTS)
+    if is_protected:
+        return sanitize_name(raw)
+
+    import re
+    separators = [
+        r'\s+fea?t\.?\s+', r'\s+featuring\s+',
+        r'\s+and\s+', r'\s+și\s+', r'\s+si\s+', r'\s+cu\s+', r'\s+vs\.?\s+',
+        r'\s+[xX×]\s+', r'\s*&\s*', r'\s*,\s*', r'\s*;\s*', r'\s*/\s*'
+    ]
+    pattern = "|".join(separators)
+    parts = re.split(pattern, raw, maxsplit=1, flags=re.IGNORECASE)
+    primary = parts[0].strip() if parts else raw
+    return sanitize_name(primary or "Unknown")
+
+
 def organize_library_singles(source_dir: Path, target_singles_dir: Path, options: dict | None = None) -> int:
     """
     Scan source_dir, detect single tracks, and move them to target_singles_dir
-    organized as target_singles_dir / Artist / Artist - Title.ext.
+    organized as target_singles_dir / Primary Artist / Artist - Title.ext.
     Returns the count of moved tracks.
     """
     if not source_dir.exists():
@@ -66,7 +92,8 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
 
             try:
                 info = read_track_metadata(path)
-                artist_dir = target_singles_dir / sanitize_name(info.artist)
+                primary_artist = get_primary_artist(info.artist)
+                artist_dir = target_singles_dir / primary_artist
                 if not dry_run:
                     artist_dir.mkdir(parents=True, exist_ok=True)
 
@@ -95,4 +122,57 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
             except (MetadataError, OSError) as e:
                 LOG.warning(f"Failed to organize track {path}: {e}")
 
+    # Phase 2 & 3: Deduplicate singles against albums
+    if target_singles_dir.exists():
+        album_fingerprints: set[str] = set()
+        for p in source_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS and "Singles" not in p.parts:
+                try:
+                    meta = read_track_metadata(p)
+                    p_art = get_primary_artist(meta.artist).lower()
+                    key = f"{p_art} - {meta.title.lower()}"
+                    album_fingerprints.add(key)
+                except Exception:
+                    pass
+
+        removed_dupes = 0
+        for single_p in list(target_singles_dir.rglob("*")):
+            if single_p.is_file() and single_p.suffix.lower() in SUPPORTED_EXTS:
+                try:
+                    meta = read_track_metadata(single_p)
+                    p_art = get_primary_artist(meta.artist).lower()
+                    key = f"{p_art} - {meta.title.lower()}"
+                    if key in album_fingerprints:
+                        if not dry_run:
+                            single_p.unlink()
+                            lrc_p = single_p.with_suffix(".lrc")
+                            if lrc_p.exists():
+                                lrc_p.unlink()
+                            LOG.info(f"   ∟ 🗑️ Removed duplicate single: {key}")
+                        else:
+                            LOG.info(f"   ∟ [DRY-RUN] Would remove duplicate single: {key}")
+                        removed_dupes += 1
+                except Exception:
+                    pass
+
+    # Cleanup empty directories
+    if not dry_run:
+        cleanup_empty_dirs(source_dir)
+
     return moved_count
+
+
+def cleanup_empty_dirs(path: Path) -> int:
+    """Recursively remove empty directories."""
+    removed = 0
+    if not path.exists() or not path.is_dir():
+        return 0
+    for child in sorted(list(path.rglob("*")), reverse=True):
+        if child.is_dir() and child.name not in (".git", ".idea", ".vscode", "__pycache__"):
+            try:
+                if not any(child.iterdir()):
+                    child.rmdir()
+                    removed += 1
+            except OSError:
+                pass
+    return removed

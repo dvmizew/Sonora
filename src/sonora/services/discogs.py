@@ -28,18 +28,17 @@ _discogs_client_token = None
 
 def search_discogs_release(artist: str, album: str, user_token: str | None = None) -> dict[str, Any] | None:
     """
-    Search Discogs for album release metadata.
-    Requires a Discogs user token.
+    Search Discogs for release metadata using a User token.
+    Returns a dict with metadata if found, otherwise None.
     """
     global _discogs_client_instance, _discogs_client_token
-    if not user_token:
+    if not user_token or not artist or not album:
         return None
 
     if discogs_client is None:
         raise APIServiceError("discogs-client library is not installed.")
 
-    global _discogs_client_instance, _discogs_client_token
-    if not album or normalize_str(album) in ["unknown album", "unknown"]:
+    if normalize_str(album) in ["unknown album", "unknown"]:
         return None
 
     artist_key = normalize_str(artist)

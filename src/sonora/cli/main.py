@@ -7,12 +7,16 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import socket
+socket.setdefaulttimeout(15)
+
 HAS_DOTENV = importlib.util.find_spec("dotenv") is not None
 
 from sonora import __version__
 from sonora.core.exceptions import SonoraError
 from sonora.core.logger import LOG
 from sonora.modules.auditor import audit_library
+from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import rename_directory_files
 from sonora.modules.tagger import tag_album_folder
@@ -38,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     tag_parser.add_argument("--lastfm-key", type=str, default=None, help="Last.fm API key for genre/mood lookup")
     tag_parser.add_argument("--acoustid-key", type=str, default=None, help="AcoustID API key for acoustic fingerprinting")
     tag_parser.add_argument("--discogs-token", type=str, default=None, help="Discogs personal user token")
+    tag_parser.add_argument("--genius-token", type=str, default=None, help="Genius API token for song descriptions")
     tag_parser.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel worker threads (default: 4)")
     audit_parser = subparsers.add_parser("audit", help="Audit music library for FLAC integrity, bracket corruption & missing LRCs")
     audit_parser.add_argument("path", type=Path, help="Directory containing music library to audit")
@@ -48,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
     organize_parser = subparsers.add_parser("organize", help="Organize single tracks into a Singles directory structure")
     organize_parser.add_argument("path", type=Path, help="Source music directory")
     organize_parser.add_argument("--target-singles", type=Path, required=True, help="Destination directory for single tracks")
+
+    backup_parser = subparsers.add_parser("backup", help="Create streaming JSON backup of audio tags")
+    backup_parser.add_argument("path", type=Path, help="Music directory to back up")
+    backup_parser.add_argument("--out", type=Path, default=None, help="Output JSON backup file path")
+
+    restore_parser = subparsers.add_parser("restore", help="Restore audio tags from JSON backup file")
+    restore_parser.add_argument("backup_file", type=Path, help="Path to JSON backup file")
 
     return parser
 
@@ -60,6 +72,7 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
     lastfm_key = args.lastfm_key or os.environ.get("LASTFM_API_KEY")
     acoustid_key = args.acoustid_key or os.environ.get("ACOUSTID_API_KEY")
     discogs_token = args.discogs_token or os.environ.get("DISCOGS_TOKEN")
+    genius_token = args.genius_token or os.environ.get("GENIUS_API_TOKEN")
 
     LOG.info(f"Tagging album directory: [bold]{args.path}[/bold]")
     results = tag_album_folder(
@@ -72,6 +85,7 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
         lastfm_api_key=lastfm_key,
         acoustid_api_key=acoustid_key,
         discogs_user_token=discogs_token,
+        genius_api_token=genius_token,
         options=options,
     )
     LOG.success(f"Successfully tagged {len(results)} tracks.")
@@ -185,6 +199,18 @@ def handle_organize(args: argparse.Namespace, options: dict) -> int:
     return 0
 
 
+def handle_backup(args: argparse.Namespace) -> int:
+    out = backup_library_tags(args.path, output_file=args.out)
+    LOG.success(f"Backup created at: [bold]{out}[/bold]")
+    return 0
+
+
+def handle_restore(args: argparse.Namespace) -> int:
+    count = restore_library_tags(args.backup_file)
+    LOG.success(f"Restored metadata for {count} tracks.")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     if HAS_DOTENV:
         from dotenv import load_dotenv
@@ -215,6 +241,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return handle_rename(args, options)
         elif args.command == "organize":
             return handle_organize(args, options)
+        elif args.command == "backup":
+            return handle_backup(args)
+        elif args.command == "restore":
+            return handle_restore(args)
         return 0
     except KeyboardInterrupt:
         LOG.warning("Aborted by user. Shutting down gracefully...")

@@ -4,17 +4,17 @@ Unit tests for Sonora core business logic modules (Auditor, Renamer, Tagger, Org
 
 import sys
 import tempfile
-from pathlib import Path
-from unittest.mock import patch
-
-# Guarantee src/ is in sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+from sonora.audio.art import check_image_similarity
+from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
+from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.exceptions import AudioProcessingError
 from sonora.core.models import TrackInfo
 from sonora.modules.auditor import audit_file, audit_library, check_brackets_corruption
+from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.organizer import is_single_folder, organize_library_singles
 from sonora.modules.renamer import (
     rename_directory_files,
@@ -23,9 +23,11 @@ from sonora.modules.renamer import (
 )
 from sonora.modules.tagger import (
     normalize_artist_alias,
+    process_artist_art,
     process_single_track,
     tag_album_folder,
 )
+from sonora.services.theaudiodb import fetch_artist_images
 
 
 def create_dummy_wav(path: Path) -> None:
@@ -138,6 +140,20 @@ class TestCoreModules(unittest.TestCase):
         renamed = rename_directory_files(self.tmp_path)
         self.assertEqual(len(renamed), 2)
 
+    def test_get_primary_artist(self):
+        from sonora.modules.organizer import get_primary_artist
+        self.assertEqual(get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage")
+        self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
+        self.assertEqual(get_primary_artist("Above & Beyond"), "Above & Beyond")
+
+    def test_rename_album_folder(self):
+        from sonora.modules.renamer import rename_album_folder
+        folder = self.tmp_path / "old_folder"
+        folder.mkdir()
+        new_f = rename_album_folder(folder, "21 Savage", "Issa Album")
+        self.assertTrue(new_f.exists())
+        self.assertEqual(new_f.name, "21 Savage - Issa Album")
+
     def test_is_single_folder(self):
         album_dir = self.tmp_path / "album"
         album_dir.mkdir()
@@ -205,7 +221,11 @@ class TestCoreModules(unittest.TestCase):
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
 
-        mock_read.return_value = TrackInfo(file_path=wav_file, artist="nane", title="Piesa")
+        # Return separate instances so orig_info snapshot differs from track_info
+        mock_read.side_effect = [
+            TrackInfo(file_path=wav_file, artist="nane", title="Piesa"),
+            TrackInfo(file_path=wav_file, artist="nane", title="Piesa"),
+        ]
         mock_mbid.return_value = "mbid-12345"
         mock_lyrics.return_value = "[00:01.00] Vers"
 
@@ -339,6 +359,123 @@ class TestCoreModules(unittest.TestCase):
         report = audit_library(self.tmp_path, check_spectral=True)
         self.assertTrue(any("fake lossless" in issue.lower() for issues in report.issues.values() for issue in issues))
         mock_spectral.assert_called_once()
+
+    def test_symfonium_extended_tags(self):
+        wav_path = self.tmp_path / "extended.wav"
+        create_dummy_wav(wav_path)
+
+        info = read_track_metadata(wav_path)
+        info.artist_sort = "Artist, Test"
+        info.album_artist_sort = "Artist, Test Album"
+        info.total_tracks = 12
+        info.total_discs = 2
+        info.release_type = "Album"
+        info.release_status = "Official"
+        info.release_country = "US"
+        info.musicbrainz_trackid = "mbid-12345"
+        info.musicbrainz_albumid = "mbid-album-12345"
+        info.label = "Test Label"
+        info.barcode = "123456789012"
+
+        write_track_metadata(info)
+
+        reloaded = read_track_metadata(wav_path)
+        self.assertEqual(reloaded.musicbrainz_trackid, "mbid-12345")
+        self.assertEqual(reloaded.musicbrainz_albumid, "mbid-album-12345")
+
+    def test_image_similarity(self):
+        import io
+        from PIL import Image
+
+        img1 = Image.new("RGB", (10, 10), color="red")
+        img2 = Image.new("RGB", (10, 10), color="red")
+
+        buf1 = io.BytesIO()
+        buf2 = io.BytesIO()
+
+        img1.save(buf1, format="JPEG")
+        img2.save(buf2, format="JPEG")
+
+        b1 = buf1.getvalue()
+        b2 = buf2.getvalue()
+
+        self.assertTrue(check_image_similarity(b1, b2, threshold=0.8))
+
+    def test_cuesheet_parsing(self):
+        cue_path = self.tmp_path / "test.cue"
+        cue_path.write_text(
+            'PERFORMER "Album Artist"\n'
+            'TITLE "Album Title"\n'
+            "TRACK 01 AUDIO\n"
+            '  TITLE "Track One"\n'
+            '  PERFORMER "Track Artist"\n'
+            "  INDEX 01 00:00:00\n",
+            encoding="utf-8"
+        )
+
+        tracks = parse_cuesheet(cue_path)
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[0]["track_number"], 1)
+        self.assertEqual(tracks[0]["title"], "Track One")
+        self.assertEqual(tracks[0]["artist"], "Track Artist")
+
+        content = read_cuesheet_content(cue_path)
+        self.assertIn('TITLE "Track One"', content)
+
+    def test_backup_and_restore(self):
+        wav_path = self.tmp_path / "song.wav"
+        create_dummy_wav(wav_path)
+
+        info_init = read_track_metadata(wav_path)
+        info_init.artist = "Test Artist"
+        write_track_metadata(info_init)
+
+        backup_file = self.tmp_path / "backup.json"
+        backup_library_tags(self.tmp_path, output_file=backup_file)
+        self.assertTrue(backup_file.exists())
+
+        # Modify track info
+        info = read_track_metadata(wav_path)
+        info.artist = "Modified Artist"
+        write_track_metadata(info)
+
+        reloaded = read_track_metadata(wav_path)
+        self.assertEqual(reloaded.artist, "Modified Artist")
+
+        # Restore
+        restored_cnt = restore_library_tags(backup_file)
+        self.assertEqual(restored_cnt, 1)
+
+        restored_info = read_track_metadata(wav_path)
+        self.assertEqual(restored_info.artist, "Test Artist")
+
+    @patch("sonora.services.theaudiodb.SESSION.get")
+    def test_theaudiodb_service(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "artists": [
+                {
+                    "strArtistThumb": "http://example.com/thumb.jpg",
+                    "strArtistBanner": "http://example.com/banner.jpg"
+                }
+            ]
+        }
+        mock_img_resp = MagicMock()
+        mock_img_resp.status_code = 200
+        mock_img_resp.content = b"fakeimage"
+
+        mock_get.side_effect = [mock_resp, mock_img_resp, mock_img_resp]
+
+        thumb, banner = fetch_artist_images("21 Savage")
+        self.assertEqual(thumb, b"fakeimage")
+        self.assertEqual(banner, b"fakeimage")
+
+        artist_folder = self.tmp_path / "21 Savage" / "Album"
+        artist_folder.mkdir(parents=True, exist_ok=True)
+        process_artist_art("21 Savage", artist_folder)
+        self.assertTrue((self.tmp_path / "21 Savage" / "artist.jpg").exists())
+        self.assertTrue((self.tmp_path / "21 Savage" / "banner.jpg").exists())
 
 
 if __name__ == "__main__":

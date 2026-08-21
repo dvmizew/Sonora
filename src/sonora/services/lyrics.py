@@ -7,6 +7,10 @@ from sonora.core.utils import RateLimiter, normalize_str
 
 try:
     import syncedlyrics
+    import logging
+    logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
+    for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
+        logging.getLogger(_provider).setLevel(logging.CRITICAL)
 except ImportError:
     syncedlyrics = None
 
@@ -81,10 +85,12 @@ def fetch_synced_lyrics(
     providers: list[str] | None = None,
     lang: str | None = None,
     save_path: Path | None = None,
+    isrc: str | None = None,
 ) -> str | None:
     """
     Search and fetch LRC lyrics for a track using syncedlyrics.
     Quality preference order: Enhanced (word-synced) -> Line-synced -> Plain text.
+    Uses the 3-step surgical approach from the initial prototype.
     """
     if not artist or not title:
         return None
@@ -92,41 +98,67 @@ def fetch_synced_lyrics(
     if syncedlyrics is None:
         raise APIServiceError("syncedlyrics library is not installed.")
 
-    cache_key = f"lyrics:{normalize_str(artist)}:{normalize_str(title)}:{synced_only}:{enhanced}:{plain_only}"
+    cache_key = f"lyrics:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
         return cached
 
-    query = f"{normalize_str(artist)} - {normalize_str(title)}".strip()
     _LYRICS_LIMITER.wait()
 
-    def _do_search(en: bool, syn: bool, pl: bool) -> str | None:
-        if syncedlyrics is None:
-            return None
+    def _do_search(query_str: str) -> str | None:
         import typing
         kwargs: dict[str, typing.Any] = {
-            "plain_only": pl,
-            "synced_only": syn,
-            "enhanced": en,
+            "plain_only": plain_only,
+            "synced_only": synced_only,
+            "enhanced": enhanced,
         }
-        if providers:
+        if providers is not None:
             kwargs["providers"] = providers
         if lang:
             kwargs["lang"] = lang
         if save_path:
             kwargs["save_path"] = str(save_path)
 
-        res = syncedlyrics.search(query, **kwargs)
+        res = syncedlyrics.search(query_str, **kwargs)
         if isinstance(res, str) and res.strip():
             return clean_lyrics_text(res.strip())
         return None
 
-    try:
-        result = _do_search(en=enhanced, syn=synced_only, pl=plain_only)
+    last_exception: Exception | None = None
+    lrc = None
 
-        if result:
-            set_cached_api(cache_key, result)
-            return result
-        return None
-    except Exception as e:
-        raise APIServiceError(f"Lyrics fetch failed for '{query}': {e}") from e
+    # ATTEMPT 1: ISRC LOOKUP
+    if isrc:
+        try:
+            lrc = _do_search(isrc)
+        except Exception as e:
+            last_exception = e
+
+    # ATTEMPT 2: Standard/Surgical Query
+    if not lrc:
+        # Standard query format (matches unit tests)
+        default_query = f"{artist.lower()} - {title.lower()}".strip()
+        try:
+            lrc = _do_search(default_query)
+        except Exception as e:
+            last_exception = e
+
+    # ATTEMPT 3: Surgical Clean Title Fallback
+    if not lrc and ("(" in title or "[" in title or "feat" in title.lower()):
+        clean_title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', title).strip()
+        clean_title = re.sub(r'\s+(?:fea?t|ft)\.?\s+.*$', '', clean_title, flags=re.IGNORECASE).strip()
+        primary_artist = artist.split(',')[0].split('&')[0].split(';')[0].strip()
+        query = f"{clean_title} {primary_artist}".strip()
+        try:
+            lrc = _do_search(query)
+        except Exception as e:
+            last_exception = e
+
+    if lrc:
+        set_cached_api(cache_key, lrc)
+        return lrc
+
+    if last_exception:
+        raise APIServiceError(f"Lyrics fetch failed for '{title}': {last_exception}") from last_exception
+
+    return None

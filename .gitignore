@@ -65,3 +65,5 @@ Thumbs.db
 *.log
 .cache/
 sonora_cache/
+
+/.music_metadata_cache

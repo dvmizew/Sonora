@@ -9,8 +9,10 @@ from sonora.services.musicbrainz import (
     init_musicbrainz,
     search_musicbrainz_release,
 )
+from sonora.services.theaudiodb import fetch_artist_images
 
 __all__ = [
+    "fetch_artist_images",
     "fetch_genius_description",
     "fetch_itunes_cover_art_url",
     "fetch_lastfm_tags",

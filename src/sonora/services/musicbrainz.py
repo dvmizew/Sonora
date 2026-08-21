@@ -10,13 +10,12 @@ try:
 except ImportError:
     musicbrainzngs = None
 
-_MB_LIMITER = RateLimiter(interval_seconds=1.0)
+_MB_LIMITER = RateLimiter(interval_seconds=1.1)
 
 
 def init_musicbrainz(app_name: str = "Sonora", version: str = "0.1.0", contact: str = "danielradu02@users.noreply.github.com") -> None:
     if musicbrainzngs is not None:
         musicbrainzngs.set_useragent(app_name, version, contact)
-        musicbrainzngs.set_rate_limit(limit_or_interval=1.0, new_requests=1)
 
 _discography_locks: dict[str, threading.Lock] = {}
 _discography_meta_lock = threading.Lock()

@@ -72,20 +72,20 @@ def sanitize_name(name: str | None) -> str:
 
 
 class RateLimiter:
-    """Thread-safe rate limiter for external API requests."""
+    """Thread-safe rate limiter matching initial/script.py logic."""
 
     def __init__(self, interval_seconds: float) -> None:
         self.interval = interval_seconds
         self.lock = threading.Lock()
         self.last_call = 0.0
 
-    def wait(self) -> None:
-        sleep_time = 0.0
+    def wait(self) -> float:
         with self.lock:
             now = time.time()
             elapsed = now - self.last_call
+            sleep_time = 0.0
             if elapsed < self.interval:
                 sleep_time = self.interval - elapsed
-            self.last_call = max(now, self.last_call) + sleep_time
-        if sleep_time > 0:
-            time.sleep(sleep_time)
+                time.sleep(sleep_time)
+            self.last_call = time.time()
+            return sleep_time

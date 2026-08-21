@@ -2,6 +2,7 @@ from pathlib import Path
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
+from sonora.core.utils import RateLimiter
 
 try:
     import acoustid
@@ -27,15 +28,17 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
         raise APIServiceError(f"Chromaprint fingerprinting failed for {file_path}: {e}") from e
 
 
-from sonora.core.utils import RateLimiter
-
 _ACOUSTID_LIMITER = RateLimiter(interval_seconds=0.4)
+_ACOUSTID_FAILURES = 0
+_MAX_ACOUSTID_FAILURES = 3
 
-def lookup_acoustid(file_path: Path, api_key: str) -> str | None:
+def lookup_acoustid(file_path: Path, api_key: str | None = None) -> str | None:
     """
-    Lookup track MBID on AcoustID service using Chromaprint fingerprint.
+    Fingerprints an audio file and fetches MusicBrainz Recording ID from AcoustID.
+    Returns the MBID string if found, otherwise None.
     """
-    if not api_key or acoustid is None:
+    global _ACOUSTID_FAILURES
+    if not api_key or acoustid is None or _ACOUSTID_FAILURES >= _MAX_ACOUSTID_FAILURES:
         return None
 
     try:
@@ -46,12 +49,15 @@ def lookup_acoustid(file_path: Path, api_key: str) -> str | None:
             return str(cached)
 
         _ACOUSTID_LIMITER.wait()
+
         results = acoustid.lookup(api_key, fingerprint, duration)
         for score, recording_id, _title, _artist in acoustid.parse_lookup_result(results):
             if score >= 0.8 and recording_id:
                 rec_str = str(recording_id)
                 set_cached_api(cache_key, rec_str)
+                _ACOUSTID_FAILURES = 0
                 return rec_str
         return None
-    except Exception as e:
-        raise APIServiceError(f"AcoustID lookup failed for {file_path}: {e}") from e
+    except Exception:
+        _ACOUSTID_FAILURES += 1
+        return None
