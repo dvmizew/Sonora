@@ -6,6 +6,7 @@ from typing import Any
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
+from sonora.core.exceptions import MetadataError
 from sonora.core.logger import LOG
 
 
@@ -25,12 +26,12 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
 
     if not audio_files:
         LOG.warning("No audio files found to back up.")
-        timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
         out_path = output_file or Path(f"backup_{timestamp_str}.json")
         out_path.write_text("{}\n", encoding="utf-8")
         return out_path
 
-    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
     out_path = output_file or Path(f"backup_{timestamp_str}.json")
 
     LOG.info(f"🔄 Creating full backup for {len(audio_files)} files (streaming mode)...")
@@ -52,7 +53,7 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
                     f.write(json.dumps(data, ensure_ascii=False))
                     first = False
                     count += 1
-                except Exception as e:
+                except (MetadataError, OSError, ValueError) as e:
                     LOG.debug(f"Error reading {file_p} for backup: {e}")
                     failed += 1
 
@@ -66,7 +67,7 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files could not be read")
         return out_path
-    except Exception as e:
+    except (OSError, ValueError, TypeError) as e:
         LOG.error(f"Failed to save backup: {e}")
         raise
 
@@ -145,7 +146,7 @@ def restore_library_tags(backup_file: Path) -> int:
                 try:
                     f_path_str = _decode_one()
                     if not isinstance(f_path_str, str):
-                        raise ValueError("Backup key is not a string path")
+                        raise TypeError("Backup key is not a string path")
 
                     _skip_ws()
                     _fill(1)
@@ -170,7 +171,7 @@ def restore_library_tags(backup_file: Path) -> int:
                                         setattr(info, k, v)
                                 write_track_metadata(info)
                                 count += 1
-                        except Exception as e:
+                        except (MetadataError, OSError, ValueError, KeyError) as e:
                             LOG.debug(f"Failed to restore {f_path}: {e}")
                             failed += 1
 
@@ -189,7 +190,7 @@ def restore_library_tags(backup_file: Path) -> int:
 
                     _trim_buffer()
 
-                except Exception as e:
+                except (json.JSONDecodeError, ValueError, TypeError, KeyError, OSError) as e:
                     LOG.debug(f"Skipping malformed restore entry: {e}")
                     failed += 1
                     _fill(1)

@@ -132,8 +132,8 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                     p_art = get_primary_artist(meta.artist).lower()
                     key = f"{p_art} - {meta.title.lower()}"
                     album_fingerprints.add(key)
-                except Exception:
-                    pass
+                except (MetadataError, OSError) as e:
+                    LOG.debug(f"Could not read metadata for single deduplication: {e}")
 
         removed_dupes = 0
         for single_p in list(target_singles_dir.rglob("*")):
@@ -152,8 +152,8 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                         else:
                             LOG.info(f"   ∟ [DRY-RUN] Would remove duplicate single: {key}")
                         removed_dupes += 1
-                except Exception:
-                    pass
+                except (MetadataError, OSError) as e:
+                    LOG.debug(f"Could not read metadata for duplicate check: {e}")
 
     # Cleanup empty directories
     if not dry_run:

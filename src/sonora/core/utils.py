@@ -22,17 +22,22 @@ def normalize_str(s: str | None) -> str:
 
 def normalize_date(d: str | None) -> str | None:
     """Ensure date is in YYYY-MM-DD format."""
-    if not d: return None
+    if not d:
+        return None
     d_str = str(d).strip()
     match = re.search(r'(\d{4}-\d{2}-\d{2})', d_str)
-    if match: return match.group(1)
+    if match:
+        return match.group(1)
     match = re.search(r'(\d{4})', d_str)
-    if match: return match.group(1)
+    if match:
+        return match.group(1)
     return d_str
+
 
 def normalize_genre(g: str | None) -> str | None:
     """Clean and standardize genre strings with strict filtering."""
-    if not g: return g
+    if not g:
+        return g
     from sonora.core.constants import BROAD_GENRE_KEYWORDS, GENRE_BLACKLIST, GENRE_MAP
     
     g_raw = str(g).strip()

@@ -252,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SonoraError as e:
         LOG.error(f"Error: {e}")
         return 1
-    except Exception as e:  # noqa: BLE001
+    except (OSError, ValueError, TypeError, RuntimeError) as e:
         LOG.error(f"Unexpected failure: {e}")
         return 1
 

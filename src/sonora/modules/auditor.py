@@ -115,7 +115,7 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
         if track.disc_number and track.disc_number > 1:
             # Multi-disc files should have DISCNUMBER set
-            infos = f"Multi-disc file (Disc {track.disc_number})"
+            pass
         
         if track.sample_rate and track.sample_rate < 44100:
             issues.append(f"Sub-standard sample rate: {track.sample_rate}Hz")
@@ -195,7 +195,7 @@ def audit_library(
                     if track_no is not None:
                         tracks_found[(disc_no, track_no)].append(path.name)
                         
-                except Exception as e:
+                except (MetadataError, OSError) as e:
                     LOG.debug(f"Could not read metadata for folder check: {e}")
 
                 file_issues = audit_file(path, check_spectral=check_spectral)

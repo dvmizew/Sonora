@@ -52,5 +52,8 @@ sonora = "sonora.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+sonora = ["py.typed"]
+
 [tool.mypy]
 ignore_missing_imports = true

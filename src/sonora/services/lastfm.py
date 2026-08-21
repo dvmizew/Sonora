@@ -51,7 +51,7 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
         final_res = res[:5]
         set_cached_api(cache_key, final_res)
         return final_res
-    except Exception as e:
+    except (OSError, ValueError, KeyError, RuntimeError) as e:
         if mbid and artist and title and not _retried:
             return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None, _retried=True)
         raise APIServiceError(f"Last.fm tag fetch failed for {artist} - {title}: {e}") from e

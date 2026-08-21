@@ -31,7 +31,7 @@ def get_cache() -> Any:
                         _CACHE_INSTANCE = diskcache.FanoutCache(str(_CACHE_DIR), shards=8, sqlite_journal_mode="wal", sqlite_synchronous=0)
                     else:
                         _CACHE_INSTANCE = diskcache.Cache(str(_CACHE_DIR), sqlite_journal_mode="wal", sqlite_synchronous=0)
-                except Exception as e:  # noqa: BLE001
+                except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
                     LOG.debug(f"Cache initialization failed: {e}")
                     _CACHE_INSTANCE = None
     return _CACHE_INSTANCE
@@ -45,7 +45,7 @@ def get_cached_api(key: str) -> Any | None:
     if cache is not None:
         try:
             return cache.get(key)
-        except Exception as e:  # noqa: BLE001
+        except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
             LOG.debug(f"Cache fetch failed for key '{key}': {e}")
     return None
 
@@ -58,7 +58,7 @@ def set_cached_api(key: str, value: Any, expire_seconds: int = 604800) -> None:
     if cache is not None:
         try:
             cache.set(key, value, expire=expire_seconds)
-        except Exception as e:  # noqa: BLE001
+        except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
             LOG.debug(f"Cache store failed for key '{key}': {e}")
 
 def close_cache() -> None:
@@ -67,7 +67,7 @@ def close_cache() -> None:
         if _CACHE_INSTANCE is not None:
             try:
                 _CACHE_INSTANCE.close()
-            except Exception as e:  # noqa: BLE001
+            except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
                 LOG.debug(f"Cache close failed: {e}")
             _CACHE_INSTANCE = None
 

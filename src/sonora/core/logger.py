@@ -49,7 +49,7 @@ class SonoraLogger:
                 CONSOLE.print(message, highlight=False)
 
     def info(self, message: str) -> None:
-        if message.startswith("   ∟") or message.startswith("✨") or message.startswith("📁") or message.startswith("🎧"):
+        if message.startswith(("   ∟", "✨", "📁", "🎧")):
             self._log_msg(message)
         else:
             self._log_msg(f"[info]INFO:[/info] {message}")

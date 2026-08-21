@@ -30,5 +30,5 @@ def verify_flac_checksum(file_path: Path) -> bool:
         raise AudioProcessingError(
             f"STRICT check failed: '{FLAC_CMD}' binary not found on system path."
         ) from e
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         raise AudioProcessingError(f"Checksum verification failed for {file_path}: {e}") from e

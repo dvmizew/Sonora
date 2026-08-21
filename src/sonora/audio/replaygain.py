@@ -38,7 +38,7 @@ def calculate_album_replaygain(files: Sequence[Path], options: dict | None = Non
             properties.add(props)
             if not has_album_gain and "REPLAYGAIN_ALBUM_GAIN" in a:
                 has_album_gain = True
-    except Exception as e:  # noqa: BLE001
+    except (OSError, ValueError, KeyError) as e:
         LOG.debug(f"Failed to read properties for ReplayGain: {e}")
         return False
 
@@ -77,6 +77,6 @@ def calculate_album_replaygain(files: Sequence[Path], options: dict | None = Non
     except subprocess.TimeoutExpired:
         LOG.error("metaflac timed out while calculating ReplayGain.")
         return False
-    except Exception as e:  # noqa: BLE001
+    except (subprocess.SubprocessError, OSError) as e:
         LOG.error(f"Failed to calculate ReplayGain: {e}")
         return False

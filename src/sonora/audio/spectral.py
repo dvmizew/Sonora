@@ -33,9 +33,7 @@ def analyze_spectral_cutoff(file_path: Path, cutoff_hz: int = 16000) -> float:
         raise AudioProcessingError(
             f"Spectral check failed: '{SOX_CMD}' binary not found on system path."
         ) from e
-    except Exception as e:
-        if isinstance(e, AudioProcessingError):
-            raise
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         raise AudioProcessingError(f"Spectral analysis error for {file_path}: {e}") from e
 
 

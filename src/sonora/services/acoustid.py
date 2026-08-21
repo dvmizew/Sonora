@@ -2,6 +2,7 @@ from pathlib import Path
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
+from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter
 
 try:
@@ -58,6 +59,7 @@ def lookup_acoustid(file_path: Path, api_key: str | None = None) -> str | None:
                 _ACOUSTID_FAILURES = 0
                 return rec_str
         return None
-    except Exception:
+    except (APIServiceError, OSError, ValueError, KeyError) as e:
+        LOG.debug(f"AcoustID lookup failed: {e}")
         _ACOUSTID_FAILURES += 1
         return None

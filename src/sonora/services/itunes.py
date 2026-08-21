@@ -32,7 +32,7 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
         results: list[dict[str, Any]] = data.get("results", [])
         set_cached_api(cache_key, results)
         return results
-    except Exception as e:
+    except (OSError, ValueError, KeyError, RuntimeError) as e:
         raise APIServiceError(f"iTunes Search API request failed for {query_term}: {e}") from e
 
 

@@ -281,11 +281,9 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 picture.mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
                 picture.desc = "Cover"
                 
-                if ext == ".flac":
-                    if hasattr(audio_container, "clear_pictures"):
-                        audio_container.clear_pictures()  # type: ignore
-                    if hasattr(audio_container, "add_picture"):
-                        audio_container.add_picture(picture)  # type: ignore
+                if isinstance(audio_container, FLAC):
+                    audio_container.clear_pictures()
+                    audio_container.add_picture(picture)
                 else:
                     import base64
                     audio_container["metadata_block_picture"] = [base64.b64encode(picture.write()).decode("ascii")]
@@ -299,7 +297,7 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                     if audio_container.tags is None:
                         audio_container.add_tags()
                     id3_audio = audio_container.tags
-                except Exception as e:  # noqa: BLE001
+                except (MetadataError, OSError, ValueError, KeyError) as e:
                     LOG.debug(f"MP3 ID3 parsing failed: {e}")
                     id3_audio = ID3()
             elif ext == ".wav":

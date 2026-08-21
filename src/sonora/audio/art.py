@@ -1,5 +1,8 @@
 import io
-from PIL import Image
+
+from PIL import Image, UnidentifiedImageError
+
+from sonora.core.logger import LOG
 
 
 def check_image_similarity(data1: bytes, data2: bytes, threshold: float = 0.82) -> bool:
@@ -31,5 +34,6 @@ def check_image_similarity(data1: bytes, data2: bytes, threshold: float = 0.82) 
         corr = covar / ((var1 * var2) ** 0.5)
 
         return float(corr) >= threshold
-    except Exception:
+    except (OSError, ValueError, UnidentifiedImageError) as e:
+        LOG.debug(f"Image comparison failed: {e}")
         return True  # Fallback to True to allow upgrade if something fails

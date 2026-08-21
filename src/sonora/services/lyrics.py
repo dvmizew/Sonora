@@ -7,6 +7,7 @@ from sonora.core.utils import RateLimiter, normalize_str
 
 try:
     import logging
+
     import syncedlyrics
     logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
     for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
@@ -131,7 +132,7 @@ def fetch_synced_lyrics(
     if isrc:
         try:
             lrc = _do_search(isrc)
-        except Exception as e:
+        except (APIServiceError, OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
     # ATTEMPT 2: Standard/Surgical Query
@@ -140,7 +141,7 @@ def fetch_synced_lyrics(
         default_query = f"{artist.lower()} - {title.lower()}".strip()
         try:
             lrc = _do_search(default_query)
-        except Exception as e:
+        except (APIServiceError, OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
     # ATTEMPT 3: Surgical Clean Title Fallback
@@ -151,7 +152,7 @@ def fetch_synced_lyrics(
         query = f"{clean_title} {primary_artist}".strip()
         try:
             lrc = _do_search(query)
-        except Exception as e:
+        except (APIServiceError, OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
     if lrc:

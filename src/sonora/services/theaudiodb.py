@@ -1,4 +1,5 @@
 import urllib.parse
+
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
@@ -39,22 +40,22 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
                         r_t = SESSION.get(thumb_url, timeout=6)
                         if r_t.status_code == 200:
                             thumb_bytes = r_t.content
-                    except Exception:
-                        pass
+                    except (OSError, ValueError) as e:
+                        LOG.debug(f"Failed to fetch thumb image: {e}")
 
                 if banner_url:
                     try:
                         r_b = SESSION.get(banner_url, timeout=6)
                         if r_b.status_code == 200:
                             banner_bytes = r_b.content
-                    except Exception:
-                        pass
+                    except (OSError, ValueError) as e:
+                        LOG.debug(f"Failed to fetch banner image: {e}")
 
                 res = (thumb_bytes, banner_bytes)
                 if thumb_bytes or banner_bytes:
                     set_cached_api(cache_key, res, expire_seconds=2592000)  # 30 days
                 return res
-    except Exception as e:
+    except (OSError, ValueError, KeyError) as e:
         LOG.debug(f"TheAudioDB fetch failed for {artist_name}: {e}")
 
     return None, None

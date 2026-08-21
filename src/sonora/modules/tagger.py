@@ -346,8 +346,8 @@ def tag_album_folder(
             meta = read_track_metadata(f_p)
             if meta.track_number is not None:
                 track_numbers.append(meta.track_number)
-        except Exception:
-            pass
+        except (MetadataError, OSError) as e:
+            LOG.debug(f"Could not read metadata for track number check on {f_p.name}: {e}")
 
     if track_numbers:
         min_t, max_t = min(track_numbers), max(track_numbers)
@@ -399,7 +399,7 @@ def tag_album_folder(
         primary_artist = results[0].album_artist or results[0].artist
         try:
             process_artist_art(primary_artist, folder_path)
-        except Exception as e:
+        except (APIServiceError, OSError) as e:
             LOG.debug(f"Artist art download failed: {e}")
 
     return results

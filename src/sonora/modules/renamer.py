@@ -152,6 +152,7 @@ def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[
         raise AudioProcessingError(f"Directory not found: {dir_path}")
 
     from collections import Counter
+
     from sonora.core.logger import LOG
 
     renamed: list[Path] = []

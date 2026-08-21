@@ -52,6 +52,8 @@ def fetch_artist_discography(artist: str) -> list[dict[str, Any]]:
             set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
             return releases
         except Exception as e:
+            if isinstance(e, APIServiceError):
+                raise
             raise APIServiceError(f"MusicBrainz discography fetch failed for {artist}: {e}") from e
 
 
@@ -85,6 +87,8 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, Any] | None
         set_cached_api(cache_key, target_rel)
         return target_rel
     except Exception as e:
+        if isinstance(e, APIServiceError):
+            raise
         raise APIServiceError(f"MusicBrainz search failed for {artist} - {album}: {e}") from e
 
 
@@ -106,4 +110,6 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         set_cached_api(cache_key, mbid)
         return mbid
     except Exception as e:
+        if isinstance(e, APIServiceError):
+            raise
         raise APIServiceError(f"MusicBrainz track lookup failed for {artist} - {title}: {e}") from e

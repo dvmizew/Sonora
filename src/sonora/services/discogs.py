@@ -72,4 +72,6 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
             return None
         except Exception as e:
             _discogs_client_instance = None
+            if isinstance(e, APIServiceError):
+                raise
             raise APIServiceError(f"Discogs search failed for {artist} - {album}: {e}") from e

@@ -1,5 +1,7 @@
 import sys
 
+from sonora import __version__
+
 IS_WINDOWS = sys.platform == 'win32'
 
 FLAC_CMD = "flac.exe" if IS_WINDOWS else "flac"
@@ -181,6 +183,5 @@ PROTECTED_ARTISTS = frozenset({
 
 FEAT_KEYWORDS = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))|×"
 TECH_FEAT = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))"
-from sonora import __version__
 
 USER_AGENT = f"Sonora/{__version__} (+https://github.com/dvmizew/Sonora)"

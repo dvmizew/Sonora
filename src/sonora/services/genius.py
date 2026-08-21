@@ -48,5 +48,5 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
             return desc.strip()
         return None
 
-    except Exception as e:
+    except (OSError, ValueError, KeyError) as e:
         raise APIServiceError(f"Genius description fetch failed for {artist} - {title}: {e}") from e
