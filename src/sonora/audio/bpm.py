@@ -39,7 +39,15 @@ def calculate_bpm(file_path: Path) -> float | None:
         # Skip intro (30s), read only 60s, and force downsample to 22050 Hz (sufficient for beat detection)
         y, sr = librosa.load(str(file_path), sr=22050, offset=30, duration=60)
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-        bpm_val = float(tempo.item()) if hasattr(tempo, "item") else float(tempo[0] if isinstance(tempo, (list, tuple)) else tempo)
+        if isinstance(tempo, (list, tuple)):
+            bpm_val = float(tempo[0])
+        elif isinstance(tempo, (int, float)):
+            bpm_val = float(tempo)
+        elif hasattr(tempo, "item"):
+            item_func = tempo.item
+            bpm_val = float(item_func())
+        else:
+            bpm_val = float(str(tempo))
         return round(bpm_val, 1)
     except Exception as e:
         raise AudioProcessingError(f"Librosa BPM calculation failed for {file_path}: {e}") from e

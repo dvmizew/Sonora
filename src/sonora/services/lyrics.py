@@ -117,9 +117,8 @@ def fetch_synced_lyrics(
             kwargs["providers"] = providers
         if lang:
             kwargs["lang"] = lang
-        if save_path:
-            kwargs["save_path"] = str(save_path)
-
+        if syncedlyrics is None:
+            return None
         res = syncedlyrics.search(query_str, **kwargs)
         if isinstance(res, str) and res.strip():
             return clean_lyrics_text(res.strip())

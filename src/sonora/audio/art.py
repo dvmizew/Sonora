@@ -1,8 +1,12 @@
 import io
 
-from PIL import Image, UnidentifiedImageError
-
 from sonora.core.logger import LOG
+
+try:
+    from PIL import Image, UnidentifiedImageError
+except ImportError:
+    Image = None
+    UnidentifiedImageError = OSError
 
 
 def check_image_similarity(data1: bytes, data2: bytes, threshold: float = 0.82) -> bool:
@@ -12,13 +16,17 @@ def check_image_similarity(data1: bytes, data2: bytes, threshold: float = 0.82) 
     """
     if not (data1 and data2):
         return False
+    if Image is None:
+        return True
     try:
         # Load and resize to 64x64 grayscale for fast comparison
         img1 = Image.open(io.BytesIO(data1)).convert('L').resize((64, 64), Image.Resampling.LANCZOS)
         img2 = Image.open(io.BytesIO(data2)).convert('L').resize((64, 64), Image.Resampling.LANCZOS)
 
-        pixels1 = [img1.getpixel((x, y)) for y in range(64) for x in range(64)]
-        pixels2 = [img2.getpixel((x, y)) for y in range(64) for x in range(64)]
+        raw1 = [img1.getpixel((x, y)) for y in range(64) for x in range(64)]
+        raw2 = [img2.getpixel((x, y)) for y in range(64) for x in range(64)]
+        pixels1: list[float] = [float(p[0]) if isinstance(p, (tuple, list)) else float(p or 0) for p in raw1]
+        pixels2: list[float] = [float(p[0]) if isinstance(p, (tuple, list)) else float(p or 0) for p in raw2]
 
         n = len(pixels1)
         mean1 = sum(pixels1) / n

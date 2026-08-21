@@ -1,20 +1,29 @@
 # Sonora
 
-CLI tool for managing local music libraries. Fully supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
+CLI tool for music tagging, library auditing, tag backup/restore, and file organization.
 
-Features:
-- **Tagging**: Fetches metadata, cover art, and mood tags from MusicBrainz, AcoustID, Discogs, Last.fm, and iTunes.
-- **Processing**: 
+Supports **FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, MPC**.
+
+---
+
+## ⚡ Features & APIs
+
+- **APIs & Services**: MusicBrainz, AcoustID (Chromaprint), Discogs, Last.fm, Genius, iTunes HD Cover Art, TheAudioDB, syncedlyrics (Musixmatch, Lrclib, NetEase).
+- **Symfonium & Navidrome Extended Tags**: `ARTISTSORT`, `ALBUMARTISTSORT`, `TOTALTRACKS`, `TOTALDISCS`, `RELEASETYPE`, `RELEASESTATUS`, `RELEASECOUNTRY`, `BARCODE`, `CATALOGNUMBER`, `LABEL`, `ORIGINALDATE`, `CUESHEET`.
+- **Audio Engines**:
   - BPM detection (`bpm-tools` / `librosa`).
-  - EBU R128 loudness & ReplayGain 2.0 (`ffmpeg`).
-  - 16kHz spectral analysis for fake lossless detection (`sox`).
-- **Lyrics**: Downloads synchronized `.lrc` lyrics (Lrclib, Musixmatch, Genius, NetEase).
-- **Auditing**: Validates FLAC MD5 checksums and flags missing/corrupted metadata.
-- **Organization**: Renames files based on metadata and isolates singles into a dedicated directory.
+  - ReplayGain 2.0 Album Mode (`metaflac`).
+  - 16kHz spectral cutoff analysis (`sox`).
+  - Bit-exact audio stream MD5 verification (`flac -t`).
+- **Cover Art Safeguard**: PIL Pearson correlation prevents replacing custom cover art unless visually matching (correlation ≥ 0.82).
+- **Artist Artwork**: Downloads `artist.jpg` (thumb) and `banner.jpg` via TheAudioDB.
+- **Tag Safety**: Memory-safe streaming JSON backup and restore (`backup` / `restore`).
 
-## Dependencies
+---
 
-Requires system packages for audio processing:
+## 🛠 Dependencies
+
+Requires system packages for external audio tools:
 
 ```bash
 # Arch Linux
@@ -27,55 +36,74 @@ sudo apt install ffmpeg flac sox bpm-tools
 brew install ffmpeg flac sox bpm-tools
 ```
 
-## Build
+---
 
-Compile the portable binary via PyInstaller:
+## 🚀 Installation
 
 ```bash
 git clone https://github.com/dvmizew/Sonora.git
 cd Sonora
-pip install -r requirements.txt
-pyinstaller --name sonora --onefile --clean src/sonora/cli/main.py
-
-./dist/sonora --help
+pip install -e .
 ```
 
-## Usage
+### Environment Variables (`.env`)
+
+```env
+LASTFM_API_KEY=your_lastfm_key
+ACOUSTID_API_KEY=your_acoustid_key
+DISCOGS_USER_TOKEN=your_discogs_token
+GENIUS_API_TOKEN=your_genius_token
+```
+
+---
+
+## 💻 Commands
 
 ### `tag`
-Tags files concurrently.
+Tags files with metadata, artwork, lyrics, BPM, ReplayGain, and extended tags.
 
 ```bash
 sonora tag /path/to/album
-
-# Dry run (preview only)
 sonora tag /path/to/album --dry-run
-
-# Force refresh (ignore MBID cache)
 sonora tag /path/to/album --force
-
-# With API keys and custom threads
-sonora tag /path/to/album -w 8 --lastfm-key KEY --acoustid-key KEY --discogs-token TOKEN
+sonora tag /path/to/album -w 8
 ```
 
 ### `audit`
-Scans for corrupt files and missing tags.
+Checks library for corrupted FLACs, missing tags, bracket clutter, and fake lossless.
 
 ```bash
 sonora audit /path/to/library
-
-# Export JSON
-sonora audit /path/to/library --json report.json
-
-# Enable spectral cutoff check (slow)
 sonora audit /path/to/library --spectral
+sonora audit /path/to/library --json report.json
 ```
 
-### `rename` & `organize`
-```bash
-# Rename files & sync LRC headers
-sonora rename /path/to/album
+### `rename`
+Renames tracks (`NN - Artist - Title.ext`), syncs `.lrc` headers, and renames album folders based on consensus.
 
-# Move 1-2 track folders to a Singles directory
-sonora organize /path/to/music --target-singles /path/to/Singles
+```bash
+sonora rename /path/to/album
+```
+
+### `organize`
+Moves 1-2 track single releases to `Singles/Primary Artist/`, deduplicates single tracks against albums, and cleans empty directories.
+
+```bash
+sonora organize /path/to/music
+```
+
+### `backup` & `restore`
+Streaming JSON tag backup and restore.
+
+```bash
+sonora backup /path/to/library -o backup.json
+sonora restore backup.json
+```
+
+---
+
+## 🧪 Tests
+
+```bash
+python3 -m unittest discover -s tests
 ```
