@@ -1,9 +1,8 @@
 import re
 from pathlib import Path
-from typing import Any
 
 
-def parse_cuesheet(cue_path: Path) -> list[dict[str, Any]]:
+def parse_cuesheet(cue_path: Path) -> list[dict[str, str | int]]:
     """
     Parse a CD .cue file into a list of track metadata dictionaries.
     """
@@ -15,8 +14,8 @@ def parse_cuesheet(cue_path: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
 
-    tracks: list[dict[str, Any]] = []
-    current_track: dict[str, Any] | None = None
+    tracks: list[dict[str, str | int]] = []
+    current_track: dict[str, str | int] | None = None
     performer_global = "Unknown Artist"
     title_global = "Unknown Album"
 

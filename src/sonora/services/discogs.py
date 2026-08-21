@@ -1,14 +1,17 @@
 import threading
-from typing import Any
+from typing import TYPE_CHECKING
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter, normalize_str
 
-try:
+if TYPE_CHECKING:
     import discogs_client
-except ImportError:
-    discogs_client = None
+else:
+    try:
+        import discogs_client
+    except ImportError:
+        discogs_client = None
 
 _DISCOGS_LIMITER = RateLimiter(interval_seconds=1.1)
 
@@ -26,7 +29,7 @@ def _get_discogs_lock(artist_key: str) -> threading.Lock:
 _discogs_client_instance = None
 _discogs_client_token = None
 
-def search_discogs_release(artist: str, album: str, user_token: str | None = None) -> dict[str, Any] | None:
+def search_discogs_release(artist: str, album: str, user_token: str | None = None) -> dict[str, object] | None:
     """
     Search Discogs for release metadata using a User token.
     Returns a dict with metadata if found, otherwise None.

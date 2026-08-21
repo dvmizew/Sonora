@@ -138,7 +138,9 @@ def process_single_track(
                 search_artist = track_info.album_artist if track_info.album_artist else track_info.artist
                 release = search_musicbrainz_release(search_artist, track_info.album)
                 if release:
-                    track_info.musicbrainz_albumid = release.get("id")
+                    mb_id = release.get("id")
+                    if mb_id is not None:
+                        track_info.musicbrainz_albumid = str(mb_id)
                     # Also opportunistically set year/genre if missing
                     if not track_info.date:
                         from sonora.core.utils import normalize_date
@@ -175,9 +177,10 @@ def process_single_track(
                     if release.get("year") and not track_info.date:
                         from sonora.core.utils import normalize_date
                         track_info.date = normalize_date(str(release["year"]))
-                    if release.get("genres") and not track_info.genre:
+                    genres_val = release.get("genres")
+                    if isinstance(genres_val, list) and genres_val and not track_info.genre:
                         from sonora.core.utils import normalize_genre
-                        raw_genre = str(release["genres"][0])
+                        raw_genre = str(genres_val[0])
                         norm_genre = normalize_genre(raw_genre)
                         if norm_genre:
                             track_info.genre = norm_genre

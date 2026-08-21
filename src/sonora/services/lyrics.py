@@ -1,19 +1,23 @@
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter, normalize_str
 
-try:
-    import logging
-
+if TYPE_CHECKING:
     import syncedlyrics
-    logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
-    for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
-        logging.getLogger(_provider).setLevel(logging.CRITICAL)
-except ImportError:
-    syncedlyrics = None
+else:
+    try:
+        import logging
+
+        import syncedlyrics
+        logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
+        for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
+            logging.getLogger(_provider).setLevel(logging.CRITICAL)
+    except ImportError:
+        syncedlyrics = None
 
 _LYRICS_LIMITER = RateLimiter(interval_seconds=1.0)
 

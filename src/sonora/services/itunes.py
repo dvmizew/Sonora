@@ -1,5 +1,3 @@
-from typing import Any
-
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.http import SESSION
@@ -8,7 +6,7 @@ from sonora.core.utils import RateLimiter, normalize_str
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 _ITUNES_LIMITER = RateLimiter(interval_seconds=3.2)
 
-def search_itunes(artist: str, term: str, entity: str = "album", country: str = "US") -> list[dict[str, Any]]:
+def search_itunes(artist: str, term: str, entity: str = "album", country: str = "US") -> list[dict[str, object]]:
     """
     Search iTunes Search API for album or track metadata.
     """
@@ -29,7 +27,8 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
         resp = SESSION.get(ITUNES_SEARCH_URL, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        results: list[dict[str, Any]] = data.get("results", [])
+        raw_results = data.get("results", []) if isinstance(data, dict) else []
+        results: list[dict[str, object]] = [r for r in raw_results if isinstance(r, dict)]
         set_cached_api(cache_key, results)
         return results
     except (OSError, ValueError, KeyError, RuntimeError) as e:
@@ -46,7 +45,7 @@ def fetch_itunes_cover_art_url(artist: str, album: str, resolution: int = 1400) 
         return None
 
     artwork_url = results[0].get("artworkUrl100")
-    if artwork_url:
+    if isinstance(artwork_url, str):
         # Upgrade low-res 100x100 URL to requested high resolution (e.g. 1400x1400 or 3000x3000)
         return artwork_url.replace("100x100bb", f"{resolution}x{resolution}bb")
     return None

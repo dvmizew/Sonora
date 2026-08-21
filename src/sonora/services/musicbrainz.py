@@ -1,14 +1,17 @@
 import threading
-from typing import Any
+from typing import TYPE_CHECKING
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter, normalize_str
 
-try:
+if TYPE_CHECKING:
     import musicbrainzngs
-except ImportError:
-    musicbrainzngs = None
+else:
+    try:
+        import musicbrainzngs
+    except ImportError:
+        musicbrainzngs = None
 
 _MB_LIMITER = RateLimiter(interval_seconds=1.1)
 
@@ -29,7 +32,7 @@ def _get_discography_lock(artist_key: str) -> threading.Lock:
         return _discography_locks[artist_key]
 
 
-def fetch_artist_discography(artist: str) -> list[dict[str, Any]]:
+def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
     """
     Fetch and cache the entire discography (releases) of an artist from MusicBrainz in a single API call.
     Returns list of release dicts.
@@ -48,7 +51,7 @@ def fetch_artist_discography(artist: str) -> list[dict[str, Any]]:
         _MB_LIMITER.wait()
         try:
             result = musicbrainzngs.search_releases(artist=artist, limit=100)
-            releases: list[dict[str, Any]] = result.get("release-list", [])
+            releases: list[dict[str, object]] = result.get("release-list", []) if isinstance(result, dict) else []
             set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
             return releases
         except Exception as e:
@@ -57,7 +60,7 @@ def fetch_artist_discography(artist: str) -> list[dict[str, Any]]:
             raise APIServiceError(f"MusicBrainz discography fetch failed for {artist}: {e}") from e
 
 
-def search_musicbrainz_release(artist: str, album: str) -> dict[str, Any] | None:
+def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | None:
     """Search MusicBrainz for an album release matching artist and album name."""
     if musicbrainzngs is None:
         raise APIServiceError("musicbrainzngs library is not installed.")
@@ -74,7 +77,8 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, Any] | None
     discography = fetch_artist_discography(artist)
     album_lower = normalize_str(album)
     for rel in discography:
-        rel_title = normalize_str(rel.get("title", ""))
+        rel_title_val = rel.get("title", "")
+        rel_title = normalize_str(str(rel_title_val))
         if rel_title == album_lower or album_lower in rel_title:
             set_cached_api(cache_key, rel)
             return rel
@@ -82,8 +86,9 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, Any] | None
     _MB_LIMITER.wait()
     try:
         result = musicbrainzngs.search_releases(artist=artist, release=album, limit=5)
-        releases: list[dict[str, Any]] = result.get("release-list", [])
-        target_rel: dict[str, Any] | None = releases[0] if releases else None
+        raw_releases = result.get("release-list", []) if isinstance(result, dict) else []
+        releases: list[dict[str, object]] = [r for r in raw_releases if isinstance(r, dict)]
+        target_rel: dict[str, object] | None = releases[0] if releases else None
         set_cached_api(cache_key, target_rel)
         return target_rel
     except Exception as e:

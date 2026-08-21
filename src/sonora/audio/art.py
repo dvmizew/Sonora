@@ -1,12 +1,16 @@
 import io
+from typing import TYPE_CHECKING
 
 from sonora.core.logger import LOG
 
-try:
+if TYPE_CHECKING:
     from PIL import Image, UnidentifiedImageError
-except ImportError:
-    Image = None
-    UnidentifiedImageError = OSError
+else:
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ImportError:
+        Image = None
+        UnidentifiedImageError = OSError
 
 
 def check_image_similarity(data1: bytes, data2: bytes, threshold: float = 0.82) -> bool:

@@ -49,5 +49,5 @@ def calculate_bpm(file_path: Path) -> float | None:
         else:
             bpm_val = float(str(tempo))
         return round(bpm_val, 1)
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError, AudioProcessingError) as e:
         raise AudioProcessingError(f"Librosa BPM calculation failed for {file_path}: {e}") from e

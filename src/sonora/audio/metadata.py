@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 from mutagen._file import File
 from mutagen.aiff import AIFF
@@ -203,8 +204,7 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
         raise MetadataError(f"File not found: {track_info.file_path}")
 
     try:
-        import typing
-        audio_container: typing.Any = None
+        audio_container: Any = None
         
         ext = track_info.file_path.suffix.lower()
         if ext in (".flac", ".ogg", ".opus"):

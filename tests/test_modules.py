@@ -420,7 +420,8 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(tracks[0]["artist"], "Track Artist")
 
         content = read_cuesheet_content(cue_path)
-        self.assertIn('TITLE "Track One"', content)
+        self.assertIsNotNone(content)
+        self.assertIn('TITLE "Track One"', content or "")
 
     def test_backup_and_restore(self):
         wav_path = self.tmp_path / "song.wav"
