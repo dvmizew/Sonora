@@ -4,9 +4,7 @@ import acoustid
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter
-from sonora.core.utils import normalize_str
-from sonora.core.utils import match_score
+from sonora.core.utils import RateLimiter, match_score, normalize_str
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:

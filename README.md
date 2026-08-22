@@ -81,43 +81,106 @@ MusicBrainz, Cover Art Archive, iTunes, and Deezer lookups work automatically wi
 
 ## Usage
 
-### `tag`
-Tag an album or directory with metadata, artwork, lyrics, BPM, and ReplayGain:
+### Global Options
+
+- `--dry-run`: Simulate operations without modifying files or directories.
+- `-v, --verbose`: Enable verbose logging.
+- `-v, --version`: Show program version.
+
+---
+
+### `sonora tag`
+Tag an album or directory automatically with metadata, artwork, lyrics, BPM, and ReplayGain:
 
 ```bash
-sonora tag /path/to/album
-sonora tag /path/to/album --dry-run
-sonora tag /path/to/album --force
-sonora tag /path/to/album -w 8
+sonora tag /path/to/music
+sonora tag /path/to/music --dry-run
+sonora tag /path/to/music --force
+sonora tag /path/to/music -t 8
+sonora tag /path/to/music --json tag_report.json
 ```
 
-### `audit`
-Audit library integrity, missing metadata, corrupt FLACs, and fake-lossless audio:
+**Options:**
+- `path`: Directory containing audio files to tag (required).
+- `-t, --threads N`: Number of parallel worker threads (default: `4`).
+- `--force`: Force retagging by ignoring disk cache and existing MBIDs.
+- `--no-bpm`: Disable BPM calculation.
+- `--no-replaygain`: Disable ReplayGain 2.0 calculation.
+- `--no-lyrics`: Disable `.lrc` lyrics fetching.
+- `--no-art`: Disable cover art downloading.
+- `--json PATH`: Output path to save LLM-optimized tagging JSON report with statistics.
+- `--lastfm-key KEY`: Last.fm API key (overrides `LASTFM_API_KEY` env).
+- `--acoustid-key KEY`: AcoustID API key (overrides `ACOUSTID_API_KEY` env).
+- `--discogs-token TOKEN`: Discogs personal token (overrides `DISCOGS_TOKEN` env).
+- `--genius-token TOKEN`: Genius API token (overrides `GENIUS_API_TOKEN` env).
+
+---
+
+### `sonora audit`
+Audit music library for FLAC integrity, bracket corruption, missing tags, and fake-lossless audio:
 
 ```bash
 sonora audit /path/to/library
+sonora audit /path/to/library -t 16
 sonora audit /path/to/library --spectral
-sonora audit /path/to/library --json report.json
+sonora audit /path/to/library --json audit_report.json
 ```
 
-### `rename`
-Rename audio files (`NN - Artist - Title.ext`), update album folder names, and keep `.lrc` lyrics in sync:
+**Options:**
+- `path`: Directory containing music library to audit (required).
+- `-t, --threads N`: Number of parallel worker threads (default: `8`).
+- `--spectral`: Enable deep spectral cutoff analysis to flag fake-lossless audio (MP3 upscaled to FLAC).
+- `--json PATH`: Output path to save audit JSON report.
+
+---
+
+### `sonora rename`
+Standardize file names (`NN - Artist - Title.ext` or `Disc-NN - Title.ext`), rename album directories, and synchronize `.lrc` metadata headers:
 
 ```bash
 sonora rename /path/to/album
+sonora rename /path/to/library --dry-run
 ```
 
-### `organize`
-Move standalone single releases to `Singles/Primary Artist/`, deduplicate against full albums, and clean empty directories:
+**Options:**
+- `path`: Directory containing audio files to rename (required).
+
+---
+
+### `sonora organize`
+Organize standalone single releases into `Singles/Primary Artist/`, deduplicate against full albums, and clean empty directories:
 
 ```bash
 sonora organize /path/to/music
+sonora organize /path/to/music --target-singles /path/to/Singles
 ```
 
-### `backup` & `restore`
-Backup audio metadata tags to a JSON file and restore them:
+**Options:**
+- `path`: Source music directory (required).
+- `--target-singles PATH`: Destination directory for single tracks (default: `<path>/Singles`).
+
+---
+
+### `sonora backup`
+Create a high-speed, streaming JSON backup of audio tags across your library:
 
 ```bash
-sonora backup /path/to/library -o backup.json
-sonora restore backup.json
+sonora backup /path/to/library
+sonora backup /path/to/library --out my_backup.json
 ```
+
+**Options:**
+- `path`: Music directory to back up (required).
+- `--out PATH`: Output JSON backup file path (default: `backup_YYYY-MM-DD_HH-MM-SS.json`).
+
+---
+
+### `sonora restore`
+Restore audio tags from a streaming JSON backup file:
+
+```bash
+sonora restore my_backup.json
+```
+
+**Options:**
+- `backup_file`: Path to JSON backup file (required).
