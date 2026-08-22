@@ -2,6 +2,7 @@ import io
 import threading
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 from sonora.core.http import SESSION
@@ -13,35 +14,25 @@ from sonora.services.theaudiodb import fetch_artist_images
 
 def check_image_similarity(data1: bytes, data2: bytes, threshold: float = 0.82) -> bool:
     """
-    Uses grayscale correlation to check if two images are likely the same art (e.g. Standard vs Deluxe).
+    Uses grayscale correlation via NumPy to check if two images are likely the same art.
     Returns True if correlation >= threshold, else False.
     """
     if not (data1 and data2):
         return False
     try:
-        # Load and resize to 64x64 grayscale for fast comparison
         img1 = Image.open(io.BytesIO(data1)).convert('L').resize((64, 64), Image.Resampling.LANCZOS)
         img2 = Image.open(io.BytesIO(data2)).convert('L').resize((64, 64), Image.Resampling.LANCZOS)
 
-        raw1 = [img1.getpixel((x, y)) for y in range(64) for x in range(64)]
-        raw2 = [img2.getpixel((x, y)) for y in range(64) for x in range(64)]
-        pixels1: list[float] = [float(p[0]) if isinstance(p, (tuple, list)) else float(p or 0) for p in raw1]
-        pixels2: list[float] = [float(p[0]) if isinstance(p, (tuple, list)) else float(p or 0) for p in raw2]
+        arr1 = np.asarray(img1, dtype=np.float64).ravel()
+        arr2 = np.asarray(img2, dtype=np.float64).ravel()
 
-        n = len(pixels1)
-        mean1 = sum(pixels1) / n
-        mean2 = sum(pixels2) / n
-
-        var1 = sum((x - mean1) ** 2 for x in pixels1)
-        var2 = sum((y - mean2) ** 2 for y in pixels2)
-
-        if var1 == 0 or var2 == 0:
+        std1 = np.std(arr1)
+        std2 = np.std(arr2)
+        if std1 == 0 or std2 == 0:
             return True
 
-        covar = sum((x - mean1) * (y - mean2) for x, y in zip(pixels1, pixels2))
-        corr = covar / ((var1 * var2) ** 0.5)
-
-        return float(corr) >= threshold
+        corr = float(np.corrcoef(arr1, arr2)[0, 1])
+        return corr >= threshold
     except (OSError, ValueError, UnidentifiedImageError) as e:
         LOG.debug(f"Image comparison failed: {e}")
         return True  # Fallback to True to allow upgrade if something fails

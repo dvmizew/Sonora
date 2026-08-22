@@ -24,7 +24,8 @@ def analyze_spectral_cutoff(file_path: Path, cutoff_hz: int = 16000) -> float:
         if result.returncode != 0:
             raise RuntimeError(f"SoX execution failed: {result.stderr}")
 
-        match = re.search(r"RMS\s+amplitude:\s+([\d.]+)", result.stderr)
+        output = result.stderr + result.stdout
+        match = re.search(r"RMS\s+amplitude:\s+([\d.]+)", output)
         if match:
             return float(match.group(1))
         return 0.0

@@ -31,13 +31,13 @@ def normalize_date(d: str | None) -> str | None:
     match = re.search(r'(\d{4})', d_str)
     if match:
         return match.group(1)
-    return d_str
+    return d_str if d_str else None
 
 
 def normalize_genre(g: str | None) -> str | None:
     """Clean and standardize genre strings with strict filtering."""
-    if not g:
-        return g
+    if not g or not str(g).strip():
+        return None
     from sonora.core.constants import BROAD_GENRE_KEYWORDS, GENRE_BLACKLIST, GENRE_MAP
     
     g_raw = str(g).strip()
@@ -77,7 +77,7 @@ def sanitize_name(name: str | None) -> str:
 
 
 class RateLimiter:
-    """Thread-safe rate limiter matching initial/script.py logic."""
+    """Thread-safe rate limiter with precise target_time scheduling."""
 
     def __init__(self, interval_seconds: float) -> None:
         self.interval = interval_seconds
@@ -87,10 +87,10 @@ class RateLimiter:
     def wait(self) -> float:
         with self.lock:
             now = time.time()
-            elapsed = now - self.last_call
-            sleep_time = 0.0
-            if elapsed < self.interval:
-                sleep_time = self.interval - elapsed
-                time.sleep(sleep_time)
-            self.last_call = time.time()
-            return sleep_time
+            target_time = max(now, self.last_call + self.interval)
+            sleep_time = target_time - now
+            self.last_call = target_time
+
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+        return sleep_time

@@ -169,7 +169,7 @@ def process_single_track(
 
         # 8. Fetch iTunes Cover Art (Download only, don't embed yet)
         cover_jpg = None
-        if fetch_itunes_art and file_path.suffix.lower() == ".flac":
+        if fetch_itunes_art:
             try:
                 cover_jpg = process_album_cover_art(
                     file_path.parent,

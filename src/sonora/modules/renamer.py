@@ -111,7 +111,7 @@ def rename_track_file(
                     from sonora.core.logger import LOG
                     LOG.info(f"[DRY-RUN] Would rename LRC {old_lrc.name} -> {new_lrc.name}")
             if not dry_run:
-                sync_lrc_metadata(new_lrc if not dry_run else old_lrc, track_info)
+                sync_lrc_metadata(new_lrc, track_info)
 
     return new_path
 
@@ -119,7 +119,6 @@ def rename_track_file(
 def rename_album_folder(folder_path: Path, artist: str, album: str, options: dict | None = None) -> Path:
     """
     Rename an album directory to 'Artist - Album' if consensus metadata exists.
-    Matches initial/rename.py logic.
     """
     if not album or album.lower() in ["singles", "unknown album", "unknown"]:
         return folder_path
