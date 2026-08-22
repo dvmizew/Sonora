@@ -6,10 +6,12 @@ from typing import Any
 import httpx
 from rich.progress import (
     BarColumn,
+    MofNCompleteColumn,
     Progress,
     SpinnerColumn,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
 
 from sonora.audio.art import process_album_cover_art, process_artist_artwork
@@ -370,7 +372,8 @@ def tag_album_folder(
 
     results: list[TrackInfo] = []
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
         future_to_file = {}
         for file_p in audio_files:
             future = executor.submit(
@@ -392,7 +395,10 @@ def tag_album_folder(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            MofNCompleteColumn(),
             TimeElapsedColumn(),
+            TextColumn("[dim]/[/dim]"),
+            TimeRemainingColumn(),
             console=CONSOLE
         ) as progress:
             task = progress.add_task("[cyan]Tagging tracks...", total=len(audio_files))
@@ -404,6 +410,11 @@ def tag_album_folder(
                 except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                     LOG.warning(f"Failed to process {file_p.name}: {e}")
                 progress.advance(task)
+    except KeyboardInterrupt:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     if options.get("fetch_replaygain", True):
         calculate_album_replaygain(audio_files, options=options)
 

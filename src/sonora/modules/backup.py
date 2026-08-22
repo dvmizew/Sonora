@@ -42,29 +42,53 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
     count = 0
     failed = 0
 
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    from sonora.core.logger import CONSOLE
+
     try:
         with open(out_path, "wb") as f:
             f.write(b"{\n")
             first = True
-            for idx, file_p in enumerate(audio_files):
-                try:
-                    info = read_track_metadata(file_p)
-                    data = info.to_dict()
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                TextColumn("[dim]/[/dim]"),
+                TimeRemainingColumn(),
+                console=CONSOLE,
+            ) as progress:
+                task = progress.add_task("[cyan]Backing up audio tags...", total=len(audio_files))
+                for idx, file_p in enumerate(audio_files):
+                    try:
+                        info = read_track_metadata(file_p)
+                        data = info.to_dict()
 
-                    if not first:
-                        f.write(b",\n")
-                    key_bytes = orjson.dumps(str(file_p), option=_ORJSON_OPTS)
-                    val_bytes = orjson.dumps(data, option=_ORJSON_OPTS)
-                    f.write(b"  " + key_bytes + b": " + val_bytes)
-                    first = False
-                    count += 1
-                except (OSError, ValueError, RuntimeError) as e:
-                    LOG.debug(f"Error reading {file_p} for backup: {e}")
-                    failed += 1
+                        if not first:
+                            f.write(b",\n")
+                        key_bytes = orjson.dumps(str(file_p), option=_ORJSON_OPTS)
+                        val_bytes = orjson.dumps(data, option=_ORJSON_OPTS)
+                        f.write(b"  " + key_bytes + b": " + val_bytes)
+                        first = False
+                        count += 1
+                    except (OSError, ValueError, RuntimeError) as e:
+                        LOG.debug(f"Error reading {file_p} for backup: {e}")
+                        failed += 1
 
-                if (idx + 1) % 500 == 0:
-                    gc.collect()
-                    LOG.info(f"   ∟ Progress: {idx + 1}/{len(audio_files)} files backed up...")
+                    progress.advance(task)
+                    if (idx + 1) % 500 == 0:
+                        gc.collect()
 
             f.write(b"\n}\n")
 
@@ -90,36 +114,59 @@ def restore_library_tags(backup_file: Path) -> int:
     failed = 0
     missing = 0
 
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    from sonora.core.logger import CONSOLE
+
     try:
         content = backup_file.read_bytes()
         backup_dict: dict[str, Any] = orjson.loads(content)
         if not isinstance(backup_dict, dict):
             raise TypeError("Backup file is not a valid JSON object")
 
-        processed = 0
-        for f_path_str, tags_dict in backup_dict.items():
-            f_path = Path(f_path_str)
-            if not f_path.exists():
-                missing += 1
-            else:
-                try:
-                    info = read_track_metadata(f_path)
-                    if isinstance(tags_dict, dict):
-                        for k, v in tags_dict.items():
-                            if k in ("file_path", "file_name"):
-                                continue
-                            if hasattr(info, k) and v is not None:
-                                setattr(info, k, v)
-                        write_track_metadata(info)
-                        count += 1
-                except (OSError, ValueError, KeyError, RuntimeError) as e:
-                    LOG.debug(f"Failed to restore {f_path}: {e}")
-                    failed += 1
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=CONSOLE,
+        ) as progress:
+            task = progress.add_task("[cyan]Restoring audio tags...", total=len(backup_dict))
+            processed = 0
+            for f_path_str, tags_dict in backup_dict.items():
+                f_path = Path(f_path_str)
+                if not f_path.exists():
+                    missing += 1
+                else:
+                    try:
+                        info = read_track_metadata(f_path)
+                        if isinstance(tags_dict, dict):
+                            for k, v in tags_dict.items():
+                                if k in ("file_path", "file_name"):
+                                    continue
+                                if hasattr(info, k) and v is not None:
+                                    setattr(info, k, v)
+                            write_track_metadata(info)
+                            count += 1
+                    except (OSError, ValueError, KeyError, RuntimeError) as e:
+                        LOG.debug(f"Failed to restore {f_path}: {e}")
+                        failed += 1
 
-            processed += 1
-            if processed % 500 == 0:
-                gc.collect()
-                LOG.info(f"   Restored progress: {processed} entries...")
+                processed += 1
+                progress.advance(task)
+                if processed % 500 == 0:
+                    gc.collect()
 
         gc.collect()
         LOG.info(f"✅ Successfully restored {count} files")

@@ -174,14 +174,6 @@ def handle_audit(args: argparse.Namespace) -> int:
         ("Files with Issues", str(len(report.issues)), "red" if report.issues else "green"),
     ]
     LOG.summary_table("Validation Summary", audit_rows)
-
-    if report.issues:
-        LOG.warning("Specific issues found:")
-        for fpath, issues in report.issues.items():
-            fname = Path(fpath).name
-            for issue in issues:
-                LOG.error(f"[{fname}] {issue}")
-
     return 0
 
 

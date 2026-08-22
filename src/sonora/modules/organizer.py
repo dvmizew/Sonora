@@ -80,13 +80,42 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
     moved_count = 0
     single_folder_cache: dict[Path, bool] = {}
 
-    for path in list(source_dir.rglob("*")):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    from sonora.core.logger import CONSOLE
+
+    all_audio_files = [
+        path for path in source_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
+    ]
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("[dim]/[/dim]"),
+        TimeRemainingColumn(),
+        console=CONSOLE,
+    ) as progress:
+        task = progress.add_task("[cyan]Organizing single tracks...", total=len(all_audio_files))
+        for path in all_audio_files:
             parent = path.parent
             if parent not in single_folder_cache:
                 single_folder_cache[parent] = is_single_folder(parent)
 
             if not single_folder_cache[parent]:
+                progress.advance(task)
                 continue  # Skip tracks belonging to full album folders
 
             try:
@@ -120,6 +149,7 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
 
             except (OSError, ValueError, RuntimeError) as e:
                 LOG.warning(f"Failed to organize track {path}: {e}")
+            progress.advance(task)
 
     # Phase 2 & 3: Deduplicate singles against albums
     if target_singles_dir.exists():
