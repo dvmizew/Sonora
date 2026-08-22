@@ -51,11 +51,21 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
             try:
                 first = results[0]
                 if first:
+                    labels = getattr(first, "labels", None)
+                    label_name = labels[0].name if labels and len(labels) > 0 and hasattr(labels[0], "name") else None
+                    cat_no = labels[0].catno if labels and len(labels) > 0 and hasattr(labels[0], "catno") else None
+                    barcodes = getattr(first, "barcodes", None)
+                    barcode_val = barcodes[0] if barcodes and len(barcodes) > 0 else None
+
                     res = {
                         "id": getattr(first, "id", None),
                         "title": getattr(first, "title", None),
                         "year": getattr(first, "year", None),
                         "genres": getattr(first, "genres", []),
+                        "country": getattr(first, "country", None),
+                        "label": label_name,
+                        "catalog_number": cat_no,
+                        "barcode": barcode_val,
                     }
                     set_cached_api(cache_key, res)
                     return res

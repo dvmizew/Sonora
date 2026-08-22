@@ -22,7 +22,6 @@ from sonora.core.models import TrackInfo
 from sonora.core.utils import normalize_str
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.discogs import search_discogs_release
-from sonora.services.genius import fetch_genius_description
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import process_track_lyrics
 from sonora.services.musicbrainz import fetch_track_mbid
@@ -123,10 +122,12 @@ def process_single_track(
                 LOG.debug(f"Last.fm lookup failed for {track_info.title}: {e}")
 
         # 5. Discogs fallback lookup for release metadata
-        if discogs_user_token and not track_info.genre:
+        if discogs_user_token:
             try:
                 release = search_discogs_release(track_info.artist, track_info.album, user_token=discogs_user_token)
                 if release:
+                    if release.get("id") and not track_info.discogs_release_id:
+                        track_info.discogs_release_id = str(release["id"])
                     if release.get("year") and not track_info.date:
                         from sonora.core.utils import normalize_date
                         track_info.date = normalize_date(str(release["year"]))
@@ -137,18 +138,56 @@ def process_single_track(
                         norm_genre = normalize_genre(raw_genre)
                         if norm_genre:
                             track_info.genre = norm_genre
+                    if release.get("country") and not track_info.release_country:
+                        track_info.release_country = str(release["country"])
+                    if release.get("label") and not track_info.label:
+                        track_info.label = str(release["label"])
+                    if release.get("catalog_number") and not track_info.catalog_number:
+                        track_info.catalog_number = str(release["catalog_number"])
+                    if release.get("barcode") and not track_info.barcode:
+                        track_info.barcode = str(release["barcode"])
             except (OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Discogs lookup failed for {track_info.title}: {e}")
 
-        # 6. Genius description as COMMENT tag
+        # 6. Genius song details (description, genius_song_id, featured_artists, producers)
         if genius_api_token:
             try:
-                desc = fetch_genius_description(track_info.artist, track_info.title, api_token=genius_api_token)
-                if desc:
-                    track_info.comment = desc
-                    LOG.info("   ∟ 📝 [Genius] Fetched description")
+                from sonora.services.genius import fetch_genius_song_details
+                g_details = fetch_genius_song_details(track_info.artist, track_info.title, api_token=genius_api_token)
+                if g_details:
+                    if g_details.get("description") and not track_info.comment:
+                        track_info.comment = str(g_details["description"])
+                    if g_details.get("genius_song_id"):
+                        track_info.genius_song_id = str(g_details["genius_song_id"])
+                    if g_details.get("featured_artists") and not track_info.featured_artists:
+                        track_info.featured_artists = str(g_details["featured_artists"])
+                    if g_details.get("producers") and not track_info.producers:
+                        track_info.producers = str(g_details["producers"])
+                    LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
             except (OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Genius lookup failed for {track_info.title}: {e}")
+
+        # 6a. Last.fm stats (listeners, playcount)
+        if lastfm_api_key:
+            try:
+                from sonora.services.lastfm import fetch_lastfm_track_stats
+                stats = fetch_lastfm_track_stats(track_info.artist, track_info.title, api_key=lastfm_api_key)
+                if stats:
+                    if stats.get("listeners"):
+                        track_info.listeners = stats["listeners"]
+                    if stats.get("playcount"):
+                        track_info.playcount = stats["playcount"]
+            except (OSError, ValueError, RuntimeError) as e:
+                LOG.debug(f"Last.fm stats lookup failed for {track_info.title}: {e}")
+
+        # 6b. TheAudioDB video URL
+        try:
+            from sonora.services.theaudiodb import fetch_track_video_url
+            vid_url = fetch_track_video_url(track_info.artist, track_info.title)
+            if vid_url:
+                track_info.music_video_url = vid_url
+        except (OSError, ValueError, RuntimeError) as e:
+            LOG.debug(f"TheAudioDB video lookup failed for {track_info.title}: {e}")
 
         # 6b. Embed Cuesheet content if .cue file exists in directory
         cue_files = list(file_path.parent.glob("*.cue"))

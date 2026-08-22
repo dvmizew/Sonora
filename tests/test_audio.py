@@ -52,10 +52,11 @@ class TestAudioEngine(unittest.TestCase):
         self.assertEqual(track_info.sample_rate, 44100)
         self.assertEqual(track_info.channels, 2)
 
-    @patch("sonora.audio.metadata.FLAC")
-    def test_write_flac_audio_metadata(self, mock_flac_cls):
-        mock_flac_instance = MagicMock()
-        mock_flac_cls.return_value = mock_flac_instance
+    @patch("taglib.File")
+    def test_write_flac_audio_metadata(self, mock_taglib_cls):
+        mock_file_instance = MagicMock()
+        mock_file_instance.tags = {}
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
 
         flac_path = Path("/tmp/test_track.flac")
         with patch.object(Path, "exists", return_value=True):
@@ -69,11 +70,11 @@ class TestAudioEngine(unittest.TestCase):
             )
             write_track_metadata(track_info)
 
-        mock_flac_instance.save.assert_called_once()
-        mock_flac_instance.__setitem__.assert_any_call("ARTIST", ["Test Artist"])
-        mock_flac_instance.__setitem__.assert_any_call("TITLE", ["Test Track"])
-        mock_flac_instance.__setitem__.assert_any_call("REPLAYGAIN_TRACK_GAIN", ["-4.25 dB"])
-        mock_flac_instance.__setitem__.assert_any_call("REPLAYGAIN_TRACK_PEAK", ["0.951234"])
+        mock_file_instance.save.assert_called_once()
+        self.assertEqual(mock_file_instance.tags["ARTIST"], ["Test Artist"])
+        self.assertEqual(mock_file_instance.tags["TITLE"], ["Test Track"])
+        self.assertEqual(mock_file_instance.tags["REPLAYGAIN_TRACK_GAIN"], ["-4.25 dB"])
+        self.assertEqual(mock_file_instance.tags["REPLAYGAIN_TRACK_PEAK"], ["0.951234"])
 
     def test_read_nonexistent_file_raises_metadata_error(self):
         bogus_path = Path("/tmp/nonexistent_audio_track_9999.flac")
@@ -124,7 +125,7 @@ class TestAudioEngine(unittest.TestCase):
         bpm = calculate_bpm(self.dummy_audio_path)
         self.assertEqual(bpm, 124.5)
 
-    @patch("mutagen.File")
+    @patch("taglib.File")
     def test_read_metadata_unsupported_format(self, mock_file):
         mock_file.return_value = None
         with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as f:
