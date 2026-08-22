@@ -5,7 +5,7 @@ import orjson
 
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
-from sonora.audio.spectral import is_fake_lossless
+from sonora.audio.spectral import detect_fake_lossless
 from sonora.core.constants import (
     FEAT_KEYWORDS,
     GENRE_BLACKLIST,
@@ -48,8 +48,9 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             issues.append(f"Checksum check failed: {e}")
         if check_spectral:
             try:
-                if is_fake_lossless(file_path):
-                    issues.append("Possible fake lossless (spectral cutoff below 16kHz).")
+                is_fake, _, desc = detect_fake_lossless(file_path)
+                if is_fake:
+                    issues.append(desc or "Possible fake lossless (spectral cutoff below 16kHz).")
             except (OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Spectral analysis failed for {file_path}: {e}")
     try:

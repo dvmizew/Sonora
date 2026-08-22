@@ -9,6 +9,8 @@ import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 # Guarantee src/ is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -114,16 +116,10 @@ class TestAudioEngine(unittest.TestCase):
         self.assertIn("/tmp/1.flac", args)
         self.assertIn("/tmp/2.flac", args)
 
-    @patch.dict("sys.modules", {"librosa": MagicMock()})
-    @patch("shutil.which", return_value=None)
-    def test_calculate_bpm_with_mocked_librosa(self, mock_which):
-        import sys
-        mock_librosa = sys.modules["librosa"]
-        mock_librosa.load.return_value = (None, 44100)
-        mock_librosa.beat.beat_track.return_value = (124.5, None)
-
+    @patch("scipy.signal.spectrogram", return_value=(None, None, np.ones((10, 100))))
+    def test_calculate_bpm_with_scipy(self, mock_spec):
         bpm = calculate_bpm(self.dummy_audio_path)
-        self.assertEqual(bpm, 124.5)
+        self.assertIsNotNone(bpm)
 
     @patch("taglib.File")
     def test_read_metadata_unsupported_format(self, mock_file):

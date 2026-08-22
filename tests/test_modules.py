@@ -342,7 +342,7 @@ class TestCoreModules(unittest.TestCase):
         mock_acoustid.assert_called_once()
         mock_discogs.assert_called_once()
 
-    @patch("sonora.modules.auditor.is_fake_lossless")
+    @patch("sonora.modules.auditor.detect_fake_lossless")
     @patch("sonora.modules.auditor.verify_flac_checksum")
     @patch("sonora.modules.auditor.read_track_metadata")
     def test_audit_library_spectral_check_option(self, mock_read, mock_checksum, mock_spectral):
@@ -351,7 +351,7 @@ class TestCoreModules(unittest.TestCase):
 
         mock_checksum.return_value = True
         mock_read.return_value = TrackInfo(file_path=flac_file, artist="Artist", title="Title")
-        mock_spectral.return_value = True
+        mock_spectral.return_value = (True, 0.0001, "Brickwall spectral cutoff detected at ~16-18kHz (likely upscaled 128-192kbps MP3 fake lossless)")
 
         report = audit_library(self.tmp_path, check_spectral=True)
         self.assertTrue(any("fake lossless" in issue.lower() for issues in report.issues.values() for issue in issues))

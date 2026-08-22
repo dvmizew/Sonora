@@ -6,8 +6,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.theme import Theme
 
-# Silence 3rd party loggers completely as in initial/script.py
-for logger_name in ["syncedlyrics", "Musixmatch", "Lrclib", "NetEase", "Megalobiz", "Genius", "urllib3", "librosa", "audioread", "resampy"]:
+for logger_name in ["syncedlyrics", "Musixmatch", "Lrclib", "NetEase", "Megalobiz", "Genius", "urllib3", "httpx"]:
     _l = logging.getLogger(logger_name)
     _l.setLevel(logging.CRITICAL)
     _l.propagate = False
