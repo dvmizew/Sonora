@@ -11,6 +11,12 @@ import orjson
 
 socket.setdefaulttimeout(15)
 
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
+
 HAS_DOTENV = importlib.util.find_spec("dotenv") is not None
 
 from sonora import __version__

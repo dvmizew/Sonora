@@ -120,7 +120,7 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
         from sonora.core.http import SESSION
         resp = SESSION.head(url, allow_redirects=True, timeout=5)
         if resp.status_code == 200:
-            return resp.url or url
+            return str(resp.url) or url
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         from sonora.core.logger import LOG
         LOG.debug(f"Cover Art Archive lookup failed: {e}")
