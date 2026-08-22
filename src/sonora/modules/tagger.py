@@ -88,22 +88,25 @@ def process_single_track(
 
         # 3. Fetch MusicBrainz Album ID via Discography Optimization
         if not track_info.musicbrainz_albumid:
-            try:
-                from sonora.services.musicbrainz import search_musicbrainz_release
-                search_artist = track_info.album_artist if track_info.album_artist else track_info.artist
-                release = search_musicbrainz_release(search_artist, track_info.album)
-                if release:
-                    mb_id = release.get("id")
-                    if mb_id is not None:
-                        track_info.musicbrainz_albumid = str(mb_id)
-                    # Also opportunistically set year/genre if missing
-                    if not track_info.date:
-                        from sonora.core.utils import normalize_date
-                        date_str = release.get("date")
-                        if isinstance(date_str, str) and len(date_str) >= 4:
-                            track_info.date = normalize_date(date_str)
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
+            pre_album_mbid = options.get("album_mbid") if isinstance(options, dict) else None
+            if pre_album_mbid:
+                track_info.musicbrainz_albumid = pre_album_mbid
+            else:
+                try:
+                    from sonora.services.musicbrainz import search_musicbrainz_release
+                    search_artist = track_info.album_artist if track_info.album_artist else track_info.artist
+                    release = search_musicbrainz_release(search_artist, track_info.album)
+                    if release:
+                        mb_id = release.get("id")
+                        if mb_id is not None:
+                            track_info.musicbrainz_albumid = str(mb_id)
+                        if not track_info.date:
+                            from sonora.core.utils import normalize_date
+                            date_str = release.get("date")
+                            if isinstance(date_str, str) and len(date_str) >= 4:
+                                track_info.date = normalize_date(date_str)
+                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
+                    LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
 
         # 4. Fetch Last.fm genre/mood tags
         if lastfm_api_key:
@@ -312,7 +315,7 @@ def tag_album_folder(
     if not audio_files:
         return []
 
-    # Batch Optimization: Fetch entire album track MBIDs in 1 single API call
+    # Batch Optimization: Fetch entire album track MBIDs and album MBID in 1 single API call
     try:
         from sonora.services.musicbrainz import (
             fetch_album_track_mbids,
@@ -324,10 +327,12 @@ def tag_album_folder(
         if s_artist and s_album:
             rel = search_musicbrainz_release(s_artist, s_album)
             if rel and rel.get("id"):
-                album_mbids = fetch_album_track_mbids(str(rel["id"]))
+                alb_id = str(rel["id"])
+                album_mbids = fetch_album_track_mbids(alb_id)
                 if options.get("options") is None:
                     options["options"] = {}
                 options["options"]["album_track_mbids"] = album_mbids
+                options["options"]["album_mbid"] = alb_id
     except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
         LOG.debug(f"Pre-fetching album track MBIDs failed: {e}")
 

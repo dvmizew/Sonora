@@ -164,13 +164,21 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
     """
     if not release_mbid:
         return None
+    cache_key = f"caa_url:{release_mbid}"
+    cached = get_cached_api(cache_key)
+    if cached is not None:
+        return str(cached) if cached else None
+
     url = f"https://coverartarchive.org/release/{release_mbid}/front"
     try:
         from sonora.core.http import SESSION
 
         resp = SESSION.head(url, allow_redirects=True, timeout=5)
         if resp.status_code == 200:
-            return str(resp.url) or url
+            res_url = str(resp.url) or url
+            set_cached_api(cache_key, res_url)
+            return res_url
+        set_cached_api(cache_key, None)
     except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
         from sonora.core.logger import LOG
 
