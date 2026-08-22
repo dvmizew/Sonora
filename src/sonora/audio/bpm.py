@@ -15,11 +15,13 @@ def _load_audio_mono(file_path: Path) -> tuple[np.ndarray, int] | None:
 
     # 1. Try soundfile C libsndfile (WAV, FLAC, OGG, AIFF)
     try:
-        data, sr = sf.read(str(file_path), dtype="float32")
-        if data.ndim > 1:
-            data = np.mean(data, axis=1)
-        if len(data) > 0:
-            return data, int(sr)
+        with sf.SoundFile(str(file_path)) as f:
+            data = f.read(dtype="float32")
+            sr = f.samplerate
+            if data.ndim > 1:
+                data = np.mean(data, axis=1)
+            if len(data) > 0:
+                return data, int(sr)
     except (sf.LibsndfileError, OSError, ValueError, RuntimeError) as e:
         LOG.debug(f"soundfile read failed for {file_path}: {e}")
 
@@ -70,7 +72,7 @@ def _load_audio_mono(file_path: Path) -> tuple[np.ndarray, int] | None:
 
 def calculate_bpm(file_path: Path) -> float | None:
     """
-    Calculate the BPM of an audio file using SciPy.
+    Calculate the BPM of an audio file using STFT onset envelope autocorrelation via SciPy.
     """
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")

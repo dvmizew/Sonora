@@ -196,7 +196,7 @@ def audit_library(
             tracks_found = defaultdict(list)
             
             for path in paths:
-                LOG.info(f"Auditing: {path.name}")
+                LOG.debug(f"Auditing: {path.name}")
                 report.total_files += 1
                 
                 # We need some info from the file for folder-level checks
@@ -219,6 +219,8 @@ def audit_library(
 
                 if file_issues:
                     report.issues[str(path)] = file_issues
+                    for issue in file_issues:
+                        LOG.warning(f"   ∟ ⚠️ [{path.name}] {issue}")
                     if any("corrupt" in normalize_str(issue) or "checksum" in normalize_str(issue) for issue in file_issues):
                         report.corrupt_files += 1
                     if any("missing" in normalize_str(issue) and "tag" in normalize_str(issue) for issue in file_issues):
@@ -252,6 +254,8 @@ def audit_library(
             
             if folder_issues:
                 report.issues[str(folder)] = folder_issues
+                for issue in folder_issues:
+                    LOG.warning(f"   ∟ ⚠️ [{folder.name}] {issue}")
 
     if output_json:
         total = report.total_files

@@ -64,7 +64,12 @@ def process_single_track(
         # 1. Respect existing MBID or prioritize AcoustID (most exact) over text search
         if (not track_info.musicbrainz_trackid or force) and acoustid_api_key:
             try:
-                acoustid_mbid = lookup_acoustid(file_path, api_key=acoustid_api_key)
+                acoustid_mbid = lookup_acoustid(
+                    file_path,
+                    api_key=acoustid_api_key,
+                    expected_artist=track_info.artist,
+                    expected_title=track_info.title,
+                )
                 if acoustid_mbid:
                     track_info.musicbrainz_trackid = acoustid_mbid
                     LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
@@ -154,6 +159,33 @@ def process_single_track(
                         track_info.barcode = str(release["barcode"])
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Discogs lookup failed for {track_info.title}: {e}")
+
+        # 5b. Deezer metadata enrichment (Label, Barcode, Release Date, Genre, ISRC)
+        try:
+            from sonora.services.deezer import (
+                fetch_deezer_album_details,
+                fetch_deezer_track_details,
+            )
+            d_album = fetch_deezer_album_details(track_info.artist, track_info.album)
+            if d_album:
+                if d_album.get("label") and not track_info.label:
+                    track_info.label = str(d_album["label"])
+                if d_album.get("barcode") and not track_info.barcode:
+                    track_info.barcode = str(d_album["barcode"])
+                if d_album.get("release_date") and not track_info.date:
+                    from sonora.core.utils import normalize_date
+                    track_info.date = normalize_date(str(d_album["release_date"]))
+                if d_album.get("genre") and not track_info.genre:
+                    from sonora.core.utils import normalize_genre
+                    norm_g = normalize_genre(str(d_album["genre"]))
+                    if norm_g:
+                        track_info.genre = norm_g
+
+            d_track = fetch_deezer_track_details(track_info.artist, track_info.title)
+            if d_track and d_track.get("isrc") and not track_info.isrc:
+                track_info.isrc = str(d_track["isrc"])
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
+            LOG.debug(f"Deezer enrichment failed for {track_info.title}: {e}")
 
         # 6. Genius song details (description, genius_song_id, featured_artists, producers)
         if genius_api_token:

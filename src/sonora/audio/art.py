@@ -7,6 +7,7 @@ from PIL import Image, UnidentifiedImageError
 
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
+from sonora.services.deezer import fetch_deezer_cover_art_url
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.musicbrainz import fetch_cover_art_archive_url
 from sonora.services.theaudiodb import fetch_artist_images
@@ -76,6 +77,8 @@ def process_album_cover_art(
             art_url = fetch_cover_art_archive_url(mb_album_id)
         if not art_url:
             art_url = fetch_itunes_cover_art_url(artist, album)
+        if not art_url:
+            art_url = fetch_deezer_cover_art_url(artist, album)
 
         if art_url:
             try:
