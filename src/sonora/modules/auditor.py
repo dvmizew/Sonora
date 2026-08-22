@@ -1,6 +1,7 @@
-import json
 import re
 from pathlib import Path
+
+import orjson
 
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
@@ -258,6 +259,11 @@ def audit_library(
             },
             "issues": report.issues,
         }
-        output_json.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        output_json.write_bytes(
+            orjson.dumps(
+                data,
+                option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_DATACLASS,
+            )
+        )
 
     return report

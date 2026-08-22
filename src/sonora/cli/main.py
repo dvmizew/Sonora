@@ -1,12 +1,13 @@
 import argparse
 import datetime
 import importlib.util
-import json
 import os
 import socket
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+
+import orjson
 
 socket.setdefaulttimeout(15)
 
@@ -143,7 +144,12 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
             },
             "tracks": [t.to_dict() for t in results],
         }
-        args.json.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        args.json.write_bytes(
+            orjson.dumps(
+                report_data,
+                option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_DATACLASS,
+            )
+        )
         LOG.info(f"Saved LLM-optimized tagging JSON report to [bold]{args.json}[/bold]")
 
     return 0
