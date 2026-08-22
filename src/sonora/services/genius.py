@@ -1,4 +1,3 @@
-from sonora.core.exceptions import APIServiceError
 from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter, normalize_str
 
@@ -49,4 +48,4 @@ def fetch_genius_description(artist: str, title: str, api_token: str | None = No
         return None
 
     except (OSError, ValueError, KeyError) as e:
-        raise APIServiceError(f"Genius description fetch failed for {artist} - {title}: {e}") from e
+        raise RuntimeError(f"Genius description fetch failed for {artist} - {title}: {e}") from e

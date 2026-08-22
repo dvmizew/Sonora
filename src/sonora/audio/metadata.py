@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from mutagen._file import File
+from mutagen._util import MutagenError
 from mutagen.aiff import AIFF
 from mutagen.asf import ASF
 from mutagen.flac import FLAC, Picture
@@ -23,7 +24,6 @@ from mutagen.mp4 import MP4, MP4Cover
 from mutagen.oggvorbis import OggVorbis
 from mutagen.wave import WAVE
 
-from sonora.core.exceptions import MetadataError
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import normalize_date, normalize_genre
@@ -34,12 +34,12 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
     Read metadata tags from an audio file and return a TrackInfo dataclass.
     """
     if not file_path.exists():
-        raise MetadataError(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
         audio = File(str(file_path))
         if audio is None:
-            raise MetadataError(f"Unsupported audio format: {file_path}")
+            raise ValueError(f"Unsupported audio format: {file_path}")
         def get_first_of(*keys: str) -> str | None:
             for k in keys:
                 try:
@@ -100,16 +100,16 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         if raw_rg_gain:
             try:
                 rg_gain = float(str(raw_rg_gain).replace(" dB", "").strip())
-            except ValueError:
-                pass
+            except ValueError as e:
+                LOG.debug(f"Failed to parse ReplayGain gain '{raw_rg_gain}': {e}")
 
         raw_rg_peak = get_first_of("TXXX:REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_TRACK_PEAK", "replaygain_track_peak")
         rg_peak = None
         if raw_rg_peak:
             try:
                 rg_peak = float(str(raw_rg_peak).strip())
-            except ValueError:
-                pass
+            except ValueError as e:
+                LOG.debug(f"Failed to parse ReplayGain peak '{raw_rg_peak}': {e}")
 
         sample_rate = getattr(audio.info, "sample_rate", None)
         bitrate = getattr(audio.info, "bitrate", None)
@@ -189,10 +189,10 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             original_date=orig_date,
             cuesheet=cuesheet,
         )
-    except Exception as e:
-        if isinstance(e, MetadataError):
+    except (MutagenError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        if isinstance(e, (RuntimeError, ValueError)):
             raise
-        raise MetadataError(f"Failed to read metadata for {file_path}: {e}") from e
+        raise RuntimeError(f"Failed to read metadata for {file_path}: {e}") from e
 
 
 def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = None) -> None:
@@ -201,7 +201,7 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
     Also embeds cover art in the same I/O operation if cover_art_path is provided, avoiding double file rewrites.
     """
     if not track_info.file_path.exists():
-        raise MetadataError(f"File not found: {track_info.file_path}")
+        raise FileNotFoundError(f"File not found: {track_info.file_path}")
 
     try:
         audio_container: Any = None
@@ -297,7 +297,7 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                     if audio_container.tags is None:
                         audio_container.add_tags()
                     id3_audio = audio_container.tags
-                except (MetadataError, OSError, ValueError, KeyError) as e:
+                except (RuntimeError, OSError, ValueError, KeyError) as e:
                     LOG.debug(f"MP3 ID3 parsing failed: {e}")
                     id3_audio = ID3()
             elif ext == ".wav":
@@ -312,7 +312,7 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 id3_audio = audio_container.tags
 
             if id3_audio is None:
-                raise MetadataError(f"Failed to initialize ID3 tags for {track_info.file_path}")
+                raise RuntimeError(f"Failed to initialize ID3 tags for {track_info.file_path}")
                 
             id3_audio.add(TPE1(encoding=3, text=[track_info.artist]))
             id3_audio.add(TIT2(encoding=3, text=[track_info.title]))
@@ -395,8 +395,8 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
                 ape_audio.save()
             
         else:
-            raise MetadataError(f"Writing metadata to {ext} files is not supported.")
-    except Exception as e:
-        if isinstance(e, MetadataError):
+            raise ValueError(f"Writing metadata to {ext} files is not supported.")
+    except (MutagenError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        if isinstance(e, RuntimeError):
             raise
-        raise MetadataError(f"Failed to write metadata for {track_info.file_path}: {e}") from e
+        raise RuntimeError(f"Failed to write metadata for {track_info.file_path}: {e}") from e

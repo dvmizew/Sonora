@@ -1,17 +1,9 @@
 import threading
-from typing import TYPE_CHECKING
+
+import discogs_client
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter, normalize_str
-
-if TYPE_CHECKING:
-    import discogs_client
-else:
-    try:
-        import discogs_client
-    except ImportError:
-        discogs_client = None
 
 _DISCOGS_LIMITER = RateLimiter(interval_seconds=1.1)
 
@@ -37,9 +29,6 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
     global _discogs_client_instance, _discogs_client_token
     if not user_token or not artist or not album:
         return None
-
-    if discogs_client is None:
-        raise APIServiceError("discogs-client library is not installed.")
 
     if normalize_str(album) in ["unknown album", "unknown"]:
         return None
@@ -70,11 +59,12 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
                     }
                     set_cached_api(cache_key, res)
                     return res
-            except (IndexError, TypeError, AttributeError):
-                pass
+            except (IndexError, TypeError, AttributeError) as e:
+                from sonora.core.logger import LOG
+                LOG.debug(f"Discogs empty result parse: {e}")
             return None
         except Exception as e:
             _discogs_client_instance = None
-            if isinstance(e, APIServiceError):
+            if isinstance(e, RuntimeError):
                 raise
-            raise APIServiceError(f"Discogs search failed for {artist} - {album}: {e}") from e
+            raise RuntimeError(f"Discogs search failed for {artist} - {album}: {e}") from e

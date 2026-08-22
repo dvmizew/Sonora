@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
 
-from sonora.core.exceptions import APIServiceError
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.discogs import search_discogs_release
 from sonora.services.genius import fetch_genius_description
@@ -73,7 +72,7 @@ class TestServicesEngine(unittest.TestCase):
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics_raises_api_service_error_on_failure(self, mock_syncedlyrics, mock_cache):
         mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
-        with self.assertRaises(APIServiceError):
+        with self.assertRaises(RuntimeError):
             fetch_synced_lyrics("FailArtist", "FailTitle")
 
     def test_synced_lyrics_empty_query_returns_none(self):
@@ -171,7 +170,7 @@ class TestServicesEngine(unittest.TestCase):
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_error_handling(self, mock_mb, mock_cache):
         mock_mb.search_recordings.side_effect = Exception("MusicBrainz server 500")
-        with self.assertRaises(APIServiceError):
+        with self.assertRaises(RuntimeError):
             fetch_track_mbid("Artist", "Title")
 
     @patch("sonora.services.discogs.get_cached_api", return_value=None)
@@ -181,7 +180,7 @@ class TestServicesEngine(unittest.TestCase):
         mock_client.search.side_effect = Exception("Discogs 401 Unauthorized")
         mock_discogs_mod.Client.return_value = mock_client
 
-        with self.assertRaises(APIServiceError):
+        with self.assertRaises(RuntimeError):
             search_discogs_release("Artist", "Album", user_token="bad_token")
 
     def test_clean_lyrics_text(self):

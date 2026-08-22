@@ -1,24 +1,19 @@
 import threading
-from typing import TYPE_CHECKING
+
+import musicbrainzngs
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter, normalize_str
-
-if TYPE_CHECKING:
-    import musicbrainzngs
-else:
-    try:
-        import musicbrainzngs
-    except ImportError:
-        musicbrainzngs = None
 
 _MB_LIMITER = RateLimiter(interval_seconds=1.1)
 
 
 def init_musicbrainz(app_name: str = "Sonora", version: str = "0.1.0", contact: str = "danielradu02@users.noreply.github.com") -> None:
-    if musicbrainzngs is not None:
+    try:
         musicbrainzngs.set_useragent(app_name, version, contact)
+    except (ValueError, AttributeError, RuntimeError) as e:
+        from sonora.core.logger import LOG
+        LOG.debug(f"MusicBrainz User-Agent initialization failed: {e}")
 
 _discography_locks: dict[str, threading.Lock] = {}
 _discography_meta_lock = threading.Lock()
@@ -37,9 +32,8 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
     Fetch and cache the entire discography (releases) of an artist from MusicBrainz in a single API call.
     Returns list of release dicts.
     """
-    if musicbrainzngs is None or not artist:
-        return []
-
+    if musicbrainzngs is not None:
+        init_musicbrainz()
     artist_key = normalize_str(artist)
     cache_key = f"mb_discography:{artist_key}"
 
@@ -55,16 +49,13 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
             set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
             return releases
         except Exception as e:
-            if isinstance(e, APIServiceError):
+            if isinstance(e, RuntimeError):
                 raise
-            raise APIServiceError(f"MusicBrainz discography fetch failed for {artist}: {e}") from e
+            raise RuntimeError(f"MusicBrainz discography fetch failed for {artist}: {e}") from e
 
 
 def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | None:
     """Search MusicBrainz for an album release matching artist and album name."""
-    if musicbrainzngs is None:
-        raise APIServiceError("musicbrainzngs library is not installed.")
-        
     if not album or normalize_str(album) in ["unknown album", "unknown"]:
         return None
 
@@ -92,16 +83,13 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
         set_cached_api(cache_key, target_rel)
         return target_rel
     except Exception as e:
-        if isinstance(e, APIServiceError):
+        if isinstance(e, RuntimeError):
             raise
-        raise APIServiceError(f"MusicBrainz search failed for {artist} - {album}: {e}") from e
+        raise RuntimeError(f"MusicBrainz search failed for {artist} - {album}: {e}") from e
 
 
 
 def fetch_track_mbid(artist: str, title: str) -> str | None:
-    if musicbrainzngs is None:
-        raise APIServiceError("musicbrainzngs library is not installed.")
-
     cache_key = f"mb_mbid:{normalize_str(artist)}:{normalize_str(title)}"
     cached = get_cached_api(cache_key)
     if cached is not None:
@@ -115,6 +103,26 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         set_cached_api(cache_key, mbid)
         return mbid
     except Exception as e:
-        if isinstance(e, APIServiceError):
+        if isinstance(e, RuntimeError):
             raise
-        raise APIServiceError(f"MusicBrainz track lookup failed for {artist} - {title}: {e}") from e
+        raise RuntimeError(f"MusicBrainz track lookup failed for {artist} - {title}: {e}") from e
+
+
+def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
+    """
+    Check if Cover Art Archive has front cover art for the given MusicBrainz release MBID.
+    Returns front cover image URL or None.
+    """
+    if not release_mbid:
+        return None
+    url = f"https://coverartarchive.org/release/{release_mbid}/front"
+    try:
+        from sonora.core.http import SESSION
+        resp = SESSION.head(url, allow_redirects=True, timeout=5)
+        if resp.status_code == 200:
+            return resp.url or url
+    except (OSError, ValueError, KeyError, RuntimeError) as e:
+        from sonora.core.logger import LOG
+        LOG.debug(f"Cover Art Archive lookup failed: {e}")
+    return None
+

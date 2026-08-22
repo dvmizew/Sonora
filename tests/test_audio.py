@@ -21,7 +21,6 @@ from sonora.audio.metadata import (
     write_track_metadata,
 )
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.exceptions import AudioProcessingError, MetadataError
 from sonora.core.models import TrackInfo
 
 
@@ -78,12 +77,12 @@ class TestAudioEngine(unittest.TestCase):
 
     def test_read_nonexistent_file_raises_metadata_error(self):
         bogus_path = Path("/tmp/nonexistent_audio_track_9999.flac")
-        with self.assertRaises(MetadataError):
+        with self.assertRaises(FileNotFoundError):
             read_track_metadata(bogus_path)
 
     def test_verify_nonexistent_file_raises_audio_error(self):
         bogus_path = Path("/tmp/nonexistent_audio_track_9999.flac")
-        with self.assertRaises(AudioProcessingError):
+        with self.assertRaises(FileNotFoundError):
             verify_flac_checksum(bogus_path)
 
     def test_verify_non_flac_returns_true(self):
@@ -132,7 +131,7 @@ class TestAudioEngine(unittest.TestCase):
             dummy_path = Path(f.name)
 
         try:
-            with self.assertRaises(MetadataError):
+            with self.assertRaises(ValueError):
                 read_track_metadata(dummy_path)
         finally:
             if dummy_path.exists():
@@ -142,7 +141,7 @@ class TestAudioEngine(unittest.TestCase):
     def test_checksum_binary_not_found(self, mock_run):
         mock_run.side_effect = FileNotFoundError()
         flac_p = Path("/tmp/dummy_flac_check_99.flac")
-        with patch.object(Path, "exists", return_value=True), self.assertRaises(AudioProcessingError):
+        with patch.object(Path, "exists", return_value=True), self.assertRaises(RuntimeError):
             verify_flac_checksum(flac_p)
 
     @patch("subprocess.run")

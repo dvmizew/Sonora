@@ -3,7 +3,6 @@ from pathlib import Path
 
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
-from sonora.core.exceptions import AudioProcessingError, MetadataError
 from sonora.core.models import TrackInfo
 from sonora.core.utils import sanitize_name
 
@@ -45,8 +44,8 @@ def sync_lrc_metadata(lrc_path: Path, track_info: TrackInfo) -> bool:
             f.write(final_content)
         return True
 
-    except Exception as e:
-        raise AudioProcessingError(f"Failed to sync LRC metadata for {lrc_path}: {e}") from e
+    except (OSError, ValueError, KeyError) as e:
+        raise RuntimeError(f"Failed to sync LRC metadata for {lrc_path}: {e}") from e
 
 
 def rename_track_file(
@@ -59,13 +58,13 @@ def rename_track_file(
     Rename an audio file and its .lrc files based on metadata.
     """
     if not file_path.exists():
-        raise AudioProcessingError(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
         if track_info is None:
             track_info = read_track_metadata(file_path)
-    except MetadataError as e:
-        raise AudioProcessingError(f"Cannot rename file without metadata: {e}") from e
+    except (OSError, ValueError, RuntimeError) as e:
+        raise RuntimeError(f"Cannot rename file without metadata: {e}") from e
 
     num = track_info.track_number or 1
     artist_clean = sanitize_name(track_info.artist)
@@ -149,7 +148,7 @@ def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[
     and album folders based on consensus metadata.
     """
     if not dir_path.exists():
-        raise AudioProcessingError(f"Directory not found: {dir_path}")
+        raise FileNotFoundError(f"Directory not found: {dir_path}")
 
     from collections import Counter
 
@@ -174,7 +173,7 @@ def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[
                     
                 new_p = rename_track_file(path, track_info=info, options=options)
                 renamed.append(new_p)
-            except AudioProcessingError as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 LOG.warning(f"Failed to rename file {path}: {e}")
         
         if album_consensus:

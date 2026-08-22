@@ -7,10 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from sonora.audio.art import check_image_similarity
+from sonora.audio.art import check_image_similarity, process_artist_artwork
 from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
-from sonora.core.exceptions import AudioProcessingError
 from sonora.core.models import TrackInfo
 from sonora.modules.auditor import audit_file, audit_library, check_brackets_corruption
 from sonora.modules.backup import backup_library_tags, restore_library_tags
@@ -22,7 +21,6 @@ from sonora.modules.renamer import (
 )
 from sonora.modules.tagger import (
     normalize_artist_alias,
-    process_artist_art,
     process_single_track,
     tag_album_folder,
 )
@@ -213,7 +211,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue((self.tmp_path / "report.json").exists())
 
     @patch("sonora.modules.tagger.write_track_metadata")
-    @patch("sonora.modules.tagger.fetch_synced_lyrics")
+    @patch("sonora.services.lyrics.fetch_synced_lyrics")
     @patch("sonora.modules.tagger.fetch_track_mbid")
     @patch("sonora.modules.tagger.read_track_metadata")
     def test_process_single_track(self, mock_read, mock_mbid, mock_lyrics, mock_write):
@@ -269,11 +267,11 @@ class TestCoreModules(unittest.TestCase):
         self.assertFalse(is_single_folder(empty_dir))
 
     def test_audit_library_nonexistent_directory(self):
-        with self.assertRaises(AudioProcessingError):
+        with self.assertRaises(FileNotFoundError):
             audit_library(self.tmp_path / "nonexistent_dir_999")
 
     def test_tag_album_folder_nonexistent_directory(self):
-        with self.assertRaises(AudioProcessingError):
+        with self.assertRaises(FileNotFoundError):
             tag_album_folder(self.tmp_path / "nonexistent_dir_999")
 
     @patch("sonora.modules.renamer.read_track_metadata")
@@ -474,7 +472,7 @@ class TestCoreModules(unittest.TestCase):
 
         artist_folder = self.tmp_path / "21 Savage" / "Album"
         artist_folder.mkdir(parents=True, exist_ok=True)
-        process_artist_art("21 Savage", artist_folder)
+        process_artist_artwork(artist_folder, "21 Savage")
         self.assertTrue((self.tmp_path / "21 Savage" / "artist.jpg").exists())
         self.assertTrue((self.tmp_path / "21 Savage" / "banner.jpg").exists())
 

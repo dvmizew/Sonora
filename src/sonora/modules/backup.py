@@ -6,7 +6,6 @@ from typing import Any
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
-from sonora.core.exceptions import MetadataError
 from sonora.core.logger import LOG
 
 
@@ -53,7 +52,7 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
                     f.write(json.dumps(data, ensure_ascii=False))
                     first = False
                     count += 1
-                except (MetadataError, OSError, ValueError) as e:
+                except (OSError, ValueError, RuntimeError) as e:
                     LOG.debug(f"Error reading {file_p} for backup: {e}")
                     failed += 1
 
@@ -171,7 +170,7 @@ def restore_library_tags(backup_file: Path) -> int:
                                         setattr(info, k, v)
                                 write_track_metadata(info)
                                 count += 1
-                        except (MetadataError, OSError, ValueError, KeyError) as e:
+                        except (OSError, ValueError, KeyError, RuntimeError) as e:
                             LOG.debug(f"Failed to restore {f_path}: {e}")
                             failed += 1
 
@@ -210,6 +209,6 @@ def restore_library_tags(backup_file: Path) -> int:
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files failed to restore")
         return count
-    except Exception as e:
+    except (json.JSONDecodeError, OSError, ValueError, KeyError) as e:
         LOG.error(f"Failed to read backup file: {e}")
         raise

@@ -1,5 +1,4 @@
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.exceptions import APIServiceError
 from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter, normalize_str
 
@@ -32,20 +31,47 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
         set_cached_api(cache_key, results)
         return results
     except (OSError, ValueError, KeyError, RuntimeError) as e:
-        raise APIServiceError(f"iTunes Search API request failed for {query_term}: {e}") from e
+        raise RuntimeError(f"iTunes Search API request failed for {query_term}: {e}") from e
 
 
 def fetch_itunes_cover_art_url(artist: str, album: str, resolution: int = 1400) -> str | None:
     """
     Fetch high-resolution album cover art URL from iTunes.
     Resolutions can be 600, 1400, or 3000.
+    Ensures album name matches target to avoid wrong album series artwork.
     """
     results = search_itunes(artist=artist, term=album, entity="album")
     if not results:
         return None
 
-    artwork_url = results[0].get("artworkUrl100")
-    if isinstance(artwork_url, str):
-        # Upgrade low-res 100x100 URL to requested high resolution (e.g. 1400x1400 or 3000x3000)
-        return artwork_url.replace("100x100bb", f"{resolution}x{resolution}bb")
+    norm_target = normalize_str(album)
+    best_result: dict[str, object] | None = None
+
+    # Step 1: Look for exact normalized title match
+    for res in results:
+        coll_name = str(res.get("collectionName", ""))
+        if normalize_str(coll_name) == norm_target:
+            best_result = res
+            break
+
+    # Step 2: Fallback matching if no exact match found
+    if best_result is None:
+        target_has_num = any(w in norm_target.split() for w in ["ii", "2", "two", "part 2", "pt 2", "pt. 2", "vol 2", "vol. 2", "iii", "3", "iv", "4"])
+        for res in results:
+            coll_name = str(res.get("collectionName", ""))
+            norm_coll = normalize_str(coll_name)
+            coll_has_num = any(w in norm_coll.split() for w in ["ii", "2", "two", "part 2", "pt 2", "pt. 2", "vol 2", "vol. 2", "iii", "3", "iv", "4"])
+            
+            # Reject mismatch between album series (e.g. Savage Mode vs Savage Mode II)
+            if coll_has_num != target_has_num:
+                continue
+
+            best_result = res
+            break
+
+    if best_result is not None:
+        artwork_url = best_result.get("artworkUrl100")
+        if isinstance(artwork_url, str):
+            return artwork_url.replace("100x100bb", f"{resolution}x{resolution}bb")
+
     return None

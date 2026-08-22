@@ -1,5 +1,4 @@
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.exceptions import APIServiceError
 from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter, normalize_str
 
@@ -54,4 +53,4 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         if mbid and artist and title and not _retried:
             return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None, _retried=True)
-        raise APIServiceError(f"Last.fm tag fetch failed for {artist} - {title}: {e}") from e
+        raise RuntimeError(f"Last.fm tag fetch failed for {artist} - {title}: {e}") from e

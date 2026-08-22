@@ -1,14 +1,10 @@
 from pathlib import Path
 
+import acoustid
+
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.exceptions import APIServiceError
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter
-
-try:
-    import acoustid
-except ImportError:
-    acoustid = None
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
@@ -17,16 +13,13 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
     Returns (duration, fingerprint_string).
     """
     if not file_path.exists():
-        raise APIServiceError(f"File not found: {file_path}")
-
-    if acoustid is None:
-        raise APIServiceError("pyacoustid library is not installed.")
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
         duration, fingerprint = acoustid.fingerprint_file(str(file_path))
         return float(duration), str(fingerprint)
-    except Exception as e:
-        raise APIServiceError(f"Chromaprint fingerprinting failed for {file_path}: {e}") from e
+    except (acoustid.AcoustidError, acoustid.WebServiceError, OSError, ValueError, RuntimeError) as e:
+        raise RuntimeError(f"Chromaprint fingerprinting failed for {file_path}: {e}") from e
 
 
 _ACOUSTID_LIMITER = RateLimiter(interval_seconds=0.4)
@@ -39,7 +32,7 @@ def lookup_acoustid(file_path: Path, api_key: str | None = None) -> str | None:
     Returns the MBID string if found, otherwise None.
     """
     global _ACOUSTID_FAILURES
-    if not api_key or acoustid is None or _ACOUSTID_FAILURES >= _MAX_ACOUSTID_FAILURES:
+    if not api_key or _ACOUSTID_FAILURES >= _MAX_ACOUSTID_FAILURES:
         return None
 
     try:
@@ -59,7 +52,7 @@ def lookup_acoustid(file_path: Path, api_key: str | None = None) -> str | None:
                 _ACOUSTID_FAILURES = 0
                 return rec_str
         return None
-    except (APIServiceError, OSError, ValueError, KeyError) as e:
-        LOG.debug(f"AcoustID lookup failed: {e}")
+    except (acoustid.AcoustidError, acoustid.WebServiceError, OSError, ValueError, KeyError, RuntimeError) as e:
+        LOG.debug(f"AcoustID lookup failed for {file_path.name}: {e}")
         _ACOUSTID_FAILURES += 1
         return None

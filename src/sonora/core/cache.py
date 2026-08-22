@@ -1,18 +1,11 @@
 import atexit
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import diskcache
 
 from sonora.core.logger import LOG
-
-if TYPE_CHECKING:
-    import diskcache
-else:
-    try:
-        import diskcache
-    except ImportError:
-        diskcache = None
-
 
 _CACHE_DIR = Path.home() / ".cache" / "sonora"
 _CACHE_INSTANCE: Any = None
@@ -25,7 +18,7 @@ def set_ignore_cache(ignore: bool) -> None:
 
 def get_cache() -> Any:
     global _CACHE_INSTANCE
-    if diskcache is not None and _CACHE_INSTANCE is None:
+    if _CACHE_INSTANCE is None:
         with _CACHE_LOCK:
             if _CACHE_INSTANCE is None:
                 try:

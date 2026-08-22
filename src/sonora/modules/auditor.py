@@ -11,7 +11,6 @@ from sonora.core.constants import (
     PROTECTED_ARTISTS,
     SUPPORTED_EXTS,
 )
-from sonora.core.exceptions import AudioProcessingError, MetadataError
 from sonora.core.logger import LOG
 from sonora.core.models import AuditReport
 from sonora.core.utils import normalize_str
@@ -44,13 +43,13 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
         try:
             if not verify_flac_checksum(file_path):
                 issues.append("FLAC audio stream MD5 checksum verification failed (corrupted FLAC).")
-        except AudioProcessingError as e:
+        except (OSError, ValueError, RuntimeError) as e:
             issues.append(f"Checksum check failed: {e}")
         if check_spectral:
             try:
                 if is_fake_lossless(file_path):
                     issues.append("Possible fake lossless (spectral cutoff below 16kHz).")
-            except AudioProcessingError as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Spectral analysis failed for {file_path}: {e}")
     try:
         track = read_track_metadata(file_path)
@@ -112,17 +111,13 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
         # Sync check filename vs title feat
         if FEAT_PATTERN.search(file_path.name) and not FEAT_PATTERN.search(track.title):
             issues.append("Filename contains 'feat' but TITLE tag does not")
-
-        if track.disc_number and track.disc_number > 1:
-            # Multi-disc files should have DISCNUMBER set
-            pass
         
         if track.sample_rate and track.sample_rate < 44100:
             issues.append(f"Sub-standard sample rate: {track.sample_rate}Hz")
         if track.bitrate and track.bitrate < 320000 and not track.is_lossless:
             issues.append(f"Sub-standard lossy bitrate: {round(track.bitrate / 1000)} kbps (Recommended: 320 kbps)")
 
-    except MetadataError as e:
+    except (OSError, ValueError, RuntimeError) as e:
         issues.append(f"Metadata read error: {e}")
     lrc_path = file_path.with_suffix(".lrc")
     if not lrc_path.exists():
@@ -141,7 +136,7 @@ def audit_library(
     and generate an AuditReport dataclass.
     """
     if not folder_path.exists():
-        raise AudioProcessingError(f"Directory not found: {folder_path}")
+        raise FileNotFoundError(f"Directory not found: {folder_path}")
 
     report = AuditReport(total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0)
 
@@ -150,7 +145,7 @@ def audit_library(
         Progress,
         SpinnerColumn,
         TextColumn,
-        TimeRemainingColumn,
+        TimeElapsedColumn,
     )
 
     from sonora.core.logger import CONSOLE
@@ -162,7 +157,7 @@ def audit_library(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeRemainingColumn(),
+        TimeElapsedColumn(),
         console=CONSOLE
     ) as progress:
         task = progress.add_task("[cyan]Auditing library...", total=len(files_to_process))
@@ -195,7 +190,7 @@ def audit_library(
                     if track_no is not None:
                         tracks_found[(disc_no, track_no)].append(path.name)
                         
-                except (MetadataError, OSError) as e:
+                except (OSError, ValueError, RuntimeError) as e:
                     LOG.debug(f"Could not read metadata for folder check: {e}")
 
                 file_issues = audit_file(path, check_spectral=check_spectral)

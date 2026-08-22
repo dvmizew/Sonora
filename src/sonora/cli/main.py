@@ -13,7 +13,6 @@ socket.setdefaulttimeout(15)
 HAS_DOTENV = importlib.util.find_spec("dotenv") is not None
 
 from sonora import __version__
-from sonora.core.exceptions import SonoraError
 from sonora.core.logger import LOG
 from sonora.modules.auditor import audit_library
 from sonora.modules.backup import backup_library_tags, restore_library_tags
@@ -219,6 +218,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     
+    if getattr(args, "verbose", False):
+        LOG.verbose = True
+
     options = {
         "dry_run": args.dry_run,
         "force": getattr(args, "force", False)
@@ -249,11 +251,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         LOG.warning("Aborted by user. Shutting down gracefully...")
         return 130
-    except SonoraError as e:
-        LOG.error(f"Error: {e}")
-        return 1
     except (OSError, ValueError, TypeError, RuntimeError) as e:
-        LOG.error(f"Unexpected failure: {e}")
+        LOG.error(f"Error: {e}")
         return 1
 
 

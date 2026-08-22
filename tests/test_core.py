@@ -5,7 +5,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
 
-from sonora.core.exceptions import AudioProcessingError, SonoraError
 from sonora.core.models import AuditReport, TrackInfo
 from sonora.core.utils import normalize_str, sanitize_name
 
@@ -74,13 +73,6 @@ class TestCoreModels(unittest.TestCase):
         self.assertIsNone(data["track_number"])
         self.assertIsNone(data["bpm"])
 
-
-
-class TestCoreExceptions(unittest.TestCase):
-    def test_exception_inheritance(self):
-        err = AudioProcessingError("FFmpeg failed")
-        self.assertIsInstance(err, SonoraError)
-        self.assertEqual(str(err), "FFmpeg failed")
 
 
 if __name__ == "__main__":

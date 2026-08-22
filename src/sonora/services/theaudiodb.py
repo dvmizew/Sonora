@@ -56,6 +56,5 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
                     set_cached_api(cache_key, res, expire_seconds=2592000)  # 30 days
                 return res
     except (OSError, ValueError, KeyError) as e:
-        LOG.debug(f"TheAudioDB fetch failed for {artist_name}: {e}")
-
+        LOG.debug(f"TheAudioDB fetch_artist_images failed for {artist_name}: {e}")
     return None, None

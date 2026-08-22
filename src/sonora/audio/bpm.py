@@ -4,7 +4,6 @@ import subprocess
 from pathlib import Path
 
 from sonora.core.constants import BPM_TAG_CMD
-from sonora.core.exceptions import AudioProcessingError
 from sonora.core.logger import LOG
 
 
@@ -15,7 +14,7 @@ def calculate_bpm(file_path: Path) -> float | None:
     Fallback path: Uses optimized Librosa (low sample rate, truncated duration).
     """
     if not file_path.exists():
-        raise AudioProcessingError(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path}")
     if shutil.which(BPM_TAG_CMD):
         try:
             # -f forces analysis ignoring existing tags, -n prints to stderr
@@ -33,7 +32,7 @@ def calculate_bpm(file_path: Path) -> float | None:
     try:
         import librosa
     except ImportError:
-        raise AudioProcessingError("Librosa and bpm-tools are both missing. Cannot calculate BPM.")
+        raise RuntimeError("Librosa and bpm-tools are both missing. Cannot calculate BPM.")
 
     try:
         # Skip intro (30s), read only 60s, and force downsample to 22050 Hz (sufficient for beat detection)
@@ -49,5 +48,5 @@ def calculate_bpm(file_path: Path) -> float | None:
         else:
             bpm_val = float(str(tempo))
         return round(bpm_val, 1)
-    except (OSError, ValueError, RuntimeError, AudioProcessingError) as e:
-        raise AudioProcessingError(f"Librosa BPM calculation failed for {file_path}: {e}") from e
+    except (OSError, ValueError, RuntimeError) as e:
+        raise RuntimeError(f"Librosa BPM calculation failed for {file_path}: {e}") from e
