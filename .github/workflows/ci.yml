@@ -23,7 +23,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y libtag1-dev ffmpeg flac sox chromaprint
+          sudo apt-get install -y libtag1-dev ffmpeg flac sox libchromaprint-dev libchromaprint-tools
 
       - name: Install dependencies
         run: |
