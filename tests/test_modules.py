@@ -7,10 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from sonora.audio.art import check_image_similarity
+from sonora.audio.art import check_image_similarity, process_artist_artwork
 from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
-from sonora.core.exceptions import AudioProcessingError
 from sonora.core.models import TrackInfo
 from sonora.modules.auditor import audit_file, audit_library, check_brackets_corruption
 from sonora.modules.backup import backup_library_tags, restore_library_tags
@@ -22,7 +21,6 @@ from sonora.modules.renamer import (
 )
 from sonora.modules.tagger import (
     normalize_artist_alias,
-    process_artist_art,
     process_single_track,
     tag_album_folder,
 )
@@ -84,8 +82,7 @@ class TestCoreModules(unittest.TestCase):
         lrc_file = self.tmp_path / "test.lrc"
         lrc_file.write_text("[00:10.00] Line 1\n", encoding="utf-8")
 
-        info = TrackInfo(file_path=Path("dummy.flac"), artist="Artist Name", title="Track Title")
-        success = sync_lrc_metadata(lrc_file, info)
+        success = sync_lrc_metadata(lrc_file, "Artist Name", "Track Title")
         self.assertTrue(success)
 
         content = lrc_file.read_text(encoding="utf-8")
@@ -97,8 +94,7 @@ class TestCoreModules(unittest.TestCase):
         lrc_file = self.tmp_path / "existing.lrc"
         lrc_file.write_text("[ar:Old Artist]\n[ti:Old Title]\n[00:15.00] Line 2\n", encoding="utf-8")
 
-        info = TrackInfo(file_path=Path("dummy.flac"), artist="New Artist", title="New Title")
-        success = sync_lrc_metadata(lrc_file, info)
+        success = sync_lrc_metadata(lrc_file, "New Artist", "New Title")
         self.assertTrue(success)
 
         content = lrc_file.read_text(encoding="utf-8")
@@ -122,7 +118,7 @@ class TestCoreModules(unittest.TestCase):
 
         new_path = rename_track_file(wav_file)
         self.assertTrue(new_path.exists())
-        self.assertEqual(new_path.name, "01 - Beyoncé - Halo.wav")
+        self.assertEqual(new_path.name, "01 - Halo.wav")
 
     @patch("sonora.modules.renamer.read_track_metadata")
     def test_rename_directory_files(self, mock_read):
@@ -213,7 +209,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue((self.tmp_path / "report.json").exists())
 
     @patch("sonora.modules.tagger.write_track_metadata")
-    @patch("sonora.modules.tagger.fetch_synced_lyrics")
+    @patch("sonora.services.lyrics.fetch_synced_lyrics")
     @patch("sonora.modules.tagger.fetch_track_mbid")
     @patch("sonora.modules.tagger.read_track_metadata")
     def test_process_single_track(self, mock_read, mock_mbid, mock_lyrics, mock_write):
@@ -269,11 +265,11 @@ class TestCoreModules(unittest.TestCase):
         self.assertFalse(is_single_folder(empty_dir))
 
     def test_audit_library_nonexistent_directory(self):
-        with self.assertRaises(AudioProcessingError):
+        with self.assertRaises(FileNotFoundError):
             audit_library(self.tmp_path / "nonexistent_dir_999")
 
     def test_tag_album_folder_nonexistent_directory(self):
-        with self.assertRaises(AudioProcessingError):
+        with self.assertRaises(FileNotFoundError):
             tag_album_folder(self.tmp_path / "nonexistent_dir_999")
 
     @patch("sonora.modules.renamer.read_track_metadata")
@@ -291,8 +287,8 @@ class TestCoreModules(unittest.TestCase):
         p1 = rename_track_file(f1)
         p2 = rename_track_file(f2)
 
-        self.assertEqual(p1.name, "01 - Artist - Title.wav")
-        self.assertEqual(p2.name, "01 - Artist - Title (2).wav")
+        self.assertEqual(p1.name, "01 - Title.wav")
+        self.assertEqual(p2.name, "01 - Title (2).wav")
 
     def test_organize_library_singles_skips_album_folders(self):
         album_dir = self.tmp_path / "AlbumFolder"
@@ -344,7 +340,7 @@ class TestCoreModules(unittest.TestCase):
         mock_acoustid.assert_called_once()
         mock_discogs.assert_called_once()
 
-    @patch("sonora.modules.auditor.is_fake_lossless")
+    @patch("sonora.modules.auditor.detect_fake_lossless")
     @patch("sonora.modules.auditor.verify_flac_checksum")
     @patch("sonora.modules.auditor.read_track_metadata")
     def test_audit_library_spectral_check_option(self, mock_read, mock_checksum, mock_spectral):
@@ -353,7 +349,7 @@ class TestCoreModules(unittest.TestCase):
 
         mock_checksum.return_value = True
         mock_read.return_value = TrackInfo(file_path=flac_file, artist="Artist", title="Title")
-        mock_spectral.return_value = True
+        mock_spectral.return_value = (True, 0.0001, "Brickwall spectral cutoff detected at ~16-18kHz (likely upscaled 128-192kbps MP3 fake lossless)")
 
         report = audit_library(self.tmp_path, check_spectral=True)
         self.assertTrue(any("fake lossless" in issue.lower() for issues in report.issues.values() for issue in issues))
@@ -450,8 +446,9 @@ class TestCoreModules(unittest.TestCase):
         restored_info = read_track_metadata(wav_path)
         self.assertEqual(restored_info.artist, "Test Artist")
 
+    @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
     @patch("sonora.services.theaudiodb.SESSION.get")
-    def test_theaudiodb_service(self, mock_get):
+    def test_theaudiodb_service(self, mock_get, _mock_cache):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
@@ -466,7 +463,7 @@ class TestCoreModules(unittest.TestCase):
         mock_img_resp.status_code = 200
         mock_img_resp.content = b"fakeimage"
 
-        mock_get.side_effect = [mock_resp, mock_img_resp, mock_img_resp]
+        mock_get.side_effect = [mock_resp, mock_img_resp, mock_img_resp, mock_resp, mock_img_resp, mock_img_resp]
 
         thumb, banner = fetch_artist_images("21 Savage")
         self.assertEqual(thumb, b"fakeimage")
@@ -474,7 +471,7 @@ class TestCoreModules(unittest.TestCase):
 
         artist_folder = self.tmp_path / "21 Savage" / "Album"
         artist_folder.mkdir(parents=True, exist_ok=True)
-        process_artist_art("21 Savage", artist_folder)
+        process_artist_artwork(artist_folder, "21 Savage")
         self.assertTrue((self.tmp_path / "21 Savage" / "artist.jpg").exists())
         self.assertTrue((self.tmp_path / "21 Savage" / "banner.jpg").exists())
 

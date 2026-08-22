@@ -56,6 +56,33 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
                     set_cached_api(cache_key, res, expire_seconds=2592000)  # 30 days
                 return res
     except (OSError, ValueError, KeyError) as e:
-        LOG.debug(f"TheAudioDB fetch failed for {artist_name}: {e}")
-
+        LOG.debug(f"TheAudioDB fetch_artist_images failed for {artist_name}: {e}")
     return None, None
+
+
+def fetch_track_video_url(artist_name: str, track_title: str) -> str | None:
+    """
+    Fetch official music video URL (strMusicVid) from TheAudioDB track search.
+    """
+    if not artist_name or not track_title:
+        return None
+    cache_key = f"theaudiodb_vid:{normalize_str(artist_name)}:{normalize_str(track_title)}"
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, str):
+        return cached
+
+    _THEAUDIODB_LIMITER.wait()
+    try:
+        url = f"https://www.theaudiodb.com/api/v1/json/2/searchtrack.php?s={urllib.parse.quote(artist_name)}&t={urllib.parse.quote(track_title)}"
+        resp = SESSION.get(url, timeout=6)
+        if resp.status_code == 200:
+            tracks = resp.json().get("track", [])
+            if tracks and isinstance(tracks, list) and tracks[0]:
+                vid = tracks[0].get("strMusicVid")
+                if vid and str(vid).strip():
+                    clean_url = str(vid).strip()
+                    set_cached_api(cache_key, clean_url)
+                    return clean_url
+    except (OSError, ValueError, KeyError) as e:
+        LOG.debug(f"TheAudioDB video lookup failed for {artist_name} - {track_title}: {e}")
+    return None

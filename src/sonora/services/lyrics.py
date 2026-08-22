@@ -1,23 +1,15 @@
+import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+import syncedlyrics
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter, normalize_str
 
-if TYPE_CHECKING:
-    import syncedlyrics
-else:
-    try:
-        import logging
-
-        import syncedlyrics
-        logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
-        for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
-            logging.getLogger(_provider).setLevel(logging.CRITICAL)
-    except ImportError:
-        syncedlyrics = None
+logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
+for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
+    logging.getLogger(_provider).setLevel(logging.CRITICAL)
 
 _LYRICS_LIMITER = RateLimiter(interval_seconds=1.0)
 
@@ -81,6 +73,37 @@ def clean_lyrics_text(text: str | None) -> str | None:
     return "\n".join(cleaned).strip()
 
 
+def get_lyrics_quality(text: str | None) -> int:
+    """
+    Returns quality level for lyrics text:
+      0: missing or empty
+      1: plain text
+      2: line-synced [00:12.34]
+      3: enhanced word-synced <00:12.34>
+    """
+    if not text or not text.strip():
+        return 0
+    if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", text):
+        return 3
+    if re.search(r"\[\d{2}:\d{2}[\.:]\d{2,3}\]", text):
+        return 2
+    return 1
+
+
+def detect_lrc_quality(file_path: Path) -> int:
+    """Detect quality level of existing lyrics file on disk for a given track path."""
+    lrc_path = file_path.with_suffix(".lrc")
+    txt_path = file_path.with_suffix(".txt")
+    target_path = lrc_path if lrc_path.exists() else (txt_path if txt_path.exists() else None)
+    if not target_path:
+        return 0
+    try:
+        content = target_path.read_text(encoding="utf-8", errors="ignore")
+        return get_lyrics_quality(content)
+    except (OSError, ValueError):
+        return 0
+
+
 def fetch_synced_lyrics(
     artist: str,
     title: str,
@@ -100,9 +123,6 @@ def fetch_synced_lyrics(
     if not artist or not title:
         return None
 
-    if syncedlyrics is None:
-        raise APIServiceError("syncedlyrics library is not installed.")
-
     cache_key = f"lyrics:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
@@ -121,8 +141,6 @@ def fetch_synced_lyrics(
             kwargs["providers"] = providers
         if lang:
             kwargs["lang"] = lang
-        if syncedlyrics is None:
-            return None
         res = syncedlyrics.search(query_str, **kwargs)
         if isinstance(res, str) and res.strip():
             return clean_lyrics_text(res.strip())
@@ -135,7 +153,7 @@ def fetch_synced_lyrics(
     if isrc:
         try:
             lrc = _do_search(isrc)
-        except (APIServiceError, OSError, ValueError, KeyError, RuntimeError) as e:
+        except (OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
     # ATTEMPT 2: Standard/Surgical Query
@@ -144,7 +162,7 @@ def fetch_synced_lyrics(
         default_query = f"{artist.lower()} - {title.lower()}".strip()
         try:
             lrc = _do_search(default_query)
-        except (APIServiceError, OSError, ValueError, KeyError, RuntimeError) as e:
+        except (OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
     # ATTEMPT 3: Surgical Clean Title Fallback
@@ -155,7 +173,7 @@ def fetch_synced_lyrics(
         query = f"{clean_title} {primary_artist}".strip()
         try:
             lrc = _do_search(query)
-        except (APIServiceError, OSError, ValueError, KeyError, RuntimeError) as e:
+        except (OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
     if lrc:
@@ -163,6 +181,45 @@ def fetch_synced_lyrics(
         return lrc
 
     if last_exception:
-        raise APIServiceError(f"Lyrics fetch failed for '{title}': {last_exception}") from last_exception
+        raise RuntimeError(f"Lyrics fetch failed for '{title}': {last_exception}") from last_exception
 
     return None
+
+
+def process_track_lyrics(
+    file_path: Path,
+    artist: str,
+    title: str,
+    force: bool = False,
+    dry_run: bool = False,
+    isrc: str | None = None,
+) -> tuple[str | None, str | None]:
+    """
+    Fetches, cleans, and saves track lyrics according to quality hierarchy.
+    Returns (lyrics_text, quality_tag) or (None, None).
+    """
+    cur_q = detect_lrc_quality(file_path)
+    if not force and cur_q >= 3:
+        return None, None
+
+    lrc_text = fetch_synced_lyrics(artist, title, enhanced=True, isrc=isrc)
+    if not lrc_text:
+        return None, None
+
+    new_q = get_lyrics_quality(lrc_text)
+    if not force and cur_q > 0 and new_q <= cur_q:
+        return None, None
+
+    lrc_path = file_path.with_suffix(".lrc")
+    if not dry_run:
+        lrc_path.write_text(lrc_text, encoding="utf-8")
+        if new_q == 3:
+            synced_copy = re.sub(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", "", lrc_text)
+            synced_path = file_path.with_suffix(".synced.lrc")
+            synced_path.write_text(synced_copy, encoding="utf-8")
+        txt_path = file_path.with_suffix(".txt")
+        if txt_path.exists() and lrc_path != txt_path:
+            txt_path.unlink(missing_ok=True)
+
+    tag_type = "enhanced" if new_q == 3 else ("synced" if new_q == 2 else "plain")
+    return lrc_text, tag_type

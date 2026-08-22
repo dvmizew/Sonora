@@ -3,7 +3,6 @@ from pathlib import Path
 
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
-from sonora.core.exceptions import AudioProcessingError, MetadataError
 from sonora.core.logger import LOG
 from sonora.core.utils import normalize_str, sanitize_name
 
@@ -33,7 +32,7 @@ def is_single_folder(folder_path: Path) -> bool:
         try:
             info = read_track_metadata(p)
             albums.add(normalize_str(info.album))
-        except (MetadataError, OSError) as e:
+        except (OSError, ValueError, RuntimeError) as e:
             LOG.debug(f"Failed to read metadata for singles detection on {p}: {e}")
     return len(albums) > 1
 
@@ -71,7 +70,7 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
     Returns the count of moved tracks.
     """
     if not source_dir.exists():
-        raise AudioProcessingError(f"Source directory not found: {source_dir}")
+        raise FileNotFoundError(f"Source directory not found: {source_dir}")
 
     options = options or {}
     dry_run = options.get("dry_run", False)
@@ -81,13 +80,42 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
     moved_count = 0
     single_folder_cache: dict[Path, bool] = {}
 
-    for path in list(source_dir.rglob("*")):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    from sonora.core.logger import CONSOLE
+
+    all_audio_files = [
+        path for path in source_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
+    ]
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("[dim]/[/dim]"),
+        TimeRemainingColumn(),
+        console=CONSOLE,
+    ) as progress:
+        task = progress.add_task("[cyan]Organizing single tracks...", total=len(all_audio_files))
+        for path in all_audio_files:
             parent = path.parent
             if parent not in single_folder_cache:
                 single_folder_cache[parent] = is_single_folder(parent)
 
             if not single_folder_cache[parent]:
+                progress.advance(task)
                 continue  # Skip tracks belonging to full album folders
 
             try:
@@ -116,11 +144,12 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                     try:
                         if not dry_run and not any(parent.iterdir()):
                             parent.rmdir()
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        LOG.debug(f"Could not remove parent dir {parent}: {e}")
 
-            except (MetadataError, OSError) as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 LOG.warning(f"Failed to organize track {path}: {e}")
+            progress.advance(task)
 
     # Phase 2 & 3: Deduplicate singles against albums
     if target_singles_dir.exists():
@@ -132,7 +161,7 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                     p_art = get_primary_artist(meta.artist).lower()
                     key = f"{p_art} - {meta.title.lower()}"
                     album_fingerprints.add(key)
-                except (MetadataError, OSError) as e:
+                except (OSError, ValueError, RuntimeError) as e:
                     LOG.debug(f"Could not read metadata for single deduplication: {e}")
 
         removed_dupes = 0
@@ -152,7 +181,7 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                         else:
                             LOG.info(f"   ∟ [DRY-RUN] Would remove duplicate single: {key}")
                         removed_dupes += 1
-                except (MetadataError, OSError) as e:
+                except (OSError, ValueError, RuntimeError) as e:
                     LOG.debug(f"Could not read metadata for duplicate check: {e}")
 
     # Cleanup empty directories
@@ -173,6 +202,6 @@ def cleanup_empty_dirs(path: Path) -> int:
                 if not any(child.iterdir()):
                     child.rmdir()
                     removed += 1
-            except OSError:
-                pass
+            except OSError as e:
+                LOG.debug(f"Could not remove empty dir {child}: {e}")
     return removed

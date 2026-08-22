@@ -7,14 +7,13 @@ from sonora.audio.metadata import (
     write_track_metadata,
 )
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.audio.spectral import analyze_spectral_cutoff, is_fake_lossless
+from sonora.audio.spectral import detect_fake_lossless
 
 __all__ = [
-    "analyze_spectral_cutoff",
     "calculate_album_replaygain",
     "calculate_bpm",
     "check_image_similarity",
-    "is_fake_lossless",
+    "detect_fake_lossless",
     "parse_cuesheet",
     "read_cuesheet_content",
     "read_track_metadata",

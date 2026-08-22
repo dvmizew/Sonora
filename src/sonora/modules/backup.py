@@ -1,18 +1,24 @@
 import datetime
 import gc
-import json
 from pathlib import Path
 from typing import Any
 
+import orjson
+
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
-from sonora.core.exceptions import MetadataError
 from sonora.core.logger import LOG
+
+_ORJSON_OPTS = (
+    orjson.OPT_SERIALIZE_DATACLASS
+    | orjson.OPT_SERIALIZE_NUMPY
+    | orjson.OPT_NON_STR_KEYS
+)
 
 
 def backup_library_tags(directory: Path, output_file: Path | None = None) -> Path:
     """
-    Stream-based backup: writes JSON line-by-line to avoid RAM overload.
+    Stream-based backup.
     Excludes cover art data to keep backup size lightweight.
     """
     if not directory.exists() or not directory.is_dir():
@@ -24,44 +30,67 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
     ])
 
-    if not audio_files:
-        LOG.warning("No audio files found to back up.")
-        timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-        out_path = output_file or Path(f"backup_{timestamp_str}.json")
-        out_path.write_text("{}\n", encoding="utf-8")
-        return out_path
-
     timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
     out_path = output_file or Path(f"backup_{timestamp_str}.json")
+
+    if not audio_files:
+        LOG.warning("No audio files found to back up.")
+        out_path.write_bytes(b"{}\n")
+        return out_path
 
     LOG.info(f"🔄 Creating full backup for {len(audio_files)} files (streaming mode)...")
     count = 0
     failed = 0
 
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    from sonora.core.logger import CONSOLE
+
     try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write("{\n")
+        with open(out_path, "wb") as f:
+            f.write(b"{\n")
             first = True
-            for idx, file_p in enumerate(audio_files):
-                try:
-                    info = read_track_metadata(file_p)
-                    data = info.to_dict()
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                TextColumn("[dim]/[/dim]"),
+                TimeRemainingColumn(),
+                console=CONSOLE,
+            ) as progress:
+                task = progress.add_task("[cyan]Backing up audio tags...", total=len(audio_files))
+                for idx, file_p in enumerate(audio_files):
+                    try:
+                        info = read_track_metadata(file_p)
+                        data = info.to_dict()
 
-                    if not first:
-                        f.write(",\n")
-                    f.write(f"  {json.dumps(str(file_p))}: ")
-                    f.write(json.dumps(data, ensure_ascii=False))
-                    first = False
-                    count += 1
-                except (MetadataError, OSError, ValueError) as e:
-                    LOG.debug(f"Error reading {file_p} for backup: {e}")
-                    failed += 1
+                        if not first:
+                            f.write(b",\n")
+                        key_bytes = orjson.dumps(str(file_p), option=_ORJSON_OPTS)
+                        val_bytes = orjson.dumps(data, option=_ORJSON_OPTS)
+                        f.write(b"  " + key_bytes + b": " + val_bytes)
+                        first = False
+                        count += 1
+                    except (OSError, ValueError, RuntimeError) as e:
+                        LOG.debug(f"Error reading {file_p} for backup: {e}")
+                        failed += 1
 
-                if (idx + 1) % 500 == 0:
-                    gc.collect()
-                    LOG.info(f"   ∟ Progress: {idx + 1}/{len(audio_files)} files backed up...")
+                    progress.advance(task)
+                    if (idx + 1) % 500 == 0:
+                        gc.collect()
 
-            f.write("\n}\n")
+            f.write(b"\n}\n")
 
         LOG.info(f"✅ Successfully backed up {count}/{len(audio_files)} files to {out_path}")
         if failed > 0:
@@ -74,7 +103,7 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
 
 def restore_library_tags(backup_file: Path) -> int:
     """
-    Stream-based restore: parses JSON incrementally to avoid RAM overload.
+    High-performance restore: parses JSON via orjson at native C/Rust speed.
     Returns the number of restored files.
     """
     if not backup_file.exists():
@@ -85,123 +114,59 @@ def restore_library_tags(backup_file: Path) -> int:
     failed = 0
     missing = 0
 
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    from sonora.core.logger import CONSOLE
+
     try:
-        with open(backup_file, "r", encoding="utf-8") as f:
-            dec = json.JSONDecoder()
-            buf = ""
-            idx = 0
-            eof = False
+        content = backup_file.read_bytes()
+        backup_dict: dict[str, Any] = orjson.loads(content)
+        if not isinstance(backup_dict, dict):
+            raise TypeError("Backup file is not a valid JSON object")
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=CONSOLE,
+        ) as progress:
+            task = progress.add_task("[cyan]Restoring audio tags...", total=len(backup_dict))
             processed = 0
-
-            def _fill(min_avail: int = 1) -> None:
-                nonlocal buf, eof
-                while (len(buf) - idx) < min_avail and not eof:
-                    chunk = f.read(65536)
-                    if chunk:
-                        buf += chunk
-                    else:
-                        eof = True
-
-            def _skip_ws() -> None:
-                nonlocal idx
-                while True:
-                    _fill(1)
-                    if idx >= len(buf) or buf[idx] not in " \t\r\n":
-                        return
-                    idx += 1
-
-            def _decode_one() -> Any:
-                nonlocal idx
-                while True:
-                    _fill(1)
+            for f_path_str, tags_dict in backup_dict.items():
+                f_path = Path(f_path_str)
+                if not f_path.exists():
+                    missing += 1
+                else:
                     try:
-                        val, end = dec.raw_decode(buf, idx)
-                        idx = end
-                        return val
-                    except json.JSONDecodeError:
-                        if eof:
-                            raise
-                        _fill(65536)
+                        info = read_track_metadata(f_path)
+                        if isinstance(tags_dict, dict):
+                            for k, v in tags_dict.items():
+                                if k in ("file_path", "file_name"):
+                                    continue
+                                if hasattr(info, k) and v is not None:
+                                    setattr(info, k, v)
+                            write_track_metadata(info)
+                            count += 1
+                    except (OSError, ValueError, KeyError, RuntimeError) as e:
+                        LOG.debug(f"Failed to restore {f_path}: {e}")
+                        failed += 1
 
-            def _trim_buffer() -> None:
-                nonlocal buf, idx
-                if idx > 512 * 1024:
-                    buf = buf[idx:]
-                    idx = 0
-
-            _skip_ws()
-            _fill(1)
-            if idx >= len(buf) or buf[idx] != "{":
-                raise ValueError("Backup file is not a valid JSON object")
-            idx += 1
-
-            while True:
-                _skip_ws()
-                _fill(1)
-                if idx >= len(buf) or buf[idx] == "}":
-                    if idx < len(buf):
-                        idx += 1
-                    break
-
-                try:
-                    f_path_str = _decode_one()
-                    if not isinstance(f_path_str, str):
-                        raise TypeError("Backup key is not a string path")
-
-                    _skip_ws()
-                    _fill(1)
-                    if idx >= len(buf) or buf[idx] != ":":
-                        raise ValueError("Missing ':' between path and payload")
-                    idx += 1
-
-                    _skip_ws()
-                    tags_dict = _decode_one()
-
-                    f_path = Path(f_path_str)
-                    if not f_path.exists():
-                        missing += 1
-                    else:
-                        try:
-                            info = read_track_metadata(f_path)
-                            if isinstance(tags_dict, dict):
-                                for k, v in tags_dict.items():
-                                    if k in ("file_path", "file_name"):
-                                        continue
-                                    if hasattr(info, k) and v is not None:
-                                        setattr(info, k, v)
-                                write_track_metadata(info)
-                                count += 1
-                        except (MetadataError, OSError, ValueError, KeyError) as e:
-                            LOG.debug(f"Failed to restore {f_path}: {e}")
-                            failed += 1
-
-                    processed += 1
-                    if processed % 200 == 0:
-                        gc.collect()
-                        LOG.info(f"   Restored progress: {processed} entries...")
-
-                    _skip_ws()
-                    _fill(1)
-                    if idx < len(buf) and buf[idx] == ",":
-                        idx += 1
-                    elif idx < len(buf) and buf[idx] == "}":
-                        idx += 1
-                        break
-
-                    _trim_buffer()
-
-                except (json.JSONDecodeError, ValueError, TypeError, KeyError, OSError) as e:
-                    LOG.debug(f"Skipping malformed restore entry: {e}")
-                    failed += 1
-                    _fill(1)
-                    while idx < len(buf) and buf[idx] not in ",}":
-                        idx += 1
-                    if idx < len(buf) and buf[idx] == ",":
-                        idx += 1
-                    elif idx < len(buf) and buf[idx] == "}":
-                        idx += 1
-                        break
-                    _trim_buffer()
+                processed += 1
+                progress.advance(task)
+                if processed % 500 == 0:
+                    gc.collect()
 
         gc.collect()
         LOG.info(f"✅ Successfully restored {count} files")
@@ -210,6 +175,6 @@ def restore_library_tags(backup_file: Path) -> int:
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files failed to restore")
         return count
-    except Exception as e:
+    except (orjson.JSONDecodeError, OSError, ValueError, KeyError) as e:
         LOG.error(f"Failed to read backup file: {e}")
         raise

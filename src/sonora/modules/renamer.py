@@ -3,17 +3,16 @@ from pathlib import Path
 
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
-from sonora.core.exceptions import AudioProcessingError, MetadataError
 from sonora.core.models import TrackInfo
-from sonora.core.utils import sanitize_name
+from sonora.core.utils import normalize_str, sanitize_name
 
 
-def sync_lrc_metadata(lrc_path: Path, track_info: TrackInfo) -> bool:
+def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
     """
     Update or insert [ar: Artist] and [ti: Title] metadata headers into an .lrc file.
     Preserves all synchronized timestamps [mm:ss.xx] intact.
     """
-    if not lrc_path.exists():
+    if not lrc_path.exists() or not lrc_path.is_file():
         return False
 
     try:
@@ -25,28 +24,65 @@ def sync_lrc_metadata(lrc_path: Path, track_info: TrackInfo) -> bool:
         ti_found = False
 
         for line in lines:
-            if line.startswith("[ar:"):
-                new_lines.append(f"[ar:{track_info.artist}]\n")
+            line_stripped = line.strip()
+            if line_stripped.lower().startswith("[ar:"):
+                new_lines.append(f"[ar:{artist}]\n")
                 ar_found = True
-            elif line.startswith("[ti:"):
-                new_lines.append(f"[ti:{track_info.title}]\n")
+            elif line_stripped.lower().startswith("[ti:"):
+                new_lines.append(f"[ti:{title}]\n")
                 ti_found = True
             else:
                 new_lines.append(line)
-        header_prefix: list[str] = []
-        if not ar_found:
-            header_prefix.append(f"[ar:{track_info.artist}]\n")
-        if not ti_found:
-            header_prefix.append(f"[ti:{track_info.title}]\n")
 
-        final_content = "".join(header_prefix + new_lines)
+        if not ar_found:
+            new_lines.insert(0, f"[ar:{artist}]\n")
+        if not ti_found:
+            new_lines.insert(0, f"[ti:{title}]\n")
 
         with open(lrc_path, "w", encoding="utf-8") as f:
-            f.write(final_content)
+            f.writelines(new_lines)
         return True
 
-    except Exception as e:
-        raise AudioProcessingError(f"Failed to sync LRC metadata for {lrc_path}: {e}") from e
+    except (OSError, ValueError, KeyError) as e:
+        from sonora.core.logger import LOG
+
+        LOG.debug(f"Failed to sync LRC metadata for {lrc_path}: {e}")
+        return False
+
+
+def build_new_filename(
+    track_num: int | str | None,
+    title: str,
+    ext: str,
+    disc_num: int | str | None = None,
+    total_discs: int | str | None = 1,
+) -> str | None:
+    """
+    - '01 - Title.flac' for single disc albums
+    - '1-01 - Title.flac' for multi-disc albums (when disc > 1 or total_discs > 1)
+    """
+    if not title:
+        return None
+
+    clean_title = sanitize_name(title)
+    tn_str = str(track_num).split("/")[0] if track_num else ""
+    tn_digits = "".join(filter(str.isdigit, tn_str))
+
+    dn_str = ""
+    if disc_num:
+        dn_clean = "".join(filter(str.isdigit, str(disc_num).split("/")[0]))
+        if dn_clean:
+            t_discs = (
+                int("".join(filter(str.isdigit, str(total_discs).split("/")[0])))
+                if total_discs
+                else 1
+            )
+            if int(dn_clean) > 1 or t_discs > 1:
+                dn_str = f"{int(dn_clean)}-"
+
+    if tn_digits:
+        return f"{dn_str}{int(tn_digits):02d} - {clean_title}{ext}"
+    return f"{dn_str}{clean_title}{ext}"
 
 
 def rename_track_file(
@@ -59,68 +95,122 @@ def rename_track_file(
     Rename an audio file and its .lrc files based on metadata.
     """
     if not file_path.exists():
-        raise AudioProcessingError(f"File not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
         if track_info is None:
             track_info = read_track_metadata(file_path)
-    except MetadataError as e:
-        raise AudioProcessingError(f"Cannot rename file without metadata: {e}") from e
-
-    num = track_info.track_number or 1
-    artist_clean = sanitize_name(track_info.artist)
-    title_clean = sanitize_name(track_info.title)
+    except (OSError, ValueError, RuntimeError) as e:
+        raise RuntimeError(f"Cannot rename file without metadata: {e}") from e
 
     options = options or {}
     dry_run = options.get("dry_run", False)
 
-    # Multi-disc track number prefix (e.g. 2-01) if disc_number > 1
-    disc_prefix = f"{track_info.disc_number}-" if (track_info.disc_number and track_info.disc_number > 1) else ""
-    
     if format_pattern is None:
-        new_stem = f"{disc_prefix}{num:02d} - {artist_clean} - {title_clean}"
+        new_name = build_new_filename(
+            track_num=track_info.track_number,
+            title=track_info.title,
+            ext=file_path.suffix,
+            disc_num=track_info.disc_number,
+            total_discs=track_info.total_discs,
+        )
+        if not new_name:
+            return file_path
     else:
+        num = track_info.track_number or 1
+        artist_clean = sanitize_name(track_info.artist)
+        title_clean = sanitize_name(track_info.title)
         new_stem = format_pattern.format(
             track_number=num,
             artist=artist_clean,
             title=title_clean,
         )
-    new_stem = re.sub(r"\s+", " ", new_stem).strip()
-    new_path = file_path.with_name(f"{new_stem}{file_path.suffix}")
+        new_stem = re.sub(r"\s+", " ", new_stem).strip()
+        new_name = f"{new_stem}{file_path.suffix}"
 
-    if new_path != file_path:
+    folder = file_path.parent
+    new_path = folder / new_name
+
+    LRC_EXTS = [".lrc", ".enhanced.lrc", ".synced.lrc", ".txt"]
+    old_lrc_path: Path | None = None
+
+    # Step 1: Look for exact stem match
+    for lext in LRC_EXTS:
+        cand = folder / f"{file_path.stem}{lext}"
+        if cand.exists():
+            old_lrc_path = cand
+            break
+
+    # Step 2: Fallback search by track number prefix
+    if not old_lrc_path and track_info.track_number:
+        tn_clean = "".join(filter(str.isdigit, str(track_info.track_number).split("/")[0]))
+        if tn_clean:
+            tn_p = f"{int(tn_clean):02d}"
+            for cand in folder.iterdir():
+                if any(cand.name.lower().endswith(e) for e in LRC_EXTS) and (
+                    cand.name.startswith(tn_p) or cand.name.startswith(str(int(tn_clean)))
+                ):
+                    old_lrc_path = cand
+                    break
+
+    # Sync LRC metadata headers
+    lrc_to_sync = old_lrc_path or (new_path.with_suffix(".lrc") if new_path.with_suffix(".lrc").exists() else None)
+    if lrc_to_sync and lrc_to_sync.suffix.lower() == ".lrc" and not dry_run:
+        sync_lrc_metadata(lrc_to_sync, track_info.artist, track_info.title)
+
+    synced_lrc_path = folder / f"{file_path.stem}.synced.lrc"
+    if synced_lrc_path.exists() and not dry_run:
+        sync_lrc_metadata(synced_lrc_path, track_info.artist, track_info.title)
+
+    # Perform file rename
+    if file_path.resolve() != new_path.resolve():
         if new_path.exists():
             counter = 2
             while new_path.exists():
-                new_path = file_path.with_name(f"{new_stem} ({counter}){file_path.suffix}")
+                new_name = f"{new_path.stem} ({counter}){file_path.suffix}"
+                new_path = folder / new_name
                 counter += 1
+
         if not dry_run:
-            file_path.rename(new_path)
+            try:
+                file_path.rename(new_path)
+                from sonora.core.logger import LOG
+
+                LOG.info(f"   ∟ 🎵 [dim]{file_path.name}[/] -> [white]{new_name}[/]")
+
+                # Rename main .lrc
+                if old_lrc_path and old_lrc_path.exists():
+                    new_lrc = folder / f"{new_path.stem}.lrc"
+                    if not new_lrc.exists():
+                        old_lrc_path.rename(new_lrc)
+                    else:
+                        old_lrc_path.unlink(missing_ok=True)
+
+                # Rename .synced.lrc
+                old_synced_lrc = folder / f"{file_path.stem}.synced.lrc"
+                if old_synced_lrc.exists():
+                    new_synced_lrc = folder / f"{new_path.stem}.synced.lrc"
+                    if not new_synced_lrc.exists():
+                        old_synced_lrc.rename(new_synced_lrc)
+                    else:
+                        old_synced_lrc.unlink(missing_ok=True)
+            except (OSError, ValueError, RuntimeError) as e:
+                from sonora.core.logger import LOG
+
+                LOG.warning(f"Failed to rename file {file_path.name}: {e}")
         else:
             from sonora.core.logger import LOG
-            LOG.info(f"[DRY-RUN] Would rename {file_path.name} -> {new_path.name}")
 
-    # Handle standard .lrc and .enhanced.lrc / .synced.lrc
-    for lrc_ext in [".lrc", ".enhanced.lrc", ".synced.lrc"]:
-        old_lrc = file_path.with_name(f"{file_path.stem}{lrc_ext}")
-        new_lrc = new_path.with_name(f"{new_path.stem}{lrc_ext}")
-        if old_lrc.exists():
-            if old_lrc != new_lrc and not new_lrc.exists():
-                if not dry_run:
-                    old_lrc.rename(new_lrc)
-                else:
-                    from sonora.core.logger import LOG
-                    LOG.info(f"[DRY-RUN] Would rename LRC {old_lrc.name} -> {new_lrc.name}")
-            if not dry_run:
-                sync_lrc_metadata(new_lrc if not dry_run else old_lrc, track_info)
+            LOG.info(f"[DRY-RUN] Would rename {file_path.name} -> {new_name}")
 
     return new_path
 
 
-def rename_album_folder(folder_path: Path, artist: str, album: str, options: dict | None = None) -> Path:
+def rename_album_folder(
+    folder_path: Path, artist: str, album: str, options: dict | None = None
+) -> Path:
     """
-    Rename an album directory to 'Artist - Album' if consensus metadata exists.
-    Matches initial/rename.py logic.
+    Rename an album directory to 'Artist - Album'.
     """
     if not album or album.lower() in ["singles", "unknown album", "unknown"]:
         return folder_path
@@ -128,18 +218,37 @@ def rename_album_folder(folder_path: Path, artist: str, album: str, options: dic
     options = options or {}
     dry_run = options.get("dry_run", False)
 
+    folder_now = folder_path.name
+    is_in_singles = "singles" in str(folder_path).lower().replace("\\", "/").split("/")
+
     expected_name = sanitize_name(f"{artist} - {album}")
-    if folder_path.name != expected_name:
+
+    if normalize_str(folder_now) != normalize_str(expected_name):
+        if is_in_singles:
+            base_album = album.split("(")[0].split("-")[0].strip()
+            if normalize_str(artist) in normalize_str(folder_now) and normalize_str(base_album) in normalize_str(folder_now):
+                return folder_path
+
         new_folder = folder_path.with_name(expected_name)
-        if not new_folder.exists():
-            if not dry_run:
+        if new_folder.exists() and folder_path.resolve() != new_folder.resolve():
+            return folder_path
+
+        if not dry_run:
+            try:
                 folder_path.rename(new_folder)
                 from sonora.core.logger import LOG
-                LOG.info(f"   ∟ 📂 Album folder renamed: [dim]{folder_path.name}[/] -> [cyan]{expected_name}[/]")
+
+                LOG.info(f"   ∟ 📂 Album folder renamed: [dim]{folder_now}[/] -> [cyan]{expected_name}[/]")
                 return new_folder
-            else:
+            except (OSError, ValueError, RuntimeError) as e:
                 from sonora.core.logger import LOG
-                LOG.info(f"[DRY-RUN] Would rename album folder {folder_path.name} -> {expected_name}")
+
+                LOG.warning(f"Failed to rename folder {folder_now}: {e}")
+                return folder_path
+        else:
+            from sonora.core.logger import LOG
+
+            LOG.info(f"[DRY-RUN] Would rename album folder {folder_now} -> {expected_name}")
     return folder_path
 
 
@@ -149,38 +258,61 @@ def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[
     and album folders based on consensus metadata.
     """
     if not dir_path.exists():
-        raise AudioProcessingError(f"Directory not found: {dir_path}")
+        raise FileNotFoundError(f"Directory not found: {dir_path}")
 
     from collections import Counter
 
-    from sonora.core.logger import LOG
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    from sonora.core.logger import CONSOLE, LOG
 
     renamed: list[Path] = []
-    
-    # Process files folder by folder to perform album folder rename consensus
     folder_files: dict[Path, list[Path]] = {}
+    total_files_count = 0
     for path in sorted(dir_path.rglob("*")):
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
             folder_files.setdefault(path.parent, []).append(path)
+            total_files_count += 1
 
-    for folder, files in folder_files.items():
-        album_consensus: Counter[tuple[str, str]] = Counter()
-        for path in files:
-            try:
-                info = read_track_metadata(path)
-                search_artist = info.album_artist or info.artist
-                if search_artist != "Unknown Artist" and info.album != "Unknown Album":
-                    album_consensus[(search_artist, info.album)] += 1
-                    
-                new_p = rename_track_file(path, track_info=info, options=options)
-                renamed.append(new_p)
-            except AudioProcessingError as e:
-                LOG.warning(f"Failed to rename file {path}: {e}")
-        
-        if album_consensus:
-            top_artist, top_album = album_consensus.most_common(1)[0][0]
-            count = album_consensus.most_common(1)[0][1]
-            if count >= len(files) / 2:
-                rename_album_folder(folder, top_artist, top_album, options=options)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("[dim]/[/dim]"),
+        TimeRemainingColumn(),
+        console=CONSOLE,
+    ) as progress:
+        task = progress.add_task("[cyan]Renaming audio files...", total=total_files_count)
+        for folder, files in folder_files.items():
+            album_consensus: Counter[tuple[str, str]] = Counter()
+            for path in files:
+                try:
+                    info = read_track_metadata(path)
+                    search_artist = info.album_artist or info.artist
+                    if search_artist != "Unknown Artist" and info.album != "Unknown Album":
+                        album_consensus[(search_artist, info.album)] += 1
+
+                    new_p = rename_track_file(path, track_info=info, options=options)
+                    renamed.append(new_p)
+                except (OSError, ValueError, RuntimeError) as e:
+                    LOG.warning(f"Failed to rename file {path}: {e}")
+                progress.advance(task)
+
+            if album_consensus:
+                top = album_consensus.most_common(1)
+                if top and top[0][1] >= len(files) / 2:
+                    top_artist, top_album = top[0][0]
+                    rename_album_folder(folder, top_artist, top_album, options=options)
 
     return renamed

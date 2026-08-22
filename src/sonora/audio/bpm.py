@@ -1,53 +1,127 @@
-import re
-import shutil
 import subprocess
+import wave
 from pathlib import Path
 
-from sonora.core.constants import BPM_TAG_CMD
-from sonora.core.exceptions import AudioProcessingError
+import numpy as np
+import scipy.signal
+import soundfile as sf
+
 from sonora.core.logger import LOG
+
+
+def _load_audio_mono(file_path: Path) -> tuple[np.ndarray, int] | None:
+    """Load audio file into 1D float32 NumPy array and sample rate."""
+    ext = file_path.suffix.lower()
+
+    # 1. Try soundfile C libsndfile (WAV, FLAC, OGG, AIFF)
+    try:
+        with sf.SoundFile(str(file_path)) as f:
+            data = f.read(dtype="float32")
+            sr = f.samplerate
+            if data.ndim > 1:
+                data = np.mean(data, axis=1)
+            if len(data) > 0:
+                return data, int(sr)
+    except (sf.LibsndfileError, OSError, ValueError, RuntimeError) as e:
+        LOG.debug(f"soundfile read failed for {file_path}: {e}")
+
+    # 2. Try stdlib wave module for WAV
+    if ext == ".wav":
+        try:
+            with wave.open(str(file_path), "rb") as wf:
+                sr = wf.getframerate()
+                nframes = wf.getnframes()
+                frames = wf.readframes(nframes)
+                dtype = np.int16 if wf.getsampwidth() == 2 else np.int32
+                raw = np.frombuffer(frames, dtype=dtype).astype(np.float32)
+                if wf.getnchannels() > 1:
+                    y = np.mean(raw.reshape(-1, wf.getnchannels()), axis=1)
+                else:
+                    y = raw
+                if len(y) > 0:
+                    return y, sr
+        except (wave.Error, OSError, ValueError, RuntimeError) as e:
+            LOG.debug(f"wave read failed for {file_path}: {e}")
+
+    # 3. Try ffmpeg subprocess fallback for MP3, M4A, AAC, etc.
+    try:
+        cmd = [
+            "ffmpeg",
+            "-i",
+            str(file_path),
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "22050",
+            "-v",
+            "quiet",
+            "-",
+        ]
+        res = subprocess.run(cmd, capture_output=True, check=True)
+        if res.stdout:
+            raw = np.frombuffer(res.stdout, dtype=np.int16).astype(np.float32)
+            if len(raw) > 0:
+                return raw, 22050
+    except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:
+        LOG.debug(f"ffmpeg decode failed for {file_path}: {e}")
+
+    return None
 
 
 def calculate_bpm(file_path: Path) -> float | None:
     """
-    Calculate the BPM (beats per minute) of an audio file.
-    Fast path: Uses C-based `bpm-tag` for maximum speed.
-    Fallback path: Uses optimized Librosa (low sample rate, truncated duration).
+    Calculate the BPM of an audio file using STFT onset envelope autocorrelation via SciPy.
     """
     if not file_path.exists():
-        raise AudioProcessingError(f"File not found: {file_path}")
-    if shutil.which(BPM_TAG_CMD):
-        try:
-            # -f forces analysis ignoring existing tags, -n prints to stderr
-            cmd = [BPM_TAG_CMD, "-f", "-n", str(file_path)]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
-            combined_output = r.stderr + r.stdout
-            m = re.search(r"([\d.]+)\s*BPM", combined_output)
-            if m:
-                bpm = float(m.group(1))
-                if bpm > 0:
-                    return round(bpm, 1)
-        except (subprocess.SubprocessError, ValueError, OSError) as e:
-            LOG.debug(f"bpm-tag failed for {file_path}: {e}")
-            
-    try:
-        import librosa
-    except ImportError:
-        raise AudioProcessingError("Librosa and bpm-tools are both missing. Cannot calculate BPM.")
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        # Skip intro (30s), read only 60s, and force downsample to 22050 Hz (sufficient for beat detection)
-        y, sr = librosa.load(str(file_path), sr=22050, offset=30, duration=60)
-        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-        if isinstance(tempo, (list, tuple)):
-            bpm_val = float(tempo[0])
-        elif isinstance(tempo, (int, float)):
-            bpm_val = float(tempo)
-        elif hasattr(tempo, "item"):
-            item_func = tempo.item
-            bpm_val = float(item_func())
-        else:
-            bpm_val = float(str(tempo))
-        return round(bpm_val, 1)
-    except (OSError, ValueError, RuntimeError, AudioProcessingError) as e:
-        raise AudioProcessingError(f"Librosa BPM calculation failed for {file_path}: {e}") from e
+        loaded = _load_audio_mono(file_path)
+        if loaded is None:
+            return None
+
+        y, sr = loaded
+        if len(y) == 0:
+            return None
+
+        # Limit analysis to max 120 seconds to save CPU
+        if len(y) > sr * 120:
+            y = y[: sr * 120]
+
+        # STFT Spectrogram onset envelope autocorrelation via SciPy
+        _, _, Sxx = scipy.signal.spectrogram(y, fs=sr, nperseg=1024, noverlap=512)
+        onset_env = np.diff(np.mean(Sxx, axis=0))
+        onset_env = np.maximum(0, onset_env)
+
+        if len(onset_env) == 0 or np.all(onset_env == 0):
+            return None
+
+        corr = scipy.signal.correlate(onset_env, onset_env, mode="full")
+        corr = corr[len(corr) // 2 :]
+
+        frame_rate = sr / 512.0
+        min_lag = int(frame_rate * 60 / 200)  # 200 BPM
+        max_lag = int(frame_rate * 60 / 60)  # 60 BPM
+
+        if max_lag <= min_lag or len(corr) <= max_lag:
+            return None
+
+        peak_idx = min_lag + np.argmax(corr[min_lag:max_lag])
+        if peak_idx == 0:
+            return None
+
+        bpm_val = (frame_rate * 60.0) / peak_idx
+
+        # Octave normalization to standard 75-190 BPM music tempo range
+        while bpm_val < 75.0:
+            bpm_val *= 2.0
+        while bpm_val > 190.0:
+            bpm_val /= 2.0
+
+        return round(float(bpm_val), 1)
+
+    except (OSError, ValueError, RuntimeError) as e:
+        LOG.debug(f"BPM calculation failed for {file_path}: {e}")
+        return None

@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from mutagen.flac import FLAC
+from mutagen.flac import error as FLACError
 
 from sonora.core.constants import METAFLAC_CMD
 from sonora.core.logger import LOG
@@ -38,7 +39,7 @@ def calculate_album_replaygain(files: Sequence[Path], options: dict | None = Non
             properties.add(props)
             if not has_album_gain and "REPLAYGAIN_ALBUM_GAIN" in a:
                 has_album_gain = True
-    except (OSError, ValueError, KeyError) as e:
+    except (FLACError, OSError, ValueError, KeyError) as e:
         LOG.debug(f"Failed to read properties for ReplayGain: {e}")
         return False
 

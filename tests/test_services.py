@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
 
-from sonora.core.exceptions import APIServiceError
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.discogs import search_discogs_release
 from sonora.services.genius import fetch_genius_description
@@ -27,10 +26,13 @@ class TestServicesEngine(unittest.TestCase):
         sonora.services.discogs._discogs_client_instance = None
         sonora.services.discogs._discogs_client_token = None
 
+    @patch("sonora.services.itunes.get_cached_api", return_value=None)
     @patch("sonora.core.http.SESSION.get")
-    def test_fetch_itunes_cover_art_url(self, mock_get):
+    def test_fetch_itunes_cover_art_url(self, mock_get, _mock_cache):
         mock_response = MagicMock()
-        mock_response.json.return_value = {"results": [{"artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/100x100bb.jpg"}]}
+        mock_response.json.return_value = {
+            "results": [{"collectionName": "Halo", "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/100x100bb.jpg"}]
+        }
         mock_get.return_value = mock_response
         # No context manager or read() needed for requests
 
@@ -39,7 +41,7 @@ class TestServicesEngine(unittest.TestCase):
 
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_basic(self, mock_syncedlyrics, mock_cache):
+    def test_fetch_synced_lyrics_basic(self, mock_syncedlyrics, _mock_cache):
         mock_syncedlyrics.search.return_value = "[00:12.34] Test lyric line"
 
         lyrics = fetch_synced_lyrics("Artist", "Title")
@@ -48,7 +50,7 @@ class TestServicesEngine(unittest.TestCase):
 
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_with_options(self, mock_syncedlyrics, mock_cache):
+    def test_fetch_synced_lyrics_with_options(self, mock_syncedlyrics, _mock_cache):
         mock_syncedlyrics.search.return_value = "<00:12.34> Enhanced lyric line"
 
         lyrics = fetch_synced_lyrics(
@@ -71,9 +73,9 @@ class TestServicesEngine(unittest.TestCase):
 
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_raises_api_service_error_on_failure(self, mock_syncedlyrics, mock_cache):
+    def test_fetch_synced_lyrics_raises_api_service_error_on_failure(self, mock_syncedlyrics, _mock_cache):
         mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
-        with self.assertRaises(APIServiceError):
+        with self.assertRaises(RuntimeError):
             fetch_synced_lyrics("FailArtist", "FailTitle")
 
     def test_synced_lyrics_empty_query_returns_none(self):
@@ -81,9 +83,15 @@ class TestServicesEngine(unittest.TestCase):
 
     @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_fetch_track_mbid(self, mock_mb, mock_cache):
+    def test_fetch_track_mbid(self, mock_mb, _mock_cache):
         mock_mb.search_recordings.return_value = {
-            "recording-list": [{"id": "12345678-1234-1234-1234-123456789abc"}]
+            "recording-list": [
+                {
+                    "id": "12345678-1234-1234-1234-123456789abc",
+                    "title": "Title",
+                    "artist-credit": [{"artist": {"name": "Artist"}}],
+                }
+            ]
         }
 
         mbid = fetch_track_mbid("Artist", "Title")
@@ -132,7 +140,19 @@ class TestServicesEngine(unittest.TestCase):
     @patch("sonora.core.http.SESSION.get")
     def test_fetch_genius_description(self, mock_get):
         mock_resp_search = MagicMock()
-        mock_resp_search.json.return_value = {"response": {"hits": [{"result": {"api_path": "/songs/123"}}]}}
+        mock_resp_search.json.return_value = {
+            "response": {
+                "hits": [
+                    {
+                        "result": {
+                            "api_path": "/songs/123",
+                            "title": "Title",
+                            "primary_artist": {"name": "Artist"},
+                        }
+                    }
+                ]
+            }
+        }
         mock_resp_song = MagicMock()
         mock_resp_song.json.return_value = {"response": {"song": {"description": {"plain": "Song story description"}}}}
         mock_get.side_effect = [mock_resp_search, mock_resp_song]
@@ -169,19 +189,19 @@ class TestServicesEngine(unittest.TestCase):
 
     @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_musicbrainz_error_handling(self, mock_mb, mock_cache):
+    def test_musicbrainz_error_handling(self, mock_mb, _mock_cache):
         mock_mb.search_recordings.side_effect = Exception("MusicBrainz server 500")
-        with self.assertRaises(APIServiceError):
+        with self.assertRaises(RuntimeError):
             fetch_track_mbid("Artist", "Title")
 
     @patch("sonora.services.discogs.get_cached_api", return_value=None)
     @patch("sonora.services.discogs.discogs_client")
-    def test_discogs_error_handling(self, mock_discogs_mod, mock_cache):
+    def test_discogs_error_handling(self, mock_discogs_mod, _mock_cache):
         mock_client = MagicMock()
         mock_client.search.side_effect = Exception("Discogs 401 Unauthorized")
         mock_discogs_mod.Client.return_value = mock_client
 
-        with self.assertRaises(APIServiceError):
+        with self.assertRaises(RuntimeError):
             search_discogs_release("Artist", "Album", user_token="bad_token")
 
     def test_clean_lyrics_text(self):

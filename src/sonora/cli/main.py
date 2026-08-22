@@ -1,19 +1,25 @@
 import argparse
 import datetime
 import importlib.util
-import json
 import os
 import socket
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import orjson
+
 socket.setdefaulttimeout(15)
+
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
 
 HAS_DOTENV = importlib.util.find_spec("dotenv") is not None
 
 from sonora import __version__
-from sonora.core.exceptions import SonoraError
 from sonora.core.logger import LOG
 from sonora.modules.auditor import audit_library
 from sonora.modules.backup import backup_library_tags, restore_library_tags
@@ -43,16 +49,17 @@ def build_parser() -> argparse.ArgumentParser:
     tag_parser.add_argument("--acoustid-key", type=str, default=None, help="AcoustID API key for acoustic fingerprinting")
     tag_parser.add_argument("--discogs-token", type=str, default=None, help="Discogs personal user token")
     tag_parser.add_argument("--genius-token", type=str, default=None, help="Genius API token for song descriptions")
-    tag_parser.add_argument("-w", "--workers", type=int, default=4, help="Number of parallel worker threads (default: 4)")
+    tag_parser.add_argument("-t", "--threads", "-w", "--workers", type=int, default=4, dest="workers", help="Number of parallel worker threads (default: 4)")
     audit_parser = subparsers.add_parser("audit", help="Audit music library for FLAC integrity, bracket corruption & missing LRCs")
     audit_parser.add_argument("path", type=Path, help="Directory containing music library to audit")
     audit_parser.add_argument("--json", type=Path, default=None, help="Output path to save audit JSON report")
     audit_parser.add_argument("--spectral", action="store_true", help="Enable deep spectral cutoff analysis for fake lossless detection (slow)")
+    audit_parser.add_argument("-t", "--threads", "-w", "--workers", type=int, default=8, dest="workers", help="Number of parallel worker threads (default: 8)")
     rename_parser = subparsers.add_parser("rename", help="Rename audio files and sync .lrc metadata headers")
     rename_parser.add_argument("path", type=Path, help="Directory containing audio files to rename")
     organize_parser = subparsers.add_parser("organize", help="Organize single tracks into a Singles directory structure")
     organize_parser.add_argument("path", type=Path, help="Source music directory")
-    organize_parser.add_argument("--target-singles", type=Path, required=True, help="Destination directory for single tracks")
+    organize_parser.add_argument("--target-singles", type=Path, default=None, help="Destination directory for single tracks (default: <path>/Singles)")
 
     backup_parser = subparsers.add_parser("backup", help="Create streaming JSON backup of audio tags")
     backup_parser.add_argument("path", type=Path, help="Music directory to back up")
@@ -144,7 +151,12 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
             },
             "tracks": [t.to_dict() for t in results],
         }
-        args.json.write_text(json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        args.json.write_bytes(
+            orjson.dumps(
+                report_data,
+                option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_DATACLASS,
+            )
+        )
         LOG.info(f"Saved LLM-optimized tagging JSON report to [bold]{args.json}[/bold]")
 
     return 0
@@ -152,7 +164,7 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
 
 def handle_audit(args: argparse.Namespace) -> int:
     LOG.info(f"Auditing music library: [bold]{args.path}[/bold]")
-    report = audit_library(args.path, output_json=args.json, check_spectral=args.spectral)
+    report = audit_library(args.path, output_json=args.json, check_spectral=args.spectral, max_workers=args.workers)
     LOG.success(f"Audit completed: {report.total_files} files scanned, {len(report.issues)} issues identified.")
 
     audit_rows = [
@@ -163,14 +175,6 @@ def handle_audit(args: argparse.Namespace) -> int:
         ("Files with Issues", str(len(report.issues)), "red" if report.issues else "green"),
     ]
     LOG.summary_table("Validation Summary", audit_rows)
-
-    if report.issues:
-        LOG.warning("Specific issues found:")
-        for fpath, issues in report.issues.items():
-            fname = Path(fpath).name
-            for issue in issues:
-                LOG.error(f"[{fname}] {issue}")
-
     return 0
 
 
@@ -188,8 +192,9 @@ def handle_rename(args: argparse.Namespace, options: dict) -> int:
 
 
 def handle_organize(args: argparse.Namespace, options: dict) -> int:
-    LOG.info(f"Organizing single tracks from {args.path} to {args.target_singles}")
-    count = organize_library_singles(args.path, args.target_singles, options=options)
+    target_singles = args.target_singles or (args.path / "Singles")
+    LOG.info(f"Organizing single tracks from {args.path} to {target_singles}")
+    count = organize_library_singles(args.path, target_singles, options=options)
     LOG.success(f"Organized and moved {count} single tracks.")
 
     organize_rows = [
@@ -219,6 +224,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     
+    if getattr(args, "verbose", False):
+        LOG.verbose = True
+
     options = {
         "dry_run": args.dry_run,
         "force": getattr(args, "force", False)
@@ -249,11 +257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         LOG.warning("Aborted by user. Shutting down gracefully...")
         return 130
-    except SonoraError as e:
-        LOG.error(f"Error: {e}")
-        return 1
     except (OSError, ValueError, TypeError, RuntimeError) as e:
-        LOG.error(f"Unexpected failure: {e}")
+        LOG.error(f"Error: {e}")
         return 1
 
 

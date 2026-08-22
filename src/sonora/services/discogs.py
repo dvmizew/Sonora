@@ -1,17 +1,9 @@
 import threading
-from typing import TYPE_CHECKING
+
+import discogs_client
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.exceptions import APIServiceError
 from sonora.core.utils import RateLimiter, normalize_str
-
-if TYPE_CHECKING:
-    import discogs_client
-else:
-    try:
-        import discogs_client
-    except ImportError:
-        discogs_client = None
 
 _DISCOGS_LIMITER = RateLimiter(interval_seconds=1.1)
 
@@ -38,9 +30,6 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
     if not user_token or not artist or not album:
         return None
 
-    if discogs_client is None:
-        raise APIServiceError("discogs-client library is not installed.")
-
     if normalize_str(album) in ["unknown album", "unknown"]:
         return None
 
@@ -62,19 +51,30 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
             try:
                 first = results[0]
                 if first:
+                    labels = getattr(first, "labels", None)
+                    label_name = labels[0].name if labels and len(labels) > 0 and hasattr(labels[0], "name") else None
+                    cat_no = labels[0].catno if labels and len(labels) > 0 and hasattr(labels[0], "catno") else None
+                    barcodes = getattr(first, "barcodes", None)
+                    barcode_val = barcodes[0] if barcodes and len(barcodes) > 0 else None
+
                     res = {
                         "id": getattr(first, "id", None),
                         "title": getattr(first, "title", None),
                         "year": getattr(first, "year", None),
                         "genres": getattr(first, "genres", []),
+                        "country": getattr(first, "country", None),
+                        "label": label_name,
+                        "catalog_number": cat_no,
+                        "barcode": barcode_val,
                     }
                     set_cached_api(cache_key, res)
                     return res
-            except (IndexError, TypeError, AttributeError):
-                pass
+            except (IndexError, TypeError, AttributeError) as e:
+                from sonora.core.logger import LOG
+                LOG.debug(f"Discogs empty result parse: {e}")
             return None
         except Exception as e:
             _discogs_client_instance = None
-            if isinstance(e, APIServiceError):
+            if isinstance(e, RuntimeError):
                 raise
-            raise APIServiceError(f"Discogs search failed for {artist} - {album}: {e}") from e
+            raise RuntimeError(f"Discogs search failed for {artist} - {album}: {e}") from e

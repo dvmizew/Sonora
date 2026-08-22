@@ -1,85 +1,40 @@
 import dataclasses
-import re
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+import httpx
 from rich.progress import (
     BarColumn,
+    MofNCompleteColumn,
     Progress,
     SpinnerColumn,
     TextColumn,
+    TimeElapsedColumn,
     TimeRemainingColumn,
 )
 
-from sonora.audio.art import check_image_similarity
+from sonora.audio.art import process_album_cover_art, process_artist_artwork
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.constants import ARTIST_ALIASES, SUPPORTED_EXTS
-from sonora.core.exceptions import APIServiceError, AudioProcessingError, MetadataError
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import normalize_str
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.discogs import search_discogs_release
-from sonora.services.genius import fetch_genius_description
-from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
-from sonora.services.lyrics import fetch_synced_lyrics
+from sonora.services.lyrics import process_track_lyrics
 from sonora.services.musicbrainz import fetch_track_mbid
-from sonora.services.theaudiodb import fetch_artist_images
 
 
 def normalize_artist_alias(artist: str) -> str:
     """Normalize artist name based on ARTIST_ALIASES table."""
-    lowered = normalize_str(artist)
-    return ARTIST_ALIASES.get(lowered, artist.strip())
-
-_cover_locks: dict[Path, threading.Lock] = {}
-_cover_meta_lock = threading.Lock()
-
-def _get_cover_lock(album_dir: Path) -> threading.Lock:
-    with _cover_meta_lock:
-        if len(_cover_locks) > 1000:
-            _cover_locks.clear()
-        if album_dir not in _cover_locks:
-            _cover_locks[album_dir] = threading.Lock()
-        return _cover_locks[album_dir]
+    return ARTIST_ALIASES.get(normalize_str(artist), artist.strip())
 
 
-def process_artist_art(artist_name: str, folder: Path) -> None:
-    """Ensure artist.jpg (avatar) and banner.jpg (wide header) exist in artist's root folder."""
-    if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
-        return
-
-    parent = folder.parent
-    artist_dir = parent if parent.name not in ["FLAC", "Music", ""] and folder.name != "Singles" else folder
-    if parent.name == "Singles":
-        artist_dir = parent.parent
-
-    has_artist_img = any((artist_dir / n).exists() for n in ["artist.jpg", "artist.png", "folder.jpg"])
-    has_banner_img = any((artist_dir / n).exists() for n in ["banner.jpg", "banner.png", "fanart.jpg"])
-
-    if has_artist_img and has_banner_img:
-        return
-
-    thumb_bytes, banner_bytes = fetch_artist_images(artist_name)
-    if thumb_bytes and not has_artist_img:
-        try:
-            (artist_dir / "artist.jpg").write_bytes(thumb_bytes)
-            LOG.info(f"   ∟ 👤 Downloaded artist avatar: {artist_name} -> artist.jpg")
-        except OSError as e:
-            LOG.debug(f"Failed to write artist avatar: {e}")
-
-    if banner_bytes and not has_banner_img:
-        try:
-            (artist_dir / "banner.jpg").write_bytes(banner_bytes)
-            LOG.info(f"   ∟ 🎨 Downloaded artist banner: {artist_name} -> banner.jpg")
-        except OSError as e:
-            LOG.debug(f"Failed to write artist banner: {e}")
 
 
 def process_single_track(
@@ -93,13 +48,10 @@ def process_single_track(
     genius_api_token: str | None = None,
     options: dict | None = None,
 ) -> TrackInfo:
-    """
-    Process and tag a single audio file with metadata, artwork, lyrics, BPM, and ReplayGain.
-    """
     LOG.start_buffering()
     try:
         if not file_path.exists():
-            raise AudioProcessingError(f"File not found: {file_path}")
+            raise FileNotFoundError(f"File not found: {file_path}")
 
         orig_info = read_track_metadata(file_path)
         track_info = read_track_metadata(file_path)
@@ -114,41 +66,54 @@ def process_single_track(
         # 1. Respect existing MBID or prioritize AcoustID (most exact) over text search
         if (not track_info.musicbrainz_trackid or force) and acoustid_api_key:
             try:
-                acoustid_mbid = lookup_acoustid(file_path, api_key=acoustid_api_key)
+                acoustid_mbid = lookup_acoustid(
+                    file_path,
+                    api_key=acoustid_api_key,
+                    expected_artist=track_info.artist,
+                    expected_title=track_info.title,
+                )
                 if acoustid_mbid:
                     track_info.musicbrainz_trackid = acoustid_mbid
                     LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
-            except APIServiceError as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"AcoustID lookup failed for {track_info.title}: {e}")
 
-        # 2. Fallback to MusicBrainz text search by existing tags if AcoustID failed
-        if not track_info.musicbrainz_trackid or force:
+        # 2. Check pre-fetched album track MBIDs map first (1 single API call per album!)
+        album_mbids = options.get("album_track_mbids", {}) if isinstance(options, dict) else {}
+        if (not track_info.musicbrainz_trackid or force) and track_info.track_number and track_info.track_number in album_mbids:
+            track_info.musicbrainz_trackid = album_mbids[track_info.track_number]
+            mbid_str = str(track_info.musicbrainz_trackid)
+            LOG.info(f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {mbid_str[:8]}...")
+        elif not track_info.musicbrainz_trackid or force:
             try:
                 mbid = fetch_track_mbid(track_info.artist, track_info.title)
                 if mbid:
                     track_info.musicbrainz_trackid = mbid
                     LOG.info(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
-            except APIServiceError as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {e}")
 
         # 3. Fetch MusicBrainz Album ID via Discography Optimization
         if not track_info.musicbrainz_albumid:
-            try:
-                from sonora.services.musicbrainz import search_musicbrainz_release
-                search_artist = track_info.album_artist if track_info.album_artist else track_info.artist
-                release = search_musicbrainz_release(search_artist, track_info.album)
-                if release:
-                    mb_id = release.get("id")
-                    if mb_id is not None:
-                        track_info.musicbrainz_albumid = str(mb_id)
-                    # Also opportunistically set year/genre if missing
-                    if not track_info.date:
-                        from sonora.core.utils import normalize_date
-                        date_str = release.get("date")
-                        if isinstance(date_str, str) and len(date_str) >= 4:
-                            track_info.date = normalize_date(date_str)
-            except APIServiceError as e:
-                LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
+            pre_album_mbid = options.get("album_mbid") if isinstance(options, dict) else None
+            if pre_album_mbid:
+                track_info.musicbrainz_albumid = pre_album_mbid
+            else:
+                try:
+                    from sonora.services.musicbrainz import search_musicbrainz_release
+                    search_artist = track_info.album_artist if track_info.album_artist else track_info.artist
+                    release = search_musicbrainz_release(search_artist, track_info.album)
+                    if release:
+                        mb_id = release.get("id")
+                        if mb_id is not None:
+                            track_info.musicbrainz_albumid = str(mb_id)
+                        if not track_info.date:
+                            from sonora.core.utils import normalize_date
+                            date_str = release.get("date")
+                            if isinstance(date_str, str) and len(date_str) >= 4:
+                                track_info.date = normalize_date(date_str)
+                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
+                    LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
 
         # 4. Fetch Last.fm genre/mood tags
         if lastfm_api_key:
@@ -166,14 +131,16 @@ def process_single_track(
                     if norm_genre:
                         track_info.genre = norm_genre
                         LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{norm_genre}[/]")
-            except APIServiceError as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Last.fm lookup failed for {track_info.title}: {e}")
 
         # 5. Discogs fallback lookup for release metadata
-        if discogs_user_token and not track_info.genre:
+        if discogs_user_token:
             try:
                 release = search_discogs_release(track_info.artist, track_info.album, user_token=discogs_user_token)
                 if release:
+                    if release.get("id") and not track_info.discogs_release_id:
+                        track_info.discogs_release_id = str(release["id"])
                     if release.get("year") and not track_info.date:
                         from sonora.core.utils import normalize_date
                         track_info.date = normalize_date(str(release["year"]))
@@ -184,18 +151,83 @@ def process_single_track(
                         norm_genre = normalize_genre(raw_genre)
                         if norm_genre:
                             track_info.genre = norm_genre
-            except APIServiceError as e:
+                    if release.get("country") and not track_info.release_country:
+                        track_info.release_country = str(release["country"])
+                    if release.get("label") and not track_info.label:
+                        track_info.label = str(release["label"])
+                    if release.get("catalog_number") and not track_info.catalog_number:
+                        track_info.catalog_number = str(release["catalog_number"])
+                    if release.get("barcode") and not track_info.barcode:
+                        track_info.barcode = str(release["barcode"])
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Discogs lookup failed for {track_info.title}: {e}")
 
-        # 6. Genius description as COMMENT tag
+        # 5b. Deezer metadata enrichment (Label, Barcode, Release Date, Genre, ISRC)
+        try:
+            from sonora.services.deezer import (
+                fetch_deezer_album_details,
+                fetch_deezer_track_details,
+            )
+            d_album = fetch_deezer_album_details(track_info.artist, track_info.album)
+            if d_album:
+                if d_album.get("label") and not track_info.label:
+                    track_info.label = str(d_album["label"])
+                if d_album.get("barcode") and not track_info.barcode:
+                    track_info.barcode = str(d_album["barcode"])
+                if d_album.get("release_date") and not track_info.date:
+                    from sonora.core.utils import normalize_date
+                    track_info.date = normalize_date(str(d_album["release_date"]))
+                if d_album.get("genre") and not track_info.genre:
+                    from sonora.core.utils import normalize_genre
+                    norm_g = normalize_genre(str(d_album["genre"]))
+                    if norm_g:
+                        track_info.genre = norm_g
+
+            d_track = fetch_deezer_track_details(track_info.artist, track_info.title)
+            if d_track and d_track.get("isrc") and not track_info.isrc:
+                track_info.isrc = str(d_track["isrc"])
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
+            LOG.debug(f"Deezer enrichment failed for {track_info.title}: {e}")
+
+        # 6. Genius song details (description, genius_song_id, featured_artists, producers)
         if genius_api_token:
             try:
-                desc = fetch_genius_description(track_info.artist, track_info.title, api_token=genius_api_token)
-                if desc:
-                    track_info.comment = desc
-                    LOG.info("   ∟ 📝 [Genius] Fetched description")
-            except APIServiceError as e:
+                from sonora.services.genius import fetch_genius_song_details
+                g_details = fetch_genius_song_details(track_info.artist, track_info.title, api_token=genius_api_token)
+                if g_details:
+                    if g_details.get("description") and (not track_info.comment or force):
+                        track_info.comment = str(g_details["description"])
+                    if g_details.get("genius_song_id"):
+                        track_info.genius_song_id = str(g_details["genius_song_id"])
+                    if g_details.get("featured_artists") and (not track_info.featured_artists or force):
+                        track_info.featured_artists = str(g_details["featured_artists"])
+                    if g_details.get("producers") and (not track_info.producers or force):
+                        track_info.producers = str(g_details["producers"])
+                    LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Genius lookup failed for {track_info.title}: {e}")
+
+        # 6a. Last.fm stats (listeners, playcount)
+        if lastfm_api_key:
+            try:
+                from sonora.services.lastfm import fetch_lastfm_track_stats
+                stats = fetch_lastfm_track_stats(track_info.artist, track_info.title, api_key=lastfm_api_key)
+                if stats:
+                    if stats.get("listeners"):
+                        track_info.listeners = stats["listeners"]
+                    if stats.get("playcount"):
+                        track_info.playcount = stats["playcount"]
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
+                LOG.debug(f"Last.fm stats lookup failed for {track_info.title}: {e}")
+
+        # 6b. TheAudioDB video URL
+        try:
+            from sonora.services.theaudiodb import fetch_track_video_url
+            vid_url = fetch_track_video_url(track_info.artist, track_info.title)
+            if vid_url:
+                track_info.music_video_url = vid_url
+        except (OSError, ValueError, RuntimeError) as e:
+            LOG.debug(f"TheAudioDB video lookup failed for {track_info.title}: {e}")
 
         # 6b. Embed Cuesheet content if .cue file exists in directory
         cue_files = list(file_path.parent.glob("*.cue"))
@@ -211,82 +243,43 @@ def process_single_track(
                 if bpm is not None:
                     track_info.bpm = bpm
                     LOG.info(f"   ∟ 🎵 BPM Calculated: [green]{bpm}[/]")
-            except AudioProcessingError as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"BPM calculation failed for {track_info.title}: {e}")
 
         # 8. Fetch iTunes Cover Art (Download only, don't embed yet)
         cover_jpg = None
-        if fetch_itunes_art and file_path.suffix.lower() == ".flac":
+        if fetch_itunes_art:
             try:
-                cover_jpg = file_path.parent / "cover.jpg"
-                # Do not block all threads on network I/O unless necessary
-                with _get_cover_lock(file_path.parent):
-                    art_downloaded = cover_jpg.exists() and not force
-                    if not art_downloaded and not dry_run:
-                        # Mark as downloaded (or downloading) so other threads skip
-                        cover_jpg.touch()
-                
-                if not art_downloaded:
-                    art_url = fetch_itunes_cover_art_url(track_info.artist, track_info.album)
-                    if art_url:
-                        from sonora.core.http import SESSION
-                        resp = SESSION.get(art_url, timeout=15)
-                        resp.raise_for_status()
-                        new_art_bytes = resp.content
-
-                        with _get_cover_lock(file_path.parent):
-                            if not dry_run:
-                                existing_bytes = cover_jpg.read_bytes() if (cover_jpg.exists() and cover_jpg.stat().st_size > 0) else None
-                                if existing_bytes and not check_image_similarity(existing_bytes, new_art_bytes):
-                                    LOG.info("   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch")
-                                else:
-                                    cover_jpg.write_bytes(new_art_bytes)
-                                    LOG.info("   ∟ 🖼️  Downloaded Cover Art")
-                            else:
-                                LOG.info(f"[DRY-RUN] Would download cover art to {cover_jpg.name}")
-                    else:
-                        # Remove placeholder if fetch failed
-                        with _get_cover_lock(file_path.parent):
-                            if not dry_run and cover_jpg.exists() and cover_jpg.stat().st_size == 0:
-                                cover_jpg.unlink()
-                
-                # Ensure we only use valid cover jpgs
-                with _get_cover_lock(file_path.parent):
-                    if not dry_run and (not cover_jpg.exists() or cover_jpg.stat().st_size == 0):
-                        cover_jpg = None
-            except (APIServiceError, OSError) as e:
+                cover_jpg = process_album_cover_art(
+                    file_path.parent,
+                    track_info.artist,
+                    track_info.album,
+                    mb_album_id=track_info.musicbrainz_albumid,
+                    force=force,
+                    dry_run=dry_run,
+                )
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Cover art downloading failed for {track_info.title}: {e}")
-                with _get_cover_lock(file_path.parent):
-                    if not dry_run and cover_jpg and cover_jpg.exists() and cover_jpg.stat().st_size == 0:
-                        cover_jpg.unlink()
                 cover_jpg = None
 
-        # 9. Fetch & write .lrc lyrics file (Skip if already present unless force)
-        lrc_path = file_path.with_suffix(".lrc")
-        enhanced_path = file_path.with_suffix(".enhanced.lrc")
-        already_has_lyrics = lrc_path.exists() or enhanced_path.exists() or bool(track_info.synced_lyrics)
-        if fetch_lyrics and (not already_has_lyrics or force):
+        # 9. Fetch & write .lrc lyrics file (Quality Upgrade: enhanced (3) > line-synced (2) > plain (1))
+        if fetch_lyrics:
             try:
-                lrc = fetch_synced_lyrics(track_info.artist, track_info.title, isrc=track_info.isrc)
-                if lrc:
-                    if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", lrc):
-                        plain_lrc = re.sub(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", "", lrc)
-                        if not dry_run:
-                            enhanced_path.write_text(lrc, encoding="utf-8")
-                            lrc_path.write_text(plain_lrc, encoding="utf-8")
-                            LOG.info(f"   ∟ [bold green]✅ Saved[/] [bold cyan]enhanced[/] lyrics for [white]{file_path.name}[/]")
-                        else:
-                            LOG.info(f"[DRY-RUN] Would write enhanced lyrics to {enhanced_path.name}")
-                    else:
-                        if not dry_run:
-                            lrc_path.write_text(lrc, encoding="utf-8")
-                            LOG.info(f"   ∟ [bold green]✅ Saved[/] [bold cyan]synced[/] lyrics for [white]{file_path.name}[/]")
-                        else:
-                            LOG.info(f"[DRY-RUN] Would write plain lyrics to {lrc_path.name}")
-            except (APIServiceError, OSError) as e:
+                lrc_text, tag_type = process_track_lyrics(
+                    file_path,
+                    track_info.artist,
+                    track_info.title,
+                    force=force,
+                    dry_run=dry_run,
+                    isrc=track_info.isrc,
+                )
+                if lrc_text and tag_type:
+                    track_info.lyrics = lrc_text
+                    LOG.info(f"   ∟ ✅ Saved {tag_type} lyrics for {file_path.name}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Lyrics fetch failed for {track_info.title}: {e}")
 
-        # Compute exact tag diffs as in initial/script.py (compare dataclass fields)
+        # Compute exact tag diffs (compare dataclass fields)
         diff_lines = []
         _SKIP_FIELDS = {"file_path", "lyrics", "synced_lyrics", "acoustid_fingerprint",
                         "sample_rate", "bitrate", "channels", "is_lossless",
@@ -299,7 +292,7 @@ def process_single_track(
             if old_val != new_val:
                 diff_lines.append(f"\n       [*] {f.name}: {old_val} -> {new_val}")
 
-        # 10. Write metadata tags back to file only if changed (matches initial/script.py)
+        # 10. Write metadata tags back to file only if changed
         if diff_lines or force:
             if not dry_run:
                 write_track_metadata(track_info, cover_art_path=cover_jpg)
@@ -329,7 +322,21 @@ def tag_album_folder(
         raise ValueError(f"Invalid options passed to tag_album_folder: {invalid}")
 
     if not folder_path.exists() or not folder_path.is_dir():
-        raise AudioProcessingError(f"Album folder not found: {folder_path}")
+        raise FileNotFoundError(f"Album folder not found: {folder_path}")
+
+    # Check if folder_path contains child directories with audio files
+    sub_dirs = [
+        d for d in sorted(folder_path.iterdir())
+        if d.is_dir() and any(p.is_file() and p.suffix.lower() in SUPPORTED_EXTS for p in d.rglob("*"))
+    ]
+
+    # If folder_path has child album directories and NO direct audio files in its root, tag each sub-album independently
+    if sub_dirs and not any(p.is_file() and p.suffix.lower() in SUPPORTED_EXTS for p in folder_path.glob("*")):
+        all_results: list[TrackInfo] = []
+        for sub in sub_dirs:
+            res = tag_album_folder(sub, max_workers=max_workers, **options)
+            all_results.extend(res)
+        return all_results
 
     audio_files = sorted([
         p for p in folder_path.rglob("*")
@@ -342,26 +349,31 @@ def tag_album_folder(
     if not audio_files:
         return []
 
-    # Off-by-N track number normalization check (matches initial prototype)
-    track_numbers = []
-    for f_p in audio_files:
-        try:
-            meta = read_track_metadata(f_p)
-            if meta.track_number is not None:
-                track_numbers.append(meta.track_number)
-        except (MetadataError, OSError) as e:
-            LOG.debug(f"Could not read metadata for track number check on {f_p.name}: {e}")
-
-    if track_numbers:
-        min_t, max_t = min(track_numbers), max(track_numbers)
-        num_t = len(track_numbers)
-        if min_t > 1 and ((num_t == 1) or ((max_t - min_t + 1) == num_t)):
-            shift = min_t - 1
-            LOG.info(f"   ∟ ⚖️  Detecting off-by-{shift} numbering. Normalizing...")
+    # Batch Optimization: Fetch entire album track MBIDs and album MBID in 1 single API call
+    try:
+        from sonora.services.musicbrainz import (
+            fetch_album_track_mbids,
+            search_musicbrainz_release,
+        )
+        sample_meta = read_track_metadata(audio_files[0])
+        s_artist = sample_meta.album_artist or sample_meta.artist
+        s_album = sample_meta.album
+        if s_artist and s_album:
+            rel = search_musicbrainz_release(s_artist, s_album)
+            if rel and rel.get("id"):
+                alb_id = str(rel["id"])
+                album_mbids = fetch_album_track_mbids(alb_id)
+                if options.get("options") is None:
+                    options["options"] = {}
+                options["options"]["album_track_mbids"] = album_mbids
+                options["options"]["album_mbid"] = alb_id
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
+        LOG.debug(f"Pre-fetching album track MBIDs failed: {e}")
 
     results: list[TrackInfo] = []
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
         future_to_file = {}
         for file_p in audio_files:
             future = executor.submit(
@@ -383,6 +395,9 @@ def tag_album_folder(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            TextColumn("[dim]/[/dim]"),
             TimeRemainingColumn(),
             console=CONSOLE
         ) as progress:
@@ -392,17 +407,22 @@ def tag_album_folder(
                 try:
                     info = future.result()
                     results.append(info)
-                except (AudioProcessingError, MetadataError, APIServiceError) as e:
+                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                     LOG.warning(f"Failed to process {file_p.name}: {e}")
                 progress.advance(task)
+    except KeyboardInterrupt:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     if options.get("fetch_replaygain", True):
         calculate_album_replaygain(audio_files, options=options)
 
     if results:
         primary_artist = results[0].album_artist or results[0].artist
         try:
-            process_artist_art(primary_artist, folder_path)
-        except (APIServiceError, OSError) as e:
+            process_artist_artwork(folder_path, primary_artist, dry_run=options.get("dry_run", False))
+        except (OSError, ValueError, RuntimeError) as e:
             LOG.debug(f"Artist art download failed: {e}")
 
     return results

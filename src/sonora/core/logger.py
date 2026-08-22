@@ -6,8 +6,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.theme import Theme
 
-# Silence 3rd party loggers completely as in initial/script.py
-for logger_name in ["syncedlyrics", "Musixmatch", "Lrclib", "NetEase", "Megalobiz", "Genius", "urllib3", "librosa", "audioread", "resampy"]:
+for logger_name in ["syncedlyrics", "Musixmatch", "Lrclib", "NetEase", "Megalobiz", "Genius", "urllib3", "httpx"]:
     _l = logging.getLogger(logger_name)
     _l.setLevel(logging.CRITICAL)
     _l.propagate = False
@@ -25,6 +24,7 @@ _LOG_LOCK = threading.Lock()
 class SonoraLogger:
     def __init__(self) -> None:
         self.local = threading.local()
+        self.verbose: bool = False
 
     def start_buffering(self) -> None:
         self.local.buf = []
@@ -61,7 +61,8 @@ class SonoraLogger:
         self._log_msg(f"[warning]WARNING:[/warning] {message}")
 
     def debug(self, message: str) -> None:
-        pass
+        if self.verbose:
+            self._log_msg(f"[dim]DEBUG:[/dim] {message}")
 
     def error(self, message: str) -> None:
         self._log_msg(f"[error]ERROR:[/error] {message}")
@@ -77,9 +78,6 @@ class SonoraLogger:
                 table.add_row(metric, val)
         with _LOG_LOCK:
             CONSOLE.print("\n", table)
-
-    def heartbeat(self, message: str, min_interval: float = 0.5) -> None:
-        pass
 
 
 LOG = SonoraLogger()

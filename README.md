@@ -1,44 +1,60 @@
 # Sonora
 
-CLI tool for music tagging, library auditing, tag backup/restore, and file organization.
+Sonora is a CLI tool for music tagging, library auditing, metadata enrichment, tag backup/restore, and file organization.
 
-Supports **FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, MPC**.
+Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 
 ---
 
-## ⚡ Features & APIs
+## Features
 
-- **APIs & Services**: MusicBrainz, AcoustID (Chromaprint), Discogs, Last.fm, Genius, iTunes HD Cover Art, TheAudioDB, syncedlyrics (Musixmatch, Lrclib, NetEase).
-- **Symfonium & Navidrome Extended Tags**: `ARTISTSORT`, `ALBUMARTISTSORT`, `TOTALTRACKS`, `TOTALDISCS`, `RELEASETYPE`, `RELEASESTATUS`, `RELEASECOUNTRY`, `BARCODE`, `CATALOGNUMBER`, `LABEL`, `ORIGINALDATE`, `CUESHEET`.
+- **Metadata & Tagging**:
+  - AcoustID (Chromaprint) audio fingerprinting and MusicBrainz lookup.
+  - Secondary enrichment from Discogs (release date, label, catalog number, barcode), Last.fm (genres, listener stats), Deezer (ISRC, barcode, label, release date), and Genius (producer credits, featured artists, song descriptions).
+  - Synchronized and plain lyrics (`.lrc`) via `syncedlyrics` (Musixmatch, Lrclib, NetEase).
+  - Extended tags for Symfonium, Navidrome, and Plex (`ARTISTSORT`, `ALBUMARTISTSORT`, `RELEASETYPE`, `BARCODE`, `CATALOGNUMBER`, `LABEL`, `ORIGINALDATE`, `ISRC`).
+- **Cover Art Engine**:
+  - Multi-source fallback: MusicBrainz Cover Art Archive -> iTunes (up to 3000x3000px) -> Deezer (1000x1000px) -> TheAudioDB (`artist.jpg` and `banner.jpg`).
+  - Grayscale correlation check (NumPy) to avoid overwriting custom covers unless visually similar (≥ 0.82 correlation).
 - **Audio Engines**:
-  - BPM detection (`bpm-tools` / `librosa`).
+  - Tempo calculation (STFT onset envelope autocorrelation via SciPy).
   - ReplayGain 2.0 Album Mode (`metaflac`).
-  - 16kHz spectral cutoff analysis (`sox`).
-  - Bit-exact audio stream MD5 verification (`flac -t`).
-- **Cover Art Safeguard**: PIL Pearson correlation prevents replacing custom cover art unless visually matching (correlation ≥ 0.82).
-- **Artist Artwork**: Downloads `artist.jpg` (thumb) and `banner.jpg` via TheAudioDB.
-- **Tag Safety**: Memory-safe streaming JSON backup and restore (`backup` / `restore`).
+  - 16kHz spectral cutoff detection (`sox`) to flag fake-lossless files.
+  - Bit-exact audio stream MD5 checksum verification (`flac -t`).
+- **Library Tools**:
+  - Library auditor for corrupt FLACs, missing tags, bracket clutter, and missing lyrics.
+  - File renamer and folder structure standardizer (`NN - Artist - Title.ext`).
+  - Single track organizer (moves 1-2 track releases to `Singles/` and deduplicates against albums).
+  - Streaming JSON tag backup and restore.
+  - SQLite disk caching (`~/.cache/sonora`) with 30-day TTL to minimize API requests.
 
 ---
 
-## 🛠 Dependencies
+## Requirements
 
-Requires system packages for external audio tools:
+- **Python**: 3.10 or higher
+- **System Audio Tools**:
+  - `flac` (includes `metaflac` for ReplayGain 2.0 and checksum validation)
+  - `ffmpeg` (audio decoding and metadata extraction)
+  - `chromaprint` (provides `fpcalc` for AcoustID audio fingerprinting)
+  - `sox` (spectral cutoff analysis)
+
+### System Package Installation
 
 ```bash
 # Arch Linux
-sudo pacman -S ffmpeg flac sox bpm-tools
+sudo pacman -S python ffmpeg flac sox chromaprint
 
 # Debian / Ubuntu
-sudo apt install ffmpeg flac sox bpm-tools
+sudo apt install python3 ffmpeg flac sox chromaprint
 
 # macOS
-brew install ffmpeg flac sox bpm-tools
+brew install python ffmpeg flac sox chromaprint
 ```
 
 ---
 
-## 🚀 Installation
+## Installation
 
 ```bash
 git clone https://github.com/dvmizew/Sonora.git
@@ -46,7 +62,11 @@ cd Sonora
 pip install -e .
 ```
 
-### Environment Variables (`.env`)
+---
+
+## Configuration
+
+Optional API keys can be set via environment variables or a `.env` file in your working directory:
 
 ```env
 LASTFM_API_KEY=your_lastfm_key
@@ -55,55 +75,112 @@ DISCOGS_USER_TOKEN=your_discogs_token
 GENIUS_API_TOKEN=your_genius_token
 ```
 
+MusicBrainz, Cover Art Archive, iTunes, and Deezer lookups work automatically without API keys.
+
 ---
 
-## 💻 Commands
+## Usage
 
-### `tag`
-Tags files with metadata, artwork, lyrics, BPM, ReplayGain, and extended tags.
+### Global Options
+
+- `--dry-run`: Simulate operations without modifying files or directories.
+- `-v, --verbose`: Enable verbose logging.
+- `-v, --version`: Show program version.
+
+---
+
+### `sonora tag`
+Tag an album or directory automatically with metadata, artwork, lyrics, BPM, and ReplayGain:
 
 ```bash
-sonora tag /path/to/album
-sonora tag /path/to/album --dry-run
-sonora tag /path/to/album --force
-sonora tag /path/to/album -w 8
+sonora tag /path/to/music
+sonora tag /path/to/music --dry-run
+sonora tag /path/to/music --force
+sonora tag /path/to/music -t 8
+sonora tag /path/to/music --json tag_report.json
 ```
 
-### `audit`
-Checks library for corrupted FLACs, missing tags, bracket clutter, and fake lossless.
+**Options:**
+- `path`: Directory containing audio files to tag (required).
+- `-t, --threads N`: Number of parallel worker threads (default: `4`).
+- `--force`: Force retagging by ignoring disk cache and existing MBIDs.
+- `--no-bpm`: Disable BPM calculation.
+- `--no-replaygain`: Disable ReplayGain 2.0 calculation.
+- `--no-lyrics`: Disable `.lrc` lyrics fetching.
+- `--no-art`: Disable cover art downloading.
+- `--json PATH`: Output path to save LLM-optimized tagging JSON report with statistics.
+- `--lastfm-key KEY`: Last.fm API key (overrides `LASTFM_API_KEY` env).
+- `--acoustid-key KEY`: AcoustID API key (overrides `ACOUSTID_API_KEY` env).
+- `--discogs-token TOKEN`: Discogs personal token (overrides `DISCOGS_TOKEN` env).
+- `--genius-token TOKEN`: Genius API token (overrides `GENIUS_API_TOKEN` env).
+
+---
+
+### `sonora audit`
+Audit music library for FLAC integrity, bracket corruption, missing tags, and fake-lossless audio:
 
 ```bash
 sonora audit /path/to/library
+sonora audit /path/to/library -t 16
 sonora audit /path/to/library --spectral
-sonora audit /path/to/library --json report.json
+sonora audit /path/to/library --json audit_report.json
 ```
 
-### `rename`
-Renames tracks (`NN - Artist - Title.ext`), syncs `.lrc` headers, and renames album folders based on consensus.
-
-```bash
-sonora rename /path/to/album
-```
-
-### `organize`
-Moves 1-2 track single releases to `Singles/Primary Artist/`, deduplicates single tracks against albums, and cleans empty directories.
-
-```bash
-sonora organize /path/to/music
-```
-
-### `backup` & `restore`
-Streaming JSON tag backup and restore.
-
-```bash
-sonora backup /path/to/library -o backup.json
-sonora restore backup.json
-```
+**Options:**
+- `path`: Directory containing music library to audit (required).
+- `-t, --threads N`: Number of parallel worker threads (default: `8`).
+- `--spectral`: Enable deep spectral cutoff analysis to flag fake-lossless audio (MP3 upscaled to FLAC).
+- `--json PATH`: Output path to save audit JSON report.
 
 ---
 
-## 🧪 Tests
+### `sonora rename`
+Standardize file names (`NN - Artist - Title.ext` or `Disc-NN - Title.ext`), rename album directories, and synchronize `.lrc` metadata headers:
 
 ```bash
-python3 -m unittest discover -s tests
+sonora rename /path/to/album
+sonora rename /path/to/library --dry-run
 ```
+
+**Options:**
+- `path`: Directory containing audio files to rename (required).
+
+---
+
+### `sonora organize`
+Organize standalone single releases into `Singles/Primary Artist/`, deduplicate against full albums, and clean empty directories:
+
+```bash
+sonora organize /path/to/music
+sonora organize /path/to/music --target-singles /path/to/Singles
+```
+
+**Options:**
+- `path`: Source music directory (required).
+- `--target-singles PATH`: Destination directory for single tracks (default: `<path>/Singles`).
+
+---
+
+### `sonora backup`
+Create a high-speed, streaming JSON backup of audio tags across your library:
+
+```bash
+sonora backup /path/to/library
+sonora backup /path/to/library --out my_backup.json
+```
+
+**Options:**
+- `path`: Music directory to back up (required).
+- `--out PATH`: Output JSON backup file path (default: `backup_YYYY-MM-DD_HH-MM-SS.json`).
+
+---
+
+### `sonora restore`
+Restore audio tags from a streaming JSON backup file:
+
+```bash
+sonora restore my_backup.json
+```
+
+**Options:**
+- `backup_file`: Path to JSON backup file (required).

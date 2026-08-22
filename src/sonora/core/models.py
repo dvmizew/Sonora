@@ -47,6 +47,27 @@ class TrackInfo:
     advisory: str | None = None
     original_date: str | None = None
     cuesheet: str | None = None
+    composer: str | None = None
+    lyricist: str | None = None
+    remixer: str | None = None
+    initial_key: str | None = None
+    copyright: str | None = None
+    compilation: bool | None = None
+    spotify_trackid: str | None = None
+    musicbrainz_albumartistid: str | None = None
+    discogs_artist_id: str | None = None
+    language: str | None = None
+    script: str | None = None
+    mood: str | None = None
+    style: str | None = None
+    disambiguation: str | None = None
+    rating: float | None = None
+    featured_artists: str | None = None
+    producers: str | None = None
+    genius_song_id: str | None = None
+    listeners: int | None = None
+    playcount: int | None = None
+    music_video_url: str | None = None
     sample_rate: int | None = None
     bitrate: int | None = None
     channels: int | None = None
@@ -82,6 +103,27 @@ class TrackInfo:
             "release_country": self.release_country,
             "label": self.label,
             "barcode": self.barcode,
+            "composer": self.composer,
+            "lyricist": self.lyricist,
+            "remixer": self.remixer,
+            "initial_key": self.initial_key,
+            "copyright": self.copyright,
+            "compilation": self.compilation,
+            "spotify_trackid": self.spotify_trackid,
+            "musicbrainz_albumartistid": self.musicbrainz_albumartistid,
+            "discogs_artist_id": self.discogs_artist_id,
+            "language": self.language,
+            "script": self.script,
+            "mood": self.mood,
+            "style": self.style,
+            "disambiguation": self.disambiguation,
+            "rating": self.rating,
+            "featured_artists": self.featured_artists,
+            "producers": self.producers,
+            "genius_song_id": self.genius_song_id,
+            "listeners": self.listeners,
+            "playcount": self.playcount,
+            "music_video_url": self.music_video_url,
             "is_lossless": self.is_lossless,
             "sample_rate": self.sample_rate,
             "bitrate": self.bitrate,
