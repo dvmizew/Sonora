@@ -27,6 +27,8 @@ classifiers = [
 ]
 
 dependencies = [
+    "pytaglib>=2.1.0",
+    "orjson>=3.9.0",
     "mutagen>=1.46.0",
     "musicbrainzngs>=0.7.1",
     "pyacoustid>=1.2.2",

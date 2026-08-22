@@ -101,13 +101,18 @@ class TestServicesEngine(unittest.TestCase):
     @patch("sonora.services.discogs.discogs_client")
     @patch("sonora.services.discogs._discogs_client_instance", None)
     def test_search_discogs_release(self, mock_discogs_mod):
+        class DummyRelease:
+            def __init__(self) -> None:
+                self.id = 999
+                self.title = "Test Album"
+                self.year = 2024
+                self.genres = ["Pop"]
+                self.country = "US"
+                self.labels: list[object] = []
+                self.barcodes: list[str] = []
+
         mock_client = MagicMock()
-        mock_item = MagicMock()
-        mock_item.id = 999
-        mock_item.title = "Test Album"
-        mock_item.year = 2024
-        mock_item.genres = ["Pop"]
-        mock_client.search.return_value = [mock_item]
+        mock_client.search.return_value = [DummyRelease()]
         mock_discogs_mod.Client.return_value = mock_client
 
         res = search_discogs_release("Artist", "Album", user_token="dummy_token")

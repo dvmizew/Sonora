@@ -61,7 +61,7 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
                         "id": getattr(first, "id", None),
                         "title": getattr(first, "title", None),
                         "year": getattr(first, "year", None),
-                        "genres": getattr(first, "genres", []),
+                        "genres": list(getattr(first, "genres", []) or []),
                         "country": getattr(first, "country", None),
                         "label": label_name,
                         "catalog_number": cat_no,

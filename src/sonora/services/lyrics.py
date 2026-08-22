@@ -1,6 +1,7 @@
 import logging
 import re
 from pathlib import Path
+from typing import Any
 
 import syncedlyrics
 
@@ -104,16 +105,38 @@ def detect_lrc_quality(file_path: Path) -> int:
         return 0
 
 
-def fetch_synced_lyrics(
-    artist: str,
-    title: str,
-    synced_only: bool = False,
+def _query_syncedlyrics(
+    query_str: str,
     plain_only: bool = False,
+    synced_only: bool = False,
     enhanced: bool = False,
     providers: list[str] | None = None,
     lang: str | None = None,
-    save_path: Path | None = None,
+) -> str | None:
+    kwargs: dict[str, Any] = {
+        "plain_only": plain_only,
+        "synced_only": synced_only,
+        "enhanced": enhanced,
+    }
+    if providers is not None:
+        kwargs["providers"] = providers
+    if lang:
+        kwargs["lang"] = lang
+    res = syncedlyrics.search(query_str, **kwargs)
+    if isinstance(res, str) and res.strip():
+        return clean_lyrics_text(res.strip())
+    return None
+
+
+def fetch_synced_lyrics(
+    artist: str,
+    title: str,
     isrc: str | None = None,
+    plain_only: bool = False,
+    synced_only: bool = False,
+    enhanced: bool = False,
+    providers: list[str] | None = None,
+    lang: str | None = None,
 ) -> str | None:
     """
     Search and fetch LRC lyrics for a track using syncedlyrics.
@@ -130,21 +153,7 @@ def fetch_synced_lyrics(
 
     _LYRICS_LIMITER.wait()
 
-    def _do_search(query_str: str) -> str | None:
-        import typing
-        kwargs: dict[str, typing.Any] = {
-            "plain_only": plain_only,
-            "synced_only": synced_only,
-            "enhanced": enhanced,
-        }
-        if providers is not None:
-            kwargs["providers"] = providers
-        if lang:
-            kwargs["lang"] = lang
-        res = syncedlyrics.search(query_str, **kwargs)
-        if isinstance(res, str) and res.strip():
-            return clean_lyrics_text(res.strip())
-        return None
+    search_args = (plain_only, synced_only, enhanced, providers, lang)
 
     last_exception: Exception | None = None
     lrc = None
@@ -152,7 +161,7 @@ def fetch_synced_lyrics(
     # ATTEMPT 1: ISRC LOOKUP
     if isrc:
         try:
-            lrc = _do_search(isrc)
+            lrc = _query_syncedlyrics(isrc, *search_args)
         except (OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
@@ -161,7 +170,7 @@ def fetch_synced_lyrics(
         # Standard query format (matches unit tests)
         default_query = f"{artist.lower()} - {title.lower()}".strip()
         try:
-            lrc = _do_search(default_query)
+            lrc = _query_syncedlyrics(default_query, *search_args)
         except (OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
@@ -172,7 +181,7 @@ def fetch_synced_lyrics(
         primary_artist = artist.split(',')[0].split('&')[0].split(';')[0].strip()
         query = f"{clean_title} {primary_artist}".strip()
         try:
-            lrc = _do_search(query)
+            lrc = _query_syncedlyrics(query, *search_args)
         except (OSError, ValueError, KeyError, RuntimeError) as e:
             last_exception = e
 
