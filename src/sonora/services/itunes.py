@@ -56,12 +56,19 @@ def fetch_itunes_cover_art_url(artist: str, album: str, resolution: int = 1400) 
 
     # Step 2: Fallback matching if no exact match found
     if best_result is None:
+        from rapidfuzz import fuzz
+
         target_has_num = any(w in norm_target.split() for w in ["ii", "2", "two", "part 2", "pt 2", "pt. 2", "vol 2", "vol. 2", "iii", "3", "iv", "4"])
         for res in results:
             coll_name = str(res.get("collectionName", ""))
             norm_coll = normalize_str(coll_name)
+
+            # Strict similarity requirement: coll_name must be fuzzy similar to album title!
+            if fuzz.token_set_ratio(norm_target, norm_coll) < 75.0:
+                continue
+
             coll_has_num = any(w in norm_coll.split() for w in ["ii", "2", "two", "part 2", "pt 2", "pt. 2", "vol 2", "vol. 2", "iii", "3", "iv", "4"])
-            
+
             # Reject mismatch between album series (e.g. Savage Mode vs Savage Mode II)
             if coll_has_num != target_has_num:
                 continue

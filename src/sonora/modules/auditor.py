@@ -2,6 +2,9 @@ import re
 from pathlib import Path
 
 import orjson
+from mutagen._util import MutagenError
+from mutagen.flac import FLAC as MutagenFLAC
+from mutagen.flac import FLACNoHeaderError
 
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
@@ -46,6 +49,23 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 issues.append("FLAC audio stream MD5 checksum verification failed (corrupted FLAC).")
         except (OSError, ValueError, RuntimeError) as e:
             issues.append(f"Checksum check failed: {e}")
+
+        try:
+            audio_flac = MutagenFLAC(str(file_path))
+            for idx, p in enumerate(audio_flac.pictures):
+                if len(p.data) == 0:
+                    issues.append(f"Corrupt 0-byte picture block at index {idx}.")
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            AttributeError,
+            KeyError,
+            TypeError,
+            FLACNoHeaderError,
+            MutagenError,
+        ) as e:
+            LOG.debug(f"Mutagen picture audit skipped for {file_path}: {e}")
         if check_spectral:
             try:
                 is_fake, _, desc = detect_fake_lossless(file_path)

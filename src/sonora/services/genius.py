@@ -1,27 +1,30 @@
 from sonora.core.http import SESSION
-from sonora.core.utils import RateLimiter, normalize_str
+from sonora.core.utils import RateLimiter, clean_title, match_score
 
 _GENIUS_LIMITER = RateLimiter(interval_seconds=0.5)
 
 
-def fetch_genius_description(artist: str, title: str, api_token: str | None = None) -> str | None:
-    """
-    Fetch song description/story from Genius API.
-    """
+def fetch_genius_description(
+    artist: str, title: str, api_token: str | None = None
+) -> str | None:
     details = fetch_genius_song_details(artist, title, api_token)
-    return str(details["description"]) if details and details.get("description") else None
+    return (
+        str(details["description"])
+        if details and details.get("description")
+        else None
+    )
 
 
-def fetch_genius_song_details(artist: str, title: str, api_token: str | None = None) -> dict[str, object] | None:
-    """
-    Fetch extended song metadata (description, genius_song_id, featured_artists, producers) from Genius API.
-    """
+def fetch_genius_song_details(
+    artist: str, title: str, api_token: str | None = None
+) -> dict[str, object] | None:
     if not api_token or not artist or not title:
         return None
 
     _GENIUS_LIMITER.wait()
     try:
-        query = f"{normalize_str(artist)} {normalize_str(title)}"
+        c_title = clean_title(title)
+        query = f"{artist} {c_title}"
         search_url = "https://api.genius.com/search"
         resp = SESSION.get(
             search_url,
@@ -34,8 +37,24 @@ def fetch_genius_song_details(artist: str, title: str, api_token: str | None = N
         hits = data.get("response", {}).get("hits", [])
         if not hits:
             return None
-        result_hit = hits[0].get("result", {})
-        api_path = result_hit.get("api_path")
+
+        best_hit = None
+        best_score = 0.0
+
+        for hit in hits:
+            res_item = hit.get("result", {})
+            hit_artist = str(res_item.get("primary_artist", {}).get("name", ""))
+            hit_title = str(res_item.get("title", ""))
+
+            score = match_score(artist, c_title, hit_artist, hit_title)
+            if score > best_score:
+                best_score = score
+                best_hit = res_item
+
+        if not best_hit or best_score < 70.0:
+            return None
+
+        api_path = best_hit.get("api_path")
         if not api_path:
             return None
 
@@ -47,21 +66,37 @@ def fetch_genius_song_details(artist: str, title: str, api_token: str | None = N
             timeout=5,
         )
         resp_song.raise_for_status()
-        song = resp_song.json().get("response", {}).get("song", {})
-        desc = song.get("description", {}).get("plain", "")
-        clean_desc = desc.strip() if desc and desc.strip() != "?" and "lyrics for this song" not in desc.lower() else None
+        song_data = resp_song.json().get("response", {}).get("song", {})
 
-        raw_feats = song.get("featured_artists", [])
-        feat_arts = [str(a.get("name")) for a in raw_feats if isinstance(a, dict) and a.get("name")]
-        raw_prods = song.get("producer_artists", [])
-        prods = [str(a.get("name")) for a in raw_prods if isinstance(a, dict) and a.get("name")]
+        desc_plain = song_data.get("description", {}).get("plain")
+        if desc_plain and "Lyrics for this song are unavailable" in str(desc_plain):
+            desc_plain = None
+
+        genius_song_id = song_data.get("id")
+
+        # Parse featured artists
+        featured_list = song_data.get("featured_artists", [])
+        featured_names = [
+            str(f["name"]) for f in featured_list if isinstance(f, dict) and f.get("name")
+        ]
+
+        # Parse producers
+        producer_list = song_data.get("producer_artists", [])
+        producer_names = [
+            str(p["name"]) for p in producer_list if isinstance(p, dict) and p.get("name")
+        ]
 
         return {
-            "genius_song_id": str(song.get("id")) if song.get("id") else None,
-            "description": clean_desc,
-            "featured_artists": ", ".join(feat_arts) if feat_arts else None,
-            "producers": ", ".join(prods) if prods else None,
+            "genius_song_id": genius_song_id,
+            "description": desc_plain,
+            "featured_artists": ", ".join(featured_names) if featured_names else None,
+            "producers": ", ".join(producer_names) if producer_names else None,
         }
 
-    except (OSError, ValueError, KeyError) as e:
-        raise RuntimeError(f"Genius details fetch failed for {artist} - {title}: {e}") from e
+    except Exception as e:
+        if isinstance(e, RuntimeError):
+            raise
+        from sonora.core.logger import LOG
+
+        LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {e}")
+        return None

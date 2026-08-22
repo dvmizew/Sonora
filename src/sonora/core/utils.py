@@ -3,6 +3,64 @@ import threading
 import time
 import unicodedata
 
+from rapidfuzz import fuzz
+
+
+def clean_title(title: str) -> str:
+    """Clean track title by removing feat./ft./with brackets and noise."""
+    if not title:
+        return ""
+    t = re.sub(r"\s*[\(\[\{](?:feat\.|ft\.|with).*?[\)\]\}]", "", title, flags=re.IGNORECASE)
+    return t.strip()
+
+
+def is_version_or_remix(s: str) -> bool:
+    keywords = ["remix", "rework", "edit", "mix", "live", "acoustic", "instrumental", "version", "demo", "sped up", "slowed", "freestyle"]
+    low = s.lower()
+    return any(kw in low for kw in keywords)
+
+
+def match_score(
+    query_artist: str,
+    query_title: str,
+    candidate_artist: str,
+    candidate_title: str,
+) -> float:
+    """
+    Calculate a combined 0-100 similarity score between query (artist, title)
+    and candidate (artist, title) using RapidFuzz WRatio and ratio with version penalties.
+    """
+    if not query_title or not candidate_title:
+        return 0.0
+
+    q_a = clean_title(query_artist).lower()
+    c_a = clean_title(candidate_artist).lower()
+    q_t = clean_title(query_title).lower()
+    c_t = clean_title(candidate_title).lower()
+
+    if q_t == c_t:
+        title_score = 100.0
+    else:
+        title_wratio = fuzz.WRatio(q_t, c_t)
+        title_ratio = fuzz.ratio(q_t, c_t)
+        if len(q_t) <= 3:
+            title_score = float(title_ratio)
+        else:
+            title_score = max(title_wratio, title_ratio)
+
+    if not is_version_or_remix(q_t) and is_version_or_remix(c_t):
+        title_score -= 35.0
+
+    title_score = max(0.0, min(100.0, title_score))
+
+    if q_a and c_a:
+        artist_w = fuzz.WRatio(q_a, c_a)
+        artist_token = fuzz.token_set_ratio(q_a, c_a)
+        artist_score = max(artist_w, artist_token)
+        return (title_score * 0.6) + (artist_score * 0.4)
+
+    return float(title_score)
+
 
 def normalize_str(s: str | None) -> str:
     """
@@ -35,11 +93,11 @@ def normalize_date(d: str | None) -> str | None:
 
 
 def normalize_genre(g: str | None) -> str | None:
-    """Clean and standardize genre strings with strict filtering."""
+    """Clean and standardize genre strings with strict keyword filtering."""
     if not g or not str(g).strip():
         return None
     from sonora.core.constants import BROAD_GENRE_KEYWORDS, GENRE_BLACKLIST, GENRE_MAP
-    
+
     g_raw = str(g).strip()
     g_title = g_raw.title()
     g_lower = g_raw.lower()
@@ -52,9 +110,8 @@ def normalize_genre(g: str | None) -> str | None:
 
     if any(b.lower() in g_lower for b in GENRE_BLACKLIST) or g_raw.isdigit():
         return None
-    
-    words = g_title.split()
-    if len(words) >= 2 and not any(kw.lower() in g_lower for kw in BROAD_GENRE_KEYWORDS):
+
+    if not any(kw.lower() in g_lower for kw in BROAD_GENRE_KEYWORDS):
         return None
 
     return GENRE_MAP.get(g_title, g_title)

@@ -71,9 +71,11 @@ def process_album_cover_art(
             cover_jpg.touch()
 
     if not art_downloaded:
-        art_url = fetch_itunes_cover_art_url(artist, album)
-        if not art_url and mb_album_id:
+        art_url = None
+        if mb_album_id:
             art_url = fetch_cover_art_archive_url(mb_album_id)
+        if not art_url:
+            art_url = fetch_itunes_cover_art_url(artist, album)
 
         if art_url:
             try:
@@ -84,7 +86,7 @@ def process_album_cover_art(
                 with _get_cover_lock(folder_path):
                     if not dry_run:
                         existing_bytes = cover_jpg.read_bytes() if (cover_jpg.exists() and cover_jpg.stat().st_size > 0) else None
-                        if existing_bytes and not check_image_similarity(existing_bytes, new_art_bytes):
+                        if existing_bytes and not force and not check_image_similarity(existing_bytes, new_art_bytes):
                             LOG.info("   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch")
                         else:
                             cover_jpg.write_bytes(new_art_bytes)

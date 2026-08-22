@@ -1,22 +1,31 @@
 import threading
+from typing import Any
 
+import httpx
 import musicbrainzngs
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.utils import RateLimiter, normalize_str
+from sonora.core.utils import RateLimiter, clean_title, match_score, normalize_str
 
 _MB_LIMITER = RateLimiter(interval_seconds=1.1)
 
 
-def init_musicbrainz(app_name: str = "Sonora", version: str = "0.1.0", contact: str = "danielradu02@users.noreply.github.com") -> None:
+def init_musicbrainz(
+    app_name: str = "Sonora",
+    version: str = "0.1.0",
+    contact: str = "danielradu02@users.noreply.github.com",
+) -> None:
     try:
         musicbrainzngs.set_useragent(app_name, version, contact)
     except (ValueError, AttributeError, RuntimeError) as e:
         from sonora.core.logger import LOG
+
         LOG.debug(f"MusicBrainz User-Agent initialization failed: {e}")
+
 
 _discography_locks: dict[str, threading.Lock] = {}
 _discography_meta_lock = threading.Lock()
+
 
 def _get_discography_lock(artist_key: str) -> threading.Lock:
     with _discography_meta_lock:
@@ -45,13 +54,17 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
         _MB_LIMITER.wait()
         try:
             result = musicbrainzngs.search_releases(artist=artist, limit=100)
-            releases: list[dict[str, object]] = result.get("release-list", []) if isinstance(result, dict) else []
+            releases: list[dict[str, object]] = (
+                result.get("release-list", []) if isinstance(result, dict) else []
+            )
             set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
             return releases
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise
-            raise RuntimeError(f"MusicBrainz discography fetch failed for {artist}: {e}") from e
+            raise RuntimeError(
+                f"MusicBrainz discography fetch failed for {artist}: {e}"
+            ) from e
 
 
 def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | None:
@@ -77,35 +90,71 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
     _MB_LIMITER.wait()
     try:
         result = musicbrainzngs.search_releases(artist=artist, release=album, limit=5)
-        raw_releases = result.get("release-list", []) if isinstance(result, dict) else []
-        releases: list[dict[str, object]] = [r for r in raw_releases if isinstance(r, dict)]
+        raw_releases = (
+            result.get("release-list", []) if isinstance(result, dict) else []
+        )
+        releases: list[dict[str, object]] = [
+            r for r in raw_releases if isinstance(r, dict)
+        ]
         target_rel: dict[str, object] | None = releases[0] if releases else None
         set_cached_api(cache_key, target_rel)
         return target_rel
     except Exception as e:
         if isinstance(e, RuntimeError):
             raise
-        raise RuntimeError(f"MusicBrainz search failed for {artist} - {album}: {e}") from e
-
+        raise RuntimeError(
+            f"MusicBrainz search failed for {artist} - {album}: {e}"
+        ) from e
 
 
 def fetch_track_mbid(artist: str, title: str) -> str | None:
-    cache_key = f"mb_mbid:{normalize_str(artist)}:{normalize_str(title)}"
+    c_title = clean_title(title)
+    cache_key = f"mb_mbid:{normalize_str(artist)}:{normalize_str(c_title)}"
     cached = get_cached_api(cache_key)
     if cached is not None:
-        return str(cached)
+        return str(cached) if cached else None
 
     _MB_LIMITER.wait()
     try:
-        result = musicbrainzngs.search_recordings(artist=artist, recording=title, limit=5)
+        result = musicbrainzngs.search_recordings(
+            artist=artist, recording=c_title, limit=5
+        )
         recordings = result.get("recording-list", [])
-        mbid = str(recordings[0].get("id")) if recordings else None
-        set_cached_api(cache_key, mbid)
-        return mbid
+        if not recordings:
+            set_cached_api(cache_key, None)
+            return None
+
+        best_mbid = None
+        best_score = 0.0
+
+        for rec in recordings:
+            rec_title = str(rec.get("title", ""))
+            rec_artist = ""
+            artist_credit: Any = rec.get("artist-credit", [])
+            if (
+                isinstance(artist_credit, list)
+                and artist_credit
+                and isinstance(artist_credit[0], dict)
+            ):
+                rec_artist = str(artist_credit[0].get("artist", {}).get("name", ""))
+
+            score = match_score(artist, c_title, rec_artist, rec_title)
+            if score > best_score:
+                best_score = score
+                best_mbid = str(rec.get("id"))
+
+        # Threshold check: require score >= 65 to avoid wrong MBIDs
+        if best_score < 65.0:
+            best_mbid = None
+
+        set_cached_api(cache_key, best_mbid)
+        return best_mbid
     except Exception as e:
         if isinstance(e, RuntimeError):
             raise
-        raise RuntimeError(f"MusicBrainz track lookup failed for {artist} - {title}: {e}") from e
+        raise RuntimeError(
+            f"MusicBrainz track lookup failed for {artist} - {title}: {e}"
+        ) from e
 
 
 def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
@@ -118,11 +167,49 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
     url = f"https://coverartarchive.org/release/{release_mbid}/front"
     try:
         from sonora.core.http import SESSION
+
         resp = SESSION.head(url, allow_redirects=True, timeout=5)
         if resp.status_code == 200:
             return str(resp.url) or url
-    except (OSError, ValueError, KeyError, RuntimeError) as e:
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
         from sonora.core.logger import LOG
+
         LOG.debug(f"Cover Art Archive lookup failed: {e}")
     return None
 
+
+def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
+    """
+    Fetch all track recording MBIDs for an entire album release in ONE single API call.
+    Returns mapping of track_position (1-indexed) -> recording_mbid.
+    """
+    if not release_mbid:
+        return {}
+
+    cache_key = f"mb_album_tracks:{release_mbid}"
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, dict):
+        return {int(k): str(v) for k, v in cached.items()}
+
+    _MB_LIMITER.wait()
+    try:
+        rel = musicbrainzngs.get_release_by_id(release_mbid, includes=["recordings", "media", "artist-credits"])
+        mediums = rel.get("release", {}).get("medium-list", []) if isinstance(rel, dict) else []
+        mapping: dict[int, str] = {}
+        for m in mediums:
+            if isinstance(m, dict):
+                for t in m.get("track-list", []):
+                    if isinstance(t, dict):
+                        pos = t.get("position")
+                        rec_id = t.get("recording", {}).get("id")
+                        if pos and rec_id:
+                            mapping[int(pos)] = str(rec_id)
+        set_cached_api(cache_key, mapping)
+        return mapping
+    except Exception as e:
+        if isinstance(e, RuntimeError):
+            raise
+        from sonora.core.logger import LOG
+
+        LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {e}")
+        return {}

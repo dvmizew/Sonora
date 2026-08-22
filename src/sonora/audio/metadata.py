@@ -318,6 +318,23 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             unsaved = song.save()
             if unsaved:
                 LOG.debug(f"TagLib unsaved tags for {track_info.file_path}: {unsaved}")
+
+            # Ensure FLAC embedded picture block is 100% updated using mutagen if FLAC
+            if cover_art_path and cover_art_path.exists() and track_info.file_path.suffix.lower() == ".flac":
+                try:
+                    from mutagen.flac import FLAC as MutagenFLAC
+                    from mutagen.flac import Picture as MutagenPicture
+
+                    audio_flac = MutagenFLAC(str(track_info.file_path))
+                    audio_flac.clear_pictures()
+                    p = MutagenPicture()
+                    p.data = cover_art_path.read_bytes()
+                    p.type = 3
+                    p.mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
+                    audio_flac.add_picture(p)
+                    audio_flac.save()
+                except (OSError, ValueError, RuntimeError, AttributeError) as ex:
+                    LOG.debug(f"Mutagen picture embedding fallback failed for {track_info.file_path}: {ex}")
     except Exception as e:
         if isinstance(e, (RuntimeError, ValueError, FileNotFoundError)):
             raise

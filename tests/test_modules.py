@@ -82,8 +82,7 @@ class TestCoreModules(unittest.TestCase):
         lrc_file = self.tmp_path / "test.lrc"
         lrc_file.write_text("[00:10.00] Line 1\n", encoding="utf-8")
 
-        info = TrackInfo(file_path=Path("dummy.flac"), artist="Artist Name", title="Track Title")
-        success = sync_lrc_metadata(lrc_file, info)
+        success = sync_lrc_metadata(lrc_file, "Artist Name", "Track Title")
         self.assertTrue(success)
 
         content = lrc_file.read_text(encoding="utf-8")
@@ -95,8 +94,7 @@ class TestCoreModules(unittest.TestCase):
         lrc_file = self.tmp_path / "existing.lrc"
         lrc_file.write_text("[ar:Old Artist]\n[ti:Old Title]\n[00:15.00] Line 2\n", encoding="utf-8")
 
-        info = TrackInfo(file_path=Path("dummy.flac"), artist="New Artist", title="New Title")
-        success = sync_lrc_metadata(lrc_file, info)
+        success = sync_lrc_metadata(lrc_file, "New Artist", "New Title")
         self.assertTrue(success)
 
         content = lrc_file.read_text(encoding="utf-8")
@@ -120,7 +118,7 @@ class TestCoreModules(unittest.TestCase):
 
         new_path = rename_track_file(wav_file)
         self.assertTrue(new_path.exists())
-        self.assertEqual(new_path.name, "01 - Beyoncé - Halo.wav")
+        self.assertEqual(new_path.name, "01 - Halo.wav")
 
     @patch("sonora.modules.renamer.read_track_metadata")
     def test_rename_directory_files(self, mock_read):
@@ -289,8 +287,8 @@ class TestCoreModules(unittest.TestCase):
         p1 = rename_track_file(f1)
         p2 = rename_track_file(f2)
 
-        self.assertEqual(p1.name, "01 - Artist - Title.wav")
-        self.assertEqual(p2.name, "01 - Artist - Title (2).wav")
+        self.assertEqual(p1.name, "01 - Title.wav")
+        self.assertEqual(p2.name, "01 - Title (2).wav")
 
     def test_organize_library_singles_skips_album_folders(self):
         album_dir = self.tmp_path / "AlbumFolder"
@@ -448,8 +446,9 @@ class TestCoreModules(unittest.TestCase):
         restored_info = read_track_metadata(wav_path)
         self.assertEqual(restored_info.artist, "Test Artist")
 
+    @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
     @patch("sonora.services.theaudiodb.SESSION.get")
-    def test_theaudiodb_service(self, mock_get):
+    def test_theaudiodb_service(self, mock_get, _mock_cache):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
@@ -464,7 +463,7 @@ class TestCoreModules(unittest.TestCase):
         mock_img_resp.status_code = 200
         mock_img_resp.content = b"fakeimage"
 
-        mock_get.side_effect = [mock_resp, mock_img_resp, mock_img_resp]
+        mock_get.side_effect = [mock_resp, mock_img_resp, mock_img_resp, mock_resp, mock_img_resp, mock_img_resp]
 
         thumb, banner = fetch_artist_images("21 Savage")
         self.assertEqual(thumb, b"fakeimage")

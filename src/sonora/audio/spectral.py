@@ -1,9 +1,9 @@
-import wave
 from pathlib import Path
 
 import numpy as np
 import scipy.signal
 
+from sonora.audio.bpm import _load_audio_mono
 from sonora.core.logger import LOG
 
 
@@ -15,24 +15,17 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        if file_path.suffix.lower() == ".wav":
-            with wave.open(str(file_path), "rb") as wf:
-                samplerate = wf.getframerate()
-                if samplerate < 32000:
-                    return False, 1.0, None
-                nframes = wf.getnframes()
-                frames = wf.readframes(min(nframes, samplerate * 30))
-                dtype = np.int16 if wf.getsampwidth() == 2 else np.int32
-                raw = np.frombuffer(frames, dtype=dtype).astype(np.float32)
-                if wf.getnchannels() > 1:
-                    mono = np.mean(raw.reshape(-1, wf.getnchannels()), axis=1)
-                else:
-                    mono = raw
-        else:
+        loaded = _load_audio_mono(file_path)
+        if loaded is None:
             return False, 1.0, None
 
-        if len(mono) == 0:
+        mono, samplerate = loaded
+        if samplerate < 32000 or len(mono) == 0:
             return False, 1.0, None
+
+        # Limit analysis to first 30 seconds
+        if len(mono) > samplerate * 30:
+            mono = mono[: samplerate * 30]
 
         # Compute Fast Fourier Transform spectrogram via SciPy
         f_axis, _, Sxx = scipy.signal.spectrogram(mono, fs=samplerate, nperseg=2048)

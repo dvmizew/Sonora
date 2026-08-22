@@ -116,8 +116,9 @@ class TestAudioEngine(unittest.TestCase):
         self.assertIn("/tmp/1.flac", args)
         self.assertIn("/tmp/2.flac", args)
 
-    @patch("scipy.signal.spectrogram", return_value=(None, None, np.ones((10, 100))))
-    def test_calculate_bpm_with_scipy(self, mock_spec):
+    @patch("sonora.audio.bpm._load_audio_mono", return_value=(np.random.rand(44100 * 10).astype(np.float32), 44100))
+    @patch("scipy.signal.spectrogram", return_value=(None, None, np.tile(np.linspace(1, 10, 100), (10, 1))))
+    def test_calculate_bpm_with_scipy(self, mock_spec, mock_load):
         bpm = calculate_bpm(self.dummy_audio_path)
         self.assertIsNotNone(bpm)
 

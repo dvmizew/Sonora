@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+import httpx
 from rich.progress import (
     BarColumn,
     Progress,
@@ -45,9 +46,6 @@ def process_single_track(
     genius_api_token: str | None = None,
     options: dict | None = None,
 ) -> TrackInfo:
-    """
-    Process and tag a single audio file with metadata, artwork, lyrics, BPM, and ReplayGain.
-    """
     LOG.start_buffering()
     try:
         if not file_path.exists():
@@ -70,17 +68,22 @@ def process_single_track(
                 if acoustid_mbid:
                     track_info.musicbrainz_trackid = acoustid_mbid
                     LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"AcoustID lookup failed for {track_info.title}: {e}")
 
-        # 2. Fallback to MusicBrainz text search by existing tags if AcoustID failed
-        if not track_info.musicbrainz_trackid or force:
+        # 2. Check pre-fetched album track MBIDs map first (1 single API call per album!)
+        album_mbids = options.get("album_track_mbids", {}) if isinstance(options, dict) else {}
+        if (not track_info.musicbrainz_trackid or force) and track_info.track_number and track_info.track_number in album_mbids:
+            track_info.musicbrainz_trackid = album_mbids[track_info.track_number]
+            mbid_str = str(track_info.musicbrainz_trackid)
+            LOG.info(f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {mbid_str[:8]}...")
+        elif not track_info.musicbrainz_trackid or force:
             try:
                 mbid = fetch_track_mbid(track_info.artist, track_info.title)
                 if mbid:
                     track_info.musicbrainz_trackid = mbid
                     LOG.info(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {e}")
 
         # 3. Fetch MusicBrainz Album ID via Discography Optimization
@@ -99,7 +102,7 @@ def process_single_track(
                         date_str = release.get("date")
                         if isinstance(date_str, str) and len(date_str) >= 4:
                             track_info.date = normalize_date(date_str)
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
 
         # 4. Fetch Last.fm genre/mood tags
@@ -118,7 +121,7 @@ def process_single_track(
                     if norm_genre:
                         track_info.genre = norm_genre
                         LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{norm_genre}[/]")
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Last.fm lookup failed for {track_info.title}: {e}")
 
         # 5. Discogs fallback lookup for release metadata
@@ -146,7 +149,7 @@ def process_single_track(
                         track_info.catalog_number = str(release["catalog_number"])
                     if release.get("barcode") and not track_info.barcode:
                         track_info.barcode = str(release["barcode"])
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Discogs lookup failed for {track_info.title}: {e}")
 
         # 6. Genius song details (description, genius_song_id, featured_artists, producers)
@@ -155,16 +158,16 @@ def process_single_track(
                 from sonora.services.genius import fetch_genius_song_details
                 g_details = fetch_genius_song_details(track_info.artist, track_info.title, api_token=genius_api_token)
                 if g_details:
-                    if g_details.get("description") and not track_info.comment:
+                    if g_details.get("description") and (not track_info.comment or force):
                         track_info.comment = str(g_details["description"])
                     if g_details.get("genius_song_id"):
                         track_info.genius_song_id = str(g_details["genius_song_id"])
-                    if g_details.get("featured_artists") and not track_info.featured_artists:
+                    if g_details.get("featured_artists") and (not track_info.featured_artists or force):
                         track_info.featured_artists = str(g_details["featured_artists"])
-                    if g_details.get("producers") and not track_info.producers:
+                    if g_details.get("producers") and (not track_info.producers or force):
                         track_info.producers = str(g_details["producers"])
                     LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Genius lookup failed for {track_info.title}: {e}")
 
         # 6a. Last.fm stats (listeners, playcount)
@@ -177,7 +180,7 @@ def process_single_track(
                         track_info.listeners = stats["listeners"]
                     if stats.get("playcount"):
                         track_info.playcount = stats["playcount"]
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Last.fm stats lookup failed for {track_info.title}: {e}")
 
         # 6b. TheAudioDB video URL
@@ -203,7 +206,7 @@ def process_single_track(
                 if bpm is not None:
                     track_info.bpm = bpm
                     LOG.info(f"   ∟ 🎵 BPM Calculated: [green]{bpm}[/]")
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"BPM calculation failed for {track_info.title}: {e}")
 
         # 8. Fetch iTunes Cover Art (Download only, don't embed yet)
@@ -218,7 +221,7 @@ def process_single_track(
                     force=force,
                     dry_run=dry_run,
                 )
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Cover art downloading failed for {track_info.title}: {e}")
                 cover_jpg = None
 
@@ -236,7 +239,7 @@ def process_single_track(
                 if lrc_text and tag_type:
                     track_info.lyrics = lrc_text
                     LOG.info(f"   ∟ ✅ Saved {tag_type} lyrics for {file_path.name}")
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Lyrics fetch failed for {track_info.title}: {e}")
 
         # Compute exact tag diffs (compare dataclass fields)
@@ -309,22 +312,24 @@ def tag_album_folder(
     if not audio_files:
         return []
 
-    # Off-by-N track number normalization check (matches initial prototype)
-    track_numbers = []
-    for f_p in audio_files:
-        try:
-            meta = read_track_metadata(f_p)
-            if meta.track_number is not None:
-                track_numbers.append(meta.track_number)
-        except (OSError, ValueError, RuntimeError) as e:
-            LOG.debug(f"Could not read metadata for track number check on {f_p.name}: {e}")
-
-    if track_numbers:
-        min_t, max_t = min(track_numbers), max(track_numbers)
-        num_t = len(track_numbers)
-        if min_t > 1 and ((num_t == 1) or ((max_t - min_t + 1) == num_t)):
-            shift = min_t - 1
-            LOG.info(f"   ∟ ⚖️  Detecting off-by-{shift} numbering. Normalizing...")
+    # Batch Optimization: Fetch entire album track MBIDs in 1 single API call
+    try:
+        from sonora.services.musicbrainz import (
+            fetch_album_track_mbids,
+            search_musicbrainz_release,
+        )
+        sample_meta = read_track_metadata(audio_files[0])
+        s_artist = sample_meta.album_artist or sample_meta.artist
+        s_album = sample_meta.album
+        if s_artist and s_album:
+            rel = search_musicbrainz_release(s_artist, s_album)
+            if rel and rel.get("id"):
+                album_mbids = fetch_album_track_mbids(str(rel["id"]))
+                if options.get("options") is None:
+                    options["options"] = {}
+                options["options"]["album_track_mbids"] = album_mbids
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
+        LOG.debug(f"Pre-fetching album track MBIDs failed: {e}")
 
     results: list[TrackInfo] = []
 
@@ -359,7 +364,7 @@ def tag_album_folder(
                 try:
                     info = future.result()
                     results.append(info)
-                except (OSError, ValueError, RuntimeError) as e:
+                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                     LOG.warning(f"Failed to process {file_p.name}: {e}")
                 progress.advance(task)
     if options.get("fetch_replaygain", True):
