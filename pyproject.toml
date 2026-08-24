@@ -42,6 +42,8 @@ dependencies = [
     "rapidfuzz>=3.0.0",
     "pillow>=9.0.0",
     "httpx[http2]>=0.27.0",
+    "ftfy>=6.2.0",
+    "music-metadata-filter>=3.0.0",
 ]
 
 [project.optional-dependencies]

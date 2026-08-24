@@ -3,14 +3,30 @@ import threading
 import time
 import unicodedata
 
+import ftfy
+from music_metadata_filter.functions import (
+    remove_clean_explicit,
+    remove_feature,
+    remove_reissue,
+    remove_remastered,
+)
 from rapidfuzz import fuzz
 
 
 def clean_title(title: str) -> str:
-    """Clean track title by removing feat./ft./with brackets and noise."""
+    """Clean track title by removing feat./ft./with brackets, remaster suffixes, and mojibake text."""
     if not title:
         return ""
-    t = re.sub(r"\s*[\(\[\{](?:feat\.|ft\.|with).*?[\)\]\}]", "", title, flags=re.IGNORECASE)
+    t = ftfy.fix_text(str(title))
+    # Apply official music-metadata-filter standard pipeline
+    t = remove_clean_explicit(remove_reissue(remove_remastered(t)))
+    t = remove_feature(t)
+    t = re.sub(
+        r"\s*[\(\[\{](?:\d{4}\s+)?(?:remaster(?:ed)?|deluxe|bonus\s+track|mono|stereo|official(?:\s+(?:video|audio))?|hq|hd).*?[\)\]\}]",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
     return t.strip()
 
 
@@ -64,12 +80,13 @@ def match_score(
 
 def normalize_str(s: str | None) -> str:
     """
-    Converts to lowercase, normalizes NFD diacritics, replaces $ and !,
-    replaces non-alphanumeric characters with space, and collapses spaces.
+    Converts to lowercase, fixes mojibake via ftfy, normalizes NFD diacritics,
+    replaces $, replaces non-alphanumeric characters with space, and collapses spaces.
     """
     if not s:
         return ""
-    s = str(s).replace('$', 's')
+    s = ftfy.fix_text(str(s))
+    s = s.replace('$', 's')
     s = s.replace('_', ' ')
     s = ''.join(
         c for c in unicodedata.normalize('NFD', s.lower())
@@ -77,6 +94,7 @@ def normalize_str(s: str | None) -> str:
     )
     s = re.sub(r'[^\w\s]', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
+
 
 def normalize_date(d: str | None) -> str | None:
     """Ensure date is in YYYY-MM-DD format."""
@@ -120,12 +138,13 @@ def normalize_genre(g: str | None) -> str | None:
 def sanitize_name(name: str | None) -> str:
     """
     Clean string for safe filesystem paths.
-    Replaces / and \\ with _, strips invalid Windows/Linux bad chars (<>:"|?*),
+    Fixes mojibake via ftfy, replaces / and \\ with _, strips invalid Windows/Linux bad chars (<>:"|?*),
     and strips trailing dots/whitespace.
     """
     if not name:
         return "Unknown"
-    s = str(name).replace('/', '_').replace('\\', '_')
+    s = ftfy.fix_text(str(name))
+    s = s.replace('/', '_').replace('\\', '_')
     bad_chars = '<>:"|?*'
     for char in bad_chars:
         s = s.replace(char, '')
