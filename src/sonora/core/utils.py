@@ -1,12 +1,16 @@
+import json
 import re
 import threading
 import time
 import unicodedata
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import TypeGuard
 
 import ftfy
+import httpx
+import musicbrainzngs
 from music_metadata_filter.functions import (
     remove_clean_explicit,
     remove_feature,
@@ -15,14 +19,12 @@ from music_metadata_filter.functions import (
 )
 from rapidfuzz import fuzz
 
+from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import (
-    BROAD_GENRE_KEYWORDS,
     COMPANION_LYRICS_EXTS,
-    GENRE_BLACKLIST,
-    GENRE_MAP,
-    PROTECTED_ARTISTS,
     SUPPORTED_EXTS,
 )
+from sonora.core.http import SESSION
 
 _ARTIST_SEPARATORS = [
     r"\s+fea?t\.?\s+",
@@ -40,25 +42,271 @@ _ARTIST_SEPARATORS = [
 ]
 _ARTIST_SPLIT_PATTERN = re.compile("|".join(_ARTIST_SEPARATORS), re.IGNORECASE)
 
+_WORD_NUMBERS: dict[str, int] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+
+_ROMAN_MAP: dict[str, int] = {
+    "i": 1,
+    "v": 5,
+    "x": 10,
+    "l": 50,
+    "c": 100,
+    "d": 500,
+    "m": 1000,
+}
+
+
+def _parse_roman(token: str) -> int | None:
+    """Parse Roman numerals (I to MMMCMXCIX) to integer."""
+    s = token.lower().strip()
+    if not s or not all(c in _ROMAN_MAP for c in s) or len(s) > 10:
+        return None
+    total = 0
+    prev_val = 0
+    for c in reversed(s):
+        val = _ROMAN_MAP[c]
+        if val < prev_val:
+            total -= val
+        else:
+            total += val
+            prev_val = val
+    return total if total > 0 else None
+
+
+def extract_series_number(text: str | None) -> int | None:
+    """
+    Extract album or track series/volume number (e.g. 'Savage Mode II' -> 2, 'Pt. 2' -> 2, 'Vol. 3' -> 3).
+    Returns integer series number or None if not part of a numbered series.
+    """
+    if not text:
+        return None
+
+    clean_text = ftfy.fix_text(str(text)).strip().lower()
+
+    # Match explicit volume/part patterns (e.g. 'Vol 2', 'Pt. 2', 'Part II', 'Act 1')
+    prefix_match = re.search(
+        r"\b(?:vol(?:ume)?|pt|part|chapter|act)\.?\s*(\d+|[ivxlcdm]+|[a-z]+)\b",
+        clean_text,
+        re.IGNORECASE,
+    )
+    if prefix_match:
+        token = prefix_match.group(1).lower()
+        if token.isdigit() and len(token) <= 2:
+            return int(token)
+        roman_val = _parse_roman(token)
+        if roman_val is not None:
+            return roman_val
+        if token in _WORD_NUMBERS:
+            return _WORD_NUMBERS[token]
+
+    # Match trailing Roman numerals (II, III, IV, etc.) or digits at the end of title
+    trailing_match = re.search(
+        r"\b(\d{1,2}|[ivxlcdm]+)\s*$",
+        clean_text,
+        re.IGNORECASE,
+    )
+    if trailing_match:
+        token = trailing_match.group(1).lower()
+        if token.isdigit():
+            return int(token)
+        roman_val = _parse_roman(token)
+        if roman_val is not None:
+            return roman_val
+
+    return None
+
+
+def _load_user_overrides() -> dict[str, str]:
+    candidate_paths = [
+        Path.home() / ".config" / "sonora" / "aliases.json",
+        Path("sonora_aliases.json"),
+    ]
+    overrides: dict[str, str] = {}
+    for path in candidate_paths:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    for key, value in data.items():
+                        overrides[normalize_str(key)] = str(value).strip()
+            except (OSError, ValueError):
+                pass
+    return overrides
+
+
+@lru_cache(maxsize=4096)
+def resolve_artist_name(raw_name: str | None) -> str:
+    """
+    Resolve legal names, aliases, or variations to canonical stage names.
+    Returns the resolved canonical name or the cleaned input if not an alias.
+    """
+    if not raw_name or not str(raw_name).strip():
+        return "Unknown Artist"
+
+    clean_name = str(raw_name).strip()
+    normalized = normalize_str(clean_name)
+    if not normalized:
+        return clean_name
+
+    # Tier 1: User custom config overrides (~/.config/sonora/aliases.json)
+    user_overrides = _load_user_overrides()
+    if normalized in user_overrides:
+        return user_overrides[normalized]
+
+    # Tier 2: Persistent DiskCache
+    cache_key = f"canonical_artist:{normalized}"
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, str):
+        return cached
+
+    # Tier 3: MusicBrainz Alias / Legal Name lookup
+    try:
+        res = musicbrainzngs.search_artists(
+            query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
+        )
+        artist_list = res.get("artist-list", [])
+        # Pass 1: Exact case-insensitive ASCII match (prioritize "Nane" over accented "Nané")
+        for artist in artist_list:
+            art_name = str(artist.get("name", "")).strip()
+            if (
+                art_name.lower() == clean_name.lower()
+                and art_name == clean_name.title()
+            ):
+                set_cached_api(cache_key, art_name, expire_seconds=86400 * 30)
+                return art_name
+        # Pass 2: High score official alias / entity match (e.g. "mgl" -> "M.G.L.", legal name -> stage name)
+        for artist in artist_list:
+            score = int(artist.get("ext:score", 0))
+            if score >= 90:
+                canonical_name = artist.get("name")
+                if canonical_name:
+                    set_cached_api(cache_key, canonical_name, expire_seconds=86400 * 30)
+                    return canonical_name
+        # Pass 3: Case-insensitive fallback
+        for artist in artist_list:
+            art_name = str(artist.get("name", "")).strip()
+            if art_name.lower() == clean_name.lower():
+                set_cached_api(cache_key, art_name, expire_seconds=86400 * 30)
+                return art_name
+    except (
+        httpx.HTTPError,
+        OSError,
+        ValueError,
+        RuntimeError,
+        musicbrainzngs.MusicBrainzError,
+    ):
+        pass
+
+    # Tier 4: Deezer Artist lookup
+    try:
+        response = SESSION.get(
+            "https://api.deezer.com/search/artist",
+            params={"q": clean_name},
+            timeout=5,
+        )
+        if response.status_code == 200:
+            data = response.json().get("data", [])
+            if data and isinstance(data, list):
+                deezer_name = str(data[0].get("name", "")).strip()
+                if deezer_name and normalize_str(deezer_name) == normalized:
+                    set_cached_api(cache_key, deezer_name, expire_seconds=86400 * 30)
+                    return deezer_name
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError):
+        pass
+
+    set_cached_api(cache_key, clean_name, expire_seconds=86400 * 7)
+    return clean_name
+
+
+@lru_cache(maxsize=4096)
+def is_single_group_artist(raw_name: str | None) -> bool:
+    """
+    Determine if an artist name containing delimiters ('&', '+', ',') is a registered
+    single band/group entity (e.g. 'Simon & Garfunkel', 'Earth, Wind & Fire', 'Play & Win')
+    or a temporary collaboration (e.g. 'Drake & 21 Savage').
+    """
+    if not raw_name or not str(raw_name).strip():
+        return False
+
+    clean_name = str(raw_name).strip()
+    normalized = normalize_str(clean_name)
+    if not normalized:
+        return False
+
+    if not any(
+        char in clean_name.lower()
+        for char in ("&", "+", ",", " și ", " si ", " with ", " / ")
+    ):
+        return False
+
+    user_overrides = _load_user_overrides()
+    if normalized in user_overrides:
+        return True
+
+    cache_key = f"is_group_entity:{normalized}"
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, bool):
+        return cached
+
+    try:
+        res = musicbrainzngs.search_artists(query=f'artist:"{clean_name}"', limit=3)
+        artist_list = res.get("artist-list", [])
+        for artist in artist_list:
+            name_match = normalize_str(artist.get("name")) == normalized
+            score = int(artist.get("ext:score", 0))
+            artist_type = artist.get("type")
+            if name_match and (score >= 95 or artist_type == "Group"):
+                set_cached_api(cache_key, True, expire_seconds=86400 * 30)
+                return True
+    except (
+        httpx.HTTPError,
+        OSError,
+        ValueError,
+        RuntimeError,
+        musicbrainzngs.MusicBrainzError,
+    ):
+        pass
+
+    set_cached_api(cache_key, False, expire_seconds=86400 * 30)
+    return False
+
 
 def get_primary_artist(artist_name: str | None) -> str:
     """
-    Extract primary artist from raw artist string by stripping featured artists/delimiters
-    (feat., ft., &, comma, etc.), respecting PROTECTED_ARTISTS.
+    Extract primary artist from raw artist string by resolving aliases and stripping
+    transient featured artists/delimiters, while preserving single group/band entities
+    (e.g., 'Simon & Garfunkel', 'Play & Win', 'Earth, Wind & Fire').
     """
     if not artist_name:
         return "Unknown"
 
     raw_artist_name = str(artist_name).strip()
-    is_protected = any(
-        protected.lower() == raw_artist_name.lower() for protected in PROTECTED_ARTISTS
-    )
-    if is_protected:
-        return sanitize_name(raw_artist_name)
+    if is_single_group_artist(raw_artist_name):
+        return sanitize_name(resolve_artist_name(raw_artist_name))
 
     parts = _ARTIST_SPLIT_PATTERN.split(raw_artist_name, maxsplit=1)
     primary = parts[0].strip() if parts else raw_artist_name
-    return sanitize_name(primary or "Unknown")
+    return sanitize_name(resolve_artist_name(primary) or "Unknown")
 
 
 def clean_title(title: str) -> str:
@@ -78,8 +326,8 @@ def clean_title(title: str) -> str:
     return title_text.strip()
 
 
-def is_version_or_remix(text: str) -> bool:
-    keywords = [
+_VERSION_OR_REMIX_KEYWORDS = frozenset(
+    {
         "remix",
         "rework",
         "edit",
@@ -92,9 +340,13 @@ def is_version_or_remix(text: str) -> bool:
         "sped up",
         "slowed",
         "freestyle",
-    ]
+    }
+)
+
+
+def is_version_or_remix(text: str) -> bool:
     text_lower = text.lower()
-    return any(keyword in text_lower for keyword in keywords)
+    return any(keyword in text_lower for keyword in _VERSION_OR_REMIX_KEYWORDS)
 
 
 def match_score(
@@ -174,34 +426,72 @@ def normalize_date(date_value: str | None) -> str | None:
     return date_str if date_str else None
 
 
+_CANONICAL_GENRE_MAP: dict[str, str] = {
+    "hip hop": "Hip-Hop/Rap",
+    "hip-hop": "Hip-Hop/Rap",
+    "rap": "Hip-Hop/Rap",
+    "trap": "Hip-Hop/Rap",
+    "rnb": "R&B/Soul",
+    "r&b": "R&B/Soul",
+    "soul": "R&B/Soul",
+    "pop/rock": "Pop",
+    "drum and bass": "Drum & Bass",
+    "drum & bass": "Drum & Bass",
+    "dnb": "Drum & Bass",
+    "synthpop": "Synth-pop",
+    "synth-pop": "Synth-pop",
+    "alternative rock": "Alternative",
+    "indie rock": "Indie",
+}
+
+_NOISE_GENRES: frozenset[str] = frozenset(
+    {
+        "billboard",
+        "hot 100",
+        "top 40",
+        "amazon",
+        "itunes",
+        "unknown",
+        "release",
+        "music",
+        "digital",
+        "various",
+        "produced by",
+        "written by",
+        "mixed by",
+        "mastered by",
+        "engineer",
+        "composer",
+    }
+)
+
+
 def normalize_genre(genre_value: str | None) -> str | None:
-    """Clean and standardize genre strings with strict keyword filtering."""
+    """Clean and standardize genre strings with noise filtering and canonical mapping."""
     if not genre_value or not str(genre_value).strip():
         return None
 
     raw_genre = str(genre_value).strip()
-    genre_title = raw_genre.title()
     genre_lower = raw_genre.lower()
 
-    try:
-        float(raw_genre.replace(",", ""))
-        return None
-    except ValueError:
-        pass
-
+    # Reject numeric or pure decimal tags
     if (
-        any(
-            blacklisted_genre.lower() in genre_lower
-            for blacklisted_genre in GENRE_BLACKLIST
-        )
-        or raw_genre.isdigit()
+        raw_genre.isdigit()
+        or raw_genre.replace(".", "", 1).isdigit()
+        or raw_genre.replace(",", "", 1).isdigit()
     ):
         return None
 
-    if not any(keyword.lower() in genre_lower for keyword in BROAD_GENRE_KEYWORDS):
+    # Reject spam / noise tags
+    if any(noise in genre_lower for noise in _NOISE_GENRES):
         return None
 
-    return GENRE_MAP.get(genre_title, genre_title)
+    # Direct canonical map
+    if genre_lower in _CANONICAL_GENRE_MAP:
+        return _CANONICAL_GENRE_MAP[genre_lower]
+
+    # Standard title-case formatting
+    return raw_genre.title()
 
 
 def sanitize_name(name: str | None) -> str:

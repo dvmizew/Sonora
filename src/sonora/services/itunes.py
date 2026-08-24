@@ -2,7 +2,7 @@ from rapidfuzz import fuzz
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.http import SESSION
-from sonora.core.utils import RateLimiter, normalize_str
+from sonora.core.utils import RateLimiter, extract_series_number, normalize_str
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 _ITUNES_LIMITER = RateLimiter(interval_seconds=3.2)
@@ -67,23 +67,7 @@ def fetch_itunes_cover_art_url(
 
     # Step 2: Fallback matching if no exact match found
     if best_result is None:
-        target_has_numeric_part = any(
-            word in normalized_target.split()
-            for word in [
-                "ii",
-                "2",
-                "two",
-                "part 2",
-                "pt 2",
-                "pt. 2",
-                "vol 2",
-                "vol. 2",
-                "iii",
-                "3",
-                "iv",
-                "4",
-            ]
-        )
+        target_series = extract_series_number(normalized_target)
         for result in results:
             collection_name = str(result.get("collectionName", ""))
             normalized_collection = normalize_str(collection_name)
@@ -92,26 +76,10 @@ def fetch_itunes_cover_art_url(
             if fuzz.token_set_ratio(normalized_target, normalized_collection) < 75.0:
                 continue
 
-            collection_has_numeric_part = any(
-                word in normalized_collection.split()
-                for word in [
-                    "ii",
-                    "2",
-                    "two",
-                    "part 2",
-                    "pt 2",
-                    "pt. 2",
-                    "vol 2",
-                    "vol. 2",
-                    "iii",
-                    "3",
-                    "iv",
-                    "4",
-                ]
-            )
+            collection_series = extract_series_number(normalized_collection)
 
-            # Reject mismatch between album series (e.g. Savage Mode vs Savage Mode II)
-            if collection_has_numeric_part != target_has_numeric_part:
+            # Reject mismatch between album series (e.g. Savage Mode vs Savage Mode II, or Pt 1 vs Pt 2)
+            if collection_series != target_series:
                 continue
 
             best_result = result
@@ -123,3 +91,61 @@ def fetch_itunes_cover_art_url(
             return artwork_url.replace("100x100bb", f"{resolution}x{resolution}bb")
 
     return None
+
+
+def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | None:
+    """
+    Fetch comprehensive track metadata from iTunes Search API.
+    """
+    results = search_itunes(artist=artist, term=title, entity="song")
+    if not results:
+        return None
+
+    normalized_target = normalize_str(title)
+    best_result: dict[str, object] | None = None
+
+    for result in results:
+        track_name = str(result.get("trackName", ""))
+        normalized_name = normalize_str(track_name)
+        if (
+            normalized_name == normalized_target
+            or fuzz.token_set_ratio(normalized_target, normalized_name) >= 80.0
+        ):
+            best_result = result
+            break
+
+    if best_result is None:
+        return None
+
+    explicitness = str(best_result.get("trackExplicitness", "")).lower()
+    advisory = (
+        "Explicit"
+        if explicitness == "explicit"
+        else "Clean"
+        if explicitness == "cleaned"
+        else None
+    )
+
+    release_date_raw = best_result.get("releaseDate")
+    date_val = str(release_date_raw)[:10] if release_date_raw else None
+
+    return {
+        "genre": best_result.get("primaryGenreName"),
+        "advisory": advisory,
+        "copyright": best_result.get("copyright"),
+        "itunes_trackid": str(best_result["trackId"])
+        if best_result.get("trackId")
+        else None,
+        "itunes_collectionid": str(best_result["collectionId"])
+        if best_result.get("collectionId")
+        else None,
+        "itunes_artistid": str(best_result["artistId"])
+        if best_result.get("artistId")
+        else None,
+        "release_country": best_result.get("country"),
+        "track_number": best_result.get("trackNumber"),
+        "total_tracks": best_result.get("trackCount"),
+        "disc_number": best_result.get("discNumber"),
+        "total_discs": best_result.get("discCount"),
+        "date": date_val,
+    }

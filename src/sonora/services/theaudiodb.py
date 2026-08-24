@@ -66,17 +66,19 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
     return None, None
 
 
-def fetch_track_video_url(artist_name: str, track_title: str) -> str | None:
+def fetch_theaudiodb_track_details(
+    artist_name: str, track_title: str
+) -> dict[str, object] | None:
     """
-    Fetch official music video URL (strMusicVid) from TheAudioDB track search.
+    Fetch track details (video URL, mood, style, key, rating, description) from TheAudioDB.
     """
     if not artist_name or not track_title:
         return None
     cache_key = (
-        f"theaudiodb_vid:{normalize_str(artist_name)}:{normalize_str(track_title)}"
+        f"theaudiodb_track:{normalize_str(artist_name)}:{normalize_str(track_title)}"
     )
     cached = get_cached_api(cache_key)
-    if isinstance(cached, str):
+    if isinstance(cached, dict):
         return cached
 
     _THEAUDIODB_LIMITER.wait()
@@ -86,13 +88,37 @@ def fetch_track_video_url(artist_name: str, track_title: str) -> str | None:
         if response.status_code == 200:
             tracks = response.json().get("track", [])
             if tracks and isinstance(tracks, list) and tracks[0]:
-                video_url = tracks[0].get("strMusicVid")
-                if video_url and str(video_url).strip():
-                    clean_url = str(video_url).strip()
-                    set_cached_api(cache_key, clean_url)
-                    return clean_url
+                raw_track = tracks[0]
+                rating_raw = raw_track.get("intScore")
+                rating = (
+                    float(rating_raw)
+                    if rating_raw and str(rating_raw).isdigit()
+                    else None
+                )
+                details: dict[str, object] = {
+                    "music_video_url": raw_track.get("strMusicVid"),
+                    "mood": raw_track.get("strMood"),
+                    "style": raw_track.get("strStyle"),
+                    "initial_key": raw_track.get("strKey")
+                    or raw_track.get("strOpenKey"),
+                    "rating": rating,
+                    "description": raw_track.get("strDescriptionEN"),
+                    "genre": raw_track.get("strGenre"),
+                }
+                set_cached_api(cache_key, details)
+                return details
     except (OSError, ValueError, KeyError) as error:
         LOG.debug(
-            f"TheAudioDB video lookup failed for {artist_name} - {track_title}: {error}"
+            f"TheAudioDB track lookup failed for {artist_name} - {track_title}: {error}"
         )
+    return None
+
+
+def fetch_track_video_url(artist_name: str, track_title: str) -> str | None:
+    """
+    Fetch official music video URL (strMusicVid) from TheAudioDB track search.
+    """
+    details = fetch_theaudiodb_track_details(artist_name, track_title)
+    if details and details.get("music_video_url"):
+        return str(details["music_video_url"])
     return None

@@ -75,6 +75,15 @@ def set_cached_api(key: str, value: Any, expire_seconds: int = 604800) -> None:
             LOG.debug(f"Cache store failed for key '{key}': {error}")
 
 
+def clear_cache() -> None:
+    cache = get_cache()
+    if cache is not None:
+        try:
+            cache.clear()
+        except (OSError, ValueError, KeyError, RuntimeError, TypeError) as error:
+            LOG.debug(f"Cache clear failed: {error}")
+
+
 def close_cache() -> None:
     global _CACHE_INSTANCE
     with _CACHE_LOCK:

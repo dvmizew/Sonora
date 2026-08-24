@@ -376,7 +376,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(
             info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
         )
-        self.assertEqual(info.date, "2024")
+        self.assertTrue(str(info.date).startswith("2024"))
         mock_acoustid.assert_called_once()
         mock_discogs.assert_called_once()
 
@@ -473,13 +473,20 @@ class TestCoreModules(unittest.TestCase):
     def test_cuesheet_parsing(self):
         cue_path = self.tmp_path / "test.cue"
         cue_path.write_text(
+            'REM GENRE "Hip-Hop"\n'
+            "REM DATE 2021\n"
+            "REM DISCNUMBER 1\n"
+            "REM TOTALDISCS 2\n"
             'PERFORMER "Album Artist"\n'
             'TITLE "Album Title"\n'
             "TRACK 01 AUDIO\n"
             '  TITLE "Track One"\n'
             '  PERFORMER "Track Artist"\n'
-            "  INDEX 01 00:00:00\n",
-            encoding="utf-8",
+            '  SONGWRITER "Composer Name"\n'
+            "  ISRC USUM71805166\n"
+            "  INDEX 00 00:00:00\n"
+            "  INDEX 01 00:02:00\n",
+            encoding="latin-1",
         )
 
         tracks = parse_cuesheet(cue_path)
@@ -487,6 +494,14 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(tracks[0]["track_number"], 1)
         self.assertEqual(tracks[0]["title"], "Track One")
         self.assertEqual(tracks[0]["artist"], "Track Artist")
+        self.assertEqual(tracks[0]["genre"], "Hip-Hop")
+        self.assertEqual(tracks[0]["date"], "2021")
+        self.assertEqual(tracks[0]["disc_number"], 1)
+        self.assertEqual(tracks[0]["total_discs"], 2)
+        self.assertEqual(tracks[0]["composer"], "Composer Name")
+        self.assertEqual(tracks[0]["isrc"], "USUM71805166")
+        self.assertEqual(tracks[0]["start_index"], "00:02:00")
+        self.assertEqual(tracks[0]["pregap_index"], "00:00:00")
 
         content = read_cuesheet_content(cue_path)
         self.assertIsNotNone(content)

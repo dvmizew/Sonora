@@ -18,7 +18,6 @@ from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.constants import ARTIST_ALIASES
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
@@ -26,7 +25,7 @@ from sonora.core.utils import (
     is_valid_uuid,
     normalize_date,
     normalize_genre,
-    normalize_str,
+    resolve_artist_name,
 )
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.deezer import (
@@ -35,18 +34,23 @@ from sonora.services.deezer import (
 )
 from sonora.services.discogs import search_discogs_release
 from sonora.services.genius import fetch_genius_song_details
+from sonora.services.itunes import fetch_itunes_track_metadata
 from sonora.services.lastfm import fetch_lastfm_tags, fetch_lastfm_track_stats
 from sonora.services.lyrics import process_track_lyrics
 from sonora.services.musicbrainz import (
     fetch_album_track_mbids,
+    fetch_musicbrainz_recording_details,
+    fetch_musicbrainz_release_details,
     fetch_track_mbid,
     search_musicbrainz_release,
 )
-from sonora.services.theaudiodb import fetch_track_video_url
+from sonora.services.theaudiodb import (
+    fetch_theaudiodb_track_details,
+)
 
 
 def normalize_artist_alias(artist: str) -> str:
-    return ARTIST_ALIASES.get(normalize_str(artist), artist.strip())
+    return resolve_artist_name(artist)
 
 
 def process_single_track(
@@ -114,7 +118,7 @@ def process_single_track(
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {error}")
 
-        # 3. Fetch MusicBrainz Album ID
+        # 3. Fetch MusicBrainz Album ID and Release Details
         if not is_valid_uuid(track_info.musicbrainz_albumid):
             if is_valid_uuid(album_mbid):
                 track_info.musicbrainz_albumid = str(album_mbid)
@@ -141,7 +145,118 @@ def process_single_track(
                         f"MusicBrainz Album lookup failed for {track_info.title}: {error}"
                     )
 
-        # 4. Fetch Last.fm genre/mood tags
+        # 3b. Deep MusicBrainz Recording & Release Details
+        if is_valid_uuid(track_info.musicbrainz_trackid):
+            try:
+                mb_rec = fetch_musicbrainz_recording_details(
+                    track_info.musicbrainz_trackid
+                )
+                if mb_rec:
+                    if mb_rec.get("isrc") and not track_info.isrc:
+                        track_info.isrc = str(mb_rec["isrc"])
+                    if mb_rec.get("disambiguation") and not track_info.disambiguation:
+                        track_info.disambiguation = str(mb_rec["disambiguation"])
+                    if mb_rec.get("composer") and not track_info.composer:
+                        track_info.composer = str(mb_rec["composer"])
+                    if mb_rec.get("lyricist") and not track_info.lyricist:
+                        track_info.lyricist = str(mb_rec["lyricist"])
+                    if mb_rec.get("producers") and not track_info.producers:
+                        track_info.producers = str(mb_rec["producers"])
+                    if mb_rec.get("remixer") and not track_info.remixer:
+                        track_info.remixer = str(mb_rec["remixer"])
+                    if (
+                        mb_rec.get("musicbrainz_workid")
+                        and not track_info.musicbrainz_workid
+                    ):
+                        track_info.musicbrainz_workid = str(
+                            mb_rec["musicbrainz_workid"]
+                        )
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(
+                    f"MusicBrainz recording details failed for {track_info.title}: {error}"
+                )
+
+        if is_valid_uuid(track_info.musicbrainz_albumid):
+            try:
+                mb_rel = fetch_musicbrainz_release_details(
+                    track_info.musicbrainz_albumid
+                )
+                if mb_rel:
+                    if mb_rel.get("barcode") and not track_info.barcode:
+                        track_info.barcode = str(mb_rel["barcode"])
+                    if mb_rel.get("release_country") and not track_info.release_country:
+                        track_info.release_country = str(mb_rel["release_country"])
+                    if mb_rel.get("release_status") and not track_info.release_status:
+                        track_info.release_status = str(mb_rel["release_status"])
+                    if mb_rel.get("release_type") and not track_info.release_type:
+                        track_info.release_type = str(mb_rel["release_type"])
+                    if (
+                        mb_rel.get("musicbrainz_releasegroupid")
+                        and not track_info.musicbrainz_releasegroupid
+                    ):
+                        track_info.musicbrainz_releasegroupid = str(
+                            mb_rel["musicbrainz_releasegroupid"]
+                        )
+                    if mb_rel.get("label") and not track_info.label:
+                        track_info.label = str(mb_rel["label"])
+                    if mb_rel.get("catalog_number") and not track_info.catalog_number:
+                        track_info.catalog_number = str(mb_rel["catalog_number"])
+                    if mb_rel.get("media") and not track_info.media:
+                        track_info.media = str(mb_rel["media"])
+                    if mb_rel.get("total_tracks") and not track_info.total_tracks:
+                        track_info.total_tracks = int(str(mb_rel["total_tracks"]))
+                    if mb_rel.get("total_discs") and not track_info.total_discs:
+                        track_info.total_discs = int(str(mb_rel["total_discs"]))
+                    if mb_rel.get("language") and not track_info.language:
+                        track_info.language = str(mb_rel["language"])
+                    if mb_rel.get("script") and not track_info.script:
+                        track_info.script = str(mb_rel["script"])
+                    if mb_rel.get("artist_sort") and not track_info.artist_sort:
+                        track_info.artist_sort = str(mb_rel["artist_sort"])
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(
+                    f"MusicBrainz release details failed for {track_info.title}: {error}"
+                )
+
+        # 4. iTunes metadata enrichment (Genre, Advisory, Copyright, Track IDs, Country)
+        try:
+            itunes_data = fetch_itunes_track_metadata(
+                track_info.artist, track_info.title
+            )
+            if itunes_data:
+                if itunes_data.get("genre") and not track_info.genre:
+                    normalized_genre = normalize_genre(str(itunes_data["genre"]))
+                    if normalized_genre:
+                        track_info.genre = normalized_genre
+                if itunes_data.get("advisory") and not track_info.advisory:
+                    track_info.advisory = str(itunes_data["advisory"])
+                if itunes_data.get("copyright") and not track_info.copyright:
+                    track_info.copyright = str(itunes_data["copyright"])
+                if itunes_data.get("itunes_trackid") and not track_info.itunes_trackid:
+                    track_info.itunes_trackid = str(itunes_data["itunes_trackid"])
+                if (
+                    itunes_data.get("itunes_collectionid")
+                    and not track_info.itunes_collectionid
+                ):
+                    track_info.itunes_collectionid = str(
+                        itunes_data["itunes_collectionid"]
+                    )
+                if (
+                    itunes_data.get("itunes_artistid")
+                    and not track_info.itunes_artistid
+                ):
+                    track_info.itunes_artistid = str(itunes_data["itunes_artistid"])
+                if (
+                    itunes_data.get("release_country")
+                    and not track_info.release_country
+                ):
+                    track_info.release_country = str(itunes_data["release_country"])
+                if itunes_data.get("date") and not track_info.date:
+                    track_info.date = normalize_date(str(itunes_data["date"]))
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"iTunes track lookup failed for {track_info.title}: {error}")
+
+        # 5. Fetch Last.fm genre/mood tags
         if lastfm_api_key:
             try:
                 tags = fetch_lastfm_tags(
@@ -150,7 +265,7 @@ def process_single_track(
                     api_key=lastfm_api_key,
                     mbid=track_info.musicbrainz_trackid,
                 )
-                if tags:
+                if tags and not track_info.genre:
                     raw_genre = tags[0]
                     normalized_genre = normalize_genre(raw_genre)
                     if normalized_genre:
@@ -159,7 +274,7 @@ def process_single_track(
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Last.fm lookup failed for {track_info.title}: {error}")
 
-        # 5. Discogs metadata enrichment
+        # 6. Discogs metadata enrichment
         if discogs_user_token:
             try:
                 release = search_discogs_release(
@@ -251,7 +366,7 @@ def process_single_track(
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Discogs lookup failed for {track_info.title}: {error}")
 
-        # 5b. Deezer metadata enrichment (Label, Barcode, Release Date, Genre, ISRC)
+        # 7. Deezer metadata enrichment (BPM, Gain, Contributors, ISRC, Label, Barcode, Release Date, Genre)
         try:
             deezer_album = fetch_deezer_album_details(
                 track_info.artist, track_info.album
@@ -271,12 +386,30 @@ def process_single_track(
             deezer_track = fetch_deezer_track_details(
                 track_info.artist, track_info.title
             )
-            if deezer_track and deezer_track.get("isrc") and not track_info.isrc:
-                track_info.isrc = str(deezer_track["isrc"])
+            if deezer_track:
+                if deezer_track.get("isrc") and not track_info.isrc:
+                    track_info.isrc = str(deezer_track["isrc"])
+                if deezer_track.get("bpm") and (track_info.bpm is None or force):
+                    track_info.bpm = float(str(deezer_track["bpm"]))
+                if (
+                    deezer_track.get("gain") is not None
+                    and track_info.replaygain_track_gain is None
+                ):
+                    track_info.replaygain_track_gain = float(str(deezer_track["gain"]))
+                if deezer_track.get("featured_artists") and (
+                    not track_info.featured_artists or force
+                ):
+                    track_info.featured_artists = str(deezer_track["featured_artists"])
+                if deezer_track.get("producers") and (
+                    not track_info.producers or force
+                ):
+                    track_info.producers = str(deezer_track["producers"])
+                if deezer_track.get("explicit_lyrics") and not track_info.advisory:
+                    track_info.advisory = "Explicit"
         except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
             LOG.debug(f"Deezer enrichment failed for {track_info.title}: {error}")
 
-        # 6. Genius song details (description, genius_song_id, featured_artists, producers)
+        # 8. Genius song details (description, genius_song_id, featured_artists, producers)
         if genius_api_token:
             try:
                 genius_details = fetch_genius_song_details(
@@ -307,7 +440,7 @@ def process_single_track(
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Genius lookup failed for {track_info.title}: {error}")
 
-        # 6a. Last.fm stats (listeners, playcount)
+        # 9. Last.fm stats (listeners, playcount)
         if lastfm_api_key:
             try:
                 stats = fetch_lastfm_track_stats(
@@ -323,15 +456,35 @@ def process_single_track(
                     f"Last.fm stats lookup failed for {track_info.title}: {error}"
                 )
 
-        # 6b. TheAudioDB video URL
+        # 10. TheAudioDB Details (mood, style, initial_key, rating, music_video_url, description)
         try:
-            video_url = fetch_track_video_url(track_info.artist, track_info.title)
-            if video_url:
-                track_info.music_video_url = video_url
+            tadb_details = fetch_theaudiodb_track_details(
+                track_info.artist, track_info.title
+            )
+            if tadb_details:
+                if (
+                    tadb_details.get("music_video_url")
+                    and not track_info.music_video_url
+                ):
+                    track_info.music_video_url = str(tadb_details["music_video_url"])
+                if tadb_details.get("mood") and not track_info.mood:
+                    track_info.mood = str(tadb_details["mood"])
+                if tadb_details.get("style") and not track_info.style:
+                    track_info.style = str(tadb_details["style"])
+                if tadb_details.get("initial_key") and not track_info.initial_key:
+                    track_info.initial_key = str(tadb_details["initial_key"])
+                if tadb_details.get("rating") is not None and track_info.rating is None:
+                    track_info.rating = float(str(tadb_details["rating"]))
+                if tadb_details.get("description") and (
+                    not track_info.comment or force
+                ):
+                    track_info.comment = str(tadb_details["description"])
         except (OSError, ValueError, RuntimeError) as error:
-            LOG.debug(f"TheAudioDB video lookup failed for {track_info.title}: {error}")
+            LOG.debug(
+                f"TheAudioDB details lookup failed for {track_info.title}: {error}"
+            )
 
-        # 6c. Embed Cuesheet content
+        # 11. Embed Cuesheet content
         if cuesheet_content:
             track_info.cuesheet = cuesheet_content
         elif not track_info.cuesheet:

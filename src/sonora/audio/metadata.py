@@ -8,10 +8,31 @@ from sonora.core.models import TrackInfo
 from sonora.core.utils import is_valid_uuid, normalize_date, normalize_genre
 
 
+def _parse_float_tag(raw_value: str | None, tag_name: str) -> float | None:
+    if not raw_value:
+        return None
+    try:
+        clean_val = str(raw_value).replace(" dB", "").strip()
+        return float(clean_val)
+    except ValueError as error:
+        LOG.debug(f"Failed to parse {tag_name} '{raw_value}': {error}")
+        return None
+
+
+def _parse_int_tag(
+    raw_value: str | None, tag_name: str, default: int | None = None
+) -> int | None:
+    if not raw_value:
+        return default
+    try:
+        clean_val = str(raw_value).split("/")[0].strip()
+        return int(clean_val)
+    except ValueError as error:
+        LOG.debug(f"Failed to parse {tag_name} '{raw_value}': {error}")
+        return default
+
+
 def read_track_metadata(file_path: Path) -> TrackInfo:
-    """
-    Read metadata tags from an audio file using C++ TagLib (pytaglib) and return a TrackInfo dataclass.
-    """
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
     if file_path.suffix.lower() not in SUPPORTED_EXTS:
@@ -41,83 +62,33 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             genre = normalize_genre(get_tag("GENRE", "TCON", "WM/GENRE"))
             isrc = get_tag("ISRC", "TSRC")
 
-            raw_track = get_tag("TRACKNUMBER", "TRCK", "TRACK")
-            track_number = None
-            if raw_track:
-                try:
-                    track_number = int(str(raw_track).split("/")[0])
-                except ValueError as error:
-                    LOG.debug(f"Failed to parse track number '{raw_track}': {error}")
-
-            raw_bpm = get_tag("BPM", "TBPM", "WM/BEATSPERMINUTE")
-            bpm = None
-            if raw_bpm:
-                try:
-                    bpm = float(raw_bpm)
-                except ValueError as error:
-                    LOG.debug(f"Failed to parse BPM '{raw_bpm}': {error}")
-
-            raw_disc = get_tag("DISCNUMBER", "TPOS", "DISC")
-            disc_number = 1
-            if raw_disc:
-                try:
-                    disc_number = int(str(raw_disc).split("/")[0])
-                except ValueError:
-                    disc_number = 1
-
-            raw_replaygain_gain = get_tag(
-                "REPLAYGAIN_TRACK_GAIN", "TXXX:REPLAYGAIN_TRACK_GAIN"
+            track_number = _parse_int_tag(
+                get_tag("TRACKNUMBER", "TRCK", "TRACK"), "track number"
             )
-            replaygain_track_gain = None
-            if raw_replaygain_gain:
-                try:
-                    replaygain_track_gain = float(
-                        str(raw_replaygain_gain).replace(" dB", "").strip()
-                    )
-                except ValueError as error:
-                    LOG.debug(
-                        f"Failed to parse ReplayGain gain '{raw_replaygain_gain}': {error}"
-                    )
-
-            raw_replaygain_peak = get_tag(
-                "REPLAYGAIN_TRACK_PEAK", "TXXX:REPLAYGAIN_TRACK_PEAK"
+            bpm = _parse_float_tag(get_tag("BPM", "TBPM", "WM/BEATSPERMINUTE"), "BPM")
+            disc_number = (
+                _parse_int_tag(
+                    get_tag("DISCNUMBER", "TPOS", "DISC"), "disc number", default=1
+                )
+                or 1
             )
-            replaygain_track_peak = None
-            if raw_replaygain_peak:
-                try:
-                    replaygain_track_peak = float(str(raw_replaygain_peak).strip())
-                except ValueError as error:
-                    LOG.debug(
-                        f"Failed to parse ReplayGain peak '{raw_replaygain_peak}': {error}"
-                    )
 
-            raw_replaygain_album_gain = get_tag(
-                "REPLAYGAIN_ALBUM_GAIN", "TXXX:REPLAYGAIN_ALBUM_GAIN"
+            replaygain_track_gain = _parse_float_tag(
+                get_tag("REPLAYGAIN_TRACK_GAIN", "TXXX:REPLAYGAIN_TRACK_GAIN"),
+                "ReplayGain track gain",
             )
-            replaygain_album_gain = None
-            if raw_replaygain_album_gain:
-                try:
-                    replaygain_album_gain = float(
-                        str(raw_replaygain_album_gain).replace(" dB", "").strip()
-                    )
-                except ValueError as error:
-                    LOG.debug(
-                        f"Failed to parse ReplayGain album gain '{raw_replaygain_album_gain}': {error}"
-                    )
-
-            raw_replaygain_album_peak = get_tag(
-                "REPLAYGAIN_ALBUM_PEAK", "TXXX:REPLAYGAIN_ALBUM_PEAK"
+            replaygain_track_peak = _parse_float_tag(
+                get_tag("REPLAYGAIN_TRACK_PEAK", "TXXX:REPLAYGAIN_TRACK_PEAK"),
+                "ReplayGain track peak",
             )
-            replaygain_album_peak = None
-            if raw_replaygain_album_peak:
-                try:
-                    replaygain_album_peak = float(
-                        str(raw_replaygain_album_peak).strip()
-                    )
-                except ValueError as error:
-                    LOG.debug(
-                        f"Failed to parse ReplayGain album peak '{raw_replaygain_album_peak}': {error}"
-                    )
+            replaygain_album_gain = _parse_float_tag(
+                get_tag("REPLAYGAIN_ALBUM_GAIN", "TXXX:REPLAYGAIN_ALBUM_GAIN"),
+                "ReplayGain album gain",
+            )
+            replaygain_album_peak = _parse_float_tag(
+                get_tag("REPLAYGAIN_ALBUM_PEAK", "TXXX:REPLAYGAIN_ALBUM_PEAK"),
+                "ReplayGain album peak",
+            )
 
             sample_rate = song.sampleRate
             bitrate = song.bitrate

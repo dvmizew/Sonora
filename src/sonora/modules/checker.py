@@ -21,13 +21,17 @@ from sonora.audio.metadata import read_track_metadata
 from sonora.audio.spectral import detect_fake_lossless
 from sonora.core.constants import (
     FEAT_KEYWORDS,
-    GENRE_BLACKLIST,
-    PROTECTED_ARTISTS,
     SUPPORTED_EXTS,
 )
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import CheckReport
-from sonora.core.utils import find_audio_files, is_valid_uuid, normalize_str
+from sonora.core.utils import (
+    find_audio_files,
+    is_single_group_artist,
+    is_valid_uuid,
+    normalize_genre,
+    normalize_str,
+)
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
 
@@ -154,10 +158,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
         issues.extend(check_brackets_corruption(track.artist))
         issues.extend(check_brackets_corruption(track.title))
 
-        if track.genre and any(
-            normalize_str(blacklisted_genre) in normalize_str(track.genre)
-            for blacklisted_genre in GENRE_BLACKLIST
-        ):
+        if track.genre and not normalize_genre(track.genre):
             issues.append(f"Blacklisted genre tag: '{track.genre}'")
         if track.artist == "Unknown Artist":
             issues.append("Missing ARTIST tag.")
@@ -234,11 +235,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
         # Check for unsplit artists (e.g. Artist A & Artist B)
         delimiters = [r"\s&\s", r"\s×\s", r"\sfeat\.?\s", r"\sft\.?\s"]
-        is_protected = any(
-            protected_artist.lower() in track.artist.lower()
-            for protected_artist in PROTECTED_ARTISTS
-        )
-        if not is_protected:
+        if not is_single_group_artist(track.artist):
             for delimiter in delimiters:
                 if re.search(delimiter, track.artist, re.IGNORECASE):
                     issues.append(

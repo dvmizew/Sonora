@@ -184,11 +184,33 @@ def fetch_deezer_track_details(
             return None
 
         track_data = detail_response.json()
+        contributors = track_data.get("contributors", [])
+        featured: list[str] = []
+        producers: list[str] = []
+        if isinstance(contributors, list):
+            for c in contributors:
+                if isinstance(c, dict):
+                    c_name = c.get("name")
+                    c_role = str(c.get("role", "")).lower()
+                    if not c_name:
+                        continue
+                    if "featured" in c_role:
+                        featured.append(c_name)
+                    elif "producer" in c_role:
+                        producers.append(c_name)
+
         result = {
             "isrc": track_data.get("isrc"),
             "bpm": track_data.get("bpm"),
             "gain": track_data.get("gain"),
             "explicit_lyrics": track_data.get("explicit_lyrics"),
+            "featured_artists": ", ".join(dict.fromkeys(featured))
+            if featured
+            else None,
+            "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
+            "track_position": track_data.get("track_position"),
+            "disk_number": track_data.get("disk_number"),
+            "release_date": track_data.get("release_date"),
         }
         set_cached_api(cache_key, result)
         return result
