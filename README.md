@@ -15,15 +15,15 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
   - Extended tags for Symfonium, Navidrome, and Plex (`ARTISTSORT`, `ALBUMARTISTSORT`, `RELEASETYPE`, `BARCODE`, `CATALOGNUMBER`, `LABEL`, `ORIGINALDATE`, `ISRC`).
 - **Cover Art Engine**:
   - Multi-source fallback: MusicBrainz Cover Art Archive -> iTunes (up to 3000x3000px) -> Deezer (1000x1000px) -> TheAudioDB (`artist.jpg` and `banner.jpg`).
-  - Grayscale correlation check (NumPy) to avoid overwriting custom covers unless visually similar (≥ 0.82 correlation).
+  - Perceptual hashing (`pHash`) check via `imagehash` with EXIF transposition to prevent overwriting custom covers unless visually matched.
 - **Audio Engines**:
   - Tempo calculation (STFT onset envelope autocorrelation via SciPy).
   - ReplayGain 2.0 Album Mode (`metaflac`).
-  - 16kHz spectral cutoff detection (`sox`) to flag fake-lossless files.
+  - 16kHz spectral cutoff detection (SciPy FFT spectrogram) to flag fake-lossless files.
   - Bit-exact audio stream MD5 checksum verification (`flac -t`).
 - **Library Tools**:
   - Library checker for corrupt FLACs, missing tags, bracket clutter, and missing lyrics.
-  - File renamer and folder structure standardizer (`NN - Artist - Title.ext`).
+  - File renamer and folder structure standardizer (`NN - Title.ext` or `Disc-NN - Title.ext`).
   - Single track organizer (moves 1-2 track releases to `Singles/` and deduplicates against albums).
   - Streaming JSON tag backup and restore.
   - SQLite disk caching (`~/.cache/sonora`) with 30-day TTL to minimize API requests.
@@ -37,19 +37,18 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
   - `flac` (includes `metaflac` for ReplayGain 2.0 and checksum validation)
   - `ffmpeg` (audio decoding and metadata extraction)
   - `chromaprint` (provides `fpcalc` for AcoustID audio fingerprinting)
-  - `sox` (spectral cutoff analysis)
 
 ### System Package Installation
 
 ```bash
 # Arch Linux
-sudo pacman -S python ffmpeg flac sox chromaprint
+sudo pacman -S python ffmpeg flac chromaprint
 
 # Debian / Ubuntu
-sudo apt install python3 ffmpeg flac sox chromaprint
+sudo apt install python3 ffmpeg flac chromaprint
 
 # macOS
-brew install python ffmpeg flac sox chromaprint
+brew install python ffmpeg flac chromaprint
 ```
 
 ---
@@ -83,9 +82,8 @@ MusicBrainz, Cover Art Archive, iTunes, and Deezer lookups work automatically wi
 
 ### Global Options
 
-- `--dry-run`: Simulate operations without modifying files or directories.
-- `-v, --verbose`: Enable verbose logging.
 - `-v, --version`: Show program version.
+- `--dry-run`: Simulate operations without modifying files or directories.
 
 ---
 
