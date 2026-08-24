@@ -74,6 +74,22 @@ class TestCLIInterface(unittest.TestCase):
         self.assertEqual(code, 0)
         mock_organize.assert_called_once()
 
+    @patch("sonora.cli.main.backup_library_tags")
+    def test_handle_backup_subcommand(self, mock_backup):
+        mock_backup.return_value = self.tmp_path / "backup.json"
+        code = main(["backup", str(self.tmp_path), "--out", str(self.tmp_path / "backup.json")])
+        self.assertEqual(code, 0)
+        mock_backup.assert_called_once()
+
+    @patch("sonora.cli.main.restore_library_tags")
+    def test_handle_restore_subcommand(self, mock_restore):
+        mock_restore.return_value = 10
+        dummy_backup = self.tmp_path / "backup.json"
+        dummy_backup.write_text("{}", encoding="utf-8")
+        code = main(["restore", str(dummy_backup)])
+        self.assertEqual(code, 0)
+        mock_restore.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

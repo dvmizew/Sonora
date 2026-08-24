@@ -1,31 +1,27 @@
-"""
-Unit tests for Sonora external API service clients using mocks.
-"""
-
-import sys
+import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Guarantee src/ is in sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-import unittest
+import httpx
 
 from sonora.services.acoustid import lookup_acoustid
+from sonora.services.deezer import (
+    fetch_deezer_album_details,
+    fetch_deezer_track_details,
+)
 from sonora.services.discogs import search_discogs_release
 from sonora.services.genius import fetch_genius_description
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
-from sonora.services.lyrics import fetch_synced_lyrics
-from sonora.services.musicbrainz import fetch_track_mbid
+from sonora.services.lyrics import clean_lyrics_text, fetch_synced_lyrics
+from sonora.services.musicbrainz import (
+    fetch_cover_art_archive_url,
+    fetch_track_mbid,
+    search_musicbrainz_release,
+)
 
 
 class TestServicesEngine(unittest.TestCase):
-    def setUp(self):
-        import sonora.services.discogs
-        sonora.services.discogs._discogs_client_instance = None
-        sonora.services.discogs._discogs_client_token = None
-
     @patch("sonora.services.itunes.get_cached_api", return_value=None)
     @patch("sonora.core.http.SESSION.get")
     def test_fetch_itunes_cover_art_url(self, mock_get, _mock_cache):
@@ -98,27 +94,63 @@ class TestServicesEngine(unittest.TestCase):
         self.assertEqual(mbid, "12345678-1234-1234-1234-123456789abc")
 
 
-    @patch("sonora.services.discogs.discogs_client")
-    @patch("sonora.services.discogs._discogs_client_instance", None)
-    def test_search_discogs_release(self, mock_discogs_mod):
-        class DummyRelease:
-            def __init__(self) -> None:
-                self.id = 999
-                self.title = "Test Album"
-                self.year = 2024
-                self.genres = ["Pop"]
-                self.country = "US"
-                self.labels: list[object] = []
-                self.barcodes: list[str] = []
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = [DummyRelease()]
-        mock_discogs_mod.Client.return_value = mock_client
+    @patch("sonora.services.discogs.get_cached_api", return_value=None)
+    @patch("sonora.services.discogs.SESSION.get")
+    def test_search_discogs_release(self, mock_get, _mock_cache):
+        # 1. Search response
+        mock_search_resp = MagicMock()
+        mock_search_resp.status_code = 200
+        mock_search_resp.json.return_value = {
+            "results": [
+                {
+                    "id": 999,
+                    "title": "Artist - Test Album",
+                    "year": 2024,
+                }
+            ]
+        }
+        # 2. Full release details response
+        mock_rel_resp = MagicMock()
+        mock_rel_resp.status_code = 200
+        mock_rel_resp.json.return_value = {
+            "id": 999,
+            "title": "Test Album",
+            "year": 2024,
+            "released": "2024-05-10",
+            "artists": [{"id": 12345, "name": "Artist"}],
+            "genres": ["Hip Hop"],
+            "styles": ["Trap", "Cloud Rap"],
+            "country": "US",
+            "labels": [{"name": "Test Label", "catno": "CAT-123"}],
+            "formats": [{"name": "CD", "descriptions": ["Album", "Deluxe Edition"]}],
+            "identifiers": [{"type": "Barcode", "value": "123456789012"}],
+            "extraartists": [
+                {"name": "Metro Boomin (2)", "role": "Producer"},
+                {"name": "Composer Guy", "role": "Written-By"},
+            ],
+            "tracklist": [
+                {
+                    "position": "1",
+                    "title": "Track One",
+                    "extraartists": [{"name": "Southside", "role": "Producer"}],
+                }
+            ],
+        }
+        mock_get.side_effect = [mock_search_resp, mock_rel_resp]
 
         res = search_discogs_release("Artist", "Album", user_token="dummy_token")
         self.assertIsNotNone(res)
         if res:
             self.assertEqual(res["id"], 999)
+            self.assertEqual(res["artist_id"], "12345")
+            self.assertEqual(res["label"], "Test Label")
+            self.assertEqual(res["catalog_number"], "CAT-123")
+            self.assertEqual(res["barcode"], "123456789012")
+            self.assertEqual(res["media"], "CD, Album, Deluxe Edition")
+            self.assertEqual(res["styles"], ["Trap", "Cloud Rap"])
+            self.assertEqual(res["producers"], "Metro Boomin")
+            self.assertEqual(res["composer"], "Composer Guy")
+            self.assertEqual(res["track_credits"]["1"]["producers"], "Southside")
 
     def test_search_discogs_without_token_returns_none(self):
         self.assertIsNone(search_discogs_release("Artist", "Album", user_token=None))
@@ -200,18 +232,13 @@ class TestServicesEngine(unittest.TestCase):
             fetch_track_mbid("Artist", "Title")
 
     @patch("sonora.services.discogs.get_cached_api", return_value=None)
-    @patch("sonora.services.discogs.discogs_client")
-    def test_discogs_error_handling(self, mock_discogs_mod, _mock_cache):
-        mock_client = MagicMock()
-        mock_client.search.side_effect = Exception("Discogs 401 Unauthorized")
-        mock_discogs_mod.Client.return_value = mock_client
-
-        with self.assertRaises(RuntimeError):
-            search_discogs_release("Artist", "Album", user_token="bad_token")
+    @patch("sonora.services.discogs.SESSION.get")
+    def test_discogs_error_handling(self, mock_get, _mock_cache):
+        mock_get.side_effect = httpx.HTTPError("Discogs 401 Unauthorized")
+        res = search_discogs_release("Artist", "Album", user_token="bad_token")
+        self.assertIsNone(res)
 
     def test_clean_lyrics_text(self):
-        from sonora.services.lyrics import clean_lyrics_text
-
         dirty = (
             "[00:12.34] Valid lyric line\n"
             "12 Contributors\n"
@@ -224,16 +251,105 @@ class TestServicesEngine(unittest.TestCase):
         self.assertEqual(cleaned, "[00:12.34] Valid lyric line\n[00:15.00] Second valid line")
 
     def test_clean_lyrics_none(self):
-        from sonora.services.lyrics import clean_lyrics_text
         self.assertIsNone(clean_lyrics_text(None))
 
     def test_clean_lyrics_empty(self):
-        from sonora.services.lyrics import clean_lyrics_text
         self.assertEqual(clean_lyrics_text(""), "")
 
     def test_clean_lyrics_only_junk(self):
-        from sonora.services.lyrics import clean_lyrics_text
         self.assertEqual(clean_lyrics_text("12 Contributors\nYou might also like\n14Embed"), "")
+
+    @patch("sonora.services.deezer.get_cached_api", return_value=None)
+    @patch("sonora.services.deezer.SESSION.get")
+    def test_fetch_deezer_album_details(self, mock_get, _mock_cache):
+        mock_search = MagicMock()
+        mock_search.status_code = 200
+        mock_search.json.return_value = {"data": [{"id": 12345}]}
+
+        mock_album = MagicMock()
+        mock_album.status_code = 200
+        mock_album.json.return_value = {
+            "title": "Album Title",
+            "label": "Universal Music",
+            "upc": "123456789012",
+            "release_date": "2024-01-01",
+            "genres": {"data": [{"name": "Hip Hop"}]},
+            "cover_xl": "https://e-cdns-images.dzcdn.net/images/cover/1000x1000.jpg",
+        }
+        mock_get.side_effect = [mock_search, mock_album]
+
+        res = fetch_deezer_album_details("Artist", "Album Title")
+        self.assertIsNotNone(res)
+        if res:
+            self.assertEqual(res["label"], "Universal Music")
+            self.assertEqual(res["barcode"], "123456789012")
+            self.assertEqual(res["genre"], "Hip Hop")
+
+    @patch("sonora.services.deezer.get_cached_api", return_value=None)
+    @patch("sonora.services.deezer.SESSION.get")
+    def test_fetch_deezer_track_details(self, mock_get, _mock_cache):
+        mock_search = MagicMock()
+        mock_search.status_code = 200
+        mock_search.json.return_value = {
+            "data": [
+                {
+                    "id": 9876,
+                    "title": "Track Title",
+                    "artist": {"name": "Artist Name"},
+                }
+            ]
+        }
+
+        mock_track = MagicMock()
+        mock_track.status_code = 200
+        mock_track.json.return_value = {
+            "isrc": "USUM71703861",
+            "bpm": 128.0,
+            "gain": -5.5,
+            "explicit_lyrics": True,
+        }
+        mock_get.side_effect = [mock_search, mock_track]
+
+        res = fetch_deezer_track_details("Artist Name", "Track Title")
+        self.assertIsNotNone(res)
+        if res:
+            self.assertEqual(res["isrc"], "USUM71703861")
+            self.assertEqual(res["bpm"], 128.0)
+
+    @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
+    @patch("sonora.services.musicbrainz.SESSION.head")
+    def test_fetch_cover_art_archive_url(self, mock_head, _mock_cache):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.url = "https://ia8000.us.archive.org/cover.jpg"
+        mock_head.return_value = mock_resp
+
+        url = fetch_cover_art_archive_url("c8b03190-306c-4125-9b32-3f9d86d60a12")
+        self.assertEqual(url, "https://ia8000.us.archive.org/cover.jpg")
+
+    def test_fetch_cover_art_archive_invalid_uuid_returns_none(self):
+        self.assertIsNone(fetch_cover_art_archive_url("invalid-uuid"))
+
+    @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
+    @patch("sonora.services.musicbrainz.musicbrainzngs")
+    def test_search_musicbrainz_release(self, mock_mb, _mock_cache):
+        mock_mb.search_releases.return_value = {
+            "release-list": [
+                {
+                    "id": "c8b03190-306c-4125-9b32-3f9d86d60a12",
+                    "title": "Album Title",
+                    "date": "2024-01-01",
+                    "country": "US",
+                    "barcode": "123456789012",
+                    "artist-credit": [{"artist": {"name": "Artist", "id": "a1b2c3d4-1234-1234-1234-123456789abc"}}],
+                }
+            ]
+        }
+        res = search_musicbrainz_release("Artist", "Album Title")
+        self.assertIsNotNone(res)
+        if res:
+            self.assertEqual(res["id"], "c8b03190-306c-4125-9b32-3f9d86d60a12")
+            self.assertEqual(res["country"], "US")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import unittest
 
 from sonora.core.models import CheckReport, TrackInfo
-from sonora.core.utils import normalize_str, sanitize_name
+from sonora.core.utils import (
+    clean_title,
+    is_valid_uuid,
+    normalize_genre,
+    normalize_str,
+    sanitize_name,
+)
 
 
 class TestCoreUtils(unittest.TestCase):
@@ -38,8 +44,6 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(sanitize_name("Artist / Title <HQ>:"), "Artist _ Title HQ")
 
     def test_is_valid_uuid(self):
-        from sonora.core.utils import is_valid_uuid
-
         self.assertTrue(is_valid_uuid("c8b03190-306c-4125-9b32-3f9d86d60a12"))
         self.assertTrue(is_valid_uuid("C8B03190-306C-4125-9B32-3F9D86D60A12"))
         self.assertFalse(is_valid_uuid("not-a-uuid"))
@@ -48,6 +52,24 @@ class TestCoreUtils(unittest.TestCase):
         self.assertFalse(is_valid_uuid("{c8b03190-306c-4125-9b32-3f9d86d60a12}"))
         self.assertFalse(is_valid_uuid(None))
         self.assertFalse(is_valid_uuid(""))
+
+    def test_clean_title_remaster_and_features(self):
+        self.assertEqual(clean_title("In the End (2020 Remaster)"), "In the End")
+        self.assertEqual(clean_title("Rockstar (feat. 21 Savage)"), "Rockstar")
+        self.assertEqual(clean_title("Song [Explicit]"), "Song")
+        self.assertEqual(clean_title("Track (Deluxe Edition)"), "Track")
+        self.assertEqual(clean_title(""), "")
+
+    def test_normalize_genre_mapping_and_filtering(self):
+        self.assertEqual(normalize_genre("Hip Hop"), "Hip-Hop/Rap")
+        self.assertEqual(normalize_genre("Rap"), "Hip-Hop/Rap")
+        self.assertEqual(normalize_genre("Electronic"), "Electronic")
+        self.assertEqual(normalize_genre("Synthpop"), "Synth-pop")
+        self.assertIsNone(normalize_genre("Billboard Top 40"))  # Blacklisted
+        self.assertIsNone(normalize_genre("Unknown"))  # Blacklisted
+        self.assertIsNone(normalize_genre("12345"))  # Digits
+        self.assertIsNone(normalize_genre(""))
+        self.assertIsNone(normalize_genre(None))
 
 
 class TestCoreModels(unittest.TestCase):

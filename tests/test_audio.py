@@ -26,27 +26,24 @@ from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.models import TrackInfo
 
 
-def create_dummy_wav_file() -> Path:
+def create_dummy_wav_file(dest_path: Path) -> Path:
     """Create a temporary 1-second WAV audio file with standard audio properties."""
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-        temp_path = Path(temp_file.name)
-
-    with wave.open(str(temp_path), "wb") as w:
+    with wave.open(str(dest_path), "wb") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
         w.setframerate(44100)
         w.writeframes(struct.pack("<h", 0) * 88200)
-
-    return temp_path
+    return dest_path
 
 
 class TestAudioEngine(unittest.TestCase):
     def setUp(self):
-        self.dummy_audio_path = create_dummy_wav_file()
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp_dir.name)
+        self.dummy_audio_path = create_dummy_wav_file(self.tmp_path / "dummy_audio.wav")
 
     def tearDown(self):
-        if self.dummy_audio_path.exists():
-            self.dummy_audio_path.unlink()
+        self.tmp_dir.cleanup()
 
     def test_read_real_audio_metadata(self):
         track_info = read_track_metadata(self.dummy_audio_path)
@@ -60,17 +57,18 @@ class TestAudioEngine(unittest.TestCase):
         mock_file_instance.tags = {}
         mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
 
-        flac_path = Path("/tmp/test_track.flac")
-        with patch.object(Path, "exists", return_value=True):
-            track_info = TrackInfo(
-                file_path=flac_path,
-                artist="Test Artist",
-                title="Test Track",
-                album="Test Album",
-                replaygain_track_gain=-4.25,
-                replaygain_track_peak=0.951234,
-            )
-            write_track_metadata(track_info)
+        flac_path = self.tmp_path / "test_track.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        track_info = TrackInfo(
+            file_path=flac_path,
+            artist="Test Artist",
+            title="Test Track",
+            album="Test Album",
+            replaygain_track_gain=-4.25,
+            replaygain_track_peak=0.951234,
+        )
+        write_track_metadata(track_info)
 
         mock_file_instance.save.assert_called_once()
         self.assertEqual(mock_file_instance.tags["ARTIST"], ["Test Artist"])
@@ -79,12 +77,12 @@ class TestAudioEngine(unittest.TestCase):
         self.assertEqual(mock_file_instance.tags["REPLAYGAIN_TRACK_PEAK"], ["0.951234"])
 
     def test_read_nonexistent_file_raises_metadata_error(self):
-        bogus_path = Path("/tmp/nonexistent_audio_track_9999.flac")
+        bogus_path = self.tmp_path / "nonexistent_audio_track_9999.flac"
         with self.assertRaises(FileNotFoundError):
             read_track_metadata(bogus_path)
 
     def test_verify_nonexistent_file_raises_audio_error(self):
-        bogus_path = Path("/tmp/nonexistent_audio_track_9999.flac")
+        bogus_path = self.tmp_path / "nonexistent_audio_track_9999.flac"
         with self.assertRaises(FileNotFoundError):
             verify_flac_checksum(bogus_path)
 
@@ -102,44 +100,47 @@ class TestAudioEngine(unittest.TestCase):
         # Simulate REPLAYGAIN_ALBUM_GAIN not being present
         mock_flac_instance.__contains__.return_value = False
         mock_flac.return_value = mock_flac_instance
-        
-        with patch.object(Path, "exists", return_value=True), patch("sonora.audio.replaygain.shutil.which", return_value="metaflac"):
-            p1 = Path("/tmp/1.flac")
-            p2 = Path("/tmp/2.flac")
+
+        p1 = self.tmp_path / "1.flac"
+        p2 = self.tmp_path / "2.flac"
+        p1.write_bytes(b"dummy")
+        p2.write_bytes(b"dummy")
+
+        with patch("sonora.audio.replaygain.shutil.which", return_value="metaflac"):
             result = calculate_album_replaygain([p1, p2])
-            
+
         self.assertTrue(result)
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
         self.assertEqual(args[0], "metaflac")
         self.assertEqual(args[1], "--add-replay-gain")
-        self.assertIn("/tmp/1.flac", args)
-        self.assertIn("/tmp/2.flac", args)
+        self.assertIn(str(p1), args)
+        self.assertIn(str(p2), args)
 
     @patch("sonora.audio.bpm._load_audio_mono", return_value=(np.random.rand(44100 * 10).astype(np.float32), 44100))
     @patch("scipy.signal.spectrogram", return_value=(None, None, np.tile(np.linspace(1, 10, 100), (10, 1))))
     def test_calculate_bpm_with_scipy(self, mock_spec, mock_load):
         bpm = calculate_bpm(self.dummy_audio_path)
         self.assertIsNotNone(bpm)
+        self.assertIsInstance(bpm, float)
+        if bpm:
+            self.assertTrue(40.0 <= bpm <= 220.0)
 
     @patch("taglib.File")
     def test_read_metadata_unsupported_format(self, mock_file):
         mock_file.return_value = None
-        with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as f:
-            dummy_path = Path(f.name)
+        dummy_path = self.tmp_path / "song.xyz"
+        dummy_path.write_bytes(b"dummy")
 
-        try:
-            with self.assertRaises(ValueError):
-                read_track_metadata(dummy_path)
-        finally:
-            if dummy_path.exists():
-                dummy_path.unlink()
+        with self.assertRaises(ValueError):
+            read_track_metadata(dummy_path)
 
     @patch("subprocess.run")
     def test_checksum_binary_not_found(self, mock_run):
         mock_run.side_effect = FileNotFoundError()
-        flac_p = Path("/tmp/dummy_flac_check_99.flac")
-        with patch.object(Path, "exists", return_value=True), self.assertRaises(RuntimeError):
+        flac_p = self.tmp_path / "dummy_flac_check_99.flac"
+        flac_p.write_bytes(b"dummy")
+        with self.assertRaises(RuntimeError):
             verify_flac_checksum(flac_p)
 
     @patch("subprocess.run")
@@ -152,10 +153,14 @@ class TestAudioEngine(unittest.TestCase):
         mock_flac_instance.info.bits_per_sample = 16
         mock_flac_instance.__contains__.return_value = False
         mock_flac.return_value = mock_flac_instance
-        
-        with patch.object(Path, "exists", return_value=True), patch("sonora.audio.replaygain.shutil.which", return_value="metaflac"):
-            result = calculate_album_replaygain([Path("/tmp/fail.flac")])
+
+        fail_flac = self.tmp_path / "fail.flac"
+        fail_flac.write_bytes(b"dummy")
+
+        with patch("sonora.audio.replaygain.shutil.which", return_value="metaflac"):
+            result = calculate_album_replaygain([fail_flac])
         self.assertFalse(result)
+
 
 if __name__ == "__main__":
     unittest.main()

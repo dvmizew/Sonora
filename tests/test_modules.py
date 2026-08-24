@@ -1,11 +1,10 @@
-"""
-Unit tests for Sonora core business logic modules (Checker, Renamer, Tagger, Organizer).
-"""
-
+import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from PIL import Image, ImageDraw
 
 from sonora.audio.art import check_image_similarity, process_artist_artwork
 from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
@@ -17,8 +16,13 @@ from sonora.modules.checker import (
     check_file,
     check_library,
 )
-from sonora.modules.organizer import is_single_folder, organize_library_singles
+from sonora.modules.organizer import (
+    get_primary_artist,
+    is_single_folder,
+    organize_library_singles,
+)
 from sonora.modules.renamer import (
+    rename_album_folder,
     rename_directory_files,
     rename_track_file,
     sync_lrc_metadata,
@@ -146,13 +150,11 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(len(renamed), 2)
 
     def test_get_primary_artist(self):
-        from sonora.modules.organizer import get_primary_artist
         self.assertEqual(get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage")
         self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
         self.assertEqual(get_primary_artist("Above & Beyond"), "Above & Beyond")
 
     def test_rename_album_folder(self):
-        from sonora.modules.renamer import rename_album_folder
         folder = self.tmp_path / "old_folder"
         folder.mkdir()
         new_f = rename_album_folder(folder, "21 Savage", "Issa Album")
@@ -389,10 +391,6 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(reloaded.musicbrainz_albumid, "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d")
 
     def test_image_similarity(self):
-        import io
-
-        from PIL import Image, ImageDraw
-
         # Image 1: White background with black square in top-left
         img1 = Image.new("RGB", (64, 64), color="white")
         draw1 = ImageDraw.Draw(img1)
