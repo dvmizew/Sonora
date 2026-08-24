@@ -1,10 +1,27 @@
+import re
 import shutil
 from pathlib import Path
 
 from sonora.audio.metadata import read_track_metadata
-from sonora.core.constants import SUPPORTED_EXTS
+from sonora.core.constants import PROTECTED_ARTISTS, SUPPORTED_EXTS
 from sonora.core.logger import LOG
 from sonora.core.utils import normalize_str, sanitize_name
+
+_ARTIST_SEPARATORS = [
+    r"\s+fea?t\.?\s+",
+    r"\s+featuring\s+",
+    r"\s+and\s+",
+    r"\s+și\s+",
+    r"\s+si\s+",
+    r"\s+cu\s+",
+    r"\s+vs\.?\s+",
+    r"\s+[xX×]\s+",
+    r"\s*&\s*",
+    r"\s*,\s*",
+    r"\s*;\s*",
+    r"\s*/\s*",
+]
+_ARTIST_SPLIT_PATTERN = re.compile("|".join(_ARTIST_SEPARATORS), re.IGNORECASE)
 
 
 def is_single_folder(folder_path: Path) -> bool:
@@ -40,25 +57,17 @@ def is_single_folder(folder_path: Path) -> bool:
 def get_primary_artist(artist_name: str | None) -> str:
     """
     Extract primary artist from raw artist string by stripping featured artists/delimiters
-    (feat., ft., &, comma, etc.), respecting PROTECTED_ARTISTS. Matches initial/organize_singles.py.
+    (feat., ft., &, comma, etc.), respecting PROTECTED_ARTISTS.
     """
     if not artist_name:
         return "Unknown"
-        
+
     raw = str(artist_name).strip()
-    from sonora.core.constants import PROTECTED_ARTISTS
     is_protected = any(p.lower() == raw.lower() for p in PROTECTED_ARTISTS)
     if is_protected:
         return sanitize_name(raw)
 
-    import re
-    separators = [
-        r'\s+fea?t\.?\s+', r'\s+featuring\s+',
-        r'\s+and\s+', r'\s+și\s+', r'\s+si\s+', r'\s+cu\s+', r'\s+vs\.?\s+',
-        r'\s+[xX×]\s+', r'\s*&\s*', r'\s*,\s*', r'\s*;\s*', r'\s*/\s*'
-    ]
-    pattern = "|".join(separators)
-    parts = re.split(pattern, raw, maxsplit=1, flags=re.IGNORECASE)
+    parts = _ARTIST_SPLIT_PATTERN.split(raw, maxsplit=1)
     primary = parts[0].strip() if parts else raw
     return sanitize_name(primary or "Unknown")
 

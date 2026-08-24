@@ -219,7 +219,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
 
 
 def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = None) -> None:
-
     if not track_info.file_path.exists():
         raise FileNotFoundError(f"File not found: {track_info.file_path}")
 

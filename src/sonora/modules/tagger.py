@@ -22,19 +22,27 @@ from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.constants import ARTIST_ALIASES, SUPPORTED_EXTS
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
-from sonora.core.utils import normalize_str
+from sonora.core.utils import normalize_date, normalize_genre, normalize_str
 from sonora.services.acoustid import lookup_acoustid
+from sonora.services.deezer import (
+    fetch_deezer_album_details,
+    fetch_deezer_track_details,
+)
 from sonora.services.discogs import search_discogs_release
-from sonora.services.lastfm import fetch_lastfm_tags
+from sonora.services.genius import fetch_genius_song_details
+from sonora.services.lastfm import fetch_lastfm_tags, fetch_lastfm_track_stats
 from sonora.services.lyrics import process_track_lyrics
-from sonora.services.musicbrainz import fetch_track_mbid
+from sonora.services.musicbrainz import (
+    fetch_album_track_mbids,
+    fetch_track_mbid,
+    search_musicbrainz_release,
+)
+from sonora.services.theaudiodb import fetch_track_video_url
 
 
 def normalize_artist_alias(artist: str) -> str:
     """Normalize artist name based on ARTIST_ALIASES table."""
     return ARTIST_ALIASES.get(normalize_str(artist), artist.strip())
-
-
 
 
 def process_single_track(
@@ -100,7 +108,6 @@ def process_single_track(
                 track_info.musicbrainz_albumid = pre_album_mbid
             else:
                 try:
-                    from sonora.services.musicbrainz import search_musicbrainz_release
                     search_artist = track_info.album_artist if track_info.album_artist else track_info.artist
                     release = search_musicbrainz_release(search_artist, track_info.album)
                     if release:
@@ -108,7 +115,6 @@ def process_single_track(
                         if mb_id is not None:
                             track_info.musicbrainz_albumid = str(mb_id)
                         if not track_info.date:
-                            from sonora.core.utils import normalize_date
                             date_str = release.get("date")
                             if isinstance(date_str, str) and len(date_str) >= 4:
                                 track_info.date = normalize_date(date_str)
@@ -125,7 +131,6 @@ def process_single_track(
                     mbid=track_info.musicbrainz_trackid,
                 )
                 if tags:
-                    from sonora.core.utils import normalize_genre
                     raw_genre = tags[0]
                     norm_genre = normalize_genre(raw_genre)
                     if norm_genre:
@@ -142,11 +147,9 @@ def process_single_track(
                     if release.get("id") and not track_info.discogs_release_id:
                         track_info.discogs_release_id = str(release["id"])
                     if release.get("year") and not track_info.date:
-                        from sonora.core.utils import normalize_date
                         track_info.date = normalize_date(str(release["year"]))
                     genres_val = release.get("genres")
                     if isinstance(genres_val, list) and genres_val and not track_info.genre:
-                        from sonora.core.utils import normalize_genre
                         raw_genre = str(genres_val[0])
                         norm_genre = normalize_genre(raw_genre)
                         if norm_genre:
@@ -164,10 +167,6 @@ def process_single_track(
 
         # 5b. Deezer metadata enrichment (Label, Barcode, Release Date, Genre, ISRC)
         try:
-            from sonora.services.deezer import (
-                fetch_deezer_album_details,
-                fetch_deezer_track_details,
-            )
             d_album = fetch_deezer_album_details(track_info.artist, track_info.album)
             if d_album:
                 if d_album.get("label") and not track_info.label:
@@ -175,10 +174,8 @@ def process_single_track(
                 if d_album.get("barcode") and not track_info.barcode:
                     track_info.barcode = str(d_album["barcode"])
                 if d_album.get("release_date") and not track_info.date:
-                    from sonora.core.utils import normalize_date
                     track_info.date = normalize_date(str(d_album["release_date"]))
                 if d_album.get("genre") and not track_info.genre:
-                    from sonora.core.utils import normalize_genre
                     norm_g = normalize_genre(str(d_album["genre"]))
                     if norm_g:
                         track_info.genre = norm_g
@@ -192,7 +189,6 @@ def process_single_track(
         # 6. Genius song details (description, genius_song_id, featured_artists, producers)
         if genius_api_token:
             try:
-                from sonora.services.genius import fetch_genius_song_details
                 g_details = fetch_genius_song_details(track_info.artist, track_info.title, api_token=genius_api_token)
                 if g_details:
                     if g_details.get("description") and (not track_info.comment or force):
@@ -210,7 +206,6 @@ def process_single_track(
         # 6a. Last.fm stats (listeners, playcount)
         if lastfm_api_key:
             try:
-                from sonora.services.lastfm import fetch_lastfm_track_stats
                 stats = fetch_lastfm_track_stats(track_info.artist, track_info.title, api_key=lastfm_api_key)
                 if stats:
                     if stats.get("listeners"):
@@ -222,19 +217,19 @@ def process_single_track(
 
         # 6b. TheAudioDB video URL
         try:
-            from sonora.services.theaudiodb import fetch_track_video_url
             vid_url = fetch_track_video_url(track_info.artist, track_info.title)
             if vid_url:
                 track_info.music_video_url = vid_url
         except (OSError, ValueError, RuntimeError) as e:
             LOG.debug(f"TheAudioDB video lookup failed for {track_info.title}: {e}")
 
-        # 6b. Embed Cuesheet content if .cue file exists in directory
-        cue_files = list(file_path.parent.glob("*.cue"))
-        if cue_files:
-            cuesheet_content = read_cuesheet_content(cue_files[0])
-            if cuesheet_content:
-                track_info.cuesheet = cuesheet_content
+        # 6c. Embed Cuesheet content (from options if album-batched, or directory scan)
+        cuesheet_content = options.get("cuesheet_content") if isinstance(options, dict) else None
+        if cuesheet_content is None and not (isinstance(options, dict) and "cuesheet_content" in options):
+            cue_files = list(file_path.parent.glob("*.cue"))
+            cuesheet_content = read_cuesheet_content(cue_files[0]) if cue_files else None
+        if cuesheet_content:
+            track_info.cuesheet = cuesheet_content
 
         # 7. Calculate BPM (Skip if already present unless force)
         if fetch_bpm and (track_info.bpm is None or force):
@@ -281,9 +276,17 @@ def process_single_track(
 
         # Compute exact tag diffs (compare dataclass fields)
         diff_lines = []
-        _SKIP_FIELDS = {"file_path", "lyrics", "synced_lyrics", "acoustid_fingerprint",
-                        "sample_rate", "bitrate", "channels", "is_lossless",
-                        "art_width", "art_height"}
+        _SKIP_FIELDS = {
+            "file_path",
+            "lyrics",
+            "synced_lyrics",
+            "sample_rate",
+            "bitrate",
+            "channels",
+            "is_lossless",
+            "art_width",
+            "art_height",
+        }
         for f in dataclasses.fields(TrackInfo):
             if f.name in _SKIP_FIELDS:
                 continue
@@ -349,12 +352,16 @@ def tag_album_folder(
     if not audio_files:
         return []
 
+    # Pre-resolve Cuesheet content once for entire album
+    cue_files = list(folder_path.glob("*.cue"))
+    album_cue_content = read_cuesheet_content(cue_files[0]) if cue_files else None
+    if options.get("options") is None:
+        options["options"] = {}
+    if album_cue_content:
+        options["options"]["cuesheet_content"] = album_cue_content
+
     # Batch Optimization: Fetch entire album track MBIDs and album MBID in 1 single API call
     try:
-        from sonora.services.musicbrainz import (
-            fetch_album_track_mbids,
-            search_musicbrainz_release,
-        )
         sample_meta = read_track_metadata(audio_files[0])
         s_artist = sample_meta.album_artist or sample_meta.artist
         s_album = sample_meta.album
@@ -363,8 +370,6 @@ def tag_album_folder(
             if rel and rel.get("id"):
                 alb_id = str(rel["id"])
                 album_mbids = fetch_album_track_mbids(alb_id)
-                if options.get("options") is None:
-                    options["options"] = {}
                 options["options"]["album_track_mbids"] = album_mbids
                 options["options"]["album_mbid"] = alb_id
     except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:

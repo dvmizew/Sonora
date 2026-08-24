@@ -3,6 +3,7 @@ from pathlib import Path
 
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
+from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import normalize_str, sanitize_name
 
@@ -44,8 +45,6 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
         return True
 
     except (OSError, ValueError, KeyError) as e:
-        from sonora.core.logger import LOG
-
         LOG.debug(f"Failed to sync LRC metadata for {lrc_path}: {e}")
         return False
 
@@ -180,7 +179,6 @@ def rename_track_file(
                     tmp_path.rename(new_path)
                 else:
                     file_path.rename(new_path)
-                from sonora.core.logger import LOG
 
                 LOG.info(f"   ∟ 🎵 [dim]{file_path.name}[/] -> [white]{new_name}[/]")
 
@@ -201,12 +199,8 @@ def rename_track_file(
                     else:
                         old_synced_lrc.unlink(missing_ok=True)
             except (OSError, ValueError, RuntimeError) as e:
-                from sonora.core.logger import LOG
-
                 LOG.warning(f"Failed to rename file {file_path.name}: {e}")
         else:
-            from sonora.core.logger import LOG
-
             LOG.info(f"[DRY-RUN] Would rename {file_path.name} -> {new_name}")
 
     return new_path
@@ -242,18 +236,12 @@ def rename_album_folder(
         if not dry_run:
             try:
                 folder_path.rename(new_folder)
-                from sonora.core.logger import LOG
-
                 LOG.info(f"   ∟ 📂 Album folder renamed: [dim]{folder_now}[/] -> [cyan]{expected_name}[/]")
                 return new_folder
             except (OSError, ValueError, RuntimeError) as e:
-                from sonora.core.logger import LOG
-
                 LOG.warning(f"Failed to rename folder {folder_now}: {e}")
                 return folder_path
         else:
-            from sonora.core.logger import LOG
-
             LOG.info(f"[DRY-RUN] Would rename album folder {folder_now} -> {expected_name}")
     return folder_path
 
@@ -277,8 +265,6 @@ def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[
         TimeElapsedColumn,
         TimeRemainingColumn,
     )
-
-    from sonora.core.logger import CONSOLE, LOG
 
     renamed: list[Path] = []
     folder_files: dict[Path, list[Path]] = {}
