@@ -1,5 +1,8 @@
 from sonora.services.acoustid import fingerprint_audio_file, lookup_acoustid
-from sonora.services.discogs import search_discogs_release
+from sonora.services.discogs import (
+    fetch_discogs_release_details,
+    search_discogs_release,
+)
 from sonora.services.genius import fetch_genius_description
 from sonora.services.itunes import fetch_itunes_cover_art_url, search_itunes
 from sonora.services.lastfm import fetch_lastfm_tags
@@ -13,6 +16,7 @@ from sonora.services.theaudiodb import fetch_artist_images
 
 __all__ = [
     "fetch_artist_images",
+    "fetch_discogs_release_details",
     "fetch_genius_description",
     "fetch_itunes_cover_art_url",
     "fetch_lastfm_tags",

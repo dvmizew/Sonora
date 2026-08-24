@@ -46,7 +46,6 @@ from sonora.services.theaudiodb import fetch_track_video_url
 
 
 def normalize_artist_alias(artist: str) -> str:
-    """Normalize artist name based on ARTIST_ALIASES table."""
     return ARTIST_ALIASES.get(normalize_str(artist), artist.strip())
 
 
@@ -107,7 +106,7 @@ def process_single_track(
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {e}")
 
-        # 3. Fetch MusicBrainz Album ID via Discography Optimization
+        # 3. Fetch MusicBrainz Album ID
         if not is_valid_uuid(track_info.musicbrainz_albumid):
             pre_album_mbid = options.get("album_mbid") if isinstance(options, dict) else None
             if is_valid_uuid(pre_album_mbid):
@@ -145,21 +144,31 @@ def process_single_track(
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Last.fm lookup failed for {track_info.title}: {e}")
 
-        # 5. Discogs fallback lookup for release metadata
+        # 5. Discogs metadata enrichment
         if discogs_user_token:
             try:
                 release = search_discogs_release(track_info.artist, track_info.album, user_token=discogs_user_token)
                 if release:
                     if release.get("id") and not track_info.discogs_release_id:
                         track_info.discogs_release_id = str(release["id"])
-                    if release.get("year") and not track_info.date:
+                    if release.get("artist_id") and not track_info.discogs_artist_id:
+                        track_info.discogs_artist_id = str(release["artist_id"])
+                    if release.get("released") and not track_info.date:
+                        track_info.date = normalize_date(str(release["released"]))
+                    elif release.get("year") and not track_info.date:
                         track_info.date = normalize_date(str(release["year"]))
+
                     genres_val = release.get("genres")
                     if isinstance(genres_val, list) and genres_val and not track_info.genre:
                         raw_genre = str(genres_val[0])
                         norm_genre = normalize_genre(raw_genre)
                         if norm_genre:
                             track_info.genre = norm_genre
+
+                    styles_val = release.get("styles")
+                    if isinstance(styles_val, list) and styles_val and not track_info.style:
+                        track_info.style = ", ".join(str(s) for s in styles_val[:3])
+
                     if release.get("country") and not track_info.release_country:
                         track_info.release_country = str(release["country"])
                     if release.get("label") and not track_info.label:
@@ -168,6 +177,31 @@ def process_single_track(
                         track_info.catalog_number = str(release["catalog_number"])
                     if release.get("barcode") and not track_info.barcode:
                         track_info.barcode = str(release["barcode"])
+                    if release.get("media") and not track_info.media:
+                        track_info.media = str(release["media"])
+                    if release.get("composer") and not track_info.composer:
+                        track_info.composer = str(release["composer"])
+
+                    # Check track-specific credits or album-level credits for producers and remixer
+                    t_credits = release.get("track_credits")
+                    t_spec = None
+                    if isinstance(t_credits, dict):
+                        track_key = str(track_info.track_number) if track_info.track_number else None
+                        if track_key and track_key in t_credits:
+                            t_spec = t_credits[track_key]
+                        elif track_info.title and track_info.title.lower() in t_credits:
+                            t_spec = t_credits[track_info.title.lower()]
+
+                    if isinstance(t_spec, dict):
+                        if t_spec.get("producers") and not track_info.producers:
+                            track_info.producers = str(t_spec["producers"])
+                        if t_spec.get("remixer") and not track_info.remixer:
+                            track_info.remixer = str(t_spec["remixer"])
+
+                    if release.get("producers") and not track_info.producers:
+                        track_info.producers = str(release["producers"])
+                    if release.get("remixer") and not track_info.remixer:
+                        track_info.remixer = str(release["remixer"])
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Discogs lookup failed for {track_info.title}: {e}")
 
@@ -237,7 +271,7 @@ def process_single_track(
         if cuesheet_content:
             track_info.cuesheet = cuesheet_content
 
-        # 7. Calculate BPM (Skip if already present unless force)
+        # 7. Calculate BPM
         if fetch_bpm and (track_info.bpm is None or force):
             try:
                 bpm = calculate_bpm(file_path)
