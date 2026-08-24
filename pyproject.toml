@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sonora"
 version = "0.1.0"
-description = "CLI tool for FLAC/MP3 music tagging, library auditing, and file organization"
+description = "CLI tool for FLAC/MP3 music tagging, library checking, and file organization"
 readme = "README.md"
 authors = [
     { name = "Daniel Radu" }

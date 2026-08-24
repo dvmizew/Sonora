@@ -1,6 +1,6 @@
 # Sonora
 
-Sonora is a CLI tool for music tagging, library auditing, metadata enrichment, tag backup/restore, and file organization.
+Sonora is a CLI tool for music tagging, metadata enrichment, tag backup/restore, and file organization.
 
 Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 
@@ -22,7 +22,7 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
   - 16kHz spectral cutoff detection (`sox`) to flag fake-lossless files.
   - Bit-exact audio stream MD5 checksum verification (`flac -t`).
 - **Library Tools**:
-  - Library auditor for corrupt FLACs, missing tags, bracket clutter, and missing lyrics.
+  - Library checker for corrupt FLACs, missing tags, bracket clutter, and missing lyrics.
   - File renamer and folder structure standardizer (`NN - Artist - Title.ext`).
   - Single track organizer (moves 1-2 track releases to `Singles/` and deduplicates against albums).
   - Streaming JSON tag backup and restore.
@@ -108,7 +108,7 @@ sonora tag /path/to/music --json tag_report.json
 - `--no-replaygain`: Disable ReplayGain 2.0 calculation.
 - `--no-lyrics`: Disable `.lrc` lyrics fetching.
 - `--no-art`: Disable cover art downloading.
-- `--json PATH`: Output path to save LLM-optimized tagging JSON report with statistics.
+- `--json PATH`: Output path to save JSON report.
 - `--lastfm-key KEY`: Last.fm API key (overrides `LASTFM_API_KEY` env).
 - `--acoustid-key KEY`: AcoustID API key (overrides `ACOUSTID_API_KEY` env).
 - `--discogs-token TOKEN`: Discogs personal token (overrides `DISCOGS_TOKEN` env).
@@ -116,21 +116,21 @@ sonora tag /path/to/music --json tag_report.json
 
 ---
 
-### `sonora audit`
-Audit music library for FLAC integrity, bracket corruption, missing tags, and fake-lossless audio:
+### `sonora check`
+Check music library for FLAC integrity, bracket corruption, missing tags, and fake-lossless audio:
 
 ```bash
-sonora audit /path/to/library
-sonora audit /path/to/library -t 16
-sonora audit /path/to/library --spectral
-sonora audit /path/to/library --json audit_report.json
+sonora check /path/to/library
+sonora check /path/to/library -t 16
+sonora check /path/to/library --spectral
+sonora check /path/to/library --json check_report.json
 ```
 
 **Options:**
-- `path`: Directory containing music library to audit (required).
+- `path`: Directory containing music library to check (required).
 - `-t, --threads N`: Number of parallel worker threads (default: `8`).
 - `--spectral`: Enable deep spectral cutoff analysis to flag fake-lossless audio (MP3 upscaled to FLAC).
-- `--json PATH`: Output path to save audit JSON report.
+- `--json PATH`: Output path to save check JSON report.
 
 ---
 

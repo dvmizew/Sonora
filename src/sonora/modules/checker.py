@@ -16,7 +16,7 @@ from sonora.core.constants import (
     SUPPORTED_EXTS,
 )
 from sonora.core.logger import LOG
-from sonora.core.models import AuditReport
+from sonora.core.models import CheckReport
 from sonora.core.utils import normalize_str
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
@@ -81,7 +81,7 @@ def check_brackets_corruption(name: str) -> list[str]:
     return issues
 
 
-def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
+def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
     issues: list[str] = []
     if not file_path.exists():
         return [f"File not found: {file_path}"]
@@ -110,7 +110,7 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             FLACNoHeaderError,
             MutagenError,
         ) as e:
-            LOG.debug(f"Mutagen picture audit skipped for {file_path}: {e}")
+            LOG.debug(f"Mutagen picture check skipped for {file_path}: {e}")
         if check_spectral:
             try:
                 is_fake, _, desc = detect_fake_lossless(file_path)
@@ -193,8 +193,8 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
     return issues
 
 
-def _audit_single_file(path: Path, check_spectral: bool) -> tuple[Path, list[str], str | None, str | None, int | None, int | None]:
-    file_issues = audit_file(path, check_spectral=check_spectral)
+def _check_single_file(path: Path, check_spectral: bool) -> tuple[Path, list[str], str | None, str | None, int | None, int | None]:
+    file_issues = check_file(path, check_spectral=check_spectral)
     album = None
     album_artist = None
     disc_no = None
@@ -212,20 +212,20 @@ def _audit_single_file(path: Path, check_spectral: bool) -> tuple[Path, list[str
     return path, file_issues, album, album_artist, disc_no, track_no
 
 
-def audit_library(
+def check_library(
     folder_path: Path,
     output_json: Path | None = None,
     check_spectral: bool = False,
     max_workers: int = 8,
-) -> AuditReport:
+) -> CheckReport:
     """
-    Scan an entire music library folder recursively, audit all audio files in parallel,
-    and generate an AuditReport dataclass.
+    Scan an entire music library folder recursively, check all audio files in parallel,
+    and generate a CheckReport dataclass.
     """
     if not folder_path.exists():
         raise FileNotFoundError(f"Directory not found: {folder_path}")
 
-    report = AuditReport(total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0)
+    report = CheckReport(total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0)
 
     from collections import defaultdict
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -252,7 +252,7 @@ def audit_library(
     executor = ThreadPoolExecutor(max_workers=max_workers)
     try:
         future_to_path = {
-            executor.submit(_audit_single_file, path, check_spectral): path
+            executor.submit(_check_single_file, path, check_spectral): path
             for path in files_to_process
         }
 
@@ -267,7 +267,7 @@ def audit_library(
             TimeRemainingColumn(),
             console=CONSOLE
         ) as progress:
-            task = progress.add_task("[cyan]Auditing library...", total=len(files_to_process))
+            task = progress.add_task("[cyan]Checking library...", total=len(files_to_process))
             
             for future in as_completed(future_to_path):
                 path, file_issues, album, album_artist, disc_no, track_no = future.result()
@@ -301,7 +301,7 @@ def audit_library(
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
-    # Folder-level checks after file auditing completes
+    # Folder-level checks after file checking completes
     for folder, albums in folder_albums.items():
         folder_issues = []
         if len(albums) > 1:
@@ -340,13 +340,13 @@ def audit_library(
         issue_count = len(report.issues)
 
         llm_summary = (
-            f"Sonora audited {total} files in '{folder_path}'. "
-            f"Audit status: {corrupt} corrupted files, {missing_meta} missing metadata, "
+            f"Sonora checked {total} files in '{folder_path}'. "
+            f"Check status: {corrupt} corrupted files, {missing_meta} missing metadata, "
             f"{missing_lrc} missing LRCs. Total files with issues: {issue_count}."
         )
 
         data = {
-            "schema": "audit_report_v1",
+            "schema": "check_report_v1",
             "generator": "Sonora",
             "llm_summary": llm_summary,
             "target_path": str(folder_path.resolve()),

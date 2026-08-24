@@ -131,8 +131,8 @@ class TrackInfo:
 
 
 @dataclass
-class AuditReport:
-    """Represents the audit results for a track or directory."""
+class CheckReport:
+    """Represents the validation/check results for a track or directory."""
 
     file_path: Path | None = None
     total_files: int = 0

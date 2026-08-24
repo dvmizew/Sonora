@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import unittest
 
 from sonora.cli.main import build_parser, main
-from sonora.core.models import AuditReport, TrackInfo
+from sonora.core.models import CheckReport, TrackInfo
 
 
 class TestCLIInterface(unittest.TestCase):
@@ -52,12 +52,12 @@ class TestCLIInterface(unittest.TestCase):
         self.assertIn("llm_summary", content)
         self.assertIn('"bpm_calculated_count": 1', content)
 
-    @patch("sonora.cli.main.audit_library")
-    def test_handle_audit_subcommand(self, mock_audit):
-        mock_audit.return_value = AuditReport(total_files=1, corrupt_files=0)
-        code = main(["audit", str(self.tmp_path)])
+    @patch("sonora.cli.main.check_library")
+    def test_handle_check_subcommand(self, mock_check):
+        mock_check.return_value = CheckReport(total_files=1, corrupt_files=0)
+        code = main(["check", str(self.tmp_path)])
         self.assertEqual(code, 0)
-        mock_audit.assert_called_once()
+        mock_check.assert_called_once()
 
     @patch("sonora.cli.main.rename_directory_files")
     def test_handle_rename_subcommand(self, mock_rename):

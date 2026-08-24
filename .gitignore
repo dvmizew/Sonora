@@ -33,7 +33,7 @@ MANIFEST
 .env
 *.env
 
-# Audit reports & CLI outputs
+# Check reports & CLI outputs
 report.json
 sonora_report.json
 

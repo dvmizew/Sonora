@@ -11,7 +11,7 @@ from sonora.core.constants import (
     USER_AGENT,
 )
 from sonora.core.logger import CONSOLE, LOG
-from sonora.core.models import AuditReport, TrackInfo
+from sonora.core.models import CheckReport, TrackInfo
 from sonora.core.utils import normalize_str, sanitize_name
 
 __all__ = [
@@ -27,7 +27,7 @@ __all__ = [
     "SOX_CMD",
     "SUPPORTED_EXTS",
     "USER_AGENT",
-    "AuditReport",
+    "CheckReport",
     "TrackInfo",
     "normalize_str",
     "sanitize_name",

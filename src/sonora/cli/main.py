@@ -21,8 +21,8 @@ HAS_DOTENV = importlib.util.find_spec("dotenv") is not None
 
 from sonora import __version__
 from sonora.core.logger import LOG
-from sonora.modules.auditor import audit_library
 from sonora.modules.backup import backup_library_tags, restore_library_tags
+from sonora.modules.checker import check_library
 from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import rename_directory_files
 from sonora.modules.tagger import tag_album_folder
@@ -31,7 +31,7 @@ from sonora.modules.tagger import tag_album_folder
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sonora",
-        description="Sonora - Music tagging, library auditing, and file organization",
+        description="Sonora - Music tagging, library checking, and file organization",
     )
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--dry-run", action="store_true", help="Simulate actions without modifying files")
@@ -50,11 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     tag_parser.add_argument("--discogs-token", type=str, default=None, help="Discogs personal user token")
     tag_parser.add_argument("--genius-token", type=str, default=None, help="Genius API token for song descriptions")
     tag_parser.add_argument("-t", "--threads", "-w", "--workers", type=int, default=4, dest="workers", help="Number of parallel worker threads (default: 4)")
-    audit_parser = subparsers.add_parser("audit", help="Audit music library for FLAC integrity, bracket corruption & missing LRCs")
-    audit_parser.add_argument("path", type=Path, help="Directory containing music library to audit")
-    audit_parser.add_argument("--json", type=Path, default=None, help="Output path to save audit JSON report")
-    audit_parser.add_argument("--spectral", action="store_true", help="Enable deep spectral cutoff analysis for fake lossless detection (slow)")
-    audit_parser.add_argument("-t", "--threads", "-w", "--workers", type=int, default=8, dest="workers", help="Number of parallel worker threads (default: 8)")
+    check_parser = subparsers.add_parser("check", help="Check music library for FLAC integrity, bracket corruption & missing LRCs")
+    check_parser.add_argument("path", type=Path, help="Directory containing music library to check")
+    check_parser.add_argument("--json", type=Path, default=None, help="Output path to save check JSON report")
+    check_parser.add_argument("--spectral", action="store_true", help="Enable deep spectral cutoff analysis for fake lossless detection (slow)")
+    check_parser.add_argument("-t", "--threads", "-w", "--workers", type=int, default=8, dest="workers", help="Number of parallel worker threads (default: 8)")
     rename_parser = subparsers.add_parser("rename", help="Rename audio files and sync .lrc metadata headers")
     rename_parser.add_argument("path", type=Path, help="Directory containing audio files to rename")
     organize_parser = subparsers.add_parser("organize", help="Organize single tracks into a Singles directory structure")
@@ -162,19 +162,19 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
     return 0
 
 
-def handle_audit(args: argparse.Namespace) -> int:
-    LOG.info(f"Auditing music library: [bold]{args.path}[/bold]")
-    report = audit_library(args.path, output_json=args.json, check_spectral=args.spectral, max_workers=args.workers)
-    LOG.success(f"Audit completed: {report.total_files} files scanned, {len(report.issues)} issues identified.")
+def handle_check(args: argparse.Namespace) -> int:
+    LOG.info(f"Checking music library: [bold]{args.path}[/bold]")
+    report = check_library(args.path, output_json=args.json, check_spectral=args.spectral, max_workers=args.workers)
+    LOG.success(f"Check completed: {report.total_files} files scanned, {len(report.issues)} issues identified.")
 
-    audit_rows = [
+    check_rows = [
         ("Total Files Scanned", str(report.total_files), None),
         ("Corrupt Files", str(report.corrupt_files), "red" if report.corrupt_files else "green"),
         ("Missing Metadata", str(report.missing_metadata), "yellow" if report.missing_metadata else "green"),
         ("Missing LRC Lyrics", str(report.missing_lrc), "yellow" if report.missing_lrc else "green"),
         ("Files with Issues", str(len(report.issues)), "red" if report.issues else "green"),
     ]
-    LOG.summary_table("Validation Summary", audit_rows)
+    LOG.summary_table("Validation Summary", check_rows)
     return 0
 
 
@@ -243,8 +243,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "tag":
             return handle_tag(args, options)
-        elif args.command == "audit":
-            return handle_audit(args)
+        elif args.command == "check":
+            return handle_check(args)
         elif args.command == "rename":
             return handle_rename(args, options)
         elif args.command == "organize":

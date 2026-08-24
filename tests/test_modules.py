@@ -1,5 +1,5 @@
 """
-Unit tests for Sonora core business logic modules (Auditor, Renamer, Tagger, Organizer).
+Unit tests for Sonora core business logic modules (Checker, Renamer, Tagger, Organizer).
 """
 
 import tempfile
@@ -11,8 +11,12 @@ from sonora.audio.art import check_image_similarity, process_artist_artwork
 from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.models import TrackInfo
-from sonora.modules.auditor import audit_file, audit_library, check_brackets_corruption
 from sonora.modules.backup import backup_library_tags, restore_library_tags
+from sonora.modules.checker import (
+    check_brackets_corruption,
+    check_file,
+    check_library,
+)
 from sonora.modules.organizer import is_single_folder, organize_library_singles
 from sonora.modules.renamer import (
     rename_directory_files,
@@ -203,14 +207,14 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue((target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists())
         self.assertTrue((target_dir / "Single Artist" / "Single Artist - Single Song.lrc").exists())
 
-    @patch("sonora.modules.auditor.read_track_metadata")
-    def test_audit_library(self, mock_read):
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library(self, mock_read):
         f1 = self.tmp_path / "song.wav"
         create_dummy_wav(f1)
 
         mock_read.return_value = TrackInfo(file_path=f1, artist="Artist [Official]", title="Title")
 
-        report = audit_library(self.tmp_path, output_json=self.tmp_path / "report.json")
+        report = check_library(self.tmp_path, output_json=self.tmp_path / "report.json")
         self.assertEqual(report.total_files, 1)
         self.assertTrue((self.tmp_path / "report.json").exists())
 
@@ -251,18 +255,18 @@ class TestCoreModules(unittest.TestCase):
         results = tag_album_folder(album_dir, max_workers=2)
         self.assertEqual(len(results), 2)
 
-    def test_audit_file_blacklisted_genre(self):
+    def test_check_file_blacklisted_genre(self):
         wav = self.tmp_path / "song.wav"
         create_dummy_wav(wav)
 
-        with patch("sonora.modules.auditor.read_track_metadata") as mock_read:
+        with patch("sonora.modules.checker.read_track_metadata") as mock_read:
             mock_read.return_value = TrackInfo(
                 file_path=wav,
                 artist="Artist",
                 title="Title",
                 genre="Top 40 Pop"
             )
-            issues = audit_file(wav)
+            issues = check_file(wav)
             self.assertTrue(any("Blacklisted genre" in issue for issue in issues))
 
     def test_is_single_folder_empty_dir(self):
@@ -270,9 +274,9 @@ class TestCoreModules(unittest.TestCase):
         empty_dir.mkdir()
         self.assertFalse(is_single_folder(empty_dir))
 
-    def test_audit_library_nonexistent_directory(self):
+    def test_check_library_nonexistent_directory(self):
         with self.assertRaises(FileNotFoundError):
-            audit_library(self.tmp_path / "nonexistent_dir_999")
+            check_library(self.tmp_path / "nonexistent_dir_999")
 
     def test_tag_album_folder_nonexistent_directory(self):
         with self.assertRaises(FileNotFoundError):
@@ -346,10 +350,10 @@ class TestCoreModules(unittest.TestCase):
         mock_acoustid.assert_called_once()
         mock_discogs.assert_called_once()
 
-    @patch("sonora.modules.auditor.detect_fake_lossless")
-    @patch("sonora.modules.auditor.verify_flac_checksum")
-    @patch("sonora.modules.auditor.read_track_metadata")
-    def test_audit_library_spectral_check_option(self, mock_read, mock_checksum, mock_spectral):
+    @patch("sonora.modules.checker.detect_fake_lossless")
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_spectral_check_option(self, mock_read, mock_checksum, mock_spectral):
         flac_file = self.tmp_path / "song.flac"
         flac_file.write_bytes(b"FLAC dummy content")
 
@@ -357,7 +361,7 @@ class TestCoreModules(unittest.TestCase):
         mock_read.return_value = TrackInfo(file_path=flac_file, artist="Artist", title="Title")
         mock_spectral.return_value = (True, 0.0001, "Brickwall spectral cutoff detected at ~16-18kHz (likely upscaled 128-192kbps MP3 fake lossless)")
 
-        report = audit_library(self.tmp_path, check_spectral=True)
+        report = check_library(self.tmp_path, check_spectral=True)
         self.assertTrue(any("fake lossless" in issue.lower() for issues in report.issues.values() for issue in issues))
         mock_spectral.assert_called_once()
 

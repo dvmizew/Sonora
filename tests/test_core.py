@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
 
-from sonora.core.models import AuditReport, TrackInfo
+from sonora.core.models import CheckReport, TrackInfo
 from sonora.core.utils import normalize_str, sanitize_name
 
 
@@ -55,8 +55,8 @@ class TestCoreModels(unittest.TestCase):
         self.assertEqual(data["bpm"], 120.0)
 
 
-    def test_audit_report_initialization(self):
-        report = AuditReport(file_path=Path("/music/1.flac"), is_valid=True)
+    def test_check_report_initialization(self):
+        report = CheckReport(file_path=Path("/music/1.flac"), is_valid=True)
         self.assertTrue(report.is_valid)
         self.assertEqual(report.missing_tags, [])
 
