@@ -5,8 +5,7 @@ from pathlib import Path
 
 import orjson
 from mutagen._util import MutagenError
-from mutagen.flac import FLAC as MutagenFLAC
-from mutagen.flac import FLACNoHeaderError
+from mutagen.flac import FLAC, FLACNoHeaderError
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -121,14 +120,14 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 issues.append(
                     "FLAC audio stream MD5 checksum verification failed (corrupted FLAC)."
                 )
-        except (OSError, ValueError, RuntimeError) as e:
-            issues.append(f"Checksum check failed: {e}")
+        except (OSError, ValueError, RuntimeError) as error:
+            issues.append(f"Checksum check failed: {error}")
 
         try:
-            audio_flac = MutagenFLAC(str(file_path))
-            for idx, p in enumerate(audio_flac.pictures):
-                if len(p.data) == 0:
-                    issues.append(f"Corrupt 0-byte picture block at index {idx}.")
+            audio_flac = FLAC(str(file_path))
+            for index, picture in enumerate(audio_flac.pictures):
+                if len(picture.data) == 0:
+                    issues.append(f"Corrupt 0-byte picture block at index {index}.")
         except (
             OSError,
             ValueError,
@@ -138,24 +137,25 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             TypeError,
             FLACNoHeaderError,
             MutagenError,
-        ) as e:
-            LOG.debug(f"Mutagen picture check skipped for {file_path}: {e}")
+        ) as error:
+            LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
         if check_spectral:
             try:
-                is_fake, _, desc = detect_fake_lossless(file_path)
+                is_fake, _, description = detect_fake_lossless(file_path)
                 if is_fake:
                     issues.append(
-                        desc or "Possible fake lossless (spectral cutoff below 16kHz)."
+                        description or "Possible fake lossless (spectral cutoff below 16kHz)."
                     )
-            except (OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"Spectral analysis failed for {file_path}: {e}")
+            except (OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
     try:
         track = read_track_metadata(file_path)
         issues.extend(check_brackets_corruption(track.artist))
         issues.extend(check_brackets_corruption(track.title))
 
         if track.genre and any(
-            normalize_str(bl) in normalize_str(track.genre) for bl in GENRE_BLACKLIST
+            normalize_str(blacklisted_genre) in normalize_str(track.genre)
+            for blacklisted_genre in GENRE_BLACKLIST
         ):
             issues.append(f"Blacklisted genre tag: '{track.genre}'")
         if track.artist == "Unknown Artist":
@@ -233,12 +233,15 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
         # Check for unsplit artists (e.g. Artist A & Artist B)
         delimiters = [r"\s&\s", r"\s×\s", r"\sfeat\.?\s", r"\sft\.?\s"]
-        is_protected = any(p.lower() in track.artist.lower() for p in PROTECTED_ARTISTS)
+        is_protected = any(
+            protected_artist.lower() in track.artist.lower()
+            for protected_artist in PROTECTED_ARTISTS
+        )
         if not is_protected:
-            for d in delimiters:
-                if re.search(d, track.artist, re.IGNORECASE):
+            for delimiter in delimiters:
+                if re.search(delimiter, track.artist, re.IGNORECASE):
                     issues.append(
-                        f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{d.strip()}')"
+                        f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{delimiter.strip()}')"
                     )
 
         # Check Title feature duplicate markers
@@ -261,8 +264,8 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"Sub-standard lossy bitrate: {round(track.bitrate / 1000)} kbps (Recommended: 320 kbps)"
             )
 
-    except (OSError, ValueError, RuntimeError) as e:
-        issues.append(f"Metadata read error: {e}")
+    except (OSError, ValueError, RuntimeError) as error:
+        issues.append(f"Metadata read error: {error}")
     lrc_path = file_path.with_suffix(".lrc")
     if not lrc_path.exists():
         issues.append("Missing synchronized lyrics (.lrc) file.")
@@ -276,19 +279,19 @@ def _check_single_file(
     file_issues = check_file(path, check_spectral=check_spectral)
     album = None
     album_artist = None
-    disc_no = None
-    track_no = None
+    disc_number = None
+    track_number = None
     try:
         track_info = read_track_metadata(path)
         if track_info.album != "Unknown Album":
             album = track_info.album
         if track_info.album_artist:
             album_artist = track_info.album_artist
-        disc_no = track_info.disc_number or 1
-        track_no = track_info.track_number
+        disc_number = track_info.disc_number or 1
+        track_number = track_info.track_number
     except (OSError, ValueError, RuntimeError):
         pass
-    return path, file_issues, album, album_artist, disc_no, track_no
+    return path, file_issues, album, album_artist, disc_number, track_number
 
 
 def check_library(
@@ -305,9 +308,9 @@ def check_library(
     )
 
     files_to_process = [
-        p
-        for p in folder_path.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+        path
+        for path in folder_path.rglob("*")
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
     ]
 
     # Map for folder-level checks
@@ -340,9 +343,14 @@ def check_library(
             )
 
             for future in as_completed(future_to_path):
-                path, file_issues, album, album_artist, disc_no, track_no = (
-                    future.result()
-                )
+                (
+                    path,
+                    file_issues,
+                    album,
+                    album_artist,
+                    disc_number,
+                    track_number,
+                ) = future.result()
                 report.total_files += 1
                 folder = path.parent
 
@@ -350,9 +358,11 @@ def check_library(
                     folder_albums[folder].add(album)
                 if album_artist:
                     folder_album_artists[folder].add(album_artist)
-                if track_no is not None:
-                    disc = disc_no or 1
-                    folder_tracks_found[folder][(disc, track_no)].append(path.name)
+                if track_number is not None:
+                    disc = disc_number or 1
+                    folder_tracks_found[folder][(disc, track_number)].append(
+                        path.name
+                    )
 
                 if file_issues:
                     report.issues[str(path)] = file_issues
@@ -392,26 +402,33 @@ def check_library(
             folder_issues.append(f"Inconsistent ALBUM name in folder: {albums}")
         album_artists = folder_album_artists.get(folder, set())
         if len(album_artists) > 1:
-            folder_issues.append(f"Inconsistent ALBUMARTIST in folder: {album_artists}")
+            folder_issues.append(
+                f"Inconsistent ALBUMARTIST in folder: {album_artists}"
+            )
 
         tracks_found = folder_tracks_found.get(folder, {})
-        for (dn, tn), f_list in tracks_found.items():
-            if len(f_list) > 1:
+        for (
+            disc_idx,
+            track_idx,
+        ), found_files in tracks_found.items():
+            if len(found_files) > 1:
                 folder_issues.append(
-                    f"Duplicate track number {tn} (Disc {dn}) found in files: {f_list}"
+                    f"Duplicate track number {track_idx} (Disc {disc_idx}) found in files: {found_files}"
                 )
 
         discs: dict[int, list[int]] = defaultdict(list)
-        for dn, tn in tracks_found:
-            discs[dn].append(tn)
-        for dn, tns in discs.items():
-            tns.sort()
-            if tns:
-                max_t = max(tns)
-                missing = [t for t in range(1, max_t + 1) if t not in tns]
+        for disc_idx, track_idx in tracks_found:
+            discs[disc_idx].append(track_idx)
+        for disc_idx, track_numbers in discs.items():
+            track_numbers.sort()
+            if track_numbers:
+                max_track = max(track_numbers)
+                missing = [
+                    t for t in range(1, max_track + 1) if t not in track_numbers
+                ]
                 if missing:
                     folder_issues.append(
-                        f"Missing track numbers in sequence for Disc {dn}: {missing}"
+                        f"Missing track numbers in sequence for Disc {disc_idx}: {missing}"
                     )
 
         if folder_issues:

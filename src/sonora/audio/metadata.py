@@ -22,10 +22,12 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             tags = song.tags
 
             def get_tag(*keys: str) -> str | None:
-                for k in keys:
-                    vals = tags.get(k) or tags.get(k.upper()) or tags.get(k.lower())
-                    if vals and len(vals) > 0 and vals[0] is not None:
-                        return str(vals[0]).strip()
+                for key in keys:
+                    tag_values = (
+                        tags.get(key) or tags.get(key.upper()) or tags.get(key.lower())
+                    )
+                    if tag_values and len(tag_values) > 0 and tag_values[0] is not None:
+                        return str(tag_values[0]).strip()
                 return None
 
             artist = get_tag("ARTIST", "TPE1", "AUTHOR") or "Unknown Artist"
@@ -44,16 +46,16 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             if raw_track:
                 try:
                     track_number = int(str(raw_track).split("/")[0])
-                except ValueError as e:
-                    LOG.debug(f"Failed to parse track number '{raw_track}': {e}")
+                except ValueError as error:
+                    LOG.debug(f"Failed to parse track number '{raw_track}': {error}")
 
             raw_bpm = get_tag("BPM", "TBPM", "WM/BEATSPERMINUTE")
             bpm = None
             if raw_bpm:
                 try:
                     bpm = float(raw_bpm)
-                except ValueError as e:
-                    LOG.debug(f"Failed to parse BPM '{raw_bpm}': {e}")
+                except ValueError as error:
+                    LOG.debug(f"Failed to parse BPM '{raw_bpm}': {error}")
 
             raw_disc = get_tag("DISCNUMBER", "TPOS", "DISC")
             disc_number = 1
@@ -63,58 +65,100 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 except ValueError:
                     disc_number = 1
 
-            raw_rg_gain = get_tag("REPLAYGAIN_TRACK_GAIN", "TXXX:REPLAYGAIN_TRACK_GAIN")
-            rg_gain = None
-            if raw_rg_gain:
+            raw_replaygain_gain = get_tag(
+                "REPLAYGAIN_TRACK_GAIN", "TXXX:REPLAYGAIN_TRACK_GAIN"
+            )
+            replaygain_track_gain = None
+            if raw_replaygain_gain:
                 try:
-                    rg_gain = float(str(raw_rg_gain).replace(" dB", "").strip())
-                except ValueError as e:
-                    LOG.debug(f"Failed to parse ReplayGain gain '{raw_rg_gain}': {e}")
+                    replaygain_track_gain = float(
+                        str(raw_replaygain_gain).replace(" dB", "").strip()
+                    )
+                except ValueError as error:
+                    LOG.debug(
+                        f"Failed to parse ReplayGain gain '{raw_replaygain_gain}': {error}"
+                    )
 
-            raw_rg_peak = get_tag("REPLAYGAIN_TRACK_PEAK", "TXXX:REPLAYGAIN_TRACK_PEAK")
-            rg_peak = None
-            if raw_rg_peak:
+            raw_replaygain_peak = get_tag(
+                "REPLAYGAIN_TRACK_PEAK", "TXXX:REPLAYGAIN_TRACK_PEAK"
+            )
+            replaygain_track_peak = None
+            if raw_replaygain_peak:
                 try:
-                    rg_peak = float(str(raw_rg_peak).strip())
-                except ValueError as e:
-                    LOG.debug(f"Failed to parse ReplayGain peak '{raw_rg_peak}': {e}")
+                    replaygain_track_peak = float(str(raw_replaygain_peak).strip())
+                except ValueError as error:
+                    LOG.debug(
+                        f"Failed to parse ReplayGain peak '{raw_replaygain_peak}': {error}"
+                    )
+
+            raw_replaygain_album_gain = get_tag(
+                "REPLAYGAIN_ALBUM_GAIN", "TXXX:REPLAYGAIN_ALBUM_GAIN"
+            )
+            replaygain_album_gain = None
+            if raw_replaygain_album_gain:
+                try:
+                    replaygain_album_gain = float(
+                        str(raw_replaygain_album_gain).replace(" dB", "").strip()
+                    )
+                except ValueError as error:
+                    LOG.debug(
+                        f"Failed to parse ReplayGain album gain '{raw_replaygain_album_gain}': {error}"
+                    )
+
+            raw_replaygain_album_peak = get_tag(
+                "REPLAYGAIN_ALBUM_PEAK", "TXXX:REPLAYGAIN_ALBUM_PEAK"
+            )
+            replaygain_album_peak = None
+            if raw_replaygain_album_peak:
+                try:
+                    replaygain_album_peak = float(
+                        str(raw_replaygain_album_peak).strip()
+                    )
+                except ValueError as error:
+                    LOG.debug(
+                        f"Failed to parse ReplayGain album peak '{raw_replaygain_album_peak}': {error}"
+                    )
 
             sample_rate = song.sampleRate
             bitrate = song.bitrate
             channels = song.channels
 
-            mb_track = get_tag(
+            musicbrainz_track_id = get_tag(
                 "MUSICBRAINZ_TRACKID",
                 "MUSICBRAINZ TRACK ID",
                 "TXXX:MUSICBRAINZ TRACK ID",
             )
-            mb_album = get_tag(
+            musicbrainz_album_id = get_tag(
                 "MUSICBRAINZ_ALBUMID",
                 "MUSICBRAINZ ALBUM ID",
                 "TXXX:MUSICBRAINZ ALBUM ID",
             )
-            mb_rg = get_tag("MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ RELEASEGROUP ID")
-            mb_art = get_tag("MUSICBRAINZ_ARTISTID", "MUSICBRAINZ ARTIST ID")
-            mb_work = get_tag("MUSICBRAINZ_WORKID")
+            musicbrainz_release_group_id = get_tag(
+                "MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ RELEASEGROUP ID"
+            )
+            musicbrainz_artist_id = get_tag(
+                "MUSICBRAINZ_ARTISTID", "MUSICBRAINZ ARTIST ID"
+            )
+            musicbrainz_work_id = get_tag("MUSICBRAINZ_WORKID")
             acoustid_id = get_tag("ACOUSTID_ID", "ACOUSTID ID")
-            discogs_id = get_tag("DISCOGS_RELEASE_ID", "DISCOGS RELEASE ID")
+            discogs_release_id = get_tag("DISCOGS_RELEASE_ID", "DISCOGS RELEASE ID")
             itunes_trackid = get_tag("ITUNESTRACKID", "ITUNES_TRACK_ID")
             itunes_collectionid = get_tag("ITUNESCOLLECTIONID", "ITUNES_COLLECTION_ID")
             itunes_artistid = get_tag("ITUNESARTISTID", "ITUNES_ARTIST_ID")
             album_artist_sort = get_tag("ALBUMARTISTSORT")
             artist_sort = get_tag("ARTISTSORT")
 
-            raw_tot_tracks = get_tag("TRACKTOTAL", "TOTALTRACKS")
+            raw_total_tracks = get_tag("TRACKTOTAL", "TOTALTRACKS")
             total_tracks = (
-                int(raw_tot_tracks)
-                if raw_tot_tracks and raw_tot_tracks.isdigit()
+                int(raw_total_tracks)
+                if raw_total_tracks and raw_total_tracks.isdigit()
                 else None
             )
 
-            raw_tot_discs = get_tag("DISCTOTAL", "TOTALDISCS")
+            raw_total_discs = get_tag("DISCTOTAL", "TOTALDISCS")
             total_discs = (
-                int(raw_tot_discs)
-                if raw_tot_discs and raw_tot_discs.isdigit()
+                int(raw_total_discs)
+                if raw_total_discs and raw_total_discs.isdigit()
                 else None
             )
 
@@ -127,27 +171,27 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             media = get_tag("MEDIA")
             comment = get_tag("COMMENT", "COMM")
             advisory = get_tag("ITUNESADVISORY", "ADVISORY")
-            orig_date = get_tag("ORIGINALDATE", "ORIGINALYEAR")
+            original_date = get_tag("ORIGINALDATE", "ORIGINALYEAR")
             cuesheet = get_tag("CUESHEET")
 
             composer = get_tag("COMPOSER", "TCOM")
             lyricist = get_tag("LYRICIST", "TEXT", "WRITER")
             remixer = get_tag("REMIXER", "TPE4")
             initial_key = get_tag("INITIALKEY", "KEY", "TKEY")
-            copyright_val = get_tag("COPYRIGHT", "TCOP")
-            raw_comp = get_tag("COMPILATION", "TCMP")
+            copyright_text = get_tag("COPYRIGHT", "TCOP")
+            raw_compilation = get_tag("COMPILATION", "TCMP")
             compilation = (
                 True
-                if raw_comp in ("1", "true", "True")
+                if raw_compilation in ("1", "true", "True")
                 else False
-                if raw_comp in ("0", "false", "False")
+                if raw_compilation in ("0", "false", "False")
                 else None
             )
             spotify_trackid = get_tag(
                 "SPOTIFY_TRACK_ID", "SPOTIFY_ID", "TXXX:SPOTIFY_TRACK_ID"
             )
 
-            mb_album_artist = get_tag(
+            musicbrainz_album_artist_id = get_tag(
                 "MUSICBRAINZ_ALBUMARTISTID", "MUSICBRAINZ ALBUM ARTIST ID"
             )
             discogs_artist_id = get_tag("DISCOGS_ARTIST_ID", "DISCOGS ARTIST ID")
@@ -157,22 +201,30 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             style = get_tag("STYLE")
 
             disambiguation = get_tag("DISAMBIGUATION", "TXXX:DISAMBIGUATION")
-            raw_rat = get_tag("RATING", "POPM")
-            rating = float(raw_rat) if raw_rat else None
+            raw_rating = get_tag("RATING", "POPM")
+            rating = float(raw_rating) if raw_rating else None
             featured_artists = get_tag("FEATURED_ARTISTS", "TXXX:FEATURED_ARTISTS")
             producers = get_tag("PRODUCERS", "TXXX:PRODUCERS")
             genius_song_id = get_tag("GENIUS_SONG_ID", "TXXX:GENIUS_SONG_ID")
-            raw_list = get_tag("LISTENERS", "TXXX:LASTFM_LISTENERS")
-            listeners = int(raw_list) if raw_list and raw_list.isdigit() else None
-            raw_play = get_tag("PLAYCOUNT", "TXXX:LASTFM_PLAYCOUNT")
-            playcount = int(raw_play) if raw_play and raw_play.isdigit() else None
+            raw_listeners = get_tag("LISTENERS", "TXXX:LASTFM_LISTENERS")
+            listeners = (
+                int(raw_listeners)
+                if raw_listeners and raw_listeners.isdigit()
+                else None
+            )
+            raw_playcount = get_tag("PLAYCOUNT", "TXXX:LASTFM_PLAYCOUNT")
+            playcount = (
+                int(raw_playcount)
+                if raw_playcount and raw_playcount.isdigit()
+                else None
+            )
             music_video_url = get_tag("MUSIC_VIDEO_URL", "TXXX:MUSIC_VIDEO_URL")
 
-            art_w, art_h = None, None
+            art_width, art_height = None, None
             if hasattr(song, "pictures") and song.pictures and len(song.pictures) > 0:
-                p0 = song.pictures[0]
-                art_w = getattr(p0, "width", None)
-                art_h = getattr(p0, "height", None)
+                first_picture = song.pictures[0]
+                art_width = getattr(first_picture, "width", None)
+                art_height = getattr(first_picture, "height", None)
 
             return TrackInfo(
                 file_path=file_path,
@@ -186,18 +238,20 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 genre=genre,
                 isrc=isrc,
                 bpm=bpm,
-                replaygain_track_gain=rg_gain,
-                replaygain_track_peak=rg_peak,
+                replaygain_track_gain=replaygain_track_gain,
+                replaygain_track_peak=replaygain_track_peak,
+                replaygain_album_gain=replaygain_album_gain,
+                replaygain_album_peak=replaygain_album_peak,
                 sample_rate=sample_rate,
                 bitrate=bitrate,
                 channels=channels,
-                musicbrainz_trackid=mb_track,
-                musicbrainz_albumid=mb_album,
-                musicbrainz_releasegroupid=mb_rg,
-                musicbrainz_artistid=mb_art,
-                musicbrainz_workid=mb_work,
+                musicbrainz_trackid=musicbrainz_track_id,
+                musicbrainz_albumid=musicbrainz_album_id,
+                musicbrainz_releasegroupid=musicbrainz_release_group_id,
+                musicbrainz_artistid=musicbrainz_artist_id,
+                musicbrainz_workid=musicbrainz_work_id,
                 acoustid_id=acoustid_id,
-                discogs_release_id=discogs_id,
+                discogs_release_id=discogs_release_id,
                 itunes_trackid=itunes_trackid,
                 itunes_collectionid=itunes_collectionid,
                 itunes_artistid=itunes_artistid,
@@ -214,16 +268,16 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 media=media,
                 comment=comment,
                 advisory=advisory,
-                original_date=orig_date,
+                original_date=original_date,
                 cuesheet=cuesheet,
                 composer=composer,
                 lyricist=lyricist,
                 remixer=remixer,
                 initial_key=initial_key,
-                copyright=copyright_val,
+                copyright=copyright_text,
                 compilation=compilation,
                 spotify_trackid=spotify_trackid,
-                musicbrainz_albumartistid=mb_album_artist,
+                musicbrainz_albumartistid=musicbrainz_album_artist_id,
                 discogs_artist_id=discogs_artist_id,
                 language=language,
                 script=script,
@@ -237,13 +291,15 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 listeners=listeners,
                 playcount=playcount,
                 music_video_url=music_video_url,
-                art_width=art_w,
-                art_height=art_h,
+                art_width=art_width,
+                art_height=art_height,
             )
     except (RuntimeError, ValueError, FileNotFoundError):
         raise
-    except (OSError, KeyError) as e:
-        raise RuntimeError(f"Failed to read metadata for {file_path}: {e}") from e
+    except (OSError, KeyError) as error:
+        raise RuntimeError(
+            f"Failed to read metadata for {file_path}: {error}"
+        ) from error
 
 
 def write_track_metadata(
@@ -265,29 +321,33 @@ def write_track_metadata(
             if track_info.album_artist_sort:
                 song.tags["ALBUMARTISTSORT"] = [track_info.album_artist_sort]
 
-            tot_tr = str(track_info.total_tracks) if track_info.total_tracks else None
+            total_tracks_str = (
+                str(track_info.total_tracks) if track_info.total_tracks else None
+            )
             if track_info.track_number is not None:
-                tr_str = (
-                    f"{track_info.track_number}/{tot_tr}"
-                    if tot_tr
+                track_number_str = (
+                    f"{track_info.track_number}/{total_tracks_str}"
+                    if total_tracks_str
                     else str(track_info.track_number)
                 )
-                song.tags["TRACKNUMBER"] = [tr_str]
-            if tot_tr:
-                song.tags["TRACKTOTAL"] = [tot_tr]
-                song.tags["TOTALTRACKS"] = [tot_tr]
+                song.tags["TRACKNUMBER"] = [track_number_str]
+            if total_tracks_str:
+                song.tags["TRACKTOTAL"] = [total_tracks_str]
+                song.tags["TOTALTRACKS"] = [total_tracks_str]
 
-            tot_ds = str(track_info.total_discs) if track_info.total_discs else None
+            total_discs_str = (
+                str(track_info.total_discs) if track_info.total_discs else None
+            )
             if track_info.disc_number is not None:
-                ds_str = (
-                    f"{track_info.disc_number}/{tot_ds}"
-                    if tot_ds
+                disc_number_str = (
+                    f"{track_info.disc_number}/{total_discs_str}"
+                    if total_discs_str
                     else str(track_info.disc_number)
                 )
-                song.tags["DISCNUMBER"] = [ds_str]
-            if tot_ds:
-                song.tags["DISCTOTAL"] = [tot_ds]
-                song.tags["TOTALDISCS"] = [tot_ds]
+                song.tags["DISCNUMBER"] = [disc_number_str]
+            if total_discs_str:
+                song.tags["DISCTOTAL"] = [total_discs_str]
+                song.tags["TOTALDISCS"] = [total_discs_str]
 
             if track_info.date:
                 song.tags["DATE"] = [track_info.date]
@@ -304,6 +364,14 @@ def write_track_metadata(
             if track_info.replaygain_track_peak is not None:
                 song.tags["REPLAYGAIN_TRACK_PEAK"] = [
                     f"{track_info.replaygain_track_peak:.6f}"
+                ]
+            if track_info.replaygain_album_gain is not None:
+                song.tags["REPLAYGAIN_ALBUM_GAIN"] = [
+                    f"{track_info.replaygain_album_gain:+.2f} dB"
+                ]
+            if track_info.replaygain_album_peak is not None:
+                song.tags["REPLAYGAIN_ALBUM_PEAK"] = [
+                    f"{track_info.replaygain_album_peak:.6f}"
                 ]
 
             if is_valid_uuid(track_info.musicbrainz_trackid):
@@ -399,28 +467,27 @@ def write_track_metadata(
                 song.tags["MUSIC_VIDEO_URL"] = [track_info.music_video_url]
 
             if cover_art_path and cover_art_path.exists():
-                with open(cover_art_path, "rb") as f:
-                    image_data = f.read()
-                mime = (
+                image_data = cover_art_path.read_bytes()
+                mime_type = (
                     "image/jpeg"
                     if cover_art_path.suffix.lower() in [".jpg", ".jpeg"]
                     else "image/png"
                 )
                 if hasattr(song, "pictures"):
-                    pic = taglib.Picture(
+                    cover_picture = taglib.Picture(
                         data=image_data,
-                        mime_type=mime,
+                        mime_type=mime_type,
                         description="Cover",
                         picture_type="Front Cover",
                     )
-                    song.pictures = [pic]
+                    song.pictures = [cover_picture]
 
             unsaved = song.save()
             if unsaved:
                 LOG.debug(f"TagLib unsaved tags for {track_info.file_path}: {unsaved}")
     except (RuntimeError, ValueError, FileNotFoundError):
         raise
-    except (OSError, KeyError) as e:
+    except (OSError, KeyError) as error:
         raise RuntimeError(
-            f"Failed to write metadata for {track_info.file_path}: {e}"
-        ) from e
+            f"Failed to write metadata for {track_info.file_path}: {error}"
+        ) from error

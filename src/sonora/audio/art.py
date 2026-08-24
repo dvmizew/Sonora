@@ -14,30 +14,32 @@ from sonora.services.musicbrainz import fetch_cover_art_archive_url
 from sonora.services.theaudiodb import fetch_artist_images
 
 
-def _load_normalized_image(data: bytes) -> Image.Image:
+def _load_normalized_image(image_bytes: bytes) -> Image.Image:
     """
     Decodes an image from bytes, forces full memory loading, applies EXIF transposition,
     and flattens transparency channels (RGBA, LA, P) onto an opaque white RGB canvas.
     """
-    with Image.open(io.BytesIO(data)) as raw_img:
-        raw_img.load()
-        img: Image.Image = ImageOps.exif_transpose(raw_img) or raw_img.copy()
+    with Image.open(io.BytesIO(image_bytes)) as raw_image:
+        raw_image.load()
+        image: Image.Image = (
+            ImageOps.exif_transpose(raw_image) or raw_image.copy()
+        )
 
-    if img.mode in ("RGBA", "LA", "P"):
-        rgba = img.convert("RGBA")
+    if image.mode in ("RGBA", "LA", "P"):
+        rgba = image.convert("RGBA")
         background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
         background.alpha_composite(rgba)
         return background.convert("RGB")
 
-    if img.mode != "RGB":
-        return img.convert("RGB")
+    if image.mode != "RGB":
+        return image.convert("RGB")
 
-    return img
+    return image
 
 
 def check_image_similarity(
-    data1: bytes,
-    data2: bytes,
+    first_image_bytes: bytes,
+    second_image_bytes: bytes,
     max_distance: int = 12,
     threshold: float | None = None,
 ) -> bool:
@@ -46,21 +48,21 @@ def check_image_similarity(
     Applies EXIF auto-rotation and alpha channel composite normalization.
     A Hamming distance <= max_distance (default: 12 out of 64 bits, ~81% visual similarity) indicates a match.
     """
-    if not (data1 and data2):
+    if not (first_image_bytes and second_image_bytes):
         return False
     if threshold is not None:
         max_distance = round((1.0 - threshold) * 64)
 
     try:
-        img1 = _load_normalized_image(data1)
-        img2 = _load_normalized_image(data2)
+        first_image = _load_normalized_image(first_image_bytes)
+        second_image = _load_normalized_image(second_image_bytes)
 
-        hash1 = imagehash.phash(img1)
-        hash2 = imagehash.phash(img2)
+        first_hash = imagehash.phash(first_image)
+        second_hash = imagehash.phash(second_image)
 
-        return (hash1 - hash2) <= max_distance
-    except (OSError, ValueError, UnidentifiedImageError) as e:
-        LOG.debug(f"Perceptual image comparison failed: {e}")
+        return (first_hash - second_hash) <= max_distance
+    except (OSError, ValueError, UnidentifiedImageError) as error:
+        LOG.debug(f"Perceptual image comparison failed: {error}")
         return True  # Fallback to True to allow upgrade if something fails
 
 
@@ -82,7 +84,7 @@ def process_album_cover_art(
     folder_path: Path,
     artist: str,
     album: str,
-    mb_album_id: str | None = None,
+    musicbrainz_album_id: str | None = None,
     force: bool = False,
     dry_run: bool = False,
 ) -> Path | None:
@@ -91,71 +93,83 @@ def process_album_cover_art(
     Tries iTunes API first, then Cover Art Archive fallback.
     Returns Path to cover.jpg if present/downloaded, else None.
     """
-    cover_jpg = folder_path / "cover.jpg"
+    cover_image_path = folder_path / "cover.jpg"
     with _get_cover_lock(folder_path):
-        art_downloaded = (
-            cover_jpg.exists() and cover_jpg.stat().st_size > 0 and not force
+        artwork_downloaded = (
+            cover_image_path.exists()
+            and cover_image_path.stat().st_size > 0
+            and not force
         )
-        if not art_downloaded and not dry_run:
-            cover_jpg.touch()
+        if not artwork_downloaded and not dry_run:
+            cover_image_path.touch()
 
-    if not art_downloaded:
-        art_url = None
-        if mb_album_id:
-            art_url = fetch_cover_art_archive_url(mb_album_id)
-        if not art_url:
-            art_url = fetch_itunes_cover_art_url(artist, album)
-        if not art_url:
-            art_url = fetch_deezer_cover_art_url(artist, album)
+    if not artwork_downloaded:
+        artwork_url = None
+        if musicbrainz_album_id:
+            artwork_url = fetch_cover_art_archive_url(musicbrainz_album_id)
+        if not artwork_url:
+            artwork_url = fetch_itunes_cover_art_url(artist, album)
+        if not artwork_url:
+            artwork_url = fetch_deezer_cover_art_url(artist, album)
 
-        if art_url:
+        if artwork_url:
             try:
-                resp = SESSION.get(art_url, timeout=15)
-                resp.raise_for_status()
-                new_art_bytes = resp.content
+                response = SESSION.get(artwork_url, timeout=15)
+                response.raise_for_status()
+                new_artwork_bytes = response.content
 
                 with _get_cover_lock(folder_path):
                     if not dry_run:
                         existing_bytes = (
-                            cover_jpg.read_bytes()
-                            if (cover_jpg.exists() and cover_jpg.stat().st_size > 0)
+                            cover_image_path.read_bytes()
+                            if (
+                                cover_image_path.exists()
+                                and cover_image_path.stat().st_size > 0
+                            )
                             else None
                         )
                         if (
                             existing_bytes
                             and not force
                             and not check_image_similarity(
-                                existing_bytes, new_art_bytes
+                                existing_bytes, new_artwork_bytes
                             )
                         ):
                             LOG.info(
                                 "   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch"
                             )
                         else:
-                            cover_jpg.write_bytes(new_art_bytes)
+                            cover_image_path.write_bytes(new_artwork_bytes)
                             LOG.info("   ∟ 🖼️  Downloaded Cover Art")
                     else:
                         LOG.info(
-                            f"[DRY-RUN] Would download cover art to {cover_jpg.name}"
+                            f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
                         )
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"Cover art download failed: {e}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"Cover art download failed: {error}")
                 with _get_cover_lock(folder_path):
                     if (
                         not dry_run
-                        and cover_jpg.exists()
-                        and cover_jpg.stat().st_size == 0
+                        and cover_image_path.exists()
+                        and cover_image_path.stat().st_size == 0
                     ):
-                        cover_jpg.unlink(missing_ok=True)
+                        cover_image_path.unlink(missing_ok=True)
         else:
             with _get_cover_lock(folder_path):
-                if not dry_run and cover_jpg.exists() and cover_jpg.stat().st_size == 0:
-                    cover_jpg.unlink(missing_ok=True)
+                if (
+                    not dry_run
+                    and cover_image_path.exists()
+                    and cover_image_path.stat().st_size == 0
+                ):
+                    cover_image_path.unlink(missing_ok=True)
 
     with _get_cover_lock(folder_path):
-        if not dry_run and (not cover_jpg.exists() or cover_jpg.stat().st_size == 0):
+        if not dry_run and (
+            not cover_image_path.exists()
+            or cover_image_path.stat().st_size == 0
+        ):
             return None
-    return cover_jpg if cover_jpg.exists() else None
+    return cover_image_path if cover_image_path.exists() else None
 
 
 def process_artist_artwork(
@@ -177,27 +191,33 @@ def process_artist_artwork(
     if parent_base == "Singles":
         artist_dir = parent.parent
 
-    has_artist_img = any(
-        (artist_dir / n).exists() for n in ["artist.jpg", "artist.png", "folder.jpg"]
+    has_artist_image = any(
+        (artist_dir / filename).exists()
+        for filename in ["artist.jpg", "artist.png", "folder.jpg"]
     )
-    has_banner_img = any(
-        (artist_dir / n).exists() for n in ["banner.jpg", "banner.png", "fanart.jpg"]
+    has_banner_image = any(
+        (artist_dir / filename).exists()
+        for filename in ["banner.jpg", "banner.png", "fanart.jpg"]
     )
 
-    if has_artist_img and has_banner_img:
+    if has_artist_image and has_banner_image:
         return
 
-    thumb_bytes, banner_bytes = fetch_artist_images(artist_name)
-    if thumb_bytes and not has_artist_img and not dry_run:
+    thumbnail_bytes, banner_bytes = fetch_artist_images(artist_name)
+    if thumbnail_bytes and not has_artist_image and not dry_run:
         try:
-            (artist_dir / "artist.jpg").write_bytes(thumb_bytes)
-            LOG.info(f"   ∟ 👤 Downloaded artist avatar: {artist_name} -> artist.jpg")
-        except OSError as e:
-            LOG.debug(f"Failed to write artist avatar image: {e}")
+            (artist_dir / "artist.jpg").write_bytes(thumbnail_bytes)
+            LOG.info(
+                f"   ∟ 👤 Downloaded artist avatar: {artist_name} -> artist.jpg"
+            )
+        except OSError as error:
+            LOG.debug(f"Failed to write artist avatar image: {error}")
 
-    if banner_bytes and not has_banner_img and not dry_run:
+    if banner_bytes and not has_banner_image and not dry_run:
         try:
             (artist_dir / "banner.jpg").write_bytes(banner_bytes)
-            LOG.info(f"   ∟ 🎨 Downloaded artist banner: {artist_name} -> banner.jpg")
-        except OSError as e:
-            LOG.debug(f"Failed to write artist banner image: {e}")
+            LOG.info(
+                f"   ∟ 🎨 Downloaded artist banner: {artist_name} -> banner.jpg"
+            )
+        except OSError as error:
+            LOG.debug(f"Failed to write artist banner image: {error}")

@@ -245,11 +245,9 @@ class TestCoreModules(unittest.TestCase):
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
 
-        # Return separate instances so orig_info snapshot differs from track_info
-        mock_read.side_effect = [
-            TrackInfo(file_path=wav_file, artist="nane", title="Piesa"),
-            TrackInfo(file_path=wav_file, artist="nane", title="Piesa"),
-        ]
+        mock_read.return_value = TrackInfo(
+            file_path=wav_file, artist="nane", title="Piesa"
+        )
         mock_mbid.return_value = "c8b03190-306c-4125-9b32-3f9d86d60a12"
         mock_lyrics.return_value = "[00:01.00] Vers"
 

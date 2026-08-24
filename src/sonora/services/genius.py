@@ -24,17 +24,17 @@ def fetch_genius_song_details(
 
     _GENIUS_LIMITER.wait()
     try:
-        c_title = clean_title(title)
-        query = f"{artist} {c_title}"
+        cleaned_title = clean_title(title)
+        query = f"{artist} {cleaned_title}"
         search_url = "https://api.genius.com/search"
-        resp = SESSION.get(
+        response = SESSION.get(
             search_url,
             params={"q": query},
             headers={"Authorization": f"Bearer {api_token}"},
             timeout=5,
         )
-        resp.raise_for_status()
-        data = resp.json()
+        response.raise_for_status()
+        data = response.json()
         hits = data.get("response", {}).get("hits", [])
         if not hits:
             return None
@@ -43,14 +43,14 @@ def fetch_genius_song_details(
         best_score = 0.0
 
         for hit in hits:
-            res_item = hit.get("result", {})
-            hit_artist = str(res_item.get("primary_artist", {}).get("name", ""))
-            hit_title = str(res_item.get("title", ""))
+            result_item = hit.get("result", {})
+            hit_artist = str(result_item.get("primary_artist", {}).get("name", ""))
+            hit_title = str(result_item.get("title", ""))
 
-            score = match_score(artist, c_title, hit_artist, hit_title)
+            score = match_score(artist, cleaned_title, hit_artist, hit_title)
             if score > best_score:
                 best_score = score
-                best_hit = res_item
+                best_hit = result_item
 
         if not best_hit or best_score < 70.0:
             return None
@@ -61,45 +61,45 @@ def fetch_genius_song_details(
 
         _GENIUS_LIMITER.wait()
         song_url = f"https://api.genius.com{api_path}"
-        resp_song = SESSION.get(
+        song_response = SESSION.get(
             song_url,
             headers={"Authorization": f"Bearer {api_token}"},
             timeout=5,
         )
-        resp_song.raise_for_status()
-        song_data = resp_song.json().get("response", {}).get("song", {})
+        song_response.raise_for_status()
+        song_data = song_response.json().get("response", {}).get("song", {})
 
-        desc_plain = song_data.get("description", {}).get("plain")
-        if desc_plain and "Lyrics for this song are unavailable" in str(desc_plain):
-            desc_plain = None
+        plain_description = song_data.get("description", {}).get("plain")
+        if plain_description and "Lyrics for this song are unavailable" in str(plain_description):
+            plain_description = None
 
         genius_song_id = song_data.get("id")
 
         # Parse featured artists
         featured_list = song_data.get("featured_artists", [])
         featured_names = [
-            str(f["name"])
-            for f in featured_list
-            if isinstance(f, dict) and f.get("name")
+            str(featured["name"])
+            for featured in featured_list
+            if isinstance(featured, dict) and featured.get("name")
         ]
 
         # Parse producers
         producer_list = song_data.get("producer_artists", [])
         producer_names = [
-            str(p["name"])
-            for p in producer_list
-            if isinstance(p, dict) and p.get("name")
+            str(producer["name"])
+            for producer in producer_list
+            if isinstance(producer, dict) and producer.get("name")
         ]
 
         return {
             "genius_song_id": genius_song_id,
-            "description": desc_plain,
+            "description": plain_description,
             "featured_artists": ", ".join(featured_names) if featured_names else None,
             "producers": ", ".join(producer_names) if producer_names else None,
         }
 
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
-        if isinstance(e, RuntimeError):
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+        if isinstance(error, RuntimeError):
             raise
-        LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {e}")
+        LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {error}")
         return None

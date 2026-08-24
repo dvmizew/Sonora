@@ -1,7 +1,6 @@
 import dataclasses
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
 
 import httpx
 from rich.progress import (
@@ -58,20 +57,20 @@ def process_single_track(
     acoustid_api_key: str | None = None,
     discogs_user_token: str | None = None,
     genius_api_token: str | None = None,
-    options: dict | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+    album_mbid: str | None = None,
+    album_track_mbids: dict[int, str] | None = None,
+    cuesheet_content: str | None = None,
 ) -> TrackInfo:
     LOG.start_buffering()
     try:
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        orig_info = read_track_metadata(file_path)
         track_info = read_track_metadata(file_path)
+        orig_info = dataclasses.replace(track_info)
         track_info.artist = normalize_artist_alias(track_info.artist)
-
-        options = options or {}
-        force = options.get("force", False)
-        dry_run = options.get("dry_run", False)
 
         LOG.info(f"🎧 Processing track: [white]{file_path.name}[/]")
 
@@ -93,9 +92,7 @@ def process_single_track(
                 LOG.debug(f"AcoustID lookup failed for {track_info.title}: {e}")
 
         # 2. Check pre-fetched album track MBIDs map first (1 single API call per album!)
-        album_mbids = (
-            options.get("album_track_mbids", {}) if isinstance(options, dict) else {}
-        )
+        album_mbids = album_track_mbids or {}
         if (
             (not is_valid_uuid(track_info.musicbrainz_trackid) or force)
             and track_info.track_number
@@ -118,11 +115,8 @@ def process_single_track(
 
         # 3. Fetch MusicBrainz Album ID
         if not is_valid_uuid(track_info.musicbrainz_albumid):
-            pre_album_mbid = (
-                options.get("album_mbid") if isinstance(options, dict) else None
-            )
-            if is_valid_uuid(pre_album_mbid):
-                track_info.musicbrainz_albumid = pre_album_mbid
+            if is_valid_uuid(album_mbid):
+                track_info.musicbrainz_albumid = str(album_mbid)
             else:
                 try:
                     search_artist = (
@@ -307,19 +301,13 @@ def process_single_track(
         except (OSError, ValueError, RuntimeError) as e:
             LOG.debug(f"TheAudioDB video lookup failed for {track_info.title}: {e}")
 
-        # 6c. Embed Cuesheet content (from options if album-batched, or directory scan)
-        cuesheet_content = (
-            options.get("cuesheet_content") if isinstance(options, dict) else None
-        )
-        if cuesheet_content is None and not (
-            isinstance(options, dict) and "cuesheet_content" in options
-        ):
-            cue_files = list(file_path.parent.glob("*.cue"))
-            cuesheet_content = (
-                read_cuesheet_content(cue_files[0]) if cue_files else None
-            )
+        # 6c. Embed Cuesheet content
         if cuesheet_content:
             track_info.cuesheet = cuesheet_content
+        elif not track_info.cuesheet:
+            cue_files = list(file_path.parent.glob("*.cue"))
+            if cue_files:
+                track_info.cuesheet = read_cuesheet_content(cue_files[0])
 
         # 7. Calculate BPM
         if fetch_bpm and (track_info.bpm is None or force):
@@ -405,52 +393,62 @@ def process_single_track(
 
 
 def tag_album_folder(
-    folder_path: Path, max_workers: int = 4, **options: Any
+    folder_path: Path,
+    max_workers: int = 4,
+    fetch_bpm: bool = True,
+    fetch_replaygain: bool = True,
+    fetch_lyrics: bool = True,
+    fetch_itunes_art: bool = True,
+    lastfm_api_key: str | None = None,
+    acoustid_api_key: str | None = None,
+    discogs_user_token: str | None = None,
+    genius_api_token: str | None = None,
+    force: bool = False,
+    dry_run: bool = False,
 ) -> list[TrackInfo]:
-    valid_options = {
-        "fetch_bpm",
-        "fetch_replaygain",
-        "fetch_lyrics",
-        "fetch_itunes_art",
-        "lastfm_api_key",
-        "acoustid_api_key",
-        "discogs_user_token",
-        "genius_api_token",
-        "options",
-    }
-    invalid = set(options.keys()) - valid_options
-    if invalid:
-        raise ValueError(f"Invalid options passed to tag_album_folder: {invalid}")
-
     if not folder_path.exists() or not folder_path.is_dir():
         raise FileNotFoundError(f"Album folder not found: {folder_path}")
 
     # Check if folder_path contains child directories with audio files
-    sub_dirs = [
-        d
-        for d in sorted(folder_path.iterdir())
-        if d.is_dir()
+    subdirectories = [
+        directory
+        for directory in sorted(folder_path.iterdir())
+        if directory.is_dir()
         and any(
-            p.is_file() and p.suffix.lower() in SUPPORTED_EXTS for p in d.rglob("*")
+            path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
+            for path in directory.rglob("*")
         )
     ]
 
     # If folder_path has child album directories and NO direct audio files in its root, tag each sub-album independently
-    if sub_dirs and not any(
-        p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
-        for p in folder_path.glob("*")
+    if subdirectories and not any(
+        path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
+        for path in folder_path.glob("*")
     ):
         all_results: list[TrackInfo] = []
-        for sub in sub_dirs:
-            res = tag_album_folder(sub, max_workers=max_workers, **options)
-            all_results.extend(res)
+        for subdirectory in subdirectories:
+            sub_results = tag_album_folder(
+                subdirectory,
+                max_workers=max_workers,
+                fetch_bpm=fetch_bpm,
+                fetch_replaygain=fetch_replaygain,
+                fetch_lyrics=fetch_lyrics,
+                fetch_itunes_art=fetch_itunes_art,
+                lastfm_api_key=lastfm_api_key,
+                acoustid_api_key=acoustid_api_key,
+                discogs_user_token=discogs_user_token,
+                genius_api_token=genius_api_token,
+                force=force,
+                dry_run=dry_run,
+            )
+            all_results.extend(sub_results)
         return all_results
 
     audio_files = sorted(
         [
-            p
-            for p in folder_path.rglob("*")
-            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+            path
+            for path in folder_path.rglob("*")
+            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
         ]
     )
 
@@ -465,45 +463,45 @@ def tag_album_folder(
     # Pre-resolve Cuesheet content once for entire album
     cue_files = list(folder_path.glob("*.cue"))
     album_cue_content = read_cuesheet_content(cue_files[0]) if cue_files else None
-    if options.get("options") is None:
-        options["options"] = {}
-    if album_cue_content:
-        options["options"]["cuesheet_content"] = album_cue_content
 
     # Batch Optimization: Fetch entire album track MBIDs and album MBID in 1 single API call
+    album_musicbrainz_id: str | None = None
+    album_track_mbids: dict[int, str] | None = None
     try:
         sample_meta = read_track_metadata(audio_files[0])
-        s_artist = sample_meta.album_artist or sample_meta.artist
-        s_album = sample_meta.album
-        if s_artist and s_album:
-            rel = search_musicbrainz_release(s_artist, s_album)
-            if rel and rel.get("id"):
-                alb_id = str(rel["id"])
-                album_mbids = fetch_album_track_mbids(alb_id)
-                options["options"]["album_track_mbids"] = album_mbids
-                options["options"]["album_mbid"] = alb_id
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-        LOG.debug(f"Pre-fetching album track MBIDs failed: {e}")
+        sample_artist = sample_meta.album_artist or sample_meta.artist
+        sample_album = sample_meta.album
+        if sample_artist and sample_album:
+            release_info = search_musicbrainz_release(sample_artist, sample_album)
+            if release_info and release_info.get("id"):
+                album_musicbrainz_id = str(release_info["id"])
+                album_track_mbids = fetch_album_track_mbids(album_musicbrainz_id)
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"Pre-fetching album track MBIDs failed: {error}")
 
     results: list[TrackInfo] = []
 
     executor = ThreadPoolExecutor(max_workers=max_workers)
     try:
-        future_to_file = {}
-        for file_p in audio_files:
-            future = executor.submit(
+        future_to_file = {
+            executor.submit(
                 process_single_track,
-                file_path=file_p,
-                fetch_bpm=options.get("fetch_bpm", True),
-                fetch_lyrics=options.get("fetch_lyrics", True),
-                fetch_itunes_art=options.get("fetch_itunes_art", True),
-                lastfm_api_key=options.get("lastfm_api_key"),
-                acoustid_api_key=options.get("acoustid_api_key"),
-                discogs_user_token=options.get("discogs_user_token"),
-                genius_api_token=options.get("genius_api_token"),
-                options=options.get("options"),
-            )
-            future_to_file[future] = file_p
+                file_path=audio_file,
+                fetch_bpm=fetch_bpm,
+                fetch_lyrics=fetch_lyrics,
+                fetch_itunes_art=fetch_itunes_art,
+                lastfm_api_key=lastfm_api_key,
+                acoustid_api_key=acoustid_api_key,
+                discogs_user_token=discogs_user_token,
+                genius_api_token=genius_api_token,
+                force=force,
+                dry_run=dry_run,
+                album_mbid=album_musicbrainz_id,
+                album_track_mbids=album_track_mbids,
+                cuesheet_content=album_cue_content,
+            ): audio_file
+            for audio_file in audio_files
+        }
 
         with Progress(
             SpinnerColumn(),
@@ -518,28 +516,27 @@ def tag_album_folder(
         ) as progress:
             task = progress.add_task("[cyan]Tagging tracks...", total=len(audio_files))
             for future in as_completed(future_to_file):
-                file_p = future_to_file[future]
+                audio_file = future_to_file[future]
                 try:
-                    info = future.result()
-                    results.append(info)
-                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                    LOG.warning(f"Failed to process {file_p.name}: {e}")
+                    track_info = future.result()
+                    results.append(track_info)
+                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                    LOG.warning(f"Failed to process {audio_file.name}: {error}")
                 progress.advance(task)
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         raise
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
-    if options.get("fetch_replaygain", True):
-        calculate_album_replaygain(audio_files, options=options)
+
+    if fetch_replaygain:
+        calculate_album_replaygain(audio_files, force=force, dry_run=dry_run)
 
     if results:
         primary_artist = results[0].album_artist or results[0].artist
         try:
-            process_artist_artwork(
-                folder_path, primary_artist, dry_run=options.get("dry_run", False)
-            )
-        except (OSError, ValueError, RuntimeError) as e:
-            LOG.debug(f"Artist art download failed: {e}")
+            process_artist_artwork(folder_path, primary_artist, dry_run=dry_run)
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"Artist art download failed: {error}")
 
     return results

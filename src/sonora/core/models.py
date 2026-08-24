@@ -19,6 +19,8 @@ class TrackInfo:
     bpm: float | None = None
     replaygain_track_gain: float | None = None
     replaygain_track_peak: float | None = None
+    replaygain_album_gain: float | None = None
+    replaygain_album_peak: float | None = None
     lyrics: str | None = None
     synced_lyrics: str | None = None
     musicbrainz_trackid: str | None = None
@@ -94,6 +96,8 @@ class TrackInfo:
             "bpm": self.bpm,
             "replaygain_track_gain": self.replaygain_track_gain,
             "replaygain_track_peak": self.replaygain_track_peak,
+            "replaygain_album_gain": self.replaygain_album_gain,
+            "replaygain_album_peak": self.replaygain_album_peak,
             "musicbrainz_trackid": self.musicbrainz_trackid,
             "musicbrainz_albumid": self.musicbrainz_albumid,
             "musicbrainz_releasegroupid": self.musicbrainz_releasegroupid,

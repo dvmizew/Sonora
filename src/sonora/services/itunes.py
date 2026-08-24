@@ -28,19 +28,19 @@ def search_itunes(
     }
     _ITUNES_LIMITER.wait()
     try:
-        resp = SESSION.get(ITUNES_SEARCH_URL, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        response = SESSION.get(ITUNES_SEARCH_URL, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
         raw_results = data.get("results", []) if isinstance(data, dict) else []
         results: list[dict[str, object]] = [
-            r for r in raw_results if isinstance(r, dict)
+            item for item in raw_results if isinstance(item, dict)
         ]
         set_cached_api(cache_key, results)
         return results
-    except (OSError, ValueError, KeyError, RuntimeError) as e:
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
         raise RuntimeError(
-            f"iTunes Search API request failed for {query_term}: {e}"
-        ) from e
+            f"iTunes Search API request failed for {query_term}: {error}"
+        ) from error
 
 
 def fetch_itunes_cover_art_url(
@@ -55,21 +55,21 @@ def fetch_itunes_cover_art_url(
     if not results:
         return None
 
-    norm_target = normalize_str(album)
+    normalized_target = normalize_str(album)
     best_result: dict[str, object] | None = None
 
     # Step 1: Look for exact normalized title match
-    for res in results:
-        coll_name = str(res.get("collectionName", ""))
-        if normalize_str(coll_name) == norm_target:
-            best_result = res
+    for result in results:
+        collection_name = str(result.get("collectionName", ""))
+        if normalize_str(collection_name) == normalized_target:
+            best_result = result
             break
 
     # Step 2: Fallback matching if no exact match found
     if best_result is None:
-        target_has_num = any(
-            w in norm_target.split()
-            for w in [
+        target_has_numeric_part = any(
+            word in normalized_target.split()
+            for word in [
                 "ii",
                 "2",
                 "two",
@@ -84,17 +84,17 @@ def fetch_itunes_cover_art_url(
                 "4",
             ]
         )
-        for res in results:
-            coll_name = str(res.get("collectionName", ""))
-            norm_coll = normalize_str(coll_name)
+        for result in results:
+            collection_name = str(result.get("collectionName", ""))
+            normalized_collection = normalize_str(collection_name)
 
-            # Strict similarity requirement: coll_name must be fuzzy similar to album title!
-            if fuzz.token_set_ratio(norm_target, norm_coll) < 75.0:
+            # Strict similarity requirement: collection_name must be fuzzy similar to album title!
+            if fuzz.token_set_ratio(normalized_target, normalized_collection) < 75.0:
                 continue
 
-            coll_has_num = any(
-                w in norm_coll.split()
-                for w in [
+            collection_has_numeric_part = any(
+                word in normalized_collection.split()
+                for word in [
                     "ii",
                     "2",
                     "two",
@@ -111,10 +111,10 @@ def fetch_itunes_cover_art_url(
             )
 
             # Reject mismatch between album series (e.g. Savage Mode vs Savage Mode II)
-            if coll_has_num != target_has_num:
+            if collection_has_numeric_part != target_has_numeric_part:
                 continue
 
-            best_result = res
+            best_result = result
             break
 
     if best_result is not None:

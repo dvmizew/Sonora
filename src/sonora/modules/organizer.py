@@ -84,7 +84,7 @@ def get_primary_artist(artist_name: str | None) -> str:
 
 
 def organize_library_singles(
-    source_dir: Path, target_singles_dir: Path, options: dict | None = None
+    source_dir: Path, target_singles_dir: Path, dry_run: bool = False
 ) -> int:
     """
     Scan source_dir, detect single tracks, and move them to target_singles_dir
@@ -93,9 +93,6 @@ def organize_library_singles(
     """
     if not source_dir.exists():
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
-
-    options = options or {}
-    dry_run = options.get("dry_run", False)
 
     if not dry_run:
         target_singles_dir.mkdir(parents=True, exist_ok=True)
@@ -162,51 +159,53 @@ def organize_library_singles(
                     try:
                         if not dry_run and not any(parent.iterdir()):
                             parent.rmdir()
-                    except OSError as e:
-                        LOG.debug(f"Could not remove parent dir {parent}: {e}")
+                    except OSError as error:
+                        LOG.debug(f"Could not remove parent dir {parent}: {error}")
 
-            except (OSError, ValueError, RuntimeError) as e:
-                LOG.warning(f"Failed to organize track {path}: {e}")
+            except (OSError, ValueError, RuntimeError) as error:
+                LOG.warning(f"Failed to organize track {path}: {error}")
             progress.advance(task)
 
     # Phase 2 & 3: Deduplicate singles against albums
     if target_singles_dir.exists():
         album_fingerprints: set[str] = set()
-        for p in source_dir.rglob("*"):
+        for audio_path in source_dir.rglob("*"):
             if (
-                p.is_file()
-                and p.suffix.lower() in SUPPORTED_EXTS
-                and "Singles" not in p.parts
+                audio_path.is_file()
+                and audio_path.suffix.lower() in SUPPORTED_EXTS
+                and "Singles" not in audio_path.parts
             ):
                 try:
-                    meta = read_track_metadata(p)
-                    p_art = get_primary_artist(meta.artist).lower()
-                    key = f"{p_art} - {meta.title.lower()}"
+                    meta = read_track_metadata(audio_path)
+                    primary_artist_key = get_primary_artist(meta.artist).lower()
+                    key = f"{primary_artist_key} - {meta.title.lower()}"
                     album_fingerprints.add(key)
-                except (OSError, ValueError, RuntimeError) as e:
-                    LOG.debug(f"Could not read metadata for single deduplication: {e}")
+                except (OSError, ValueError, RuntimeError) as error:
+                    LOG.debug(
+                        f"Could not read metadata for single deduplication: {error}"
+                    )
 
         removed_dupes = 0
-        for single_p in list(target_singles_dir.rglob("*")):
-            if single_p.is_file() and single_p.suffix.lower() in SUPPORTED_EXTS:
+        for single_path in list(target_singles_dir.rglob("*")):
+            if single_path.is_file() and single_path.suffix.lower() in SUPPORTED_EXTS:
                 try:
-                    meta = read_track_metadata(single_p)
-                    p_art = get_primary_artist(meta.artist).lower()
-                    key = f"{p_art} - {meta.title.lower()}"
+                    meta = read_track_metadata(single_path)
+                    primary_artist_key = get_primary_artist(meta.artist).lower()
+                    key = f"{primary_artist_key} - {meta.title.lower()}"
                     if key in album_fingerprints:
                         if not dry_run:
-                            single_p.unlink()
-                            lrc_p = single_p.with_suffix(".lrc")
-                            if lrc_p.exists():
-                                lrc_p.unlink()
+                            single_path.unlink()
+                            single_lrc = single_path.with_suffix(".lrc")
+                            if single_lrc.exists():
+                                single_lrc.unlink()
                             LOG.info(f"   ∟ 🗑️ Removed duplicate single: {key}")
                         else:
                             LOG.info(
                                 f"   ∟ [DRY-RUN] Would remove duplicate single: {key}"
                             )
                         removed_dupes += 1
-                except (OSError, ValueError, RuntimeError) as e:
-                    LOG.debug(f"Could not read metadata for duplicate check: {e}")
+                except (OSError, ValueError, RuntimeError) as error:
+                    LOG.debug(f"Could not read metadata for duplicate check: {error}")
 
     # Cleanup empty directories
     if not dry_run:
@@ -230,6 +229,6 @@ def cleanup_empty_dirs(path: Path) -> int:
                 if not any(child.iterdir()):
                     child.rmdir()
                     removed += 1
-            except OSError as e:
-                LOG.debug(f"Could not remove empty dir {child}: {e}")
+            except OSError as error:
+                LOG.debug(f"Could not remove empty dir {child}: {error}")
     return removed

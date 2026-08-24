@@ -18,7 +18,7 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
   - Perceptual hashing (`pHash`) check via `imagehash` with EXIF transposition to prevent overwriting custom covers unless visually matched.
 - **Audio Engines**:
   - Tempo calculation (STFT onset envelope autocorrelation via SciPy).
-  - ReplayGain 2.0 Album Mode (`metaflac`).
+  - ReplayGain 2.0 Track & Album Mode (ITU-R BS.1770-4 / EBU R128 via `pyloudnorm` across all formats).
   - 16kHz spectral cutoff detection (SciPy FFT spectrogram) to flag fake-lossless files.
   - Bit-exact audio stream MD5 checksum verification (`flac -t`).
 - **Library Tools**:
@@ -34,8 +34,8 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 
 - **Python**: 3.10 or higher
 - **System Audio Tools**:
-  - `flac` (includes `metaflac` for ReplayGain 2.0 and checksum validation)
-  - `ffmpeg` (audio decoding and metadata extraction)
+  - `flac` (checksum validation via `flac -t`)
+  - `ffmpeg` (audio decoding and stream pipe extraction)
   - `chromaprint` (provides `fpcalc` for AcoustID audio fingerprinting)
 
 ### System Package Installation

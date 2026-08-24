@@ -37,11 +37,11 @@ def parse_cuesheet(cue_path: Path) -> list[dict[str, str | int]]:
             if match:
                 if current_track:
                     tracks.append(current_track)
-                track_num = int(match.group(1))
+                track_number = int(match.group(1))
                 current_track = {
-                    "track_number": track_num,
+                    "track_number": track_number,
                     "artist": performer_global,
-                    "title": f"Track {track_num}",
+                    "title": f"Track {track_number}",
                     "album": title_global,
                 }
         elif current_track is not None:

@@ -24,10 +24,10 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
         OSError,
         ValueError,
         RuntimeError,
-    ) as e:
+    ) as error:
         raise RuntimeError(
-            f"Chromaprint fingerprinting failed for {file_path}: {e}"
-        ) from e
+            f"Chromaprint fingerprinting failed for {file_path}: {error}"
+        ) from error
 
 
 _ACOUSTID_LIMITER = RateLimiter(interval_seconds=0.4)
@@ -106,7 +106,7 @@ def lookup_acoustid(
         ValueError,
         KeyError,
         RuntimeError,
-    ) as e:
-        LOG.debug(f"AcoustID lookup failed for {file_path.name}: {e}")
+    ) as error:
+        LOG.debug(f"AcoustID lookup failed for {file_path.name}: {error}")
         _ACOUSTID_FAILURES += 1
         return None

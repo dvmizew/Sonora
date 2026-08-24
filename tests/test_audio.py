@@ -2,7 +2,6 @@
 Unit and integration tests for Sonora audio engine modules.
 """
 
-import struct
 import sys
 import tempfile
 import wave
@@ -22,17 +21,24 @@ from sonora.audio.metadata import (
     read_track_metadata,
     write_track_metadata,
 )
-from sonora.audio.replaygain import calculate_album_replaygain
+from sonora.audio.replaygain import (
+    calculate_album_replaygain,
+    calculate_track_replaygain,
+)
 from sonora.core.models import TrackInfo
 
 
 def create_dummy_wav_file(dest_path: Path) -> Path:
     """Create a temporary 1-second WAV audio file with standard audio properties."""
+    sr = 44100
+    t = np.linspace(0, 1, sr, endpoint=False)
+    samples = (np.sin(2 * np.pi * 440 * t) * 16000).astype(np.int16)
+    stereo = np.column_stack([samples, samples]).flatten()
     with wave.open(str(dest_path), "wb") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
-        w.setframerate(44100)
-        w.writeframes(struct.pack("<h", 0) * 88200)
+        w.setframerate(sr)
+        w.writeframes(stereo.tobytes())
     return dest_path
 
 
@@ -89,36 +95,32 @@ class TestAudioEngine(unittest.TestCase):
     def test_verify_non_flac_returns_true(self):
         self.assertTrue(verify_flac_checksum(self.dummy_audio_path))
 
-    @patch("subprocess.run")
-    @patch("sonora.audio.replaygain.FLAC")
-    def test_calculate_album_replaygain_success(self, mock_flac, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stderr="")
-        mock_flac_instance = MagicMock()
-        mock_flac_instance.info.sample_rate = 44100
-        mock_flac_instance.info.channels = 2
-        mock_flac_instance.info.bits_per_sample = 16
-        # Simulate REPLAYGAIN_ALBUM_GAIN not being present
-        mock_flac_instance.__contains__.return_value = False
-        mock_flac.return_value = mock_flac_instance
+    def test_calculate_track_replaygain_success(self):
+        res = calculate_track_replaygain(self.dummy_audio_path)
+        self.assertIsNotNone(res)
+        if res:
+            gain, peak = res
+            self.assertIsInstance(gain, float)
+            self.assertIsInstance(peak, float)
+            self.assertTrue(0.0 <= peak <= 1.0)
 
-        p1 = self.tmp_path / "1.flac"
-        p2 = self.tmp_path / "2.flac"
-        p1.write_bytes(b"dummy")
-        p2.write_bytes(b"dummy")
+    def test_calculate_album_replaygain_success(self):
+        p1 = self.tmp_path / "1.wav"
+        p2 = self.tmp_path / "2.wav"
+        create_dummy_wav_file(p1)
+        create_dummy_wav_file(p2)
 
-        with patch("sonora.audio.replaygain.shutil.which", return_value="metaflac"):
-            result = calculate_album_replaygain([p1, p2])
-
+        result = calculate_album_replaygain([p1, p2], force=True)
         self.assertTrue(result)
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        self.assertEqual(args[0], "metaflac")
-        self.assertEqual(args[1], "--add-replay-gain")
-        self.assertIn(str(p1), args)
-        self.assertIn(str(p2), args)
+
+        info1 = read_track_metadata(p1)
+        self.assertIsNotNone(info1.replaygain_track_gain)
+        self.assertIsNotNone(info1.replaygain_album_gain)
+        self.assertIsNotNone(info1.replaygain_track_peak)
+        self.assertIsNotNone(info1.replaygain_album_peak)
 
     @patch(
-        "sonora.audio.bpm._load_audio_mono",
+        "sonora.audio.bpm.load_audio",
         return_value=(np.random.rand(44100 * 10).astype(np.float32), 44100),
     )
     @patch(
@@ -149,22 +151,14 @@ class TestAudioEngine(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             verify_flac_checksum(flac_p)
 
-    @patch("subprocess.run")
-    @patch("sonora.audio.replaygain.FLAC")
-    def test_calculate_album_replaygain_failure(self, mock_flac, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stderr="error")
-        mock_flac_instance = MagicMock()
-        mock_flac_instance.info.sample_rate = 44100
-        mock_flac_instance.info.channels = 2
-        mock_flac_instance.info.bits_per_sample = 16
-        mock_flac_instance.__contains__.return_value = False
-        mock_flac.return_value = mock_flac_instance
+    def test_calculate_album_replaygain_failure_empty(self):
+        result = calculate_album_replaygain([])
+        self.assertFalse(result)
 
-        fail_flac = self.tmp_path / "fail.flac"
-        fail_flac.write_bytes(b"dummy")
-
-        with patch("sonora.audio.replaygain.shutil.which", return_value="metaflac"):
-            result = calculate_album_replaygain([fail_flac])
+    def test_calculate_album_replaygain_corrupted_file(self):
+        fail_wav = self.tmp_path / "corrupt.wav"
+        fail_wav.write_bytes(b"not an audio file")
+        result = calculate_album_replaygain([fail_wav])
         self.assertFalse(result)
 
 

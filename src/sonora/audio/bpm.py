@@ -1,71 +1,56 @@
 import subprocess
-import wave
 from pathlib import Path
 
 import numpy as np
 import scipy.signal
-import soundfile as sf
+import soundfile
 
 from sonora.core.logger import LOG
 
 
-def _load_audio_mono(file_path: Path) -> tuple[np.ndarray, int] | None:
-    """Load audio file into 1D float32 NumPy array and sample rate."""
-    ext = file_path.suffix.lower()
-
-    # 1. Try soundfile C libsndfile (WAV, FLAC, OGG, AIFF)
+def load_audio(file_path: Path, mono: bool = False) -> tuple[np.ndarray, int] | None:
+    """
+    Load an audio file into a NumPy float32 array (2D multichannel or 1D mono) and sample rate.
+    Uses soundfile (C libsndfile) with direct ffmpeg pipe fallback.
+    """
     try:
-        with sf.SoundFile(str(file_path)) as f:
-            data = f.read(dtype="float32")
-            sr = f.samplerate
-            if data.ndim > 1:
-                data = np.mean(data, axis=1)
-            if len(data) > 0:
-                return data, int(sr)
-    except (sf.LibsndfileError, OSError, ValueError, RuntimeError) as e:
-        LOG.debug(f"soundfile read failed for {file_path}: {e}")
+        audio_data, sample_rate = soundfile.read(
+            str(file_path), dtype="float32", always_2d=True
+        )
+        if mono:
+            audio_data = (
+                np.mean(audio_data, axis=1)
+                if audio_data.shape[1] > 1
+                else audio_data[:, 0]
+            )
+        return audio_data, int(sample_rate)
+    except (soundfile.LibsndfileError, OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"soundfile decode failed for {file_path}: {error}")
 
-    # 2. Try stdlib wave module for WAV
-    if ext == ".wav":
-        try:
-            with wave.open(str(file_path), "rb") as wf:
-                sr = wf.getframerate()
-                nframes = wf.getnframes()
-                frames = wf.readframes(nframes)
-                dtype = np.int16 if wf.getsampwidth() == 2 else np.int32
-                raw = np.frombuffer(frames, dtype=dtype).astype(np.float32)
-                if wf.getnchannels() > 1:
-                    y = np.mean(raw.reshape(-1, wf.getnchannels()), axis=1)
-                else:
-                    y = raw
-                if len(y) > 0:
-                    return y, sr
-        except (wave.Error, OSError, ValueError, RuntimeError) as e:
-            LOG.debug(f"wave read failed for {file_path}: {e}")
-
-    # 3. Try ffmpeg subprocess fallback for MP3, M4A, AAC, etc.
     try:
-        cmd = [
+        command = [
             "ffmpeg",
             "-i",
             str(file_path),
             "-f",
-            "s16le",
-            "-ac",
-            "1",
+            "f32le",
             "-ar",
-            "22050",
+            "44100",
+            "-ac",
+            "1" if mono else "2",
             "-v",
             "quiet",
             "-",
         ]
-        res = subprocess.run(cmd, capture_output=True, check=True)
-        if res.stdout:
-            raw = np.frombuffer(res.stdout, dtype=np.int16).astype(np.float32)
-            if len(raw) > 0:
-                return raw, 22050
-    except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:
-        LOG.debug(f"ffmpeg decode failed for {file_path}: {e}")
+        result = subprocess.run(command, capture_output=True, check=True)
+        if result.stdout:
+            raw_data = np.frombuffer(result.stdout, dtype=np.float32)
+            if not mono:
+                raw_data = raw_data.reshape(-1, 2)
+            if len(raw_data) > 0:
+                return raw_data, 44100
+    except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"ffmpeg decode failed for {file_path}: {error}")
 
     return None
 
@@ -78,50 +63,52 @@ def calculate_bpm(file_path: Path) -> float | None:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        loaded = _load_audio_mono(file_path)
+        loaded = load_audio(file_path, mono=True)
         if loaded is None:
             return None
 
-        y, sr = loaded
-        if len(y) == 0:
+        audio_mono, sample_rate = loaded
+        if len(audio_mono) == 0:
             return None
 
         # Limit analysis to max 120 seconds to save CPU
-        if len(y) > sr * 120:
-            y = y[: sr * 120]
+        if len(audio_mono) > sample_rate * 120:
+            audio_mono = audio_mono[: sample_rate * 120]
 
         # STFT Spectrogram onset envelope autocorrelation via SciPy
-        _, _, Sxx = scipy.signal.spectrogram(y, fs=sr, nperseg=1024, noverlap=512)
-        onset_env = np.diff(np.mean(Sxx, axis=0))
+        _, _, spectrogram = scipy.signal.spectrogram(
+            audio_mono, fs=sample_rate, nperseg=1024, noverlap=512
+        )
+        onset_env = np.diff(np.mean(spectrogram, axis=0))
         onset_env = np.maximum(0, onset_env)
 
         if len(onset_env) == 0 or np.all(onset_env == 0):
             return None
 
-        corr = scipy.signal.correlate(onset_env, onset_env, mode="full")
-        corr = corr[len(corr) // 2 :]
+        autocorr = scipy.signal.correlate(onset_env, onset_env, mode="full")
+        autocorr = autocorr[len(autocorr) // 2 :]
 
-        frame_rate = sr / 512.0
+        frame_rate = sample_rate / 512.0
         min_lag = int(frame_rate * 60 / 200)  # 200 BPM
         max_lag = int(frame_rate * 60 / 60)  # 60 BPM
 
-        if max_lag <= min_lag or len(corr) <= max_lag:
+        if max_lag <= min_lag or len(autocorr) <= max_lag:
             return None
 
-        peak_idx = min_lag + np.argmax(corr[min_lag:max_lag])
+        peak_idx = min_lag + np.argmax(autocorr[min_lag:max_lag])
         if peak_idx == 0:
             return None
 
-        bpm_val = (frame_rate * 60.0) / peak_idx
+        bpm_value = (frame_rate * 60.0) / peak_idx
 
         # Octave normalization to standard 75-190 BPM music tempo range
-        while bpm_val < 75.0:
-            bpm_val *= 2.0
-        while bpm_val > 190.0:
-            bpm_val /= 2.0
+        while bpm_value < 75.0:
+            bpm_value *= 2.0
+        while bpm_value > 190.0:
+            bpm_value /= 2.0
 
-        return round(float(bpm_val), 1)
+        return round(float(bpm_value), 1)
 
-    except (OSError, ValueError, RuntimeError) as e:
-        LOG.debug(f"BPM calculation failed for {file_path}: {e}")
+    except (OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"BPM calculation failed for {file_path}: {error}")
         return None

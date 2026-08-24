@@ -7,22 +7,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import orjson
+from dotenv import load_dotenv
 
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except ImportError:
-    pass
-
+load_dotenv()
 socket.setdefaulttimeout(15)
-
-try:
-    import uvloop
-
-    uvloop.install()
-except ImportError:
-    pass
 
 from sonora import __version__
 from sonora.core.cache import set_ignore_cache
@@ -183,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def handle_tag(args: argparse.Namespace, options: dict) -> int:
+def handle_tag(args: argparse.Namespace) -> int:
     init_musicbrainz()
 
     lastfm_key = args.lastfm_key or os.environ.get("LASTFM_API_KEY")
@@ -203,53 +191,54 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
         acoustid_api_key=acoustid_key,
         discogs_user_token=discogs_token,
         genius_api_token=genius_token,
-        options=options,
+        force=args.force,
+        dry_run=args.dry_run,
     )
     LOG.success(f"Successfully tagged {len(results)} tracks.")
 
     total = len(results)
-    bpm_cnt = sum(1 for t in results if t.bpm is not None)
-    rg_cnt = sum(1 for t in results if t.replaygain_track_gain is not None)
-    mb_cnt = sum(1 for t in results if t.musicbrainz_trackid is not None)
-    genre_cnt = sum(1 for t in results if t.genre is not None)
+    bpm_count = sum(1 for track in results if track.bpm is not None)
+    replaygain_count = sum(
+        1 for track in results if track.replaygain_track_gain is not None
+    )
+    musicbrainz_count = sum(
+        1 for track in results if track.musicbrainz_trackid is not None
+    )
+    genre_count = sum(1 for track in results if track.genre is not None)
 
-    bpm_pct = (bpm_cnt / total * 100) if total > 0 else 0.0
-    rg_pct = (rg_cnt / total * 100) if total > 0 else 0.0
-    mb_pct = (mb_cnt / total * 100) if total > 0 else 0.0
-    genre_pct = (genre_cnt / total * 100) if total > 0 else 0.0
+    bpm_percentage = (bpm_count / total * 100) if total > 0 else 0.0
+    replaygain_percentage = (replaygain_count / total * 100) if total > 0 else 0.0
+    musicbrainz_percentage = (musicbrainz_count / total * 100) if total > 0 else 0.0
+    genre_percentage = (genre_count / total * 100) if total > 0 else 0.0
 
     tag_rows = [
         ("Total Tracks Processed", str(total), None),
-        (
-            "BPM Calculated",
-            f"{bpm_cnt}/{total} ({bpm_pct:.0f}%)",
-            "green" if bpm_cnt else "white",
-        ),
+        ("BPM Calculated", f"{bpm_count}/{total} ({bpm_percentage:.0f}%)", None),
         (
             "ReplayGain Calculated",
-            f"{rg_cnt}/{total} ({rg_pct:.0f}%)",
-            "green" if rg_cnt else "white",
+            f"{replaygain_count}/{total} ({replaygain_percentage:.0f}%)",
+            None,
         ),
         (
             "MusicBrainz Matched",
-            f"{mb_cnt}/{total} ({mb_pct:.0f}%)",
-            "green" if mb_cnt else "white",
+            f"{musicbrainz_count}/{total} ({musicbrainz_percentage:.0f}%)",
+            None,
         ),
         (
             "Genre Tagged",
-            f"{genre_cnt}/{total} ({genre_pct:.0f}%)",
-            "green" if genre_cnt else "white",
+            f"{genre_count}/{total} ({genre_percentage:.0f}%)",
+            None,
         ),
     ]
     LOG.summary_table("Tagging Summary", tag_rows)
 
     if args.json:
         summary_text = (
-            f"Sonora tagged {total} audio tracks in '{args.path}'. "
-            f"Enrichment summary: BPM {bpm_cnt}/{total} ({bpm_pct:.0f}%), "
-            f"ReplayGain {rg_cnt}/{total} ({rg_pct:.0f}%), "
-            f"MusicBrainz MBID {mb_cnt}/{total} ({mb_pct:.0f}%), "
-            f"Genre {genre_cnt}/{total} ({genre_pct:.0f}%)."
+            f"Successfully processed {total} tracks. "
+            f"BPM {bpm_count}/{total} ({bpm_percentage:.0f}%), "
+            f"ReplayGain {replaygain_count}/{total} ({replaygain_percentage:.0f}%), "
+            f"MusicBrainz MBID {musicbrainz_count}/{total} ({musicbrainz_percentage:.0f}%), "
+            f"Genre {genre_count}/{total} ({genre_percentage:.0f}%)."
         )
 
         report_data = {
@@ -265,17 +254,17 @@ def handle_tag(args: argparse.Namespace, options: dict) -> int:
             "statistics": {
                 "total_tracks": total,
                 "enrichment": {
-                    "bpm_calculated_count": bpm_cnt,
-                    "bpm_percentage": round(bpm_pct, 1),
-                    "replaygain_calculated_count": rg_cnt,
-                    "replaygain_percentage": round(rg_pct, 1),
-                    "musicbrainz_matched_count": mb_cnt,
-                    "musicbrainz_percentage": round(mb_pct, 1),
-                    "genre_tagged_count": genre_cnt,
-                    "genre_percentage": round(genre_pct, 1),
+                    "bpm_calculated_count": bpm_count,
+                    "bpm_percentage": round(bpm_percentage, 1),
+                    "replaygain_calculated_count": replaygain_count,
+                    "replaygain_percentage": round(replaygain_percentage, 1),
+                    "musicbrainz_matched_count": musicbrainz_count,
+                    "musicbrainz_percentage": round(musicbrainz_percentage, 1),
+                    "genre_tagged_count": genre_count,
+                    "genre_percentage": round(genre_percentage, 1),
                 },
             },
-            "tracks": [t.to_dict() for t in results],
+            "tracks": [track.to_dict() for track in results],
         }
         args.json.write_bytes(
             orjson.dumps(
@@ -329,9 +318,9 @@ def handle_check(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_rename(args: argparse.Namespace, options: dict) -> int:
+def handle_rename(args: argparse.Namespace) -> int:
     LOG.info(f"Renaming files in directory: [bold]{args.path}[/bold]")
-    renamed = rename_directory_files(args.path, options=options)
+    renamed = rename_directory_files(args.path, dry_run=args.dry_run)
     LOG.success(f"Renamed {len(renamed)} audio files and synchronized .lrc headers.")
 
     rename_rows = [
@@ -346,10 +335,10 @@ def handle_rename(args: argparse.Namespace, options: dict) -> int:
     return 0
 
 
-def handle_organize(args: argparse.Namespace, options: dict) -> int:
+def handle_organize(args: argparse.Namespace) -> int:
     target_singles = args.target_singles or (args.path / "Singles")
     LOG.info(f"Organizing single tracks from {args.path} to {target_singles}")
-    count = organize_library_singles(args.path, target_singles, options=options)
+    count = organize_library_singles(args.path, target_singles, dry_run=args.dry_run)
     LOG.success(f"Organized and moved {count} single tracks.")
 
     organize_rows = [
@@ -378,9 +367,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if getattr(args, "verbose", False):
         LOG.verbose = True
 
-    options = {"dry_run": args.dry_run, "force": getattr(args, "force", False)}
-
-    if options["force"]:
+    force = getattr(args, "force", False)
+    if force:
         set_ignore_cache(True)
 
     if not args.command:
@@ -389,13 +377,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.command == "tag":
-            return handle_tag(args, options)
+            return handle_tag(args)
         elif args.command == "check":
             return handle_check(args)
         elif args.command == "rename":
-            return handle_rename(args, options)
+            return handle_rename(args)
         elif args.command == "organize":
-            return handle_organize(args, options)
+            return handle_organize(args)
         elif args.command == "backup":
             return handle_backup(args)
         elif args.command == "restore":
@@ -404,8 +392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         LOG.warning("Aborted by user. Shutting down gracefully...")
         return 130
-    except (OSError, ValueError, TypeError, RuntimeError) as e:
-        LOG.error(f"Error: {e}")
+    except (OSError, ValueError, TypeError, RuntimeError) as error:
+        LOG.error(f"Error: {error}")
         return 1
 
 

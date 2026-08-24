@@ -18,7 +18,7 @@ from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import CONSOLE, LOG
 
-_ORJSON_OPTS = (
+_ORJSON_OPTIONS = (
     orjson.OPT_SERIALIZE_DATACLASS
     | orjson.OPT_SERIALIZE_NUMPY
     | orjson.OPT_NON_STR_KEYS
@@ -36,21 +36,21 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
     LOG.info(f"🔄 Scanning for files in {directory}...")
     audio_files = sorted(
         [
-            p
-            for p in directory.rglob("*")
-            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+            path
+            for path in directory.rglob("*")
+            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
         ]
     )
 
     timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%d_%H-%M-%S"
     )
-    out_path = output_file or Path(f"backup_{timestamp_str}.json")
+    output_path = output_file or Path(f"backup_{timestamp_str}.json")
 
     if not audio_files:
         LOG.warning("No audio files found to back up.")
-        out_path.write_bytes(b"{}\n")
-        return out_path
+        output_path.write_bytes(b"{}\n")
+        return output_path
 
     LOG.info(
         f"🔄 Creating full backup for {len(audio_files)} files (streaming mode)..."
@@ -59,8 +59,8 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
     failed = 0
 
     try:
-        with open(out_path, "wb") as f:
-            f.write(b"{\n")
+        with open(output_path, "wb") as file_handle:
+            file_handle.write(b"{\n")
             first = True
             with Progress(
                 SpinnerColumn(),
@@ -76,36 +76,36 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
                 task = progress.add_task(
                     "[cyan]Backing up audio tags...", total=len(audio_files)
                 )
-                for idx, file_p in enumerate(audio_files):
+                for index, audio_file in enumerate(audio_files):
                     try:
-                        info = read_track_metadata(file_p)
-                        data = info.to_dict()
+                        track_info = read_track_metadata(audio_file)
+                        track_data = track_info.to_dict()
 
                         if not first:
-                            f.write(b",\n")
-                        key_bytes = orjson.dumps(str(file_p), option=_ORJSON_OPTS)
-                        val_bytes = orjson.dumps(data, option=_ORJSON_OPTS)
-                        f.write(b"  " + key_bytes + b": " + val_bytes)
+                            file_handle.write(b",\n")
+                        key_bytes = orjson.dumps(str(audio_file), option=_ORJSON_OPTIONS)
+                        value_bytes = orjson.dumps(track_data, option=_ORJSON_OPTIONS)
+                        file_handle.write(b"  " + key_bytes + b": " + value_bytes)
                         first = False
                         count += 1
-                    except (OSError, ValueError, RuntimeError) as e:
-                        LOG.debug(f"Error reading {file_p} for backup: {e}")
+                    except (OSError, ValueError, RuntimeError) as error:
+                        LOG.debug(f"Error reading {audio_file} for backup: {error}")
                         failed += 1
 
                     progress.advance(task)
-                    if (idx + 1) % 500 == 0:
+                    if (index + 1) % 500 == 0:
                         gc.collect()
 
-            f.write(b"\n}\n")
+            file_handle.write(b"\n}\n")
 
         LOG.info(
-            f"✅ Successfully backed up {count}/{len(audio_files)} files to {out_path}"
+            f"✅ Successfully backed up {count}/{len(audio_files)} files to {output_path}"
         )
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files could not be read")
-        return out_path
-    except (OSError, ValueError, TypeError) as e:
-        LOG.error(f"Failed to save backup: {e}")
+        return output_path
+    except (OSError, ValueError, TypeError) as error:
+        LOG.error(f"Failed to save backup: {error}")
         raise
 
 
@@ -142,23 +142,23 @@ def restore_library_tags(backup_file: Path) -> int:
                 "[cyan]Restoring audio tags...", total=len(backup_dict)
             )
             processed = 0
-            for f_path_str, tags_dict in backup_dict.items():
-                f_path = Path(f_path_str)
-                if not f_path.exists():
+            for file_path_string, tags_dictionary in backup_dict.items():
+                target_file_path = Path(file_path_string)
+                if not target_file_path.exists():
                     missing += 1
                 else:
                     try:
-                        info = read_track_metadata(f_path)
-                        if isinstance(tags_dict, dict):
-                            for k, v in tags_dict.items():
-                                if k in ("file_path", "file_name"):
+                        track_info = read_track_metadata(target_file_path)
+                        if isinstance(tags_dictionary, dict):
+                            for tag_key, tag_value in tags_dictionary.items():
+                                if tag_key in ("file_path", "file_name"):
                                     continue
-                                if hasattr(info, k) and v is not None:
-                                    setattr(info, k, v)
-                            write_track_metadata(info)
+                                if hasattr(track_info, tag_key) and tag_value is not None:
+                                    setattr(track_info, tag_key, tag_value)
+                            write_track_metadata(track_info)
                             count += 1
-                    except (OSError, ValueError, KeyError, RuntimeError) as e:
-                        LOG.debug(f"Failed to restore {f_path}: {e}")
+                    except (OSError, ValueError, KeyError, RuntimeError) as error:
+                        LOG.debug(f"Failed to restore {target_file_path}: {error}")
                         failed += 1
 
                 processed += 1
@@ -173,6 +173,6 @@ def restore_library_tags(backup_file: Path) -> int:
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files failed to restore")
         return count
-    except (orjson.JSONDecodeError, OSError, ValueError, KeyError) as e:
-        LOG.error(f"Failed to read backup file: {e}")
+    except (orjson.JSONDecodeError, OSError, ValueError, KeyError) as error:
+        LOG.error(f"Failed to read backup file: {error}")
         raise
