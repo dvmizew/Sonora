@@ -203,8 +203,14 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
 
     _MB_LIMITER.wait()
     try:
-        rel = musicbrainzngs.get_release_by_id(release_mbid, includes=["recordings", "media", "artist-credits"])
-        mediums = rel.get("release", {}).get("medium-list", []) if isinstance(rel, dict) else []
+        rel = musicbrainzngs.get_release_by_id(
+            release_mbid, includes=["recordings", "media", "artist-credits"]
+        )
+        mediums = (
+            rel.get("release", {}).get("medium-list", [])
+            if isinstance(rel, dict)
+            else []
+        )
         mapping: dict[int, str] = {}
         for m in mediums:
             if isinstance(m, dict):

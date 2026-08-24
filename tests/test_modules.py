@@ -51,7 +51,7 @@ def create_dummy_wav(path: Path) -> None:
     header.extend(chunk_size.to_bytes(4, "little"))
     header.extend(b"WAVEfmt ")
     header.extend((16).to_bytes(4, "little"))  # Subchunk1Size
-    header.extend((1).to_bytes(2, "little"))   # AudioFormat (PCM)
+    header.extend((1).to_bytes(2, "little"))  # AudioFormat (PCM)
     header.extend(num_channels.to_bytes(2, "little"))
     header.extend(sample_rate.to_bytes(4, "little"))
     header.extend(byte_rate.to_bytes(4, "little"))
@@ -88,9 +88,13 @@ class TestCoreModules(unittest.TestCase):
 
         # Ensure artist names containing keywords as substrings (e.g. Trippie -> rip, Claudio -> audio, MHD -> hd) are NOT flagged
         self.assertEqual(check_brackets_corruption("Candy (feat. Trippie Redd)"), [])
-        self.assertEqual(check_brackets_corruption("Que Dieu me pardonne (feat. Claudio Capéo)"), [])
+        self.assertEqual(
+            check_brackets_corruption("Que Dieu me pardonne (feat. Claudio Capéo)"), []
+        )
         self.assertEqual(check_brackets_corruption("Versus (feat. MHD)"), [])
-        self.assertEqual(check_brackets_corruption("MODERN JAM (feat. Teezo Touchdown)"), [])
+        self.assertEqual(
+            check_brackets_corruption("MODERN JAM (feat. Teezo Touchdown)"), []
+        )
 
     def test_sync_lrc_metadata(self):
         lrc_file = self.tmp_path / "test.lrc"
@@ -106,7 +110,9 @@ class TestCoreModules(unittest.TestCase):
 
     def test_sync_lrc_metadata_existing_headers(self):
         lrc_file = self.tmp_path / "existing.lrc"
-        lrc_file.write_text("[ar:Old Artist]\n[ti:Old Title]\n[00:15.00] Line 2\n", encoding="utf-8")
+        lrc_file.write_text(
+            "[ar:Old Artist]\n[ti:Old Title]\n[00:15.00] Line 2\n", encoding="utf-8"
+        )
 
         success = sync_lrc_metadata(lrc_file, "New Artist", "New Title")
         self.assertTrue(success)
@@ -124,10 +130,7 @@ class TestCoreModules(unittest.TestCase):
         create_dummy_wav(wav_file)
 
         mock_read.return_value = TrackInfo(
-            file_path=wav_file,
-            artist="Beyoncé",
-            title="Halo",
-            track_number=1
+            file_path=wav_file, artist="Beyoncé", title="Halo", track_number=1
         )
 
         new_path = rename_track_file(wav_file)
@@ -150,7 +153,9 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(len(renamed), 2)
 
     def test_get_primary_artist(self):
-        self.assertEqual(get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage")
+        self.assertEqual(
+            get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
+        )
         self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
         self.assertEqual(get_primary_artist("Above & Beyond"), "Above & Beyond")
 
@@ -187,11 +192,15 @@ class TestCoreModules(unittest.TestCase):
         f1 = src_dir / "single.wav"
         create_dummy_wav(f1)
 
-        mock_read.return_value = TrackInfo(file_path=f1, artist="Single Artist", title="Single Song")
+        mock_read.return_value = TrackInfo(
+            file_path=f1, artist="Single Artist", title="Single Song"
+        )
 
         moved = organize_library_singles(src_dir, target_dir)
         self.assertEqual(moved, 1)
-        self.assertTrue((target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists())
+        self.assertTrue(
+            (target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists()
+        )
 
     @patch("sonora.modules.organizer.read_track_metadata")
     def test_organize_library_singles_with_lrc(self, mock_read):
@@ -202,19 +211,27 @@ class TestCoreModules(unittest.TestCase):
         create_dummy_wav(f1)
         lrc.write_text("[00:01.00] lyrics", encoding="utf-8")
 
-        mock_read.return_value = TrackInfo(file_path=f1, artist="Single Artist", title="Single Song")
+        mock_read.return_value = TrackInfo(
+            file_path=f1, artist="Single Artist", title="Single Song"
+        )
 
         moved = organize_library_singles(src_dir, target_dir)
         self.assertEqual(moved, 1)
-        self.assertTrue((target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists())
-        self.assertTrue((target_dir / "Single Artist" / "Single Artist - Single Song.lrc").exists())
+        self.assertTrue(
+            (target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists()
+        )
+        self.assertTrue(
+            (target_dir / "Single Artist" / "Single Artist - Single Song.lrc").exists()
+        )
 
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library(self, mock_read):
         f1 = self.tmp_path / "song.wav"
         create_dummy_wav(f1)
 
-        mock_read.return_value = TrackInfo(file_path=f1, artist="Artist [Official]", title="Title")
+        mock_read.return_value = TrackInfo(
+            file_path=f1, artist="Artist [Official]", title="Title"
+        )
 
         report = check_library(self.tmp_path, output_json=self.tmp_path / "report.json")
         self.assertEqual(report.total_files, 1)
@@ -238,7 +255,9 @@ class TestCoreModules(unittest.TestCase):
 
         info = process_single_track(wav_file, fetch_bpm=False)
         self.assertEqual(info.artist, "Nane")
-        self.assertEqual(info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
+        self.assertEqual(
+            info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
+        )
         mock_write.assert_called_once()
 
     @patch("sonora.modules.tagger.process_single_track")
@@ -263,10 +282,7 @@ class TestCoreModules(unittest.TestCase):
 
         with patch("sonora.modules.checker.read_track_metadata") as mock_read:
             mock_read.return_value = TrackInfo(
-                file_path=wav,
-                artist="Artist",
-                title="Title",
-                genre="Top 40 Pop"
+                file_path=wav, artist="Artist", title="Title", genre="Top 40 Pop"
             )
             issues = check_file(wav)
             self.assertTrue(any("Blacklisted genre" in issue for issue in issues))
@@ -315,7 +331,9 @@ class TestCoreModules(unittest.TestCase):
         target_dir = self.tmp_path / "Singles"
 
         with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
-            mock_read.return_value = TrackInfo(file_path=f1, artist="Artist", album="Full Album")
+            mock_read.return_value = TrackInfo(
+                file_path=f1, artist="Artist", album="Full Album"
+            )
             moved = organize_library_singles(self.tmp_path, target_dir)
             self.assertEqual(moved, 0)
             self.assertTrue(f1.exists())
@@ -333,7 +351,9 @@ class TestCoreModules(unittest.TestCase):
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
 
-        mock_read.return_value = TrackInfo(file_path=wav_file, artist="Artist", title="Title", genre=None)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_file, artist="Artist", title="Title", genre=None
+        )
         mock_mbid.return_value = None
         mock_acoustid.return_value = "c8b03190-306c-4125-9b32-3f9d86d60a12"
         mock_discogs.return_value = {"id": 123, "year": 2024}
@@ -347,7 +367,9 @@ class TestCoreModules(unittest.TestCase):
             discogs_user_token="discogs_token",
         )
 
-        self.assertEqual(info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
+        self.assertEqual(
+            info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
+        )
         self.assertEqual(info.date, "2024")
         mock_acoustid.assert_called_once()
         mock_discogs.assert_called_once()
@@ -355,16 +377,30 @@ class TestCoreModules(unittest.TestCase):
     @patch("sonora.modules.checker.detect_fake_lossless")
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library_spectral_check_option(self, mock_read, mock_checksum, mock_spectral):
+    def test_check_library_spectral_check_option(
+        self, mock_read, mock_checksum, mock_spectral
+    ):
         flac_file = self.tmp_path / "song.flac"
         flac_file.write_bytes(b"FLAC dummy content")
 
         mock_checksum.return_value = True
-        mock_read.return_value = TrackInfo(file_path=flac_file, artist="Artist", title="Title")
-        mock_spectral.return_value = (True, 0.0001, "Brickwall spectral cutoff detected at ~16-18kHz (likely upscaled 128-192kbps MP3 fake lossless)")
+        mock_read.return_value = TrackInfo(
+            file_path=flac_file, artist="Artist", title="Title"
+        )
+        mock_spectral.return_value = (
+            True,
+            0.0001,
+            "Brickwall spectral cutoff detected at ~16-18kHz (likely upscaled 128-192kbps MP3 fake lossless)",
+        )
 
         report = check_library(self.tmp_path, check_spectral=True)
-        self.assertTrue(any("fake lossless" in issue.lower() for issues in report.issues.values() for issue in issues))
+        self.assertTrue(
+            any(
+                "fake lossless" in issue.lower()
+                for issues in report.issues.values()
+                for issue in issues
+            )
+        )
         mock_spectral.assert_called_once()
 
     def test_symfonium_extended_tags(self):
@@ -387,8 +423,12 @@ class TestCoreModules(unittest.TestCase):
         write_track_metadata(info)
 
         reloaded = read_track_metadata(wav_path)
-        self.assertEqual(reloaded.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
-        self.assertEqual(reloaded.musicbrainz_albumid, "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d")
+        self.assertEqual(
+            reloaded.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
+        )
+        self.assertEqual(
+            reloaded.musicbrainz_albumid, "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d"
+        )
 
     def test_image_similarity(self):
         # Image 1: White background with black square in top-left
@@ -429,7 +469,7 @@ class TestCoreModules(unittest.TestCase):
             '  TITLE "Track One"\n'
             '  PERFORMER "Track Artist"\n'
             "  INDEX 01 00:00:00\n",
-            encoding="utf-8"
+            encoding="utf-8",
         )
 
         tracks = parse_cuesheet(cue_path)
@@ -478,7 +518,7 @@ class TestCoreModules(unittest.TestCase):
             "artists": [
                 {
                     "strArtistThumb": "http://example.com/thumb.jpg",
-                    "strArtistBanner": "http://example.com/banner.jpg"
+                    "strArtistBanner": "http://example.com/banner.jpg",
                 }
             ]
         }
@@ -486,7 +526,14 @@ class TestCoreModules(unittest.TestCase):
         mock_img_resp.status_code = 200
         mock_img_resp.content = b"fakeimage"
 
-        mock_get.side_effect = [mock_resp, mock_img_resp, mock_img_resp, mock_resp, mock_img_resp, mock_img_resp]
+        mock_get.side_effect = [
+            mock_resp,
+            mock_img_resp,
+            mock_img_resp,
+            mock_resp,
+            mock_img_resp,
+            mock_img_resp,
+        ]
 
         thumb, banner = fetch_artist_images("21 Savage")
         self.assertEqual(thumb, b"fakeimage")

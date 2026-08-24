@@ -150,18 +150,23 @@ def rename_track_file(
 
     # Step 2: Fallback search by track number prefix
     if not old_lrc_path and track_info.track_number:
-        tn_clean = "".join(filter(str.isdigit, str(track_info.track_number).split("/")[0]))
+        tn_clean = "".join(
+            filter(str.isdigit, str(track_info.track_number).split("/")[0])
+        )
         if tn_clean:
             tn_p = f"{int(tn_clean):02d}"
             for cand in folder.iterdir():
                 if any(cand.name.lower().endswith(e) for e in LRC_EXTS) and (
-                    cand.name.startswith(tn_p) or cand.name.startswith(str(int(tn_clean)))
+                    cand.name.startswith(tn_p)
+                    or cand.name.startswith(str(int(tn_clean)))
                 ):
                     old_lrc_path = cand
                     break
 
     # Sync LRC metadata headers
-    lrc_to_sync = old_lrc_path or (new_path.with_suffix(".lrc") if new_path.with_suffix(".lrc").exists() else None)
+    lrc_to_sync = old_lrc_path or (
+        new_path.with_suffix(".lrc") if new_path.with_suffix(".lrc").exists() else None
+    )
     if lrc_to_sync and lrc_to_sync.suffix.lower() == ".lrc" and not dry_run:
         sync_lrc_metadata(lrc_to_sync, track_info.artist, track_info.title)
 
@@ -171,9 +176,15 @@ def rename_track_file(
 
     # Perform file rename
     if file_path.name != new_name or file_path.parent != new_path.parent:
-        if new_path.exists() and (file_path.parent != new_path.parent or file_path.name.lower() != new_path.name.lower()):
+        if new_path.exists() and (
+            file_path.parent != new_path.parent
+            or file_path.name.lower() != new_path.name.lower()
+        ):
             counter = 2
-            while new_path.exists() and (file_path.parent != new_path.parent or file_path.name.lower() != new_path.name.lower()):
+            while new_path.exists() and (
+                file_path.parent != new_path.parent
+                or file_path.name.lower() != new_path.name.lower()
+            ):
                 new_name = f"{new_path.stem} ({counter}){file_path.suffix}"
                 new_path = folder / new_name
                 counter += 1
@@ -181,7 +192,11 @@ def rename_track_file(
         if not dry_run:
             try:
                 # Handle case-only rename safely across all filesystems
-                if file_path.parent == new_path.parent and file_path.name.lower() == new_path.name.lower() and file_path.name != new_path.name:
+                if (
+                    file_path.parent == new_path.parent
+                    and file_path.name.lower() == new_path.name.lower()
+                    and file_path.name != new_path.name
+                ):
                     tmp_path = folder / f".tmp_{file_path.name}"
                     file_path.rename(tmp_path)
                     tmp_path.rename(new_path)
@@ -231,7 +246,9 @@ def rename_album_folder(
     if normalize_str(folder_now) != normalize_str(expected_name):
         if is_in_singles:
             base_album = album.split("(")[0].split("-")[0].strip()
-            if normalize_str(artist) in normalize_str(folder_now) and normalize_str(base_album) in normalize_str(folder_now):
+            if normalize_str(artist) in normalize_str(folder_now) and normalize_str(
+                base_album
+            ) in normalize_str(folder_now):
                 return folder_path
 
         new_folder = folder_path.with_name(expected_name)
@@ -241,13 +258,17 @@ def rename_album_folder(
         if not dry_run:
             try:
                 folder_path.rename(new_folder)
-                LOG.info(f"   ∟ 📂 Album folder renamed: [dim]{folder_now}[/] -> [cyan]{expected_name}[/]")
+                LOG.info(
+                    f"   ∟ 📂 Album folder renamed: [dim]{folder_now}[/] -> [cyan]{expected_name}[/]"
+                )
                 return new_folder
             except (OSError, ValueError, RuntimeError) as e:
                 LOG.warning(f"Failed to rename folder {folder_now}: {e}")
                 return folder_path
         else:
-            LOG.info(f"[DRY-RUN] Would rename album folder {folder_now} -> {expected_name}")
+            LOG.info(
+                f"[DRY-RUN] Would rename album folder {folder_now} -> {expected_name}"
+            )
     return folder_path
 
 
@@ -278,14 +299,19 @@ def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[
         TimeRemainingColumn(),
         console=CONSOLE,
     ) as progress:
-        task = progress.add_task("[cyan]Renaming audio files...", total=total_files_count)
+        task = progress.add_task(
+            "[cyan]Renaming audio files...", total=total_files_count
+        )
         for folder, files in folder_files.items():
             album_consensus: Counter[tuple[str, str]] = Counter()
             for path in files:
                 try:
                     info = read_track_metadata(path)
                     search_artist = info.album_artist or info.artist
-                    if search_artist != "Unknown Artist" and info.album != "Unknown Album":
+                    if (
+                        search_artist != "Unknown Artist"
+                        and info.album != "Unknown Album"
+                    ):
                         album_consensus[(search_artist, info.album)] += 1
 
                     new_p = rename_track_file(path, track_info=info, options=options)
@@ -303,6 +329,8 @@ def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[
                     albums_found = {a for (_, a) in album_consensus}
                     if len(albums_found) == 1:
                         common_album = next(iter(albums_found))
-                        rename_album_folder(folder, "Various Artists", common_album, options=options)
+                        rename_album_folder(
+                            folder, "Various Artists", common_album, options=options
+                        )
 
     return renamed

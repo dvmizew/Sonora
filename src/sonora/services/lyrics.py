@@ -52,7 +52,12 @@ def clean_lyrics_text(text: str | None) -> str | None:
             continue
 
         is_junk = any(re.match(p, s_line, re.IGNORECASE) for p in junk_patterns)
-        if not is_junk and s_line.startswith("[") and s_line.endswith("]") and not is_timestamped(s_line):
+        if (
+            not is_junk
+            and s_line.startswith("[")
+            and s_line.endswith("]")
+            and not is_timestamped(s_line)
+        ):
             # Check for non-timestamped brackets like [Verse 1], [Chorus] if plain text
             pass  # Preserve section headers for plain text readability
 
@@ -63,11 +68,15 @@ def clean_lyrics_text(text: str | None) -> str | None:
         return ""
 
     # Strip trailing "Embed" or digit+Embed on the last non-empty line
-    while cleaned and (re.search(r"\bEmbed\b\s*$", cleaned[-1], re.IGNORECASE) or cleaned[-1] == ""):
+    while cleaned and (
+        re.search(r"\bEmbed\b\s*$", cleaned[-1], re.IGNORECASE) or cleaned[-1] == ""
+    ):
         if cleaned[-1] == "":
             cleaned.pop()
             continue
-        cleaned[-1] = re.sub(r"\d*\s*Embed\s*$", "", cleaned[-1], flags=re.IGNORECASE).strip()
+        cleaned[-1] = re.sub(
+            r"\d*\s*Embed\s*$", "", cleaned[-1], flags=re.IGNORECASE
+        ).strip()
         if not cleaned[-1]:
             cleaned.pop()
 
@@ -95,7 +104,9 @@ def detect_lrc_quality(file_path: Path) -> int:
     """Detect quality level of existing lyrics file on disk for a given track path."""
     lrc_path = file_path.with_suffix(".lrc")
     txt_path = file_path.with_suffix(".txt")
-    target_path = lrc_path if lrc_path.exists() else (txt_path if txt_path.exists() else None)
+    target_path = (
+        lrc_path if lrc_path.exists() else (txt_path if txt_path.exists() else None)
+    )
     if not target_path:
         return 0
     try:
@@ -176,9 +187,11 @@ def fetch_synced_lyrics(
 
     # ATTEMPT 3: Surgical Clean Title Fallback
     if not lrc and ("(" in title or "[" in title or "feat" in title.lower()):
-        clean_title = re.sub(r'[\(\[\{].*?[\)\]\}]', '', title).strip()
-        clean_title = re.sub(r'\s+(?:fea?t|ft)\.?\s+.*$', '', clean_title, flags=re.IGNORECASE).strip()
-        primary_artist = artist.split(',')[0].split('&')[0].split(';')[0].strip()
+        clean_title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", title).strip()
+        clean_title = re.sub(
+            r"\s+(?:fea?t|ft)\.?\s+.*$", "", clean_title, flags=re.IGNORECASE
+        ).strip()
+        primary_artist = artist.split(",")[0].split("&")[0].split(";")[0].strip()
         query = f"{clean_title} {primary_artist}".strip()
         try:
             lrc = _query_syncedlyrics(query, *search_args)
@@ -190,7 +203,9 @@ def fetch_synced_lyrics(
         return lrc
 
     if last_exception:
-        raise RuntimeError(f"Lyrics fetch failed for '{title}': {last_exception}") from last_exception
+        raise RuntimeError(
+            f"Lyrics fetch failed for '{title}': {last_exception}"
+        ) from last_exception
 
     return None
 

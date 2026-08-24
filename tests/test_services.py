@@ -27,13 +27,20 @@ class TestServicesEngine(unittest.TestCase):
     def test_fetch_itunes_cover_art_url(self, mock_get, _mock_cache):
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "results": [{"collectionName": "Halo", "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/100x100bb.jpg"}]
+            "results": [
+                {
+                    "collectionName": "Halo",
+                    "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/100x100bb.jpg",
+                }
+            ]
         }
         mock_get.return_value = mock_response
         # No context manager or read() needed for requests
 
         url = fetch_itunes_cover_art_url("Beyoncé", "Halo", resolution=1400)
-        self.assertEqual(url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg")
+        self.assertEqual(
+            url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg"
+        )
 
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
@@ -42,7 +49,9 @@ class TestServicesEngine(unittest.TestCase):
 
         lyrics = fetch_synced_lyrics("Artist", "Title")
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
-        mock_syncedlyrics.search.assert_called_once_with("artist - title", plain_only=False, synced_only=False, enhanced=False)
+        mock_syncedlyrics.search.assert_called_once_with(
+            "artist - title", plain_only=False, synced_only=False, enhanced=False
+        )
 
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
@@ -55,7 +64,7 @@ class TestServicesEngine(unittest.TestCase):
             synced_only=True,
             enhanced=True,
             providers=["Lrclib"],
-            lang="en"
+            lang="en",
         )
         self.assertEqual(lyrics, "<00:12.34> Enhanced lyric line")
         mock_syncedlyrics.search.assert_called_once_with(
@@ -64,12 +73,14 @@ class TestServicesEngine(unittest.TestCase):
             synced_only=True,
             enhanced=True,
             providers=["Lrclib"],
-            lang="en"
+            lang="en",
         )
 
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_raises_api_service_error_on_failure(self, mock_syncedlyrics, _mock_cache):
+    def test_fetch_synced_lyrics_raises_api_service_error_on_failure(
+        self, mock_syncedlyrics, _mock_cache
+    ):
         mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
         with self.assertRaises(RuntimeError):
             fetch_synced_lyrics("FailArtist", "FailTitle")
@@ -92,7 +103,6 @@ class TestServicesEngine(unittest.TestCase):
 
         mbid = fetch_track_mbid("Artist", "Title")
         self.assertEqual(mbid, "12345678-1234-1234-1234-123456789abc")
-
 
     @patch("sonora.services.discogs.get_cached_api", return_value=None)
     @patch("sonora.services.discogs.SESSION.get")
@@ -160,7 +170,9 @@ class TestServicesEngine(unittest.TestCase):
     def test_lookup_acoustid(self, mock_acoustid, _mock_cache):
         mock_acoustid.fingerprint_file.return_value = (120.0, "fingerprint_data_str")
         mock_acoustid.lookup.return_value = {}
-        mock_acoustid.parse_lookup_result.return_value = [(0.95, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Title", "Artist")]
+        mock_acoustid.parse_lookup_result.return_value = [
+            (0.95, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Title", "Artist")
+        ]
 
         mbid = lookup_acoustid(Path(__file__), api_key="dummy_key")
         self.assertEqual(mbid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
@@ -169,7 +181,9 @@ class TestServicesEngine(unittest.TestCase):
     @patch("sonora.core.http.SESSION.get")
     def test_fetch_lastfm_tags(self, mock_get, _mock_cache):
         mock_response = MagicMock()
-        mock_response.json.return_value = {"toptags": {"tag": [{"name": "pop"}, {"name": "rnb"}]}}
+        mock_response.json.return_value = {
+            "toptags": {"tag": [{"name": "pop"}, {"name": "rnb"}]}
+        }
         mock_get.return_value = mock_response
 
         tags = fetch_lastfm_tags("Beyoncé", "Halo", api_key="dummy_lastfm_key")
@@ -192,10 +206,14 @@ class TestServicesEngine(unittest.TestCase):
             }
         }
         mock_resp_song = MagicMock()
-        mock_resp_song.json.return_value = {"response": {"song": {"description": {"plain": "Song story description"}}}}
+        mock_resp_song.json.return_value = {
+            "response": {"song": {"description": {"plain": "Song story description"}}}
+        }
         mock_get.side_effect = [mock_resp_search, mock_resp_song]
 
-        desc = fetch_genius_description("Artist", "Title", api_token="dummy_genius_token")
+        desc = fetch_genius_description(
+            "Artist", "Title", api_token="dummy_genius_token"
+        )
         self.assertEqual(desc, "Song story description")
 
     def test_acoustid_no_api_key_returns_none(self):
@@ -206,7 +224,9 @@ class TestServicesEngine(unittest.TestCase):
     def test_acoustid_low_score_returns_none(self, mock_acoustid, _mock_cache):
         mock_acoustid.fingerprint_file.return_value = (100.0, "fp_data")
         mock_acoustid.lookup.return_value = {}
-        mock_acoustid.parse_lookup_result.return_value = [(0.5, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Title", "Artist")]
+        mock_acoustid.parse_lookup_result.return_value = [
+            (0.5, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Title", "Artist")
+        ]
 
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key="dummy_key"))
 
@@ -216,12 +236,22 @@ class TestServicesEngine(unittest.TestCase):
     @patch("sonora.core.http.SESSION.get")
     def test_genius_rejects_lyrics_unavailable_text(self, mock_get):
         mock_resp1 = MagicMock()
-        mock_resp1.json.return_value = {"response": {"hits": [{"result": {"api_path": "/songs/1"}}]}}
+        mock_resp1.json.return_value = {
+            "response": {"hits": [{"result": {"api_path": "/songs/1"}}]}
+        }
         mock_resp2 = MagicMock()
-        mock_resp2.json.return_value = {"response": {"song": {"description": {"plain": "Lyrics for this song are unavailable"}}}}
+        mock_resp2.json.return_value = {
+            "response": {
+                "song": {
+                    "description": {"plain": "Lyrics for this song are unavailable"}
+                }
+            }
+        }
         mock_get.side_effect = [mock_resp1, mock_resp2]
 
-        self.assertIsNone(fetch_genius_description("Artist", "Title", api_token="token"))
+        self.assertIsNone(
+            fetch_genius_description("Artist", "Title", api_token="token")
+        )
 
     @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
@@ -247,7 +277,9 @@ class TestServicesEngine(unittest.TestCase):
             "14Embed"
         )
         cleaned = clean_lyrics_text(dirty)
-        self.assertEqual(cleaned, "[00:12.34] Valid lyric line\n[00:15.00] Second valid line")
+        self.assertEqual(
+            cleaned, "[00:12.34] Valid lyric line\n[00:15.00] Second valid line"
+        )
 
     def test_clean_lyrics_none(self):
         self.assertIsNone(clean_lyrics_text(None))
@@ -256,7 +288,9 @@ class TestServicesEngine(unittest.TestCase):
         self.assertEqual(clean_lyrics_text(""), "")
 
     def test_clean_lyrics_only_junk(self):
-        self.assertEqual(clean_lyrics_text("12 Contributors\nYou might also like\n14Embed"), "")
+        self.assertEqual(
+            clean_lyrics_text("12 Contributors\nYou might also like\n14Embed"), ""
+        )
 
     @patch("sonora.services.deezer.get_cached_api", return_value=None)
     @patch("sonora.services.deezer.SESSION.get")
@@ -340,7 +374,14 @@ class TestServicesEngine(unittest.TestCase):
                     "date": "2024-01-01",
                     "country": "US",
                     "barcode": "123456789012",
-                    "artist-credit": [{"artist": {"name": "Artist", "id": "a1b2c3d4-1234-1234-1234-123456789abc"}}],
+                    "artist-credit": [
+                        {
+                            "artist": {
+                                "name": "Artist",
+                                "id": "a1b2c3d4-1234-1234-1234-123456789abc",
+                            }
+                        }
+                    ],
                 }
             ]
         }

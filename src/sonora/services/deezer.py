@@ -65,7 +65,9 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
         return None
 
 
-def fetch_deezer_album_details(artist: str, album: str) -> dict[str, str | int | bool | None] | None:
+def fetch_deezer_album_details(
+    artist: str, album: str
+) -> dict[str, str | int | bool | None] | None:
     if not (artist and album):
         return None
 
@@ -99,7 +101,11 @@ def fetch_deezer_album_details(artist: str, album: str) -> dict[str, str | int |
             return None
 
         alb_data = detail_resp.json()
-        genres = [g["name"] for g in alb_data.get("genres", {}).get("data", []) if isinstance(g, dict) and "name" in g]
+        genres = [
+            g["name"]
+            for g in alb_data.get("genres", {}).get("data", [])
+            if isinstance(g, dict) and "name" in g
+        ]
 
         result = {
             "label": alb_data.get("label"),
@@ -116,7 +122,9 @@ def fetch_deezer_album_details(artist: str, album: str) -> dict[str, str | int |
         return None
 
 
-def fetch_deezer_track_details(artist: str, title: str) -> dict[str, str | int | float | bool | None] | None:
+def fetch_deezer_track_details(
+    artist: str, title: str
+) -> dict[str, str | int | float | bool | None] | None:
     if not (artist and title):
         return None
 

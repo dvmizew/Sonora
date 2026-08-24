@@ -10,9 +10,7 @@ def fetch_genius_description(
 ) -> str | None:
     details = fetch_genius_song_details(artist, title, api_token)
     return (
-        str(details["description"])
-        if details and details.get("description")
-        else None
+        str(details["description"]) if details and details.get("description") else None
     )
 
 
@@ -78,13 +76,17 @@ def fetch_genius_song_details(
         # Parse featured artists
         featured_list = song_data.get("featured_artists", [])
         featured_names = [
-            str(f["name"]) for f in featured_list if isinstance(f, dict) and f.get("name")
+            str(f["name"])
+            for f in featured_list
+            if isinstance(f, dict) and f.get("name")
         ]
 
         # Parse producers
         producer_list = song_data.get("producer_artists", [])
         producer_names = [
-            str(p["name"]) for p in producer_list if isinstance(p, dict) and p.get("name")
+            str(p["name"])
+            for p in producer_list
+            if isinstance(p, dict) and p.get("name")
         ]
 
         return {

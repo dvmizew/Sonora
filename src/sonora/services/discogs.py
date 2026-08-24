@@ -24,7 +24,9 @@ def _get_discogs_lock(key: str) -> threading.Lock:
         return _discogs_locks[key]
 
 
-def fetch_discogs_release_details(release_id: int | str, user_token: str) -> dict[str, Any] | None:
+def fetch_discogs_release_details(
+    release_id: int | str, user_token: str
+) -> dict[str, Any] | None:
     if not release_id or not user_token:
         return None
 
@@ -51,15 +53,28 @@ def fetch_discogs_release_details(release_id: int | str, user_token: str) -> dic
 
             # 1. Primary Artist ID
             artists = data.get("artists", [])
-            artist_id = str(artists[0].get("id")) if isinstance(artists, list) and artists and isinstance(artists[0], dict) and artists[0].get("id") else None
+            artist_id = (
+                str(artists[0].get("id"))
+                if isinstance(artists, list)
+                and artists
+                and isinstance(artists[0], dict)
+                and artists[0].get("id")
+                else None
+            )
 
             # 2. Labels & Catalog Number
             labels = data.get("labels", [])
             label_name = None
             cat_no = None
             if isinstance(labels, list) and labels and isinstance(labels[0], dict):
-                label_name = str(labels[0].get("name")) if labels[0].get("name") else None
-                cat_no = str(labels[0].get("catno")) if labels[0].get("catno") and labels[0].get("catno") != "none" else None
+                label_name = (
+                    str(labels[0].get("name")) if labels[0].get("name") else None
+                )
+                cat_no = (
+                    str(labels[0].get("catno"))
+                    if labels[0].get("catno") and labels[0].get("catno") != "none"
+                    else None
+                )
 
             # 3. Barcode & Matrix Identifiers
             barcode_val = None
@@ -67,7 +82,11 @@ def fetch_discogs_release_details(release_id: int | str, user_token: str) -> dic
             if isinstance(identifiers, list):
                 for ident in identifiers:
                     if isinstance(ident, dict) and ident.get("type") == "Barcode":
-                        raw_bc = str(ident.get("value", "")).replace(" ", "").replace("-", "")
+                        raw_bc = (
+                            str(ident.get("value", ""))
+                            .replace(" ", "")
+                            .replace("-", "")
+                        )
                         if raw_bc:
                             barcode_val = raw_bc
                             break
@@ -96,11 +115,24 @@ def fetch_discogs_release_details(release_id: int | str, user_token: str) -> dic
                     if isinstance(ea, dict) and ea.get("name") and ea.get("role"):
                         name = re.sub(r"\s*\(\d+\)$", "", str(ea["name"])).strip()
                         role = str(ea["role"]).lower()
-                        if ("producer" in role or "produced by" in role) and name not in producers:
+                        if (
+                            "producer" in role or "produced by" in role
+                        ) and name not in producers:
                             producers.append(name)
                         elif "remix" in role and name not in remixers:
                             remixers.append(name)
-                        elif any(kw in role for kw in ("written", "composer", "music by", "words by")) and name not in composers:
+                        elif (
+                            any(
+                                kw in role
+                                for kw in (
+                                    "written",
+                                    "composer",
+                                    "music by",
+                                    "words by",
+                                )
+                            )
+                            and name not in composers
+                        ):
                             composers.append(name)
 
             # 6. Tracklist Level Credits
@@ -114,10 +146,18 @@ def fetch_discogs_release_details(release_id: int | str, user_token: str) -> dic
                         t_prods: list[str] = []
                         t_remix: list[str] = []
                         for tea in t.get("extraartists", []):
-                            if isinstance(tea, dict) and tea.get("name") and tea.get("role"):
-                                tea_name = re.sub(r"\s*\(\d+\)$", "", str(tea["name"])).strip()
+                            if (
+                                isinstance(tea, dict)
+                                and tea.get("name")
+                                and tea.get("role")
+                            ):
+                                tea_name = re.sub(
+                                    r"\s*\(\d+\)$", "", str(tea["name"])
+                                ).strip()
                                 tea_role = str(tea["role"]).lower()
-                                if ("producer" in tea_role or "produced by" in tea_role) and tea_name not in t_prods:
+                                if (
+                                    "producer" in tea_role or "produced by" in tea_role
+                                ) and tea_name not in t_prods:
                                     t_prods.append(tea_name)
                                 elif "remix" in tea_role and tea_name not in t_remix:
                                     t_remix.append(tea_name)
@@ -156,7 +196,9 @@ def fetch_discogs_release_details(release_id: int | str, user_token: str) -> dic
             return None
 
 
-def search_discogs_release(artist: str, album: str, user_token: str | None = None) -> dict[str, Any] | None:
+def search_discogs_release(
+    artist: str, album: str, user_token: str | None = None
+) -> dict[str, Any] | None:
     """
     Search Discogs for release metadata using official REST API and User token.
     Fetches full canonical release metadata if matched.
@@ -210,9 +252,15 @@ def search_discogs_release(artist: str, album: str, user_token: str | None = Non
             label_name = str(labels[0]) if isinstance(labels, list) and labels else None
             cat_no = str(first.get("catno")) if first.get("catno") else None
             barcodes = first.get("barcode", [])
-            barcode_val = str(barcodes[0]) if isinstance(barcodes, list) and barcodes else None
+            barcode_val = (
+                str(barcodes[0]) if isinstance(barcodes, list) and barcodes else None
+            )
             formats = first.get("format", [])
-            media_format = ", ".join(str(f) for f in formats) if isinstance(formats, list) and formats else None
+            media_format = (
+                ", ".join(str(f) for f in formats)
+                if isinstance(formats, list) and formats
+                else None
+            )
 
             res: dict[str, Any] = {
                 "id": rel_id,

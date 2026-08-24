@@ -18,13 +18,22 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
     try:
         duration, fingerprint = acoustid.fingerprint_file(str(file_path))
         return float(duration), str(fingerprint)
-    except (acoustid.AcoustidError, acoustid.WebServiceError, OSError, ValueError, RuntimeError) as e:
-        raise RuntimeError(f"Chromaprint fingerprinting failed for {file_path}: {e}") from e
+    except (
+        acoustid.AcoustidError,
+        acoustid.WebServiceError,
+        OSError,
+        ValueError,
+        RuntimeError,
+    ) as e:
+        raise RuntimeError(
+            f"Chromaprint fingerprinting failed for {file_path}: {e}"
+        ) from e
 
 
 _ACOUSTID_LIMITER = RateLimiter(interval_seconds=0.4)
 _ACOUSTID_FAILURES = 0
 _MAX_ACOUSTID_FAILURES = 3
+
 
 def lookup_acoustid(
     file_path: Path,
@@ -45,7 +54,9 @@ def lookup_acoustid(
         duration, fingerprint = fingerprint_audio_file(file_path)
         cache_key = f"acoustid:{fingerprint}"
         if expected_artist and expected_title:
-            cache_key += f":{normalize_str(expected_artist)}:{normalize_str(expected_title)}"
+            cache_key += (
+                f":{normalize_str(expected_artist)}:{normalize_str(expected_title)}"
+            )
 
         cached = get_cached_api(cache_key)
         if cached is not None:
@@ -57,11 +68,26 @@ def lookup_acoustid(
         best_mbid = None
         best_combined_score = -1.0
 
-        for score, recording_id, candidate_title, candidate_artist in acoustid.parse_lookup_result(results):
+        for (
+            score,
+            recording_id,
+            candidate_title,
+            candidate_artist,
+        ) in acoustid.parse_lookup_result(results):
             if score >= 0.75 and recording_id and is_valid_uuid(str(recording_id)):
                 combined_score = float(score) * 100.0
-                if expected_artist and expected_title and candidate_title and candidate_artist:
-                    text_score = match_score(expected_artist, expected_title, str(candidate_artist), str(candidate_title))
+                if (
+                    expected_artist
+                    and expected_title
+                    and candidate_title
+                    and candidate_artist
+                ):
+                    text_score = match_score(
+                        expected_artist,
+                        expected_title,
+                        str(candidate_artist),
+                        str(candidate_title),
+                    )
                     combined_score = (float(score) * 40.0) + (text_score * 0.6)
 
                 if combined_score > best_combined_score:
@@ -73,7 +99,14 @@ def lookup_acoustid(
             _ACOUSTID_FAILURES = 0
             return best_mbid
         return None
-    except (acoustid.AcoustidError, acoustid.WebServiceError, OSError, ValueError, KeyError, RuntimeError) as e:
+    except (
+        acoustid.AcoustidError,
+        acoustid.WebServiceError,
+        OSError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+    ) as e:
         LOG.debug(f"AcoustID lookup failed for {file_path.name}: {e}")
         _ACOUSTID_FAILURES += 1
         return None

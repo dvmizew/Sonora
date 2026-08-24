@@ -6,10 +6,11 @@ from sonora.core.constants import USER_AGENT
 
 
 class SonoraHTTPClient:
-
     def __init__(self) -> None:
         transport = httpx.HTTPTransport(retries=3)
-        limits = httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=30.0)
+        limits = httpx.Limits(
+            max_connections=100, max_keepalive_connections=20, keepalive_expiry=30.0
+        )
         timeout = httpx.Timeout(timeout=10.0)
         self._client = httpx.Client(
             http2=True,

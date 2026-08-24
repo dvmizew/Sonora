@@ -20,7 +20,7 @@ def verify_flac_checksum(file_path: Path) -> bool:
             capture_output=True,
             text=True,
             check=False,
-            timeout=60
+            timeout=60,
         )
         return result.returncode == 0
     except FileNotFoundError as e:

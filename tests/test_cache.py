@@ -54,7 +54,9 @@ class TestDiskCache(unittest.TestCase):
         mock_get_cache.return_value = mock_cache_inst
 
         set_cached_api("test_key", {"title": "Test Album"}, expire_seconds=86400)
-        mock_cache_inst.set.assert_called_once_with("test_key", {"title": "Test Album"}, expire=86400)
+        mock_cache_inst.set.assert_called_once_with(
+            "test_key", {"title": "Test Album"}, expire=86400
+        )
 
 
 if __name__ == "__main__":

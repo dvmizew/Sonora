@@ -47,7 +47,9 @@ class TestCoreUtils(unittest.TestCase):
         self.assertTrue(is_valid_uuid("c8b03190-306c-4125-9b32-3f9d86d60a12"))
         self.assertTrue(is_valid_uuid("C8B03190-306C-4125-9B32-3F9D86D60A12"))
         self.assertFalse(is_valid_uuid("not-a-uuid"))
-        self.assertFalse(is_valid_uuid("c8b03190306c41259b323f9d86d60a12"))  # 32 chars without hyphens
+        self.assertFalse(
+            is_valid_uuid("c8b03190306c41259b323f9d86d60a12")
+        )  # 32 chars without hyphens
         self.assertFalse(is_valid_uuid("urn:uuid:c8b03190-306c-4125-9b32-3f9d86d60a12"))
         self.assertFalse(is_valid_uuid("{c8b03190-306c-4125-9b32-3f9d86d60a12}"))
         self.assertFalse(is_valid_uuid(None))
@@ -80,14 +82,13 @@ class TestCoreModels(unittest.TestCase):
             title="HALO",
             album="I Am... Sasha Fierce",
             track_number=1,
-            bpm=120.0
+            bpm=120.0,
         )
         data = track.to_dict()
         self.assertEqual(data["artist"], "Beyoncé")
         self.assertEqual(data["title"], "HALO")
         self.assertEqual(data["track_number"], 1)
         self.assertEqual(data["bpm"], 120.0)
-
 
     def test_check_report_initialization(self):
         report = CheckReport(file_path=Path("/music/1.flac"), is_valid=True)
@@ -106,7 +107,6 @@ class TestCoreModels(unittest.TestCase):
         data = track.to_dict()
         self.assertIsNone(data["track_number"])
         self.assertIsNone(data["bpm"])
-
 
 
 if __name__ == "__main__":

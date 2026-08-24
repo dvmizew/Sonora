@@ -42,14 +42,20 @@ class TestCLIInterface(unittest.TestCase):
     @patch("sonora.cli.main.tag_album_folder")
     def test_handle_tag_subcommand_with_json_report(self, mock_tag_folder):
         mock_tag_folder.return_value = [
-            TrackInfo(file_path=Path("dummy.flac"), title="Song", artist="Artist", bpm=120.0, genre="Pop")
+            TrackInfo(
+                file_path=Path("dummy.flac"),
+                title="Song",
+                artist="Artist",
+                bpm=120.0,
+                genre="Pop",
+            )
         ]
         json_out = self.tmp_path / "tag_report.json"
         code = main(["tag", str(self.tmp_path), "--json", str(json_out)])
         self.assertEqual(code, 0)
         self.assertTrue(json_out.exists())
         content = json_out.read_text(encoding="utf-8")
-        self.assertIn("llm_summary", content)
+        self.assertIn("summary_text", content)
         self.assertIn('"bpm_calculated_count": 1', content)
 
     @patch("sonora.cli.main.check_library")
@@ -77,7 +83,9 @@ class TestCLIInterface(unittest.TestCase):
     @patch("sonora.cli.main.backup_library_tags")
     def test_handle_backup_subcommand(self, mock_backup):
         mock_backup.return_value = self.tmp_path / "backup.json"
-        code = main(["backup", str(self.tmp_path), "--out", str(self.tmp_path / "backup.json")])
+        code = main(
+            ["backup", str(self.tmp_path), "--out", str(self.tmp_path / "backup.json")]
+        )
         self.assertEqual(code, 0)
         mock_backup.assert_called_once()
 

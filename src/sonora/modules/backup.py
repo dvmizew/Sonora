@@ -34,12 +34,17 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
         raise ValueError(f"Directory not found: {directory}")
 
     LOG.info(f"🔄 Scanning for files in {directory}...")
-    audio_files = sorted([
-        p for p in directory.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
-    ])
+    audio_files = sorted(
+        [
+            p
+            for p in directory.rglob("*")
+            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+        ]
+    )
 
-    timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%d_%H-%M-%S"
+    )
     out_path = output_file or Path(f"backup_{timestamp_str}.json")
 
     if not audio_files:
@@ -47,7 +52,9 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
         out_path.write_bytes(b"{}\n")
         return out_path
 
-    LOG.info(f"🔄 Creating full backup for {len(audio_files)} files (streaming mode)...")
+    LOG.info(
+        f"🔄 Creating full backup for {len(audio_files)} files (streaming mode)..."
+    )
     count = 0
     failed = 0
 
@@ -66,7 +73,9 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
                 TimeRemainingColumn(),
                 console=CONSOLE,
             ) as progress:
-                task = progress.add_task("[cyan]Backing up audio tags...", total=len(audio_files))
+                task = progress.add_task(
+                    "[cyan]Backing up audio tags...", total=len(audio_files)
+                )
                 for idx, file_p in enumerate(audio_files):
                     try:
                         info = read_track_metadata(file_p)
@@ -89,7 +98,9 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
 
             f.write(b"\n}\n")
 
-        LOG.info(f"✅ Successfully backed up {count}/{len(audio_files)} files to {out_path}")
+        LOG.info(
+            f"✅ Successfully backed up {count}/{len(audio_files)} files to {out_path}"
+        )
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files could not be read")
         return out_path
@@ -127,7 +138,9 @@ def restore_library_tags(backup_file: Path) -> int:
             TimeRemainingColumn(),
             console=CONSOLE,
         ) as progress:
-            task = progress.add_task("[cyan]Restoring audio tags...", total=len(backup_dict))
+            task = progress.add_task(
+                "[cyan]Restoring audio tags...", total=len(backup_dict)
+            )
             processed = 0
             for f_path_str, tags_dict in backup_dict.items():
                 f_path = Path(f_path_str)

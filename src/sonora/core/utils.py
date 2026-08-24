@@ -35,7 +35,20 @@ def clean_title(title: str) -> str:
 
 
 def is_version_or_remix(s: str) -> bool:
-    keywords = ["remix", "rework", "edit", "mix", "live", "acoustic", "instrumental", "version", "demo", "sped up", "slowed", "freestyle"]
+    keywords = [
+        "remix",
+        "rework",
+        "edit",
+        "mix",
+        "live",
+        "acoustic",
+        "instrumental",
+        "version",
+        "demo",
+        "sped up",
+        "slowed",
+        "freestyle",
+    ]
     low = s.lower()
     return any(kw in low for kw in keywords)
 
@@ -90,14 +103,15 @@ def normalize_str(s: str | None) -> str:
     if not s:
         return ""
     s = ftfy.fix_text(str(s))
-    s = s.replace('$', 's')
-    s = s.replace('_', ' ')
-    s = ''.join(
-        c for c in unicodedata.normalize('NFD', s.lower())
-        if unicodedata.category(c) != 'Mn'
+    s = s.replace("$", "s")
+    s = s.replace("_", " ")
+    s = "".join(
+        c
+        for c in unicodedata.normalize("NFD", s.lower())
+        if unicodedata.category(c) != "Mn"
     )
-    s = re.sub(r'[^\w\s]', ' ', s)
-    return re.sub(r'\s+', ' ', s).strip()
+    s = re.sub(r"[^\w\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def normalize_date(d: str | None) -> str | None:
@@ -105,10 +119,10 @@ def normalize_date(d: str | None) -> str | None:
     if not d:
         return None
     d_str = str(d).strip()
-    match = re.search(r'(\d{4}-\d{2}-\d{2})', d_str)
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", d_str)
     if match:
         return match.group(1)
-    match = re.search(r'(\d{4})', d_str)
+    match = re.search(r"(\d{4})", d_str)
     if match:
         return match.group(1)
     return d_str if d_str else None
@@ -124,7 +138,7 @@ def normalize_genre(g: str | None) -> str | None:
     g_lower = g_raw.lower()
 
     try:
-        float(g_raw.replace(',', ''))
+        float(g_raw.replace(",", ""))
         return None
     except ValueError:
         pass
@@ -147,11 +161,11 @@ def sanitize_name(name: str | None) -> str:
     if not name:
         return "Unknown"
     s = ftfy.fix_text(str(name))
-    s = s.replace('/', '_').replace('\\', '_')
+    s = s.replace("/", "_").replace("\\", "_")
     bad_chars = '<>:"|?*'
     for char in bad_chars:
-        s = s.replace(char, '')
-    s = re.sub(r'\s+', ' ', s).strip().rstrip('.')
+        s = s.replace(char, "")
+    s = re.sub(r"\s+", " ", s).strip().rstrip(".")
     return s or "Unknown"
 
 

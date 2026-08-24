@@ -44,7 +44,8 @@ def is_single_folder(folder_path: Path) -> bool:
         return False
 
     audio_files = [
-        p for p in folder_path.glob("*")
+        p
+        for p in folder_path.glob("*")
         if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
     ]
 
@@ -82,7 +83,9 @@ def get_primary_artist(artist_name: str | None) -> str:
     return sanitize_name(primary or "Unknown")
 
 
-def organize_library_singles(source_dir: Path, target_singles_dir: Path, options: dict | None = None) -> int:
+def organize_library_singles(
+    source_dir: Path, target_singles_dir: Path, options: dict | None = None
+) -> int:
     """
     Scan source_dir, detect single tracks, and move them to target_singles_dir
     organized as target_singles_dir / Primary Artist / Artist - Title.ext.
@@ -93,14 +96,15 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
 
     options = options or {}
     dry_run = options.get("dry_run", False)
-    
+
     if not dry_run:
         target_singles_dir.mkdir(parents=True, exist_ok=True)
     moved_count = 0
     single_folder_cache: dict[Path, bool] = {}
 
     all_audio_files = [
-        path for path in source_dir.rglob("*")
+        path
+        for path in source_dir.rglob("*")
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
     ]
 
@@ -115,7 +119,9 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
         TimeRemainingColumn(),
         console=CONSOLE,
     ) as progress:
-        task = progress.add_task("[cyan]Organizing single tracks...", total=len(all_audio_files))
+        task = progress.add_task(
+            "[cyan]Organizing single tracks...", total=len(all_audio_files)
+        )
         for path in all_audio_files:
             parent = path.parent
             if parent not in single_folder_cache:
@@ -132,7 +138,10 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                 if not dry_run:
                     artist_dir.mkdir(parents=True, exist_ok=True)
 
-                target_file = artist_dir / f"{sanitize_name(info.artist)} - {sanitize_name(info.title)}{path.suffix}"
+                target_file = (
+                    artist_dir
+                    / f"{sanitize_name(info.artist)} - {sanitize_name(info.title)}{path.suffix}"
+                )
                 if path != target_file and not target_file.exists():
                     if not dry_run:
                         shutil.move(str(path), str(target_file))
@@ -145,7 +154,9 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                             if not dry_run:
                                 shutil.move(str(lrc_path), str(target_lrc))
                             else:
-                                LOG.info(f"[DRY-RUN] Would move LRC {lrc_path.name} -> {target_lrc}")
+                                LOG.info(
+                                    f"[DRY-RUN] Would move LRC {lrc_path.name} -> {target_lrc}"
+                                )
 
                     moved_count += 1
                     try:
@@ -162,7 +173,11 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
     if target_singles_dir.exists():
         album_fingerprints: set[str] = set()
         for p in source_dir.rglob("*"):
-            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS and "Singles" not in p.parts:
+            if (
+                p.is_file()
+                and p.suffix.lower() in SUPPORTED_EXTS
+                and "Singles" not in p.parts
+            ):
                 try:
                     meta = read_track_metadata(p)
                     p_art = get_primary_artist(meta.artist).lower()
@@ -186,7 +201,9 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
                                 lrc_p.unlink()
                             LOG.info(f"   ∟ 🗑️ Removed duplicate single: {key}")
                         else:
-                            LOG.info(f"   ∟ [DRY-RUN] Would remove duplicate single: {key}")
+                            LOG.info(
+                                f"   ∟ [DRY-RUN] Would remove duplicate single: {key}"
+                            )
                         removed_dupes += 1
                 except (OSError, ValueError, RuntimeError) as e:
                     LOG.debug(f"Could not read metadata for duplicate check: {e}")
@@ -203,7 +220,12 @@ def cleanup_empty_dirs(path: Path) -> int:
     if not path.exists() or not path.is_dir():
         return 0
     for child in sorted(path.rglob("*"), reverse=True):
-        if child.is_dir() and child.name not in (".git", ".idea", ".vscode", "__pycache__"):
+        if child.is_dir() and child.name not in (
+            ".git",
+            ".idea",
+            ".vscode",
+            "__pycache__",
+        ):
             try:
                 if not any(child.iterdir()):
                     child.rmdir()

@@ -10,7 +10,9 @@ from sonora.core.constants import METAFLAC_CMD
 from sonora.core.logger import LOG
 
 
-def calculate_album_replaygain(files: Sequence[Path], options: dict | None = None) -> bool:
+def calculate_album_replaygain(
+    files: Sequence[Path], options: dict | None = None
+) -> bool:
     """
     Use metaflac to calculate both Track and Album ReplayGain for a list of FLAC files.
     Skips if REPLAYGAIN_ALBUM_GAIN is already present.
@@ -20,17 +22,17 @@ def calculate_album_replaygain(files: Sequence[Path], options: dict | None = Non
     flac_files = [str(f) for f in files if f.exists() and f.suffix.lower() == ".flac"]
     if not flac_files:
         return False
-        
+
     if not shutil.which(METAFLAC_CMD):
         LOG.warning(f"'{METAFLAC_CMD}' not found in PATH! ReplayGain disabled.")
         return False
-        
+
     options = options or {}
     dry_run = options.get("dry_run", False)
 
     properties = set()
     has_album_gain = False
-    
+
     try:
         for f in flac_files:
             a = FLAC(f)
@@ -53,19 +55,27 @@ def calculate_album_replaygain(files: Sequence[Path], options: dict | None = Non
             LOG.info("🔊 Calculating ReplayGain (Album Mode)...")
             if not dry_run:
                 cmd = [METAFLAC_CMD, "--add-replay-gain"] + flac_files
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+                r = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=300, check=False
+                )
                 if r.returncode != 0:
                     LOG.error(f"metaflac failed: {r.stderr}")
                     return False
             else:
-                LOG.info(f"[DRY-RUN] Would calculate ReplayGain (Album Mode) for {len(flac_files)} files")
+                LOG.info(
+                    f"[DRY-RUN] Would calculate ReplayGain (Album Mode) for {len(flac_files)} files"
+                )
         else:
-            LOG.warning("⚠️  Mixed audio properties detected. Falling back to Track-only ReplayGain.")
+            LOG.warning(
+                "⚠️  Mixed audio properties detected. Falling back to Track-only ReplayGain."
+            )
             any_success = False
             for f in flac_files:
                 if not dry_run:
                     cmd = [METAFLAC_CMD, "--add-replay-gain", f]
-                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+                    r = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=60, check=False
+                    )
                     if r.returncode != 0:
                         LOG.error(f"metaflac failed for {f}: {r.stderr}")
                     else:

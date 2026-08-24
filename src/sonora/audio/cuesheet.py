@@ -33,7 +33,7 @@ def parse_cuesheet(cue_path: Path) -> list[dict[str, str | int]]:
             if match:
                 title_global = match.group(1)
         elif line.startswith("TRACK"):
-            match = re.search(r'TRACK\s+(\d+)\s+AUDIO', line, re.IGNORECASE)
+            match = re.search(r"TRACK\s+(\d+)\s+AUDIO", line, re.IGNORECASE)
             if match:
                 if current_track:
                     tracks.append(current_track)
@@ -54,7 +54,7 @@ def parse_cuesheet(cue_path: Path) -> list[dict[str, str | int]]:
                 if match:
                     current_track["artist"] = match.group(1)
             elif line.startswith("INDEX 01"):
-                match = re.search(r'INDEX 01\s+(\d+:\d+:\d+)', line, re.IGNORECASE)
+                match = re.search(r"INDEX 01\s+(\d+:\d+:\d+)", line, re.IGNORECASE)
                 if match:
                     current_track["start_index"] = match.group(1)
 

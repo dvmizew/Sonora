@@ -33,7 +33,11 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
             if artists and isinstance(artists, list) and artists[0]:
                 art = artists[0]
                 thumb_url = art.get("strArtistThumb") or art.get("strArtistFanart")
-                banner_url = art.get("strArtistBanner") or art.get("strArtistWideBanner") or art.get("strArtistFanart")
+                banner_url = (
+                    art.get("strArtistBanner")
+                    or art.get("strArtistWideBanner")
+                    or art.get("strArtistFanart")
+                )
 
                 if thumb_url:
                     try:
@@ -66,7 +70,9 @@ def fetch_track_video_url(artist_name: str, track_title: str) -> str | None:
     """
     if not artist_name or not track_title:
         return None
-    cache_key = f"theaudiodb_vid:{normalize_str(artist_name)}:{normalize_str(track_title)}"
+    cache_key = (
+        f"theaudiodb_vid:{normalize_str(artist_name)}:{normalize_str(track_title)}"
+    )
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
         return cached
@@ -84,5 +90,7 @@ def fetch_track_video_url(artist_name: str, track_title: str) -> str | None:
                     set_cached_api(cache_key, clean_url)
                     return clean_url
     except (OSError, ValueError, KeyError) as e:
-        LOG.debug(f"TheAudioDB video lookup failed for {artist_name} - {track_title}: {e}")
+        LOG.debug(
+            f"TheAudioDB video lookup failed for {artist_name} - {track_title}: {e}"
+        )
     return None

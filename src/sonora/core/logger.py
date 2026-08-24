@@ -6,17 +6,23 @@ from rich.console import Console
 from rich.table import Table
 from rich.theme import Theme
 
-for logger_name in ["syncedlyrics", "Musixmatch", "Lrclib", "NetEase", "Megalobiz", "Genius", "urllib3", "httpx"]:
+for logger_name in [
+    "syncedlyrics",
+    "Musixmatch",
+    "Lrclib",
+    "NetEase",
+    "Megalobiz",
+    "Genius",
+    "urllib3",
+    "httpx",
+]:
     _l = logging.getLogger(logger_name)
     _l.setLevel(logging.CRITICAL)
     _l.propagate = False
 
-_THEME = Theme({
-    "info": "cyan",
-    "warning": "yellow",
-    "error": "red",
-    "success": "green bold"
-})
+_THEME = Theme(
+    {"info": "cyan", "warning": "yellow", "error": "red", "success": "green bold"}
+)
 CONSOLE = Console(theme=_THEME, force_terminal=True)
 _LOG_LOCK = threading.Lock()
 
@@ -67,7 +73,9 @@ class SonoraLogger:
     def error(self, message: str) -> None:
         self._log_msg(f"[error]ERROR:[/error] {message}")
 
-    def summary_table(self, title: str, rows: Sequence[tuple[str, str, str | None]]) -> None:
+    def summary_table(
+        self, title: str, rows: Sequence[tuple[str, str, str | None]]
+    ) -> None:
         table = Table(title=title, show_header=True, header_style="bold magenta")
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")

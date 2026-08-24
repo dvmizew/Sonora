@@ -76,7 +76,9 @@ def process_single_track(
         LOG.info(f"🎧 Processing track: [white]{file_path.name}[/]")
 
         # 1. Respect existing MBID or prioritize AcoustID (most exact) over text search
-        if (not is_valid_uuid(track_info.musicbrainz_trackid) or force) and acoustid_api_key:
+        if (
+            not is_valid_uuid(track_info.musicbrainz_trackid) or force
+        ) and acoustid_api_key:
             try:
                 acoustid_mbid = lookup_acoustid(
                     file_path,
@@ -91,12 +93,20 @@ def process_single_track(
                 LOG.debug(f"AcoustID lookup failed for {track_info.title}: {e}")
 
         # 2. Check pre-fetched album track MBIDs map first (1 single API call per album!)
-        album_mbids = options.get("album_track_mbids", {}) if isinstance(options, dict) else {}
-        if (not is_valid_uuid(track_info.musicbrainz_trackid) or force) and track_info.track_number and track_info.track_number in album_mbids:
+        album_mbids = (
+            options.get("album_track_mbids", {}) if isinstance(options, dict) else {}
+        )
+        if (
+            (not is_valid_uuid(track_info.musicbrainz_trackid) or force)
+            and track_info.track_number
+            and track_info.track_number in album_mbids
+        ):
             cand_mbid = album_mbids[track_info.track_number]
             if is_valid_uuid(cand_mbid):
                 track_info.musicbrainz_trackid = cand_mbid
-                LOG.info(f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {cand_mbid[:8]}...")
+                LOG.info(
+                    f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {cand_mbid[:8]}..."
+                )
         elif not is_valid_uuid(track_info.musicbrainz_trackid) or force:
             try:
                 mbid = fetch_track_mbid(track_info.artist, track_info.title)
@@ -108,13 +118,21 @@ def process_single_track(
 
         # 3. Fetch MusicBrainz Album ID
         if not is_valid_uuid(track_info.musicbrainz_albumid):
-            pre_album_mbid = options.get("album_mbid") if isinstance(options, dict) else None
+            pre_album_mbid = (
+                options.get("album_mbid") if isinstance(options, dict) else None
+            )
             if is_valid_uuid(pre_album_mbid):
                 track_info.musicbrainz_albumid = pre_album_mbid
             else:
                 try:
-                    search_artist = track_info.album_artist if track_info.album_artist else track_info.artist
-                    release = search_musicbrainz_release(search_artist, track_info.album)
+                    search_artist = (
+                        track_info.album_artist
+                        if track_info.album_artist
+                        else track_info.artist
+                    )
+                    release = search_musicbrainz_release(
+                        search_artist, track_info.album
+                    )
                     if release:
                         mb_id = release.get("id")
                         if is_valid_uuid(str(mb_id)):
@@ -124,7 +142,9 @@ def process_single_track(
                             if isinstance(date_str, str) and len(date_str) >= 4:
                                 track_info.date = normalize_date(date_str)
                 except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                    LOG.debug(f"MusicBrainz Album lookup failed for {track_info.title}: {e}")
+                    LOG.debug(
+                        f"MusicBrainz Album lookup failed for {track_info.title}: {e}"
+                    )
 
         # 4. Fetch Last.fm genre/mood tags
         if lastfm_api_key:
@@ -147,7 +167,9 @@ def process_single_track(
         # 5. Discogs metadata enrichment
         if discogs_user_token:
             try:
-                release = search_discogs_release(track_info.artist, track_info.album, user_token=discogs_user_token)
+                release = search_discogs_release(
+                    track_info.artist, track_info.album, user_token=discogs_user_token
+                )
                 if release:
                     if release.get("id") and not track_info.discogs_release_id:
                         track_info.discogs_release_id = str(release["id"])
@@ -159,14 +181,22 @@ def process_single_track(
                         track_info.date = normalize_date(str(release["year"]))
 
                     genres_val = release.get("genres")
-                    if isinstance(genres_val, list) and genres_val and not track_info.genre:
+                    if (
+                        isinstance(genres_val, list)
+                        and genres_val
+                        and not track_info.genre
+                    ):
                         raw_genre = str(genres_val[0])
                         norm_genre = normalize_genre(raw_genre)
                         if norm_genre:
                             track_info.genre = norm_genre
 
                     styles_val = release.get("styles")
-                    if isinstance(styles_val, list) and styles_val and not track_info.style:
+                    if (
+                        isinstance(styles_val, list)
+                        and styles_val
+                        and not track_info.style
+                    ):
                         track_info.style = ", ".join(str(s) for s in styles_val[:3])
 
                     if release.get("country") and not track_info.release_country:
@@ -186,7 +216,11 @@ def process_single_track(
                     t_credits = release.get("track_credits")
                     t_spec = None
                     if isinstance(t_credits, dict):
-                        track_key = str(track_info.track_number) if track_info.track_number else None
+                        track_key = (
+                            str(track_info.track_number)
+                            if track_info.track_number
+                            else None
+                        )
                         if track_key and track_key in t_credits:
                             t_spec = t_credits[track_key]
                         elif track_info.title and track_info.title.lower() in t_credits:
@@ -229,15 +263,23 @@ def process_single_track(
         # 6. Genius song details (description, genius_song_id, featured_artists, producers)
         if genius_api_token:
             try:
-                g_details = fetch_genius_song_details(track_info.artist, track_info.title, api_token=genius_api_token)
+                g_details = fetch_genius_song_details(
+                    track_info.artist, track_info.title, api_token=genius_api_token
+                )
                 if g_details:
-                    if g_details.get("description") and (not track_info.comment or force):
+                    if g_details.get("description") and (
+                        not track_info.comment or force
+                    ):
                         track_info.comment = str(g_details["description"])
                     if g_details.get("genius_song_id"):
                         track_info.genius_song_id = str(g_details["genius_song_id"])
-                    if g_details.get("featured_artists") and (not track_info.featured_artists or force):
+                    if g_details.get("featured_artists") and (
+                        not track_info.featured_artists or force
+                    ):
                         track_info.featured_artists = str(g_details["featured_artists"])
-                    if g_details.get("producers") and (not track_info.producers or force):
+                    if g_details.get("producers") and (
+                        not track_info.producers or force
+                    ):
                         track_info.producers = str(g_details["producers"])
                     LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
@@ -246,7 +288,9 @@ def process_single_track(
         # 6a. Last.fm stats (listeners, playcount)
         if lastfm_api_key:
             try:
-                stats = fetch_lastfm_track_stats(track_info.artist, track_info.title, api_key=lastfm_api_key)
+                stats = fetch_lastfm_track_stats(
+                    track_info.artist, track_info.title, api_key=lastfm_api_key
+                )
                 if stats:
                     if stats.get("listeners"):
                         track_info.listeners = stats["listeners"]
@@ -264,10 +308,16 @@ def process_single_track(
             LOG.debug(f"TheAudioDB video lookup failed for {track_info.title}: {e}")
 
         # 6c. Embed Cuesheet content (from options if album-batched, or directory scan)
-        cuesheet_content = options.get("cuesheet_content") if isinstance(options, dict) else None
-        if cuesheet_content is None and not (isinstance(options, dict) and "cuesheet_content" in options):
+        cuesheet_content = (
+            options.get("cuesheet_content") if isinstance(options, dict) else None
+        )
+        if cuesheet_content is None and not (
+            isinstance(options, dict) and "cuesheet_content" in options
+        ):
             cue_files = list(file_path.parent.glob("*.cue"))
-            cuesheet_content = read_cuesheet_content(cue_files[0]) if cue_files else None
+            cuesheet_content = (
+                read_cuesheet_content(cue_files[0]) if cue_files else None
+            )
         if cuesheet_content:
             track_info.cuesheet = cuesheet_content
 
@@ -339,11 +389,15 @@ def process_single_track(
         if diff_lines or force:
             if not dry_run:
                 write_track_metadata(track_info, cover_art_path=cover_jpg)
-                LOG.info(f"   ∟ [green]✓[/] {file_path.name}: {len(diff_lines)} tag(s) updated.{''.join(diff_lines)}")
+                LOG.info(
+                    f"   ∟ [green]✓[/] {file_path.name}: {len(diff_lines)} tag(s) updated.{''.join(diff_lines)}"
+                )
             else:
                 LOG.info(f"   ∟ [DRY-RUN] {file_path.name}{''.join(diff_lines)}")
         else:
-            LOG.info(f"   ∟ [bold dim]✨ SKIPPED:[/] [dim]{file_path.name}[/] [dim]is already perfect.[/]")
+            LOG.info(
+                f"   ∟ [bold dim]✨ SKIPPED:[/] [dim]{file_path.name}[/] [dim]is already perfect.[/]"
+            )
 
         return track_info
     finally:
@@ -351,14 +405,18 @@ def process_single_track(
 
 
 def tag_album_folder(
-    folder_path: Path,
-    max_workers: int = 4,
-    **options: Any
+    folder_path: Path, max_workers: int = 4, **options: Any
 ) -> list[TrackInfo]:
     valid_options = {
-        "fetch_bpm", "fetch_replaygain", "fetch_lyrics", "fetch_itunes_art",
-        "lastfm_api_key", "acoustid_api_key", "discogs_user_token",
-        "genius_api_token", "options"
+        "fetch_bpm",
+        "fetch_replaygain",
+        "fetch_lyrics",
+        "fetch_itunes_art",
+        "lastfm_api_key",
+        "acoustid_api_key",
+        "discogs_user_token",
+        "genius_api_token",
+        "options",
     }
     invalid = set(options.keys()) - valid_options
     if invalid:
@@ -369,25 +427,37 @@ def tag_album_folder(
 
     # Check if folder_path contains child directories with audio files
     sub_dirs = [
-        d for d in sorted(folder_path.iterdir())
-        if d.is_dir() and any(p.is_file() and p.suffix.lower() in SUPPORTED_EXTS for p in d.rglob("*"))
+        d
+        for d in sorted(folder_path.iterdir())
+        if d.is_dir()
+        and any(
+            p.is_file() and p.suffix.lower() in SUPPORTED_EXTS for p in d.rglob("*")
+        )
     ]
 
     # If folder_path has child album directories and NO direct audio files in its root, tag each sub-album independently
-    if sub_dirs and not any(p.is_file() and p.suffix.lower() in SUPPORTED_EXTS for p in folder_path.glob("*")):
+    if sub_dirs and not any(
+        p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+        for p in folder_path.glob("*")
+    ):
         all_results: list[TrackInfo] = []
         for sub in sub_dirs:
             res = tag_album_folder(sub, max_workers=max_workers, **options)
             all_results.extend(res)
         return all_results
 
-    audio_files = sorted([
-        p for p in folder_path.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
-    ])
+    audio_files = sorted(
+        [
+            p
+            for p in folder_path.rglob("*")
+            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+        ]
+    )
 
     folder_name = folder_path.name
-    LOG.force_info(f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]")
+    LOG.force_info(
+        f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]"
+    )
 
     if not audio_files:
         return []
@@ -422,7 +492,7 @@ def tag_album_folder(
         future_to_file = {}
         for file_p in audio_files:
             future = executor.submit(
-                process_single_track, 
+                process_single_track,
                 file_path=file_p,
                 fetch_bpm=options.get("fetch_bpm", True),
                 fetch_lyrics=options.get("fetch_lyrics", True),
@@ -431,10 +501,10 @@ def tag_album_folder(
                 acoustid_api_key=options.get("acoustid_api_key"),
                 discogs_user_token=options.get("discogs_user_token"),
                 genius_api_token=options.get("genius_api_token"),
-                options=options.get("options")
+                options=options.get("options"),
             )
             future_to_file[future] = file_p
-        
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -444,7 +514,7 @@ def tag_album_folder(
             TimeElapsedColumn(),
             TextColumn("[dim]/[/dim]"),
             TimeRemainingColumn(),
-            console=CONSOLE
+            console=CONSOLE,
         ) as progress:
             task = progress.add_task("[cyan]Tagging tracks...", total=len(audio_files))
             for future in as_completed(future_to_file):
@@ -466,7 +536,9 @@ def tag_album_folder(
     if results:
         primary_artist = results[0].album_artist or results[0].artist
         try:
-            process_artist_artwork(folder_path, primary_artist, dry_run=options.get("dry_run", False))
+            process_artist_artwork(
+                folder_path, primary_artist, dry_run=options.get("dry_run", False)
+            )
         except (OSError, ValueError, RuntimeError) as e:
             LOG.debug(f"Artist art download failed: {e}")
 

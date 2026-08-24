@@ -31,7 +31,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             artist = get_tag("ARTIST", "TPE1", "AUTHOR") or "Unknown Artist"
             title = get_tag("TITLE", "TIT2") or "Unknown Title"
             album = get_tag("ALBUM", "TALB", "WM/ALBUMTITLE") or "Unknown Album"
-            album_artist = get_tag("ALBUMARTIST", "ALBUM ARTIST", "TPE2", "WM/ALBUMARTIST")
+            album_artist = get_tag(
+                "ALBUMARTIST", "ALBUM ARTIST", "TPE2", "WM/ALBUMARTIST"
+            )
             date_str = get_tag("DATE", "TDRC", "YEAR", "WM/YEAR")
             date = normalize_date(date_str)
             genre = normalize_genre(get_tag("GENRE", "TCON", "WM/GENRE"))
@@ -81,8 +83,16 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             bitrate = song.bitrate
             channels = song.channels
 
-            mb_track = get_tag("MUSICBRAINZ_TRACKID", "MUSICBRAINZ TRACK ID", "TXXX:MUSICBRAINZ TRACK ID")
-            mb_album = get_tag("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ ALBUM ID", "TXXX:MUSICBRAINZ ALBUM ID")
+            mb_track = get_tag(
+                "MUSICBRAINZ_TRACKID",
+                "MUSICBRAINZ TRACK ID",
+                "TXXX:MUSICBRAINZ TRACK ID",
+            )
+            mb_album = get_tag(
+                "MUSICBRAINZ_ALBUMID",
+                "MUSICBRAINZ ALBUM ID",
+                "TXXX:MUSICBRAINZ ALBUM ID",
+            )
             mb_rg = get_tag("MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ RELEASEGROUP ID")
             mb_art = get_tag("MUSICBRAINZ_ARTISTID", "MUSICBRAINZ ARTIST ID")
             mb_work = get_tag("MUSICBRAINZ_WORKID")
@@ -95,10 +105,18 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             artist_sort = get_tag("ARTISTSORT")
 
             raw_tot_tracks = get_tag("TRACKTOTAL", "TOTALTRACKS")
-            total_tracks = int(raw_tot_tracks) if raw_tot_tracks and raw_tot_tracks.isdigit() else None
+            total_tracks = (
+                int(raw_tot_tracks)
+                if raw_tot_tracks and raw_tot_tracks.isdigit()
+                else None
+            )
 
             raw_tot_discs = get_tag("DISCTOTAL", "TOTALDISCS")
-            total_discs = int(raw_tot_discs) if raw_tot_discs and raw_tot_discs.isdigit() else None
+            total_discs = (
+                int(raw_tot_discs)
+                if raw_tot_discs and raw_tot_discs.isdigit()
+                else None
+            )
 
             release_type = get_tag("RELEASETYPE")
             release_status = get_tag("RELEASESTATUS")
@@ -118,10 +136,20 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             initial_key = get_tag("INITIALKEY", "KEY", "TKEY")
             copyright_val = get_tag("COPYRIGHT", "TCOP")
             raw_comp = get_tag("COMPILATION", "TCMP")
-            compilation = True if raw_comp in ("1", "true", "True") else False if raw_comp in ("0", "false", "False") else None
-            spotify_trackid = get_tag("SPOTIFY_TRACK_ID", "SPOTIFY_ID", "TXXX:SPOTIFY_TRACK_ID")
+            compilation = (
+                True
+                if raw_comp in ("1", "true", "True")
+                else False
+                if raw_comp in ("0", "false", "False")
+                else None
+            )
+            spotify_trackid = get_tag(
+                "SPOTIFY_TRACK_ID", "SPOTIFY_ID", "TXXX:SPOTIFY_TRACK_ID"
+            )
 
-            mb_album_artist = get_tag("MUSICBRAINZ_ALBUMARTISTID", "MUSICBRAINZ ALBUM ARTIST ID")
+            mb_album_artist = get_tag(
+                "MUSICBRAINZ_ALBUMARTISTID", "MUSICBRAINZ ALBUM ARTIST ID"
+            )
             discogs_artist_id = get_tag("DISCOGS_ARTIST_ID", "DISCOGS ARTIST ID")
             language = get_tag("LANGUAGE", "TLAN")
             script = get_tag("SCRIPT")
@@ -218,7 +246,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
         raise RuntimeError(f"Failed to read metadata for {file_path}: {e}") from e
 
 
-def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = None) -> None:
+def write_track_metadata(
+    track_info: TrackInfo, cover_art_path: Path | None = None
+) -> None:
     if not track_info.file_path.exists():
         raise FileNotFoundError(f"File not found: {track_info.file_path}")
 
@@ -228,13 +258,20 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             song.tags["TITLE"] = [track_info.title]
             song.tags["ALBUM"] = [track_info.album]
 
-            if track_info.album_artist: song.tags["ALBUMARTIST"] = [track_info.album_artist]
-            if track_info.artist_sort: song.tags["ARTISTSORT"] = [track_info.artist_sort]
-            if track_info.album_artist_sort: song.tags["ALBUMARTISTSORT"] = [track_info.album_artist_sort]
+            if track_info.album_artist:
+                song.tags["ALBUMARTIST"] = [track_info.album_artist]
+            if track_info.artist_sort:
+                song.tags["ARTISTSORT"] = [track_info.artist_sort]
+            if track_info.album_artist_sort:
+                song.tags["ALBUMARTISTSORT"] = [track_info.album_artist_sort]
 
             tot_tr = str(track_info.total_tracks) if track_info.total_tracks else None
             if track_info.track_number is not None:
-                tr_str = f"{track_info.track_number}/{tot_tr}" if tot_tr else str(track_info.track_number)
+                tr_str = (
+                    f"{track_info.track_number}/{tot_tr}"
+                    if tot_tr
+                    else str(track_info.track_number)
+                )
                 song.tags["TRACKNUMBER"] = [tr_str]
             if tot_tr:
                 song.tags["TRACKTOTAL"] = [tot_tr]
@@ -242,76 +279,140 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
 
             tot_ds = str(track_info.total_discs) if track_info.total_discs else None
             if track_info.disc_number is not None:
-                ds_str = f"{track_info.disc_number}/{tot_ds}" if tot_ds else str(track_info.disc_number)
+                ds_str = (
+                    f"{track_info.disc_number}/{tot_ds}"
+                    if tot_ds
+                    else str(track_info.disc_number)
+                )
                 song.tags["DISCNUMBER"] = [ds_str]
             if tot_ds:
                 song.tags["DISCTOTAL"] = [tot_ds]
                 song.tags["TOTALDISCS"] = [tot_ds]
 
-            if track_info.date: song.tags["DATE"] = [track_info.date]
-            if track_info.genre: song.tags["GENRE"] = [track_info.genre]
-            if track_info.bpm is not None: song.tags["BPM"] = [f"{track_info.bpm:.1f}"]
-            if track_info.isrc: song.tags["ISRC"] = [track_info.isrc]
+            if track_info.date:
+                song.tags["DATE"] = [track_info.date]
+            if track_info.genre:
+                song.tags["GENRE"] = [track_info.genre]
+            if track_info.bpm is not None:
+                song.tags["BPM"] = [f"{track_info.bpm:.1f}"]
+            if track_info.isrc:
+                song.tags["ISRC"] = [track_info.isrc]
             if track_info.replaygain_track_gain is not None:
-                song.tags["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
+                song.tags["REPLAYGAIN_TRACK_GAIN"] = [
+                    f"{track_info.replaygain_track_gain:+.2f} dB"
+                ]
             if track_info.replaygain_track_peak is not None:
-                song.tags["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
+                song.tags["REPLAYGAIN_TRACK_PEAK"] = [
+                    f"{track_info.replaygain_track_peak:.6f}"
+                ]
 
-            if is_valid_uuid(track_info.musicbrainz_trackid): song.tags["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
-            if is_valid_uuid(track_info.musicbrainz_albumid): song.tags["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
-            if is_valid_uuid(track_info.musicbrainz_releasegroupid): song.tags["MUSICBRAINZ_RELEASEGROUPID"] = [track_info.musicbrainz_releasegroupid]
-            if is_valid_uuid(track_info.musicbrainz_artistid): song.tags["MUSICBRAINZ_ARTISTID"] = [track_info.musicbrainz_artistid]
-            if is_valid_uuid(track_info.musicbrainz_workid): song.tags["MUSICBRAINZ_WORKID"] = [track_info.musicbrainz_workid]
-            if track_info.acoustid_id: song.tags["ACOUSTID_ID"] = [track_info.acoustid_id]
-            if track_info.discogs_release_id: song.tags["DISCOGS_RELEASE_ID"] = [track_info.discogs_release_id]
-            if track_info.itunes_trackid: song.tags["ITUNESTRACKID"] = [track_info.itunes_trackid]
-            if track_info.itunes_collectionid: song.tags["ITUNESCOLLECTIONID"] = [track_info.itunes_collectionid]
-            if track_info.itunes_artistid: song.tags["ITUNESARTISTID"] = [track_info.itunes_artistid]
-            if track_info.release_type: song.tags["RELEASETYPE"] = [track_info.release_type]
-            if track_info.release_status: song.tags["RELEASESTATUS"] = [track_info.release_status]
+            if is_valid_uuid(track_info.musicbrainz_trackid):
+                song.tags["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
+            if is_valid_uuid(track_info.musicbrainz_albumid):
+                song.tags["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
+            if is_valid_uuid(track_info.musicbrainz_releasegroupid):
+                song.tags["MUSICBRAINZ_RELEASEGROUPID"] = [
+                    track_info.musicbrainz_releasegroupid
+                ]
+            if is_valid_uuid(track_info.musicbrainz_artistid):
+                song.tags["MUSICBRAINZ_ARTISTID"] = [track_info.musicbrainz_artistid]
+            if is_valid_uuid(track_info.musicbrainz_workid):
+                song.tags["MUSICBRAINZ_WORKID"] = [track_info.musicbrainz_workid]
+            if track_info.acoustid_id:
+                song.tags["ACOUSTID_ID"] = [track_info.acoustid_id]
+            if track_info.discogs_release_id:
+                song.tags["DISCOGS_RELEASE_ID"] = [track_info.discogs_release_id]
+            if track_info.itunes_trackid:
+                song.tags["ITUNESTRACKID"] = [track_info.itunes_trackid]
+            if track_info.itunes_collectionid:
+                song.tags["ITUNESCOLLECTIONID"] = [track_info.itunes_collectionid]
+            if track_info.itunes_artistid:
+                song.tags["ITUNESARTISTID"] = [track_info.itunes_artistid]
+            if track_info.release_type:
+                song.tags["RELEASETYPE"] = [track_info.release_type]
+            if track_info.release_status:
+                song.tags["RELEASESTATUS"] = [track_info.release_status]
             if track_info.release_country:
                 song.tags["RELEASECOUNTRY"] = [track_info.release_country]
                 song.tags["COUNTRY"] = [track_info.release_country]
             if track_info.label:
                 song.tags["LABEL"] = [track_info.label]
                 song.tags["PUBLISHER"] = [track_info.label]
-            if track_info.catalog_number: song.tags["CATALOGNUMBER"] = [track_info.catalog_number]
-            if track_info.barcode: song.tags["BARCODE"] = [track_info.barcode]
-            if track_info.media: song.tags["MEDIA"] = [track_info.media]
-            if track_info.comment: song.tags["COMMENT"] = [track_info.comment]
-            if track_info.advisory: song.tags["ITUNESADVISORY"] = [track_info.advisory]
+            if track_info.catalog_number:
+                song.tags["CATALOGNUMBER"] = [track_info.catalog_number]
+            if track_info.barcode:
+                song.tags["BARCODE"] = [track_info.barcode]
+            if track_info.media:
+                song.tags["MEDIA"] = [track_info.media]
+            if track_info.comment:
+                song.tags["COMMENT"] = [track_info.comment]
+            if track_info.advisory:
+                song.tags["ITUNESADVISORY"] = [track_info.advisory]
             if track_info.original_date:
                 song.tags["ORIGINALDATE"] = [track_info.original_date]
                 song.tags["ORIGINALYEAR"] = [track_info.original_date[:4]]
-            if track_info.cuesheet: song.tags["CUESHEET"] = [track_info.cuesheet]
-            if track_info.composer: song.tags["COMPOSER"] = [track_info.composer]
-            if track_info.lyricist: song.tags["LYRICIST"] = [track_info.lyricist]
-            if track_info.remixer: song.tags["REMIXER"] = [track_info.remixer]
-            if track_info.initial_key: song.tags["INITIALKEY"] = [track_info.initial_key]
-            if track_info.copyright: song.tags["COPYRIGHT"] = [track_info.copyright]
-            if track_info.compilation is not None: song.tags["COMPILATION"] = ["1" if track_info.compilation else "0"]
-            if track_info.spotify_trackid: song.tags["SPOTIFY_TRACK_ID"] = [track_info.spotify_trackid]
-            if is_valid_uuid(track_info.musicbrainz_albumartistid): song.tags["MUSICBRAINZ_ALBUMARTISTID"] = [track_info.musicbrainz_albumartistid]
-            if track_info.discogs_artist_id: song.tags["DISCOGS_ARTIST_ID"] = [track_info.discogs_artist_id]
-            if track_info.language: song.tags["LANGUAGE"] = [track_info.language]
-            if track_info.script: song.tags["SCRIPT"] = [track_info.script]
-            if track_info.mood: song.tags["MOOD"] = [track_info.mood]
-            if track_info.style: song.tags["STYLE"] = [track_info.style]
-            if track_info.disambiguation: song.tags["DISAMBIGUATION"] = [track_info.disambiguation]
-            if track_info.rating is not None: song.tags["RATING"] = [f"{track_info.rating:.1f}"]
-            if track_info.featured_artists: song.tags["FEATURED_ARTISTS"] = [track_info.featured_artists]
-            if track_info.producers: song.tags["PRODUCERS"] = [track_info.producers]
-            if track_info.genius_song_id: song.tags["GENIUS_SONG_ID"] = [track_info.genius_song_id]
-            if track_info.listeners is not None: song.tags["LISTENERS"] = [str(track_info.listeners)]
-            if track_info.playcount is not None: song.tags["PLAYCOUNT"] = [str(track_info.playcount)]
-            if track_info.music_video_url: song.tags["MUSIC_VIDEO_URL"] = [track_info.music_video_url]
+            if track_info.cuesheet:
+                song.tags["CUESHEET"] = [track_info.cuesheet]
+            if track_info.composer:
+                song.tags["COMPOSER"] = [track_info.composer]
+            if track_info.lyricist:
+                song.tags["LYRICIST"] = [track_info.lyricist]
+            if track_info.remixer:
+                song.tags["REMIXER"] = [track_info.remixer]
+            if track_info.initial_key:
+                song.tags["INITIALKEY"] = [track_info.initial_key]
+            if track_info.copyright:
+                song.tags["COPYRIGHT"] = [track_info.copyright]
+            if track_info.compilation is not None:
+                song.tags["COMPILATION"] = ["1" if track_info.compilation else "0"]
+            if track_info.spotify_trackid:
+                song.tags["SPOTIFY_TRACK_ID"] = [track_info.spotify_trackid]
+            if is_valid_uuid(track_info.musicbrainz_albumartistid):
+                song.tags["MUSICBRAINZ_ALBUMARTISTID"] = [
+                    track_info.musicbrainz_albumartistid
+                ]
+            if track_info.discogs_artist_id:
+                song.tags["DISCOGS_ARTIST_ID"] = [track_info.discogs_artist_id]
+            if track_info.language:
+                song.tags["LANGUAGE"] = [track_info.language]
+            if track_info.script:
+                song.tags["SCRIPT"] = [track_info.script]
+            if track_info.mood:
+                song.tags["MOOD"] = [track_info.mood]
+            if track_info.style:
+                song.tags["STYLE"] = [track_info.style]
+            if track_info.disambiguation:
+                song.tags["DISAMBIGUATION"] = [track_info.disambiguation]
+            if track_info.rating is not None:
+                song.tags["RATING"] = [f"{track_info.rating:.1f}"]
+            if track_info.featured_artists:
+                song.tags["FEATURED_ARTISTS"] = [track_info.featured_artists]
+            if track_info.producers:
+                song.tags["PRODUCERS"] = [track_info.producers]
+            if track_info.genius_song_id:
+                song.tags["GENIUS_SONG_ID"] = [track_info.genius_song_id]
+            if track_info.listeners is not None:
+                song.tags["LISTENERS"] = [str(track_info.listeners)]
+            if track_info.playcount is not None:
+                song.tags["PLAYCOUNT"] = [str(track_info.playcount)]
+            if track_info.music_video_url:
+                song.tags["MUSIC_VIDEO_URL"] = [track_info.music_video_url]
 
             if cover_art_path and cover_art_path.exists():
                 with open(cover_art_path, "rb") as f:
                     image_data = f.read()
-                mime = "image/jpeg" if cover_art_path.suffix.lower() in [".jpg", ".jpeg"] else "image/png"
+                mime = (
+                    "image/jpeg"
+                    if cover_art_path.suffix.lower() in [".jpg", ".jpeg"]
+                    else "image/png"
+                )
                 if hasattr(song, "pictures"):
-                    pic = taglib.Picture(data=image_data, mime_type=mime, description="Cover", picture_type="Front Cover")
+                    pic = taglib.Picture(
+                        data=image_data,
+                        mime_type=mime,
+                        description="Cover",
+                        picture_type="Front Cover",
+                    )
                     song.pictures = [pic]
 
             unsaved = song.save()
@@ -320,4 +421,6 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
     except Exception as e:
         if isinstance(e, (RuntimeError, ValueError, FileNotFoundError)):
             raise
-        raise RuntimeError(f"Failed to write metadata for {track_info.file_path}: {e}") from e
+        raise RuntimeError(
+            f"Failed to write metadata for {track_info.file_path}: {e}"
+        ) from e

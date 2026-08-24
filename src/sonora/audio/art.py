@@ -62,6 +62,7 @@ def check_image_similarity(
         LOG.debug(f"Perceptual image comparison failed: {e}")
         return True  # Fallback to True to allow upgrade if something fails
 
+
 _cover_locks: dict[str, threading.Lock] = {}
 _cover_meta_lock = threading.Lock()
 
@@ -91,7 +92,9 @@ def process_album_cover_art(
     """
     cover_jpg = folder_path / "cover.jpg"
     with _get_cover_lock(folder_path):
-        art_downloaded = cover_jpg.exists() and cover_jpg.stat().st_size > 0 and not force
+        art_downloaded = (
+            cover_jpg.exists() and cover_jpg.stat().st_size > 0 and not force
+        )
         if not art_downloaded and not dry_run:
             cover_jpg.touch()
 
@@ -112,18 +115,36 @@ def process_album_cover_art(
 
                 with _get_cover_lock(folder_path):
                     if not dry_run:
-                        existing_bytes = cover_jpg.read_bytes() if (cover_jpg.exists() and cover_jpg.stat().st_size > 0) else None
-                        if existing_bytes and not force and not check_image_similarity(existing_bytes, new_art_bytes):
-                            LOG.info("   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch")
+                        existing_bytes = (
+                            cover_jpg.read_bytes()
+                            if (cover_jpg.exists() and cover_jpg.stat().st_size > 0)
+                            else None
+                        )
+                        if (
+                            existing_bytes
+                            and not force
+                            and not check_image_similarity(
+                                existing_bytes, new_art_bytes
+                            )
+                        ):
+                            LOG.info(
+                                "   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch"
+                            )
                         else:
                             cover_jpg.write_bytes(new_art_bytes)
                             LOG.info("   ∟ 🖼️  Downloaded Cover Art")
                     else:
-                        LOG.info(f"[DRY-RUN] Would download cover art to {cover_jpg.name}")
+                        LOG.info(
+                            f"[DRY-RUN] Would download cover art to {cover_jpg.name}"
+                        )
             except (OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Cover art download failed: {e}")
                 with _get_cover_lock(folder_path):
-                    if not dry_run and cover_jpg.exists() and cover_jpg.stat().st_size == 0:
+                    if (
+                        not dry_run
+                        and cover_jpg.exists()
+                        and cover_jpg.stat().st_size == 0
+                    ):
                         cover_jpg.unlink(missing_ok=True)
         else:
             with _get_cover_lock(folder_path):
@@ -136,7 +157,9 @@ def process_album_cover_art(
     return cover_jpg if cover_jpg.exists() else None
 
 
-def process_artist_artwork(folder_path: Path, artist_name: str, dry_run: bool = False) -> None:
+def process_artist_artwork(
+    folder_path: Path, artist_name: str, dry_run: bool = False
+) -> None:
     """Ensure artist.jpg and banner.jpg exist in the artist's root folder."""
     if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
         return
@@ -145,12 +168,20 @@ def process_artist_artwork(folder_path: Path, artist_name: str, dry_run: bool = 
     base_name = folder_path.name
     parent_base = parent.name
 
-    artist_dir = parent if parent_base not in ["FLAC", "Music", ""] and base_name != "Singles" else folder_path
+    artist_dir = (
+        parent
+        if parent_base not in ["FLAC", "Music", ""] and base_name != "Singles"
+        else folder_path
+    )
     if parent_base == "Singles":
         artist_dir = parent.parent
 
-    has_artist_img = any((artist_dir / n).exists() for n in ["artist.jpg", "artist.png", "folder.jpg"])
-    has_banner_img = any((artist_dir / n).exists() for n in ["banner.jpg", "banner.png", "fanart.jpg"])
+    has_artist_img = any(
+        (artist_dir / n).exists() for n in ["artist.jpg", "artist.png", "folder.jpg"]
+    )
+    has_banner_img = any(
+        (artist_dir / n).exists() for n in ["banner.jpg", "banner.png", "fanart.jpg"]
+    )
 
     if has_artist_img and has_banner_img:
         return

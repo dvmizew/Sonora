@@ -33,8 +33,20 @@ from sonora.core.utils import is_valid_uuid, normalize_str
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
 
 JUNK_BRACKET_KEYWORDS = {
-    "official", "video", "audio", "flac", "mp3", "320", "320kbps",
-    "hq", "hd", "rip", "cdrip", "webrip", "lossless", "remastered",
+    "official",
+    "video",
+    "audio",
+    "flac",
+    "mp3",
+    "320",
+    "320kbps",
+    "hq",
+    "hd",
+    "rip",
+    "cdrip",
+    "webrip",
+    "lossless",
+    "remastered",
 }
 
 PAIRS = {"(": ")", "[": "]", "{": "}"}
@@ -62,7 +74,9 @@ def extract_bracket_tokens(text: str) -> list[tuple[str, set[str]]]:
                 if not stack and start != -1:
                     full_bracket = text[start : i + 1]
                     inner = full_bracket[1:-1].lower()
-                    tokens = set("".join(c if c.isalnum() else " " for c in inner).split())
+                    tokens = set(
+                        "".join(c if c.isalnum() else " " for c in inner).split()
+                    )
                     results.append((full_bracket, tokens))
                     start = -1
     return results
@@ -75,7 +89,9 @@ def is_valid_track_filename(filename: str) -> bool:
         if delim in stem:
             prefix = stem.split(delim, 1)[0].strip()
             parts = prefix.split("-")
-            if len(parts) in (1, 2) and all(p.isdigit() and 1 <= len(p) <= 4 for p in parts):
+            if len(parts) in (1, 2) and all(
+                p.isdigit() and 1 <= len(p) <= 4 for p in parts
+            ):
                 return True
     return False
 
@@ -102,7 +118,9 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
     if file_path.suffix.lower() == ".flac":
         try:
             if not verify_flac_checksum(file_path):
-                issues.append("FLAC audio stream MD5 checksum verification failed (corrupted FLAC).")
+                issues.append(
+                    "FLAC audio stream MD5 checksum verification failed (corrupted FLAC)."
+                )
         except (OSError, ValueError, RuntimeError) as e:
             issues.append(f"Checksum check failed: {e}")
 
@@ -126,7 +144,9 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             try:
                 is_fake, _, desc = detect_fake_lossless(file_path)
                 if is_fake:
-                    issues.append(desc or "Possible fake lossless (spectral cutoff below 16kHz).")
+                    issues.append(
+                        desc or "Possible fake lossless (spectral cutoff below 16kHz)."
+                    )
             except (OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Spectral analysis failed for {file_path}: {e}")
     try:
@@ -134,7 +154,9 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
         issues.extend(check_brackets_corruption(track.artist))
         issues.extend(check_brackets_corruption(track.title))
 
-        if track.genre and any(normalize_str(bl) in normalize_str(track.genre) for bl in GENRE_BLACKLIST):
+        if track.genre and any(
+            normalize_str(bl) in normalize_str(track.genre) for bl in GENRE_BLACKLIST
+        ):
             issues.append(f"Blacklisted genre tag: '{track.genre}'")
         if track.artist == "Unknown Artist":
             issues.append("Missing ARTIST tag.")
@@ -157,55 +179,87 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
         if not track.musicbrainz_trackid:
             issues.append("Missing MUSICBRAINZ_TRACKID tag.")
         elif not is_valid_uuid(track.musicbrainz_trackid):
-            issues.append(f"Invalid UUID format in MUSICBRAINZ_TRACKID: '{track.musicbrainz_trackid}'")
+            issues.append(
+                f"Invalid UUID format in MUSICBRAINZ_TRACKID: '{track.musicbrainz_trackid}'"
+            )
 
         if not track.musicbrainz_albumid:
             issues.append("Missing MUSICBRAINZ_ALBUMID tag.")
         elif not is_valid_uuid(track.musicbrainz_albumid):
-            issues.append(f"Invalid UUID format in MUSICBRAINZ_ALBUMID: '{track.musicbrainz_albumid}'")
+            issues.append(
+                f"Invalid UUID format in MUSICBRAINZ_ALBUMID: '{track.musicbrainz_albumid}'"
+            )
 
         if track.musicbrainz_artistid and not is_valid_uuid(track.musicbrainz_artistid):
-            issues.append(f"Invalid UUID format in MUSICBRAINZ_ARTISTID: '{track.musicbrainz_artistid}'")
+            issues.append(
+                f"Invalid UUID format in MUSICBRAINZ_ARTISTID: '{track.musicbrainz_artistid}'"
+            )
 
-        if track.musicbrainz_albumartistid and not is_valid_uuid(track.musicbrainz_albumartistid):
-            issues.append(f"Invalid UUID format in MUSICBRAINZ_ALBUMARTISTID: '{track.musicbrainz_albumartistid}'")
+        if track.musicbrainz_albumartistid and not is_valid_uuid(
+            track.musicbrainz_albumartistid
+        ):
+            issues.append(
+                f"Invalid UUID format in MUSICBRAINZ_ALBUMARTISTID: '{track.musicbrainz_albumartistid}'"
+            )
 
-        if track.musicbrainz_releasegroupid and not is_valid_uuid(track.musicbrainz_releasegroupid):
-            issues.append(f"Invalid UUID format in MUSICBRAINZ_RELEASEGROUPID: '{track.musicbrainz_releasegroupid}'")
+        if track.musicbrainz_releasegroupid and not is_valid_uuid(
+            track.musicbrainz_releasegroupid
+        ):
+            issues.append(
+                f"Invalid UUID format in MUSICBRAINZ_RELEASEGROUPID: '{track.musicbrainz_releasegroupid}'"
+            )
 
         if track.musicbrainz_workid and not is_valid_uuid(track.musicbrainz_workid):
-            issues.append(f"Invalid UUID format in MUSICBRAINZ_WORKID: '{track.musicbrainz_workid}'")
+            issues.append(
+                f"Invalid UUID format in MUSICBRAINZ_WORKID: '{track.musicbrainz_workid}'"
+            )
 
-        if track.art_width and (track.art_width < 500 or (track.art_height and track.art_height < 500)):
-            issues.append(f"Low resolution cover art: {track.art_width}x{track.art_height}")
+        if track.art_width and (
+            track.art_width < 500 or (track.art_height and track.art_height < 500)
+        ):
+            issues.append(
+                f"Low resolution cover art: {track.art_width}x{track.art_height}"
+            )
 
         if not is_valid_track_filename(file_path.name):
-            issues.append(f"Filename does not start with track number: '{file_path.name}'")
+            issues.append(
+                f"Filename does not start with track number: '{file_path.name}'"
+            )
 
         if FEAT_PATTERN.search(track.artist):
-            issues.append(f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: TITLE only)")
-        
+            issues.append(
+                f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: TITLE only)"
+            )
+
         # Check for unsplit artists (e.g. Artist A & Artist B)
         delimiters = [r"\s&\s", r"\s×\s", r"\sfeat\.?\s", r"\sft\.?\s"]
         is_protected = any(p.lower() in track.artist.lower() for p in PROTECTED_ARTISTS)
         if not is_protected:
             for d in delimiters:
                 if re.search(d, track.artist, re.IGNORECASE):
-                    issues.append(f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{d.strip()}')")
-        
+                    issues.append(
+                        f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{d.strip()}')"
+                    )
+
         # Check Title feature duplicate markers
-        feat_matches = re.findall(rf"[\(\[]\s*({FEAT_KEYWORDS})", track.title, re.IGNORECASE)
+        feat_matches = re.findall(
+            rf"[\(\[]\s*({FEAT_KEYWORDS})", track.title, re.IGNORECASE
+        )
         if len(feat_matches) > 1:
-            issues.append(f"Duplicate featuring markers detected in TITLE ({len(feat_matches)} markers found)")
+            issues.append(
+                f"Duplicate featuring markers detected in TITLE ({len(feat_matches)} markers found)"
+            )
 
         # Sync check filename vs title feat
         if FEAT_PATTERN.search(file_path.name) and not FEAT_PATTERN.search(track.title):
             issues.append("Filename contains 'feat' but TITLE tag does not")
-        
+
         if track.sample_rate and track.sample_rate < 44100:
             issues.append(f"Sub-standard sample rate: {track.sample_rate}Hz")
         if track.bitrate and track.bitrate < 320000 and not track.is_lossless:
-            issues.append(f"Sub-standard lossy bitrate: {round(track.bitrate / 1000)} kbps (Recommended: 320 kbps)")
+            issues.append(
+                f"Sub-standard lossy bitrate: {round(track.bitrate / 1000)} kbps (Recommended: 320 kbps)"
+            )
 
     except (OSError, ValueError, RuntimeError) as e:
         issues.append(f"Metadata read error: {e}")
@@ -216,7 +270,9 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
     return issues
 
 
-def _check_single_file(path: Path, check_spectral: bool) -> tuple[Path, list[str], str | None, str | None, int | None, int | None]:
+def _check_single_file(
+    path: Path, check_spectral: bool
+) -> tuple[Path, list[str], str | None, str | None, int | None, int | None]:
     file_issues = check_file(path, check_spectral=check_spectral)
     album = None
     album_artist = None
@@ -244,14 +300,22 @@ def check_library(
     if not folder_path.exists():
         raise FileNotFoundError(f"Directory not found: {folder_path}")
 
-    report = CheckReport(total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0)
+    report = CheckReport(
+        total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
+    )
 
-    files_to_process = [p for p in folder_path.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
-    
+    files_to_process = [
+        p
+        for p in folder_path.rglob("*")
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+    ]
+
     # Map for folder-level checks
     folder_albums: dict[Path, set[str]] = defaultdict(set)
     folder_album_artists: dict[Path, set[str]] = defaultdict(set)
-    folder_tracks_found: dict[Path, dict[tuple[int, int], list[str]]] = defaultdict(lambda: defaultdict(list))
+    folder_tracks_found: dict[Path, dict[tuple[int, int], list[str]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
 
     executor = ThreadPoolExecutor(max_workers=max_workers)
     try:
@@ -269,12 +333,16 @@ def check_library(
             TimeElapsedColumn(),
             TextColumn("[dim]/[/dim]"),
             TimeRemainingColumn(),
-            console=CONSOLE
+            console=CONSOLE,
         ) as progress:
-            task = progress.add_task("[cyan]Checking library...", total=len(files_to_process))
-            
+            task = progress.add_task(
+                "[cyan]Checking library...", total=len(files_to_process)
+            )
+
             for future in as_completed(future_to_path):
-                path, file_issues, album, album_artist, disc_no, track_no = future.result()
+                path, file_issues, album, album_artist, disc_no, track_no = (
+                    future.result()
+                )
                 report.total_files += 1
                 folder = path.parent
 
@@ -291,13 +359,25 @@ def check_library(
                     LOG.warning(f"🔍 [bold]{path.name}[/bold]")
                     for issue in file_issues:
                         LOG.warning(f"   ∟ ⚠️  {issue}")
-                    if any("corrupt" in normalize_str(issue) or "checksum" in normalize_str(issue) for issue in file_issues):
+                    if any(
+                        "corrupt" in normalize_str(issue)
+                        or "checksum" in normalize_str(issue)
+                        for issue in file_issues
+                    ):
                         report.corrupt_files += 1
-                    if any("missing" in normalize_str(issue) and "tag" in normalize_str(issue) for issue in file_issues):
+                    if any(
+                        "missing" in normalize_str(issue)
+                        and "tag" in normalize_str(issue)
+                        for issue in file_issues
+                    ):
                         report.missing_metadata += 1
-                    if any("missing" in normalize_str(issue) and "lrc" in normalize_str(issue) for issue in file_issues):
+                    if any(
+                        "missing" in normalize_str(issue)
+                        and "lrc" in normalize_str(issue)
+                        for issue in file_issues
+                    ):
                         report.missing_lrc += 1
-                
+
                 progress.advance(task)
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
@@ -317,10 +397,12 @@ def check_library(
         tracks_found = folder_tracks_found.get(folder, {})
         for (dn, tn), f_list in tracks_found.items():
             if len(f_list) > 1:
-                folder_issues.append(f"Duplicate track number {tn} (Disc {dn}) found in files: {f_list}")
+                folder_issues.append(
+                    f"Duplicate track number {tn} (Disc {dn}) found in files: {f_list}"
+                )
 
         discs: dict[int, list[int]] = defaultdict(list)
-        for (dn, tn) in tracks_found:
+        for dn, tn in tracks_found:
             discs[dn].append(tn)
         for dn, tns in discs.items():
             tns.sort()
@@ -328,7 +410,9 @@ def check_library(
                 max_t = max(tns)
                 missing = [t for t in range(1, max_t + 1) if t not in tns]
                 if missing:
-                    folder_issues.append(f"Missing track numbers in sequence for Disc {dn}: {missing}")
+                    folder_issues.append(
+                        f"Missing track numbers in sequence for Disc {dn}: {missing}"
+                    )
 
         if folder_issues:
             report.issues[str(folder)] = folder_issues
@@ -343,7 +427,7 @@ def check_library(
         missing_lrc = report.missing_lrc
         issue_count = len(report.issues)
 
-        llm_summary = (
+        summary_text = (
             f"Sonora checked {total} files in '{folder_path}'. "
             f"Check status: {corrupt} corrupted files, {missing_meta} missing metadata, "
             f"{missing_lrc} missing LRCs. Total files with issues: {issue_count}."
@@ -352,7 +436,7 @@ def check_library(
         data = {
             "schema": "check_report_v1",
             "generator": "Sonora",
-            "llm_summary": llm_summary,
+            "summary_text": summary_text,
             "target_path": str(folder_path.resolve()),
             "summary": {
                 "total_files": total,
@@ -366,7 +450,9 @@ def check_library(
         output_json.write_bytes(
             orjson.dumps(
                 data,
-                option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_DATACLASS,
+                option=orjson.OPT_INDENT_2
+                | orjson.OPT_NON_STR_KEYS
+                | orjson.OPT_SERIALIZE_DATACLASS,
             )
         )
 

@@ -7,7 +7,13 @@ from sonora.core.utils import RateLimiter, is_valid_uuid, normalize_str
 _LASTFM_LIMITER = RateLimiter(interval_seconds=0.25)
 
 
-def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid: str | None = None, _retried: bool = False) -> list[str]:
+def fetch_lastfm_tags(
+    artist: str,
+    title: str,
+    api_key: str | None = None,
+    mbid: str | None = None,
+    _retried: bool = False,
+) -> list[str]:
     """
     Fetch top tags from Last.fm API to use as MOOD/STYLE tags.
     Returns list of top 5 tags (title-cased).
@@ -24,7 +30,7 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
     params: dict[str, str] = {
         "method": "track.getTopTags",
         "api_key": api_key,
-        "format": "json"
+        "format": "json",
     }
 
     if mbid and is_valid_uuid(mbid):
@@ -48,17 +54,25 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
         ]
         if not res and mbid and artist and title and not _retried:
             # Fallback to artist+title if MBID returned 0 tags
-            return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None, _retried=True)
+            return fetch_lastfm_tags(
+                artist, title, api_key=api_key, mbid=None, _retried=True
+            )
         final_res = res[:5]
         set_cached_api(cache_key, final_res)
         return final_res
     except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
         if mbid and artist and title and not _retried:
-            return fetch_lastfm_tags(artist, title, api_key=api_key, mbid=None, _retried=True)
-        raise RuntimeError(f"Last.fm tag fetch failed for {artist} - {title}: {e}") from e
+            return fetch_lastfm_tags(
+                artist, title, api_key=api_key, mbid=None, _retried=True
+            )
+        raise RuntimeError(
+            f"Last.fm tag fetch failed for {artist} - {title}: {e}"
+        ) from e
 
 
-def fetch_lastfm_track_stats(artist: str, title: str, api_key: str | None = None) -> dict[str, int] | None:
+def fetch_lastfm_track_stats(
+    artist: str, title: str, api_key: str | None = None
+) -> dict[str, int] | None:
     """
     Fetch track popularity metrics (listeners, playcount) from Last.fm API.
     """
@@ -86,10 +100,14 @@ def fetch_lastfm_track_stats(artist: str, title: str, api_key: str | None = None
         listeners_str = track.get("listeners")
         play_str = track.get("playcount")
         res = {
-            "listeners": int(listeners_str) if listeners_str and str(listeners_str).isdigit() else 0,
+            "listeners": int(listeners_str)
+            if listeners_str and str(listeners_str).isdigit()
+            else 0,
             "playcount": int(play_str) if play_str and str(play_str).isdigit() else 0,
         }
         set_cached_api(cache_key, res)
         return res
     except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
-        raise RuntimeError(f"Last.fm stats fetch failed for {artist} - {title}: {e}") from e
+        raise RuntimeError(
+            f"Last.fm stats fetch failed for {artist} - {title}: {e}"
+        ) from e

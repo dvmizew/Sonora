@@ -7,7 +7,10 @@ from sonora.core.utils import RateLimiter, normalize_str
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 _ITUNES_LIMITER = RateLimiter(interval_seconds=3.2)
 
-def search_itunes(artist: str, term: str, entity: str = "album", country: str = "US") -> list[dict[str, object]]:
+
+def search_itunes(
+    artist: str, term: str, entity: str = "album", country: str = "US"
+) -> list[dict[str, object]]:
     """
     Search iTunes Search API for album or track metadata.
     """
@@ -29,14 +32,20 @@ def search_itunes(artist: str, term: str, entity: str = "album", country: str = 
         resp.raise_for_status()
         data = resp.json()
         raw_results = data.get("results", []) if isinstance(data, dict) else []
-        results: list[dict[str, object]] = [r for r in raw_results if isinstance(r, dict)]
+        results: list[dict[str, object]] = [
+            r for r in raw_results if isinstance(r, dict)
+        ]
         set_cached_api(cache_key, results)
         return results
     except (OSError, ValueError, KeyError, RuntimeError) as e:
-        raise RuntimeError(f"iTunes Search API request failed for {query_term}: {e}") from e
+        raise RuntimeError(
+            f"iTunes Search API request failed for {query_term}: {e}"
+        ) from e
 
 
-def fetch_itunes_cover_art_url(artist: str, album: str, resolution: int = 1400) -> str | None:
+def fetch_itunes_cover_art_url(
+    artist: str, album: str, resolution: int = 1400
+) -> str | None:
     """
     Fetch high-resolution album cover art URL from iTunes.
     Resolutions can be 600, 1400, or 3000.
@@ -58,7 +67,23 @@ def fetch_itunes_cover_art_url(artist: str, album: str, resolution: int = 1400) 
 
     # Step 2: Fallback matching if no exact match found
     if best_result is None:
-        target_has_num = any(w in norm_target.split() for w in ["ii", "2", "two", "part 2", "pt 2", "pt. 2", "vol 2", "vol. 2", "iii", "3", "iv", "4"])
+        target_has_num = any(
+            w in norm_target.split()
+            for w in [
+                "ii",
+                "2",
+                "two",
+                "part 2",
+                "pt 2",
+                "pt. 2",
+                "vol 2",
+                "vol. 2",
+                "iii",
+                "3",
+                "iv",
+                "4",
+            ]
+        )
         for res in results:
             coll_name = str(res.get("collectionName", ""))
             norm_coll = normalize_str(coll_name)
@@ -67,7 +92,23 @@ def fetch_itunes_cover_art_url(artist: str, album: str, resolution: int = 1400) 
             if fuzz.token_set_ratio(norm_target, norm_coll) < 75.0:
                 continue
 
-            coll_has_num = any(w in norm_coll.split() for w in ["ii", "2", "two", "part 2", "pt 2", "pt. 2", "vol 2", "vol. 2", "iii", "3", "iv", "4"])
+            coll_has_num = any(
+                w in norm_coll.split()
+                for w in [
+                    "ii",
+                    "2",
+                    "two",
+                    "part 2",
+                    "pt 2",
+                    "pt. 2",
+                    "vol 2",
+                    "vol. 2",
+                    "iii",
+                    "3",
+                    "iv",
+                    "4",
+                ]
+            )
 
             # Reject mismatch between album series (e.g. Savage Mode vs Savage Mode II)
             if coll_has_num != target_has_num:
