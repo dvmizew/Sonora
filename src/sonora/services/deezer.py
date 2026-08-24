@@ -5,7 +5,9 @@ import httpx
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import clean_title, match_score, normalize_str
+from sonora.core.utils import RateLimiter, clean_title, match_score, normalize_str
+
+_DEEZER_LIMITER = RateLimiter(interval_seconds=0.15)
 
 
 def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
@@ -18,6 +20,7 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
     if cached is not None:
         return str(cached) if cached else None
 
+    _DEEZER_LIMITER.wait()
     query = f'artist:"{artist}" album:"{clean_alb}"'
     url = f"https://api.deezer.com/search/album?q={urllib.parse.quote(query)}"
 
@@ -72,6 +75,7 @@ def fetch_deezer_album_details(artist: str, album: str) -> dict[str, str | int |
     if isinstance(cached, dict):
         return cached
 
+    _DEEZER_LIMITER.wait()
     query = f'artist:"{artist}" album:"{clean_alb}"'
     url = f"https://api.deezer.com/search/album?q={urllib.parse.quote(query)}"
 
@@ -89,6 +93,7 @@ def fetch_deezer_album_details(artist: str, album: str) -> dict[str, str | int |
         if not album_id:
             return None
 
+        _DEEZER_LIMITER.wait()
         detail_resp = SESSION.get(f"https://api.deezer.com/album/{album_id}", timeout=6)
         if detail_resp.status_code != 200:
             return None
@@ -121,6 +126,7 @@ def fetch_deezer_track_details(artist: str, title: str) -> dict[str, str | int |
     if isinstance(cached, dict):
         return cached
 
+    _DEEZER_LIMITER.wait()
     query = f"{artist} {clean_t}"
     url = f"https://api.deezer.com/search/track?q={urllib.parse.quote(query)}"
 
@@ -154,6 +160,7 @@ def fetch_deezer_track_details(artist: str, title: str) -> dict[str, str | int |
         if not track_id:
             return None
 
+        _DEEZER_LIMITER.wait()
         detail_resp = SESSION.get(f"https://api.deezer.com/track/{track_id}", timeout=6)
         if detail_resp.status_code != 200:
             return None
