@@ -83,7 +83,9 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
 
                         if not first:
                             file_handle.write(b",\n")
-                        key_bytes = orjson.dumps(str(audio_file), option=_ORJSON_OPTIONS)
+                        key_bytes = orjson.dumps(
+                            str(audio_file), option=_ORJSON_OPTIONS
+                        )
                         value_bytes = orjson.dumps(track_data, option=_ORJSON_OPTIONS)
                         file_handle.write(b"  " + key_bytes + b": " + value_bytes)
                         first = False
@@ -153,7 +155,10 @@ def restore_library_tags(backup_file: Path) -> int:
                             for tag_key, tag_value in tags_dictionary.items():
                                 if tag_key in ("file_path", "file_name"):
                                     continue
-                                if hasattr(track_info, tag_key) and tag_value is not None:
+                                if (
+                                    hasattr(track_info, tag_key)
+                                    and tag_value is not None
+                                ):
                                     setattr(track_info, tag_key, tag_value)
                             write_track_metadata(track_info)
                             count += 1

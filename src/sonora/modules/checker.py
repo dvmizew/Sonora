@@ -144,7 +144,8 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 is_fake, _, description = detect_fake_lossless(file_path)
                 if is_fake:
                     issues.append(
-                        description or "Possible fake lossless (spectral cutoff below 16kHz)."
+                        description
+                        or "Possible fake lossless (spectral cutoff below 16kHz)."
                     )
             except (OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
@@ -360,9 +361,7 @@ def check_library(
                     folder_album_artists[folder].add(album_artist)
                 if track_number is not None:
                     disc = disc_number or 1
-                    folder_tracks_found[folder][(disc, track_number)].append(
-                        path.name
-                    )
+                    folder_tracks_found[folder][(disc, track_number)].append(path.name)
 
                 if file_issues:
                     report.issues[str(path)] = file_issues
@@ -402,9 +401,7 @@ def check_library(
             folder_issues.append(f"Inconsistent ALBUM name in folder: {albums}")
         album_artists = folder_album_artists.get(folder, set())
         if len(album_artists) > 1:
-            folder_issues.append(
-                f"Inconsistent ALBUMARTIST in folder: {album_artists}"
-            )
+            folder_issues.append(f"Inconsistent ALBUMARTIST in folder: {album_artists}")
 
         tracks_found = folder_tracks_found.get(folder, {})
         for (
@@ -423,9 +420,7 @@ def check_library(
             track_numbers.sort()
             if track_numbers:
                 max_track = max(track_numbers)
-                missing = [
-                    t for t in range(1, max_track + 1) if t not in track_numbers
-                ]
+                missing = [t for t in range(1, max_track + 1) if t not in track_numbers]
                 if missing:
                     folder_issues.append(
                         f"Missing track numbers in sequence for Disc {disc_idx}: {missing}"

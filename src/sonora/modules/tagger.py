@@ -74,7 +74,7 @@ def process_single_track(
 
         LOG.info(f"🎧 Processing track: [white]{file_path.name}[/]")
 
-        # 1. Respect existing MBID or prioritize AcoustID (most exact) over text search
+        # 1. AcoustID fingerprinting + WebService lookup
         if (
             not is_valid_uuid(track_info.musicbrainz_trackid) or force
         ) and acoustid_api_key:
@@ -88,8 +88,8 @@ def process_single_track(
                 if is_valid_uuid(acoustid_mbid):
                     track_info.musicbrainz_trackid = acoustid_mbid
                     LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"AcoustID lookup failed for {track_info.title}: {e}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"AcoustID lookup failed for {track_info.title}: {error}")
 
         # 2. Check pre-fetched album track MBIDs map first (1 single API call per album!)
         album_mbids = album_track_mbids or {}
@@ -98,11 +98,11 @@ def process_single_track(
             and track_info.track_number
             and track_info.track_number in album_mbids
         ):
-            cand_mbid = album_mbids[track_info.track_number]
-            if is_valid_uuid(cand_mbid):
-                track_info.musicbrainz_trackid = cand_mbid
+            candidate_mbid = album_mbids[track_info.track_number]
+            if is_valid_uuid(candidate_mbid):
+                track_info.musicbrainz_trackid = candidate_mbid
                 LOG.info(
-                    f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {cand_mbid[:8]}..."
+                    f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {candidate_mbid[:8]}..."
                 )
         elif not is_valid_uuid(track_info.musicbrainz_trackid) or force:
             try:
@@ -110,8 +110,8 @@ def process_single_track(
                 if is_valid_uuid(mbid):
                     track_info.musicbrainz_trackid = mbid
                     LOG.info(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {e}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {error}")
 
         # 3. Fetch MusicBrainz Album ID
         if not is_valid_uuid(track_info.musicbrainz_albumid):
@@ -128,16 +128,16 @@ def process_single_track(
                         search_artist, track_info.album
                     )
                     if release:
-                        mb_id = release.get("id")
-                        if is_valid_uuid(str(mb_id)):
-                            track_info.musicbrainz_albumid = str(mb_id)
+                        musicbrainz_id = release.get("id")
+                        if is_valid_uuid(str(musicbrainz_id)):
+                            track_info.musicbrainz_albumid = str(musicbrainz_id)
                         if not track_info.date:
                             date_str = release.get("date")
                             if isinstance(date_str, str) and len(date_str) >= 4:
                                 track_info.date = normalize_date(date_str)
-                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
+                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                     LOG.debug(
-                        f"MusicBrainz Album lookup failed for {track_info.title}: {e}"
+                        f"MusicBrainz Album lookup failed for {track_info.title}: {error}"
                     )
 
         # 4. Fetch Last.fm genre/mood tags
@@ -151,18 +151,20 @@ def process_single_track(
                 )
                 if tags:
                     raw_genre = tags[0]
-                    norm_genre = normalize_genre(raw_genre)
-                    if norm_genre:
-                        track_info.genre = norm_genre
-                        LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{norm_genre}[/]")
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"Last.fm lookup failed for {track_info.title}: {e}")
+                    normalized_genre = normalize_genre(raw_genre)
+                    if normalized_genre:
+                        track_info.genre = normalized_genre
+                        LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"Last.fm lookup failed for {track_info.title}: {error}")
 
         # 5. Discogs metadata enrichment
         if discogs_user_token:
             try:
                 release = search_discogs_release(
-                    track_info.artist, track_info.album, user_token=discogs_user_token
+                    track_info.artist,
+                    track_info.album,
+                    user_token=discogs_user_token,
                 )
                 if release:
                     if release.get("id") and not track_info.discogs_release_id:
@@ -181,9 +183,9 @@ def process_single_track(
                         and not track_info.genre
                     ):
                         raw_genre = str(genres_val[0])
-                        norm_genre = normalize_genre(raw_genre)
-                        if norm_genre:
-                            track_info.genre = norm_genre
+                        normalized_genre = normalize_genre(raw_genre)
+                        if normalized_genre:
+                            track_info.genre = normalized_genre
 
                     styles_val = release.get("styles")
                     if (
@@ -191,7 +193,9 @@ def process_single_track(
                         and styles_val
                         and not track_info.style
                     ):
-                        track_info.style = ", ".join(str(s) for s in styles_val[:3])
+                        track_info.style = ", ".join(
+                            str(style_item) for style_item in styles_val[:3]
+                        )
 
                     if release.get("country") and not track_info.release_country:
                         track_info.release_country = str(release["country"])
@@ -207,77 +211,100 @@ def process_single_track(
                         track_info.composer = str(release["composer"])
 
                     # Check track-specific credits or album-level credits for producers and remixer
-                    t_credits = release.get("track_credits")
-                    t_spec = None
-                    if isinstance(t_credits, dict):
+                    track_credits_dict = release.get("track_credits")
+                    track_specific_credits = None
+                    if isinstance(track_credits_dict, dict):
                         track_key = (
                             str(track_info.track_number)
                             if track_info.track_number
                             else None
                         )
-                        if track_key and track_key in t_credits:
-                            t_spec = t_credits[track_key]
-                        elif track_info.title and track_info.title.lower() in t_credits:
-                            t_spec = t_credits[track_info.title.lower()]
+                        if track_key and track_key in track_credits_dict:
+                            track_specific_credits = track_credits_dict[track_key]
+                        elif (
+                            track_info.title
+                            and track_info.title.lower() in track_credits_dict
+                        ):
+                            track_specific_credits = track_credits_dict[
+                                track_info.title.lower()
+                            ]
 
-                    if isinstance(t_spec, dict):
-                        if t_spec.get("producers") and not track_info.producers:
-                            track_info.producers = str(t_spec["producers"])
-                        if t_spec.get("remixer") and not track_info.remixer:
-                            track_info.remixer = str(t_spec["remixer"])
+                    if isinstance(track_specific_credits, dict):
+                        if (
+                            track_specific_credits.get("producers")
+                            and not track_info.producers
+                        ):
+                            track_info.producers = str(
+                                track_specific_credits["producers"]
+                            )
+                        if (
+                            track_specific_credits.get("remixer")
+                            and not track_info.remixer
+                        ):
+                            track_info.remixer = str(track_specific_credits["remixer"])
 
                     if release.get("producers") and not track_info.producers:
                         track_info.producers = str(release["producers"])
                     if release.get("remixer") and not track_info.remixer:
                         track_info.remixer = str(release["remixer"])
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"Discogs lookup failed for {track_info.title}: {e}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"Discogs lookup failed for {track_info.title}: {error}")
 
         # 5b. Deezer metadata enrichment (Label, Barcode, Release Date, Genre, ISRC)
         try:
-            d_album = fetch_deezer_album_details(track_info.artist, track_info.album)
-            if d_album:
-                if d_album.get("label") and not track_info.label:
-                    track_info.label = str(d_album["label"])
-                if d_album.get("barcode") and not track_info.barcode:
-                    track_info.barcode = str(d_album["barcode"])
-                if d_album.get("release_date") and not track_info.date:
-                    track_info.date = normalize_date(str(d_album["release_date"]))
-                if d_album.get("genre") and not track_info.genre:
-                    norm_g = normalize_genre(str(d_album["genre"]))
-                    if norm_g:
-                        track_info.genre = norm_g
+            deezer_album = fetch_deezer_album_details(
+                track_info.artist, track_info.album
+            )
+            if deezer_album:
+                if deezer_album.get("label") and not track_info.label:
+                    track_info.label = str(deezer_album["label"])
+                if deezer_album.get("barcode") and not track_info.barcode:
+                    track_info.barcode = str(deezer_album["barcode"])
+                if deezer_album.get("release_date") and not track_info.date:
+                    track_info.date = normalize_date(str(deezer_album["release_date"]))
+                if deezer_album.get("genre") and not track_info.genre:
+                    normalized_genre = normalize_genre(str(deezer_album["genre"]))
+                    if normalized_genre:
+                        track_info.genre = normalized_genre
 
-            d_track = fetch_deezer_track_details(track_info.artist, track_info.title)
-            if d_track and d_track.get("isrc") and not track_info.isrc:
-                track_info.isrc = str(d_track["isrc"])
-        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-            LOG.debug(f"Deezer enrichment failed for {track_info.title}: {e}")
+            deezer_track = fetch_deezer_track_details(
+                track_info.artist, track_info.title
+            )
+            if deezer_track and deezer_track.get("isrc") and not track_info.isrc:
+                track_info.isrc = str(deezer_track["isrc"])
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"Deezer enrichment failed for {track_info.title}: {error}")
 
         # 6. Genius song details (description, genius_song_id, featured_artists, producers)
         if genius_api_token:
             try:
-                g_details = fetch_genius_song_details(
-                    track_info.artist, track_info.title, api_token=genius_api_token
+                genius_details = fetch_genius_song_details(
+                    track_info.artist,
+                    track_info.title,
+                    api_token=genius_api_token,
                 )
-                if g_details:
-                    if g_details.get("description") and (
+                if genius_details:
+                    if genius_details.get("description") and (
                         not track_info.comment or force
                     ):
-                        track_info.comment = str(g_details["description"])
-                    if g_details.get("genius_song_id"):
-                        track_info.genius_song_id = str(g_details["genius_song_id"])
-                    if g_details.get("featured_artists") and (
+                        track_info.comment = str(genius_details["description"])
+                    if genius_details.get("genius_song_id"):
+                        track_info.genius_song_id = str(
+                            genius_details["genius_song_id"]
+                        )
+                    if genius_details.get("featured_artists") and (
                         not track_info.featured_artists or force
                     ):
-                        track_info.featured_artists = str(g_details["featured_artists"])
-                    if g_details.get("producers") and (
+                        track_info.featured_artists = str(
+                            genius_details["featured_artists"]
+                        )
+                    if genius_details.get("producers") and (
                         not track_info.producers or force
                     ):
-                        track_info.producers = str(g_details["producers"])
+                        track_info.producers = str(genius_details["producers"])
                     LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"Genius lookup failed for {track_info.title}: {e}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"Genius lookup failed for {track_info.title}: {error}")
 
         # 6a. Last.fm stats (listeners, playcount)
         if lastfm_api_key:
@@ -290,16 +317,18 @@ def process_single_track(
                         track_info.listeners = stats["listeners"]
                     if stats.get("playcount"):
                         track_info.playcount = stats["playcount"]
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"Last.fm stats lookup failed for {track_info.title}: {e}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(
+                    f"Last.fm stats lookup failed for {track_info.title}: {error}"
+                )
 
         # 6b. TheAudioDB video URL
         try:
-            vid_url = fetch_track_video_url(track_info.artist, track_info.title)
-            if vid_url:
-                track_info.music_video_url = vid_url
-        except (OSError, ValueError, RuntimeError) as e:
-            LOG.debug(f"TheAudioDB video lookup failed for {track_info.title}: {e}")
+            video_url = fetch_track_video_url(track_info.artist, track_info.title)
+            if video_url:
+                track_info.music_video_url = video_url
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"TheAudioDB video lookup failed for {track_info.title}: {error}")
 
         # 6c. Embed Cuesheet content
         if cuesheet_content:
@@ -316,29 +345,31 @@ def process_single_track(
                 if bpm is not None:
                     track_info.bpm = bpm
                     LOG.info(f"   ∟ 🎵 BPM Calculated: [green]{bpm}[/]")
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"BPM calculation failed for {track_info.title}: {e}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"BPM calculation failed for {track_info.title}: {error}")
 
         # 8. Fetch iTunes Cover Art (Download only, don't embed yet)
-        cover_jpg = None
+        cover_image_file = None
         if fetch_itunes_art:
             try:
-                cover_jpg = process_album_cover_art(
+                cover_image_file = process_album_cover_art(
                     file_path.parent,
                     track_info.artist,
                     track_info.album,
-                    mb_album_id=track_info.musicbrainz_albumid,
+                    musicbrainz_album_id=track_info.musicbrainz_albumid,
                     force=force,
                     dry_run=dry_run,
                 )
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"Cover art downloading failed for {track_info.title}: {e}")
-                cover_jpg = None
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(
+                    f"Cover art downloading failed for {track_info.title}: {error}"
+                )
+                cover_image_file = None
 
         # 9. Fetch & write .lrc lyrics file (Quality Upgrade: enhanced (3) > line-synced (2) > plain (1))
         if fetch_lyrics:
             try:
-                lrc_text, tag_type = process_track_lyrics(
+                lyrics_text, tag_type = process_track_lyrics(
                     file_path,
                     track_info.artist,
                     track_info.title,
@@ -346,11 +377,11 @@ def process_single_track(
                     dry_run=dry_run,
                     isrc=track_info.isrc,
                 )
-                if lrc_text and tag_type:
-                    track_info.lyrics = lrc_text
+                if lyrics_text and tag_type:
+                    track_info.lyrics = lyrics_text
                     LOG.info(f"   ∟ ✅ Saved {tag_type} lyrics for {file_path.name}")
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
-                LOG.debug(f"Lyrics fetch failed for {track_info.title}: {e}")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"Lyrics fetch failed for {track_info.title}: {error}")
 
         # Compute exact tag diffs (compare dataclass fields)
         diff_lines = []
@@ -365,18 +396,20 @@ def process_single_track(
             "art_width",
             "art_height",
         }
-        for f in dataclasses.fields(TrackInfo):
-            if f.name in _SKIP_FIELDS:
+        for field_info in dataclasses.fields(TrackInfo):
+            if field_info.name in _SKIP_FIELDS:
                 continue
-            old_val = getattr(orig_info, f.name)
-            new_val = getattr(track_info, f.name)
-            if old_val != new_val:
-                diff_lines.append(f"\n       [*] {f.name}: {old_val} -> {new_val}")
+            old_value = getattr(orig_info, field_info.name)
+            new_value = getattr(track_info, field_info.name)
+            if old_value != new_value:
+                diff_lines.append(
+                    f"\n       [*] {field_info.name}: {old_value} -> {new_value}"
+                )
 
         # 10. Write metadata tags back to file only if changed
         if diff_lines or force:
             if not dry_run:
-                write_track_metadata(track_info, cover_art_path=cover_jpg)
+                write_track_metadata(track_info, cover_art_path=cover_image_file)
                 LOG.info(
                     f"   ∟ [green]✓[/] {file_path.name}: {len(diff_lines)} tag(s) updated.{''.join(diff_lines)}"
                 )

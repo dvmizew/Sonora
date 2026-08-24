@@ -44,10 +44,10 @@ def fetch_discogs_release_details(
         try:
             url = f"https://api.discogs.com/releases/{release_id}"
             headers = {"Authorization": f"Discogs token={user_token}"}
-            resp = SESSION.get(url, headers=headers, timeout=10)
-            if resp.status_code != 200:
+            response = SESSION.get(url, headers=headers, timeout=10)
+            if response.status_code != 200:
                 return None
-            data = resp.json()
+            data = response.json()
             if not isinstance(data, dict):
                 return None
 
@@ -65,45 +65,48 @@ def fetch_discogs_release_details(
             # 2. Labels & Catalog Number
             labels = data.get("labels", [])
             label_name = None
-            cat_no = None
+            catalog_number = None
             if isinstance(labels, list) and labels and isinstance(labels[0], dict):
                 label_name = (
                     str(labels[0].get("name")) if labels[0].get("name") else None
                 )
-                cat_no = (
+                catalog_number = (
                     str(labels[0].get("catno"))
                     if labels[0].get("catno") and labels[0].get("catno") != "none"
                     else None
                 )
 
             # 3. Barcode & Matrix Identifiers
-            barcode_val = None
+            barcode_value = None
             identifiers = data.get("identifiers", [])
             if isinstance(identifiers, list):
-                for ident in identifiers:
-                    if isinstance(ident, dict) and ident.get("type") == "Barcode":
-                        raw_bc = (
-                            str(ident.get("value", ""))
+                for identifier in identifiers:
+                    if (
+                        isinstance(identifier, dict)
+                        and identifier.get("type") == "Barcode"
+                    ):
+                        raw_barcode = (
+                            str(identifier.get("value", ""))
                             .replace(" ", "")
                             .replace("-", "")
                         )
-                        if raw_bc:
-                            barcode_val = raw_bc
+                        if raw_barcode:
+                            barcode_value = raw_barcode
                             break
 
             # 4. Media & Format Details (e.g., "Vinyl, LP, 180g" or "CD, Album, Deluxe Edition")
             media_format = None
             formats = data.get("formats", [])
             if isinstance(formats, list) and formats and isinstance(formats[0], dict):
-                f0 = formats[0]
-                fmt_parts: list[str] = []
-                if f0.get("name"):
-                    fmt_parts.append(str(f0["name"]))
-                descs = f0.get("descriptions", [])
-                if isinstance(descs, list):
-                    fmt_parts.extend(str(d) for d in descs if d)
-                if fmt_parts:
-                    media_format = ", ".join(fmt_parts)
+                first_format = formats[0]
+                format_parts: list[str] = []
+                if first_format.get("name"):
+                    format_parts.append(str(first_format["name"]))
+                descriptions = first_format.get("descriptions", [])
+                if isinstance(descriptions, list):
+                    format_parts.extend(str(desc) for desc in descriptions if desc)
+                if format_parts:
+                    media_format = ", ".join(format_parts)
 
             # 5. Production & Engineering Credits
             producers: list[str] = []
@@ -111,10 +114,16 @@ def fetch_discogs_release_details(
             composers: list[str] = []
             extra_artists = data.get("extraartists", [])
             if isinstance(extra_artists, list):
-                for ea in extra_artists:
-                    if isinstance(ea, dict) and ea.get("name") and ea.get("role"):
-                        name = re.sub(r"\s*\(\d+\)$", "", str(ea["name"])).strip()
-                        role = str(ea["role"]).lower()
+                for extra_artist in extra_artists:
+                    if (
+                        isinstance(extra_artist, dict)
+                        and extra_artist.get("name")
+                        and extra_artist.get("role")
+                    ):
+                        name = re.sub(
+                            r"\s*\(\d+\)$", "", str(extra_artist["name"])
+                        ).strip()
+                        role = str(extra_artist["role"]).lower()
                         if (
                             "producer" in role or "produced by" in role
                         ) and name not in producers:
@@ -139,39 +148,45 @@ def fetch_discogs_release_details(
             track_credits: dict[str, dict[str, str]] = {}
             tracklist = data.get("tracklist", [])
             if isinstance(tracklist, list):
-                for t in tracklist:
-                    if isinstance(t, dict):
-                        pos = str(t.get("position", "")).strip()
-                        t_title = str(t.get("title", "")).strip()
-                        t_prods: list[str] = []
-                        t_remix: list[str] = []
-                        for tea in t.get("extraartists", []):
+                for track in tracklist:
+                    if isinstance(track, dict):
+                        position = str(track.get("position", "")).strip()
+                        track_title = str(track.get("title", "")).strip()
+                        track_producers: list[str] = []
+                        track_remixers: list[str] = []
+                        for track_extra_artist in track.get("extraartists", []):
                             if (
-                                isinstance(tea, dict)
-                                and tea.get("name")
-                                and tea.get("role")
+                                isinstance(track_extra_artist, dict)
+                                and track_extra_artist.get("name")
+                                and track_extra_artist.get("role")
                             ):
-                                tea_name = re.sub(
-                                    r"\s*\(\d+\)$", "", str(tea["name"])
+                                track_artist_name = re.sub(
+                                    r"\s*\(\d+\)$", "", str(track_extra_artist["name"])
                                 ).strip()
-                                tea_role = str(tea["role"]).lower()
+                                track_artist_role = str(
+                                    track_extra_artist["role"]
+                                ).lower()
                                 if (
-                                    "producer" in tea_role or "produced by" in tea_role
-                                ) and tea_name not in t_prods:
-                                    t_prods.append(tea_name)
-                                elif "remix" in tea_role and tea_name not in t_remix:
-                                    t_remix.append(tea_name)
-                        c_dict: dict[str, str] = {}
-                        if t_prods:
-                            c_dict["producers"] = ", ".join(t_prods)
-                        if t_remix:
-                            c_dict["remixer"] = ", ".join(t_remix)
-                        if pos:
-                            track_credits[pos] = c_dict
-                        if t_title:
-                            track_credits[t_title.lower()] = c_dict
+                                    "producer" in track_artist_role
+                                    or "produced by" in track_artist_role
+                                ) and track_artist_name not in track_producers:
+                                    track_producers.append(track_artist_name)
+                                elif (
+                                    "remix" in track_artist_role
+                                    and track_artist_name not in track_remixers
+                                ):
+                                    track_remixers.append(track_artist_name)
+                        credits_dict: dict[str, str] = {}
+                        if track_producers:
+                            credits_dict["producers"] = ", ".join(track_producers)
+                        if track_remixers:
+                            credits_dict["remixer"] = ", ".join(track_remixers)
+                        if position:
+                            track_credits[position] = credits_dict
+                        if track_title:
+                            track_credits[track_title.lower()] = credits_dict
 
-            res: dict[str, Any] = {
+            release_result: dict[str, Any] = {
                 "id": data.get("id"),
                 "artist_id": artist_id,
                 "title": data.get("title"),
@@ -181,18 +196,18 @@ def fetch_discogs_release_details(
                 "styles": list(data.get("styles", []) or []),
                 "country": data.get("country"),
                 "label": label_name,
-                "catalog_number": cat_no,
-                "barcode": barcode_val,
+                "catalog_number": catalog_number,
+                "barcode": barcode_value,
                 "media": media_format,
                 "producers": ", ".join(producers) if producers else None,
                 "remixer": ", ".join(remixers) if remixers else None,
                 "composer": ", ".join(composers) if composers else None,
                 "track_credits": track_credits,
             }
-            set_cached_api(cache_key, res, expire_seconds=2419200)  # 30 days
-            return res
-        except (httpx.HTTPError, OSError, ValueError, KeyError) as e:
-            LOG.debug(f"Discogs release fetch failed for ID {release_id}: {e}")
+            set_cached_api(cache_key, release_result, expire_seconds=2419200)  # 30 days
+            return release_result
+        except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
+            LOG.debug(f"Discogs release fetch failed for ID {release_id}: {error}")
             return None
 
 
@@ -228,21 +243,21 @@ def search_discogs_release(
                 "type": "release",
                 "per_page": "5",
             }
-            resp = SESSION.get(url, params=params, headers=headers, timeout=10)
-            if resp.status_code != 200:
+            response = SESSION.get(url, params=params, headers=headers, timeout=10)
+            if response.status_code != 200:
                 return None
-            data = resp.json()
+            data = response.json()
             results = data.get("results", []) if isinstance(data, dict) else []
             if not results or not isinstance(results[0], dict):
                 return None
 
             first = results[0]
-            rel_id = first.get("id")
-            if not rel_id:
+            release_id = first.get("id")
+            if not release_id:
                 return None
 
             # Enrich with full release details
-            full_details = fetch_discogs_release_details(rel_id, user_token)
+            full_details = fetch_discogs_release_details(release_id, user_token)
             if full_details:
                 set_cached_api(cache_key, full_details, expire_seconds=2419200)
                 return full_details
@@ -250,20 +265,20 @@ def search_discogs_release(
             # Fallback to search result fields if full fetch failed
             labels = first.get("label", [])
             label_name = str(labels[0]) if isinstance(labels, list) and labels else None
-            cat_no = str(first.get("catno")) if first.get("catno") else None
+            catalog_number = str(first.get("catno")) if first.get("catno") else None
             barcodes = first.get("barcode", [])
-            barcode_val = (
+            barcode_value = (
                 str(barcodes[0]) if isinstance(barcodes, list) and barcodes else None
             )
             formats = first.get("format", [])
             media_format = (
-                ", ".join(str(f) for f in formats)
+                ", ".join(str(format_item) for format_item in formats)
                 if isinstance(formats, list) and formats
                 else None
             )
 
-            res: dict[str, Any] = {
-                "id": rel_id,
+            release_result: dict[str, Any] = {
+                "id": release_id,
                 "artist_id": None,
                 "title": first.get("title"),
                 "year": first.get("year"),
@@ -272,16 +287,16 @@ def search_discogs_release(
                 "styles": list(first.get("style", []) or []),
                 "country": first.get("country"),
                 "label": label_name,
-                "catalog_number": cat_no,
-                "barcode": barcode_val,
+                "catalog_number": catalog_number,
+                "barcode": barcode_value,
                 "media": media_format,
                 "producers": None,
                 "remixer": None,
                 "composer": None,
                 "track_credits": {},
             }
-            set_cached_api(cache_key, res, expire_seconds=2419200)
-            return res
-        except (httpx.HTTPError, OSError, ValueError, KeyError) as e:
-            LOG.debug(f"Discogs search failed for {artist} - {album}: {e}")
+            set_cached_api(cache_key, release_result, expire_seconds=2419200)
+            return release_result
+        except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
+            LOG.debug(f"Discogs search failed for {artist} - {album}: {error}")
             return None

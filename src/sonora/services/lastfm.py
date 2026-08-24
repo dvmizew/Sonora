@@ -50,7 +50,9 @@ def fetch_lastfm_tags(
         tag_names = [
             tag["name"].title()
             for tag in tags
-            if isinstance(tag, dict) and tag.get("name") and isinstance(tag["name"], str)
+            if isinstance(tag, dict)
+            and tag.get("name")
+            and isinstance(tag["name"], str)
         ]
         if not tag_names and mbid and artist and title and not _retried:
             # Fallback to artist+title if MBID returned 0 tags

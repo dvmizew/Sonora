@@ -26,8 +26,8 @@ def init_musicbrainz(
 ) -> None:
     try:
         musicbrainzngs.set_useragent(app_name, version, contact)
-    except (ValueError, AttributeError, RuntimeError) as e:
-        LOG.debug(f"MusicBrainz User-Agent initialization failed: {e}")
+    except (ValueError, AttributeError, RuntimeError) as error:
+        LOG.debug(f"MusicBrainz User-Agent initialization failed: {error}")
 
 
 _discography_locks: dict[str, threading.Lock] = {}
@@ -72,12 +72,12 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
             ValueError,
             KeyError,
             RuntimeError,
-        ) as e:
-            if isinstance(e, RuntimeError):
+        ) as error:
+            if isinstance(error, RuntimeError):
                 raise
             raise RuntimeError(
-                f"MusicBrainz discography fetch failed for {artist}: {e}"
-            ) from e
+                f"MusicBrainz discography fetch failed for {artist}: {error}"
+            ) from error
 
 
 def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | None:
@@ -93,12 +93,12 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
     # Batch strategy: Check artist discography cache first
     discography = fetch_artist_discography(artist)
     album_lower = normalize_str(album)
-    for rel in discography:
-        rel_title_val = rel.get("title", "")
-        rel_title = normalize_str(str(rel_title_val))
-        if rel_title == album_lower or album_lower in rel_title:
-            set_cached_api(cache_key, rel)
-            return rel
+    for release in discography:
+        release_title_value = release.get("title", "")
+        release_title = normalize_str(str(release_title_value))
+        if release_title == album_lower or album_lower in release_title:
+            set_cached_api(cache_key, release)
+            return release
 
     _MB_LIMITER.wait()
     try:
@@ -107,28 +107,28 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
             result.get("release-list", []) if isinstance(result, dict) else []
         )
         releases: list[dict[str, object]] = [
-            r for r in raw_releases if isinstance(r, dict)
+            release for release in raw_releases if isinstance(release, dict)
         ]
-        target_rel: dict[str, object] | None = releases[0] if releases else None
-        set_cached_api(cache_key, target_rel)
-        return target_rel
+        target_release: dict[str, object] | None = releases[0] if releases else None
+        set_cached_api(cache_key, target_release)
+        return target_release
     except (
         MusicBrainzError,
         OSError,
         ValueError,
         KeyError,
         RuntimeError,
-    ) as e:
-        if isinstance(e, RuntimeError):
+    ) as error:
+        if isinstance(error, RuntimeError):
             raise
         raise RuntimeError(
-            f"MusicBrainz search failed for {artist} - {album}: {e}"
-        ) from e
+            f"MusicBrainz search failed for {artist} - {album}: {error}"
+        ) from error
 
 
 def fetch_track_mbid(artist: str, title: str) -> str | None:
-    c_title = clean_title(title)
-    cache_key = f"mb_mbid:{normalize_str(artist)}:{normalize_str(c_title)}"
+    cleaned_title = clean_title(title)
+    cache_key = f"mb_mbid:{normalize_str(artist)}:{normalize_str(cleaned_title)}"
     cached = get_cached_api(cache_key)
     if cached is not None:
         return str(cached) if cached else None
@@ -136,7 +136,7 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
     _MB_LIMITER.wait()
     try:
         result = musicbrainzngs.search_recordings(
-            artist=artist, recording=c_title, limit=5
+            artist=artist, recording=cleaned_title, limit=5
         )
         recordings = result.get("recording-list", [])
         if not recordings:
@@ -146,21 +146,25 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         best_mbid = None
         best_score = 0.0
 
-        for rec in recordings:
-            rec_title = str(rec.get("title", ""))
-            rec_artist = ""
-            artist_credit: Any = rec.get("artist-credit", [])
+        for recording in recordings:
+            recording_title = str(recording.get("title", ""))
+            recording_artist = ""
+            artist_credit: Any = recording.get("artist-credit", [])
             if (
                 isinstance(artist_credit, list)
                 and artist_credit
                 and isinstance(artist_credit[0], dict)
             ):
-                rec_artist = str(artist_credit[0].get("artist", {}).get("name", ""))
+                recording_artist = str(
+                    artist_credit[0].get("artist", {}).get("name", "")
+                )
 
-            score = match_score(artist, c_title, rec_artist, rec_title)
+            score = match_score(
+                artist, cleaned_title, recording_artist, recording_title
+            )
             if score > best_score:
                 best_score = score
-                best_mbid = str(rec.get("id"))
+                best_mbid = str(recording.get("id"))
 
         # Threshold check: require score >= 65 to avoid wrong MBIDs
         if best_score < 65.0 or not is_valid_uuid(best_mbid):
@@ -174,12 +178,12 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         ValueError,
         KeyError,
         RuntimeError,
-    ) as e:
-        if isinstance(e, RuntimeError):
+    ) as error:
+        if isinstance(error, RuntimeError):
             raise
         raise RuntimeError(
-            f"MusicBrainz track lookup failed for {artist} - {title}: {e}"
-        ) from e
+            f"MusicBrainz track lookup failed for {artist} - {title}: {error}"
+        ) from error
 
 
 def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
@@ -196,14 +200,14 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
 
     url = f"https://coverartarchive.org/release/{release_mbid}/front"
     try:
-        resp = SESSION.head(url, allow_redirects=True, timeout=5)
-        if resp.status_code == 200:
-            res_url = str(resp.url) or url
-            set_cached_api(cache_key, res_url)
-            return res_url
+        response = SESSION.head(url, allow_redirects=True, timeout=5)
+        if response.status_code == 200:
+            result_url = str(response.url) or url
+            set_cached_api(cache_key, result_url)
+            return result_url
         set_cached_api(cache_key, None)
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
-        LOG.debug(f"Cover Art Archive lookup failed: {e}")
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+        LOG.debug(f"Cover Art Archive lookup failed: {error}")
     return None
 
 
@@ -218,27 +222,30 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
     cache_key = f"mb_album_tracks:{release_mbid}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
-        return {int(k): str(v) for k, v in cached.items()}
+        return {
+            int(track_position_key): str(recording_mbid_value)
+            for track_position_key, recording_mbid_value in cached.items()
+        }
 
     _MB_LIMITER.wait()
     try:
-        rel = musicbrainzngs.get_release_by_id(
+        release_data = musicbrainzngs.get_release_by_id(
             release_mbid, includes=["recordings", "media", "artist-credits"]
         )
         mediums = (
-            rel.get("release", {}).get("medium-list", [])
-            if isinstance(rel, dict)
+            release_data.get("release", {}).get("medium-list", [])
+            if isinstance(release_data, dict)
             else []
         )
         mapping: dict[int, str] = {}
-        for m in mediums:
-            if isinstance(m, dict):
-                for t in m.get("track-list", []):
-                    if isinstance(t, dict):
-                        pos = t.get("position")
-                        rec_id = t.get("recording", {}).get("id")
-                        if pos and rec_id:
-                            mapping[int(pos)] = str(rec_id)
+        for medium in mediums:
+            if isinstance(medium, dict):
+                for track in medium.get("track-list", []):
+                    if isinstance(track, dict):
+                        position = track.get("position")
+                        recording_id = track.get("recording", {}).get("id")
+                        if position and recording_id:
+                            mapping[int(position)] = str(recording_id)
         set_cached_api(cache_key, mapping)
         return mapping
     except (
@@ -247,8 +254,8 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
         ValueError,
         KeyError,
         RuntimeError,
-    ) as e:
-        if isinstance(e, RuntimeError):
+    ) as error:
+        if isinstance(error, RuntimeError):
             raise
-        LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {e}")
+        LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {error}")
         return {}

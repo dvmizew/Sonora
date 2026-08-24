@@ -21,9 +21,7 @@ def _load_normalized_image(image_bytes: bytes) -> Image.Image:
     """
     with Image.open(io.BytesIO(image_bytes)) as raw_image:
         raw_image.load()
-        image: Image.Image = (
-            ImageOps.exif_transpose(raw_image) or raw_image.copy()
-        )
+        image: Image.Image = ImageOps.exif_transpose(raw_image) or raw_image.copy()
 
     if image.mode in ("RGBA", "LA", "P"):
         rgba = image.convert("RGBA")
@@ -165,8 +163,7 @@ def process_album_cover_art(
 
     with _get_cover_lock(folder_path):
         if not dry_run and (
-            not cover_image_path.exists()
-            or cover_image_path.stat().st_size == 0
+            not cover_image_path.exists() or cover_image_path.stat().st_size == 0
         ):
             return None
     return cover_image_path if cover_image_path.exists() else None
@@ -207,17 +204,13 @@ def process_artist_artwork(
     if thumbnail_bytes and not has_artist_image and not dry_run:
         try:
             (artist_dir / "artist.jpg").write_bytes(thumbnail_bytes)
-            LOG.info(
-                f"   ∟ 👤 Downloaded artist avatar: {artist_name} -> artist.jpg"
-            )
+            LOG.info(f"   ∟ 👤 Downloaded artist avatar: {artist_name} -> artist.jpg")
         except OSError as error:
             LOG.debug(f"Failed to write artist avatar image: {error}")
 
     if banner_bytes and not has_banner_image and not dry_run:
         try:
             (artist_dir / "banner.jpg").write_bytes(banner_bytes)
-            LOG.info(
-                f"   ∟ 🎨 Downloaded artist banner: {artist_name} -> banner.jpg"
-            )
+            LOG.info(f"   ∟ 🎨 Downloaded artist banner: {artist_name} -> banner.jpg")
         except OSError as error:
             LOG.debug(f"Failed to write artist banner image: {error}")

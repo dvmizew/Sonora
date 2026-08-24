@@ -87,7 +87,9 @@ def fetch_deezer_album_details(
             set_cached_api(cache_key, None)
             return None
 
-        items = response.json().get("data", []) if isinstance(response.json(), dict) else []
+        items = (
+            response.json().get("data", []) if isinstance(response.json(), dict) else []
+        )
         if not items:
             return None
 
@@ -96,7 +98,9 @@ def fetch_deezer_album_details(
             return None
 
         _DEEZER_LIMITER.wait()
-        detail_response = SESSION.get(f"https://api.deezer.com/album/{album_id}", timeout=6)
+        detail_response = SESSION.get(
+            f"https://api.deezer.com/album/{album_id}", timeout=6
+        )
         if detail_response.status_code != 200:
             return None
 
@@ -129,7 +133,9 @@ def fetch_deezer_track_details(
         return None
 
     clean_track_title = clean_title(title)
-    cache_key = f"deezer_track:{normalize_str(artist)}:{normalize_str(clean_track_title)}"
+    cache_key = (
+        f"deezer_track:{normalize_str(artist)}:{normalize_str(clean_track_title)}"
+    )
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -144,7 +150,9 @@ def fetch_deezer_track_details(
             set_cached_api(cache_key, None)
             return None
 
-        items = response.json().get("data", []) if isinstance(response.json(), dict) else []
+        items = (
+            response.json().get("data", []) if isinstance(response.json(), dict) else []
+        )
         if not items:
             return None
 
@@ -169,7 +177,9 @@ def fetch_deezer_track_details(
             return None
 
         _DEEZER_LIMITER.wait()
-        detail_response = SESSION.get(f"https://api.deezer.com/track/{track_id}", timeout=6)
+        detail_response = SESSION.get(
+            f"https://api.deezer.com/track/{track_id}", timeout=6
+        )
         if detail_response.status_code != 200:
             return None
 

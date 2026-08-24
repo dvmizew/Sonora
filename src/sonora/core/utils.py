@@ -21,20 +21,20 @@ def clean_title(title: str) -> str:
     """Clean track title by removing feat./ft./with brackets, remaster suffixes, and mojibake text."""
     if not title:
         return ""
-    t = ftfy.fix_text(str(title))
+    title_text = ftfy.fix_text(str(title))
     # Apply official music-metadata-filter standard pipeline
-    t = remove_clean_explicit(remove_reissue(remove_remastered(t)))
-    t = remove_feature(t)
-    t = re.sub(
+    title_text = remove_clean_explicit(remove_reissue(remove_remastered(title_text)))
+    title_text = remove_feature(title_text)
+    title_text = re.sub(
         r"\s*[\(\[\{](?:\d{4}\s+)?(?:remaster(?:ed)?|deluxe|bonus\s+track|mono|stereo|official(?:\s+(?:video|audio))?|hq|hd).*?[\)\]\}]",
         "",
-        t,
+        title_text,
         flags=re.IGNORECASE,
     )
-    return t.strip()
+    return title_text.strip()
 
 
-def is_version_or_remix(s: str) -> bool:
+def is_version_or_remix(text: str) -> bool:
     keywords = [
         "remix",
         "rework",
@@ -49,8 +49,8 @@ def is_version_or_remix(s: str) -> bool:
         "slowed",
         "freestyle",
     ]
-    low = s.lower()
-    return any(kw in low for kw in keywords)
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in keywords)
 
 
 def match_score(
@@ -66,90 +66,98 @@ def match_score(
     if not query_title or not candidate_title:
         return 0.0
 
-    q_a = clean_title(query_artist).lower()
-    c_a = clean_title(candidate_artist).lower()
-    q_t = clean_title(query_title).lower()
-    c_t = clean_title(candidate_title).lower()
+    query_artist_clean = clean_title(query_artist).lower()
+    candidate_artist_clean = clean_title(candidate_artist).lower()
+    query_title_clean = clean_title(query_title).lower()
+    candidate_title_clean = clean_title(candidate_title).lower()
 
-    if q_t == c_t:
+    if query_title_clean == candidate_title_clean:
         title_score = 100.0
     else:
-        title_wratio = fuzz.WRatio(q_t, c_t)
-        title_ratio = fuzz.ratio(q_t, c_t)
-        if len(q_t) <= 3:
+        title_wratio = fuzz.WRatio(query_title_clean, candidate_title_clean)
+        title_ratio = fuzz.ratio(query_title_clean, candidate_title_clean)
+        if len(query_title_clean) <= 3:
             title_score = float(title_ratio)
         else:
             title_score = max(title_wratio, title_ratio)
 
-    if not is_version_or_remix(q_t) and is_version_or_remix(c_t):
+    if not is_version_or_remix(query_title_clean) and is_version_or_remix(
+        candidate_title_clean
+    ):
         title_score -= 35.0
 
     title_score = max(0.0, min(100.0, title_score))
 
-    if q_a and c_a:
-        artist_w = fuzz.WRatio(q_a, c_a)
-        artist_token = fuzz.token_set_ratio(q_a, c_a)
+    if query_artist_clean and candidate_artist_clean:
+        artist_w = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
+        artist_token = fuzz.token_set_ratio(query_artist_clean, candidate_artist_clean)
         artist_score = max(artist_w, artist_token)
         return (title_score * 0.6) + (artist_score * 0.4)
 
     return float(title_score)
 
 
-def normalize_str(s: str | None) -> str:
+def normalize_str(text: str | None) -> str:
     """
     Converts to lowercase, fixes mojibake via ftfy, normalizes NFD diacritics,
     replaces $, replaces non-alphanumeric characters with space, and collapses spaces.
     """
-    if not s:
+    if not text:
         return ""
-    s = ftfy.fix_text(str(s))
-    s = s.replace("$", "s")
-    s = s.replace("_", " ")
-    s = "".join(
-        c
-        for c in unicodedata.normalize("NFD", s.lower())
-        if unicodedata.category(c) != "Mn"
+    cleaned_text = ftfy.fix_text(str(text))
+    cleaned_text = cleaned_text.replace("$", "s")
+    cleaned_text = cleaned_text.replace("_", " ")
+    cleaned_text = "".join(
+        char
+        for char in unicodedata.normalize("NFD", cleaned_text.lower())
+        if unicodedata.category(char) != "Mn"
     )
-    s = re.sub(r"[^\w\s]", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
+    cleaned_text = re.sub(r"[^\w\s]", " ", cleaned_text)
+    return re.sub(r"\s+", " ", cleaned_text).strip()
 
 
-def normalize_date(d: str | None) -> str | None:
+def normalize_date(date_value: str | None) -> str | None:
     """Ensure date is in YYYY-MM-DD format."""
-    if not d:
+    if not date_value:
         return None
-    d_str = str(d).strip()
-    match = re.search(r"(\d{4}-\d{2}-\d{2})", d_str)
+    date_str = str(date_value).strip()
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", date_str)
     if match:
         return match.group(1)
-    match = re.search(r"(\d{4})", d_str)
+    match = re.search(r"(\d{4})", date_str)
     if match:
         return match.group(1)
-    return d_str if d_str else None
+    return date_str if date_str else None
 
 
-def normalize_genre(g: str | None) -> str | None:
+def normalize_genre(genre_value: str | None) -> str | None:
     """Clean and standardize genre strings with strict keyword filtering."""
-    if not g or not str(g).strip():
+    if not genre_value or not str(genre_value).strip():
         return None
 
-    g_raw = str(g).strip()
-    g_title = g_raw.title()
-    g_lower = g_raw.lower()
+    raw_genre = str(genre_value).strip()
+    genre_title = raw_genre.title()
+    genre_lower = raw_genre.lower()
 
     try:
-        float(g_raw.replace(",", ""))
+        float(raw_genre.replace(",", ""))
         return None
     except ValueError:
         pass
 
-    if any(b.lower() in g_lower for b in GENRE_BLACKLIST) or g_raw.isdigit():
+    if (
+        any(
+            blacklisted_genre.lower() in genre_lower
+            for blacklisted_genre in GENRE_BLACKLIST
+        )
+        or raw_genre.isdigit()
+    ):
         return None
 
-    if not any(kw.lower() in g_lower for kw in BROAD_GENRE_KEYWORDS):
+    if not any(keyword.lower() in genre_lower for keyword in BROAD_GENRE_KEYWORDS):
         return None
 
-    return GENRE_MAP.get(g_title, g_title)
+    return GENRE_MAP.get(genre_title, genre_title)
 
 
 def sanitize_name(name: str | None) -> str:
@@ -160,13 +168,13 @@ def sanitize_name(name: str | None) -> str:
     """
     if not name:
         return "Unknown"
-    s = ftfy.fix_text(str(name))
-    s = s.replace("/", "_").replace("\\", "_")
+    sanitized_text = ftfy.fix_text(str(name))
+    sanitized_text = sanitized_text.replace("/", "_").replace("\\", "_")
     bad_chars = '<>:"|?*'
     for char in bad_chars:
-        s = s.replace(char, "")
-    s = re.sub(r"\s+", " ", s).strip().rstrip(".")
-    return s or "Unknown"
+        sanitized_text = sanitized_text.replace(char, "")
+    sanitized_text = re.sub(r"\s+", " ", sanitized_text).strip().rstrip(".")
+    return sanitized_text or "Unknown"
 
 
 class RateLimiter:
@@ -189,15 +197,15 @@ class RateLimiter:
         return sleep_time
 
 
-def is_valid_uuid(val: object) -> TypeGuard[str]:
-    """Validate that val is a 36-character canonical RFC 4122 UUID (e.g. MusicBrainz MBID)."""
-    if not val or not isinstance(val, str):
+def is_valid_uuid(uuid_candidate: object) -> TypeGuard[str]:
+    """Validate that uuid_candidate is a 36-character canonical RFC 4122 UUID (e.g. MusicBrainz MBID)."""
+    if not uuid_candidate or not isinstance(uuid_candidate, str):
         return False
-    val_clean = val.strip()
-    if len(val_clean) != 36:
+    cleaned_uuid = uuid_candidate.strip()
+    if len(cleaned_uuid) != 36:
         return False
     try:
-        parsed = uuid.UUID(val_clean)
-        return str(parsed).lower() == val_clean.lower()
+        parsed = uuid.UUID(cleaned_uuid)
+        return str(parsed).lower() == cleaned_uuid.lower()
     except (ValueError, AttributeError, TypeError):
         return False

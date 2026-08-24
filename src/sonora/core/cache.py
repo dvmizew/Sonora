@@ -38,7 +38,13 @@ def get_cache() -> Any:
                             sqlite_journal_mode="wal",
                             sqlite_synchronous=0,
                         )
-                except (OSError, ValueError, KeyError, RuntimeError, TypeError) as error:
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    RuntimeError,
+                    TypeError,
+                ) as error:
                     LOG.debug(f"Cache initialization failed: {error}")
                     _CACHE_INSTANCE = None
     return _CACHE_INSTANCE

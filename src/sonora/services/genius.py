@@ -70,7 +70,9 @@ def fetch_genius_song_details(
         song_data = song_response.json().get("response", {}).get("song", {})
 
         plain_description = song_data.get("description", {}).get("plain")
-        if plain_description and "Lyrics for this song are unavailable" in str(plain_description):
+        if plain_description and "Lyrics for this song are unavailable" in str(
+            plain_description
+        ):
             plain_description = None
 
         genius_song_id = song_data.get("id")

@@ -53,8 +53,7 @@ def clean_lyrics_text(text: str | None) -> str | None:
             continue
 
         is_junk = any(
-            re.match(pattern, stripped_line, re.IGNORECASE)
-            for pattern in junk_patterns
+            re.match(pattern, stripped_line, re.IGNORECASE) for pattern in junk_patterns
         )
         if (
             not is_junk
@@ -73,8 +72,7 @@ def clean_lyrics_text(text: str | None) -> str | None:
 
     # Strip trailing "Embed" or digit+Embed on the last non-empty line
     while cleaned and (
-        re.search(r"\bEmbed\b\s*$", cleaned[-1], re.IGNORECASE)
-        or cleaned[-1] == ""
+        re.search(r"\bEmbed\b\s*$", cleaned[-1], re.IGNORECASE) or cleaned[-1] == ""
     ):
         if cleaned[-1] == "":
             cleaned.pop()
@@ -110,9 +108,7 @@ def detect_lrc_quality(file_path: Path) -> int:
     lrc_path = file_path.with_suffix(".lrc")
     txt_path = file_path.with_suffix(".txt")
     target_path = (
-        lrc_path
-        if lrc_path.exists()
-        else (txt_path if txt_path.exists() else None)
+        lrc_path if lrc_path.exists() else (txt_path if txt_path.exists() else None)
     )
     if not target_path:
         return 0
@@ -253,8 +249,6 @@ def process_track_lyrics(
             txt_path.unlink(missing_ok=True)
 
     tag_type = (
-        "enhanced"
-        if new_quality == 3
-        else ("synced" if new_quality == 2 else "plain")
+        "enhanced" if new_quality == 3 else ("synced" if new_quality == 2 else "plain")
     )
     return lyrics_text, tag_type
