@@ -2,9 +2,19 @@ import re
 import shutil
 from pathlib import Path
 
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.constants import PROTECTED_ARTISTS, SUPPORTED_EXTS
-from sonora.core.logger import LOG
+from sonora.core.logger import CONSOLE, LOG
 from sonora.core.utils import normalize_str, sanitize_name
 
 _ARTIST_SEPARATORS = [
@@ -88,18 +98,6 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
         target_singles_dir.mkdir(parents=True, exist_ok=True)
     moved_count = 0
     single_folder_cache: dict[Path, bool] = {}
-
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TextColumn,
-        TimeElapsedColumn,
-        TimeRemainingColumn,
-    )
-
-    from sonora.core.logger import CONSOLE
 
     all_audio_files = [
         path for path in source_dir.rglob("*")
@@ -201,7 +199,6 @@ def organize_library_singles(source_dir: Path, target_singles_dir: Path, options
 
 
 def cleanup_empty_dirs(path: Path) -> int:
-    """Recursively remove empty directories."""
     removed = 0
     if not path.exists() or not path.is_dir():
         return 0

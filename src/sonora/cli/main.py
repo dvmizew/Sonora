@@ -1,6 +1,5 @@
 import argparse
 import datetime
-import importlib.util
 import os
 import socket
 import sys
@@ -9,23 +8,31 @@ from pathlib import Path
 
 import orjson
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 socket.setdefaulttimeout(15)
 
 try:
     import uvloop
+
     uvloop.install()
 except ImportError:
     pass
 
-HAS_DOTENV = importlib.util.find_spec("dotenv") is not None
-
 from sonora import __version__
+from sonora.core.cache import set_ignore_cache
 from sonora.core.logger import LOG
 from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.checker import check_library
 from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import rename_directory_files
 from sonora.modules.tagger import tag_album_folder
+from sonora.services.musicbrainz import init_musicbrainz
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,8 +79,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def handle_tag(args: argparse.Namespace, options: dict) -> int:
-    from sonora.services.musicbrainz import init_musicbrainz
-
     init_musicbrainz()
 
     lastfm_key = args.lastfm_key or os.environ.get("LASTFM_API_KEY")
@@ -217,10 +222,6 @@ def handle_restore(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    if HAS_DOTENV:
-        from dotenv import load_dotenv
-        load_dotenv()
-
     parser = build_parser()
     args = parser.parse_args(argv)
     
@@ -233,7 +234,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     
     if options["force"]:
-        from sonora.core.cache import set_ignore_cache
         set_ignore_cache(True)
 
     if not args.command:

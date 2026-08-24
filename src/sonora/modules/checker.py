@@ -1,10 +1,21 @@
 import re
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import orjson
 from mutagen._util import MutagenError
 from mutagen.flac import FLAC as MutagenFLAC
 from mutagen.flac import FLACNoHeaderError
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
@@ -15,7 +26,7 @@ from sonora.core.constants import (
     PROTECTED_ARTISTS,
     SUPPORTED_EXTS,
 )
-from sonora.core.logger import LOG
+from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import CheckReport
 from sonora.core.utils import is_valid_uuid, normalize_str
 
@@ -230,29 +241,10 @@ def check_library(
     check_spectral: bool = False,
     max_workers: int = 8,
 ) -> CheckReport:
-    """
-    Scan an entire music library folder recursively, check all audio files in parallel,
-    and generate a CheckReport dataclass.
-    """
     if not folder_path.exists():
         raise FileNotFoundError(f"Directory not found: {folder_path}")
 
     report = CheckReport(total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0)
-
-    from collections import defaultdict
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TextColumn,
-        TimeElapsedColumn,
-        TimeRemainingColumn,
-    )
-
-    from sonora.core.logger import CONSOLE
 
     files_to_process = [p for p in folder_path.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
     

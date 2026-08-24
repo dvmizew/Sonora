@@ -4,10 +4,19 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
-from sonora.core.logger import LOG
+from sonora.core.logger import CONSOLE, LOG
 
 _ORJSON_OPTS = (
     orjson.OPT_SERIALIZE_DATACLASS
@@ -41,18 +50,6 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
     LOG.info(f"🔄 Creating full backup for {len(audio_files)} files (streaming mode)...")
     count = 0
     failed = 0
-
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TextColumn,
-        TimeElapsedColumn,
-        TimeRemainingColumn,
-    )
-
-    from sonora.core.logger import CONSOLE
 
     try:
         with open(out_path, "wb") as f:
@@ -113,18 +110,6 @@ def restore_library_tags(backup_file: Path) -> int:
     count = 0
     failed = 0
     missing = 0
-
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TextColumn,
-        TimeElapsedColumn,
-        TimeRemainingColumn,
-    )
-
-    from sonora.core.logger import CONSOLE
 
     try:
         content = backup_file.read_bytes()

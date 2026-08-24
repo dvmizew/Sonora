@@ -1,4 +1,5 @@
 from sonora.core.http import SESSION
+from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, clean_title, match_score
 
 _GENIUS_LIMITER = RateLimiter(interval_seconds=0.5)
@@ -96,7 +97,5 @@ def fetch_genius_song_details(
     except Exception as e:
         if isinstance(e, RuntimeError):
             raise
-        from sonora.core.logger import LOG
-
         LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {e}")
         return None

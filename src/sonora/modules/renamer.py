@@ -1,5 +1,16 @@
 import re
+from collections import Counter
 from pathlib import Path
+
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
@@ -90,9 +101,6 @@ def rename_track_file(
     track_info: TrackInfo | None = None,
     options: dict | None = None,
 ) -> Path:
-    """
-    Rename an audio file and its .lrc files based on metadata.
-    """
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -209,9 +217,6 @@ def rename_track_file(
 def rename_album_folder(
     folder_path: Path, artist: str, album: str, options: dict | None = None
 ) -> Path:
-    """
-    Rename an album directory to 'Artist - Album'.
-    """
     if not album or album.lower() in ["singles", "unknown album", "unknown"]:
         return folder_path
 
@@ -253,18 +258,6 @@ def rename_directory_files(dir_path: Path, options: dict | None = None) -> list[
     """
     if not dir_path.exists():
         raise FileNotFoundError(f"Directory not found: {dir_path}")
-
-    from collections import Counter
-
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TextColumn,
-        TimeElapsedColumn,
-        TimeRemainingColumn,
-    )
 
     renamed: list[Path] = []
     folder_files: dict[Path, list[Path]] = {}

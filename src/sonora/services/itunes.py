@@ -1,3 +1,5 @@
+from rapidfuzz import fuzz
+
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter, normalize_str
@@ -56,8 +58,6 @@ def fetch_itunes_cover_art_url(artist: str, album: str, resolution: int = 1400) 
 
     # Step 2: Fallback matching if no exact match found
     if best_result is None:
-        from rapidfuzz import fuzz
-
         target_has_num = any(w in norm_target.split() for w in ["ii", "2", "two", "part 2", "pt 2", "pt. 2", "vol 2", "vol. 2", "iii", "3", "iv", "4"])
         for res in results:
             coll_name = str(res.get("collectionName", ""))

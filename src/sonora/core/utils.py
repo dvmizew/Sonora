@@ -14,6 +14,8 @@ from music_metadata_filter.functions import (
 )
 from rapidfuzz import fuzz
 
+from sonora.core.constants import BROAD_GENRE_KEYWORDS, GENRE_BLACKLIST, GENRE_MAP
+
 
 def clean_title(title: str) -> str:
     """Clean track title by removing feat./ft./with brackets, remaster suffixes, and mojibake text."""
@@ -116,7 +118,6 @@ def normalize_genre(g: str | None) -> str | None:
     """Clean and standardize genre strings with strict keyword filtering."""
     if not g or not str(g).strip():
         return None
-    from sonora.core.constants import BROAD_GENRE_KEYWORDS, GENRE_BLACKLIST, GENRE_MAP
 
     g_raw = str(g).strip()
     g_title = g_raw.title()

@@ -5,6 +5,8 @@ import httpx
 import musicbrainzngs
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.http import SESSION
+from sonora.core.logger import LOG
 from sonora.core.utils import (
     RateLimiter,
     clean_title,
@@ -24,8 +26,6 @@ def init_musicbrainz(
     try:
         musicbrainzngs.set_useragent(app_name, version, contact)
     except (ValueError, AttributeError, RuntimeError) as e:
-        from sonora.core.logger import LOG
-
         LOG.debug(f"MusicBrainz User-Agent initialization failed: {e}")
 
 
@@ -177,8 +177,6 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
 
     url = f"https://coverartarchive.org/release/{release_mbid}/front"
     try:
-        from sonora.core.http import SESSION
-
         resp = SESSION.head(url, allow_redirects=True, timeout=5)
         if resp.status_code == 200:
             res_url = str(resp.url) or url
@@ -186,8 +184,6 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
             return res_url
         set_cached_api(cache_key, None)
     except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
-        from sonora.core.logger import LOG
-
         LOG.debug(f"Cover Art Archive lookup failed: {e}")
     return None
 
@@ -223,7 +219,5 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
     except Exception as e:
         if isinstance(e, RuntimeError):
             raise
-        from sonora.core.logger import LOG
-
         LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {e}")
         return {}
