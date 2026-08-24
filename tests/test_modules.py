@@ -78,6 +78,12 @@ class TestCoreModules(unittest.TestCase):
         no_issues = check_brackets_corruption("Song Title (Remix)")
         self.assertEqual(no_issues, [])
 
+        # Ensure artist names containing keywords as substrings (e.g. Trippie -> rip, Claudio -> audio, MHD -> hd) are NOT flagged
+        self.assertEqual(check_brackets_corruption("Candy (feat. Trippie Redd)"), [])
+        self.assertEqual(check_brackets_corruption("Que Dieu me pardonne (feat. Claudio Capéo)"), [])
+        self.assertEqual(check_brackets_corruption("Versus (feat. MHD)"), [])
+        self.assertEqual(check_brackets_corruption("MODERN JAM (feat. Teezo Touchdown)"), [])
+
     def test_sync_lrc_metadata(self):
         lrc_file = self.tmp_path / "test.lrc"
         lrc_file.write_text("[00:10.00] Line 1\n", encoding="utf-8")

@@ -19,20 +19,65 @@ from sonora.core.logger import LOG
 from sonora.core.models import AuditReport
 from sonora.core.utils import normalize_str
 
-BRACKET_PATTERN = re.compile(r"\[.*?\]|\(.*?\)")
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
+
+JUNK_BRACKET_KEYWORDS = {
+    "official", "video", "audio", "flac", "mp3", "320", "320kbps",
+    "hq", "hd", "rip", "cdrip", "webrip", "lossless", "remastered",
+}
+
+PAIRS = {"(": ")", "[": "]", "{": "}"}
+CLOSING_TO_OPENING = {v: k for k, v in PAIRS.items()}
+
+
+def extract_bracket_tokens(text: str) -> list[tuple[str, set[str]]]:
+    """
+    Extracts all bracketed substrings and their constituent alphanumeric word tokens
+    using a character stack and pure tokenization.
+    """
+    results: list[tuple[str, set[str]]] = []
+    stack: list[str] = []
+    start = -1
+
+    for i, char in enumerate(text):
+        if char in PAIRS:
+            if not stack:
+                start = i
+            stack.append(char)
+        elif char in CLOSING_TO_OPENING and stack:
+            expected_opening = CLOSING_TO_OPENING[char]
+            if stack[-1] == expected_opening:
+                stack.pop()
+                if not stack and start != -1:
+                    full_bracket = text[start : i + 1]
+                    inner = full_bracket[1:-1].lower()
+                    tokens = set("".join(c if c.isalnum() else " " for c in inner).split())
+                    results.append((full_bracket, tokens))
+                    start = -1
+    return results
+
+
+def is_valid_track_filename(filename: str) -> bool:
+    """Check if filename starts with a clean track number prefix (e.g. '01 - ...' or '1-01 - ...')."""
+    stem = filename.rsplit(".", 1)[0]
+    for delim in [" - ", " _ ", ". ", "_", " "]:
+        if delim in stem:
+            prefix = stem.split(delim, 1)[0].strip()
+            parts = prefix.split("-")
+            if len(parts) in (1, 2) and all(p.isdigit() and 1 <= len(p) <= 4 for p in parts):
+                return True
+    return False
 
 
 def check_brackets_corruption(name: str) -> list[str]:
     """
     Check if a filename or tag contains corrupt/unwanted bracket metadata
-    (e.g., [FLAC], (Official Video), [HQ]).
+    (e.g., [FLAC], (Official Video), [HQ]) using set intersection.
     """
     issues = []
-    for match in BRACKET_PATTERN.findall(name):
-        lowered = normalize_str(match)
-        if any(kw in lowered for kw in ["official", "video", "audio", "flac", "mp3", "320", "hq", "hd", "rip"]):
-            issues.append(f"Corrupt bracket metadata: '{match}'")
+    for full_bracket, tokens in extract_bracket_tokens(name):
+        if tokens & JUNK_BRACKET_KEYWORDS:
+            issues.append(f"Corrupt bracket metadata: '{full_bracket}'")
     return issues
 
 
@@ -111,7 +156,7 @@ def audit_file(file_path: Path, check_spectral: bool = False) -> list[str]:
         if track.art_width and (track.art_width < 500 or (track.art_height and track.art_height < 500)):
             issues.append(f"Low resolution cover art: {track.art_width}x{track.art_height}")
 
-        if not re.match(r'^\d{2,3}\s*[-._ ]\s*', file_path.name):
+        if not is_valid_track_filename(file_path.name):
             issues.append(f"Filename does not start with track number: '{file_path.name}'")
 
         if FEAT_PATTERN.search(track.artist):
