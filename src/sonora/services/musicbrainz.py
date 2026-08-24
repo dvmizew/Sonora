@@ -3,6 +3,7 @@ from typing import Any
 
 import httpx
 import musicbrainzngs
+from musicbrainzngs import MusicBrainzError
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.http import SESSION
@@ -65,7 +66,13 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
             )
             set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
             return releases
-        except Exception as e:
+        except (
+            MusicBrainzError,
+            OSError,
+            ValueError,
+            KeyError,
+            RuntimeError,
+        ) as e:
             if isinstance(e, RuntimeError):
                 raise
             raise RuntimeError(
@@ -105,7 +112,13 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
         target_rel: dict[str, object] | None = releases[0] if releases else None
         set_cached_api(cache_key, target_rel)
         return target_rel
-    except Exception as e:
+    except (
+        MusicBrainzError,
+        OSError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+    ) as e:
         if isinstance(e, RuntimeError):
             raise
         raise RuntimeError(
@@ -155,7 +168,13 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
 
         set_cached_api(cache_key, best_mbid)
         return best_mbid
-    except Exception as e:
+    except (
+        MusicBrainzError,
+        OSError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+    ) as e:
         if isinstance(e, RuntimeError):
             raise
         raise RuntimeError(
@@ -222,7 +241,13 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
                             mapping[int(pos)] = str(rec_id)
         set_cached_api(cache_key, mapping)
         return mapping
-    except Exception as e:
+    except (
+        MusicBrainzError,
+        OSError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+    ) as e:
         if isinstance(e, RuntimeError):
             raise
         LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {e}")

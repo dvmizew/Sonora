@@ -46,10 +46,13 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
             else:
                 new_lines.append(line)
 
+        headers: list[str] = []
         if not ar_found:
-            new_lines.insert(0, f"[ar:{artist}]\n")
+            headers.append(f"[ar:{artist}]\n")
         if not ti_found:
-            new_lines.insert(0, f"[ti:{title}]\n")
+            headers.append(f"[ti:{title}]\n")
+        if headers:
+            new_lines = headers + new_lines
 
         with open(lrc_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)

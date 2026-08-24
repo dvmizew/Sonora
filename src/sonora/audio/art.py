@@ -2,6 +2,7 @@ import io
 import threading
 from pathlib import Path
 
+import httpx
 import imagehash
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -137,7 +138,7 @@ def process_album_cover_art(
                         LOG.info(
                             f"[DRY-RUN] Would download cover art to {cover_jpg.name}"
                         )
-            except (OSError, ValueError, RuntimeError) as e:
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"Cover art download failed: {e}")
                 with _get_cover_lock(folder_path):
                     if (

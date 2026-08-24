@@ -240,9 +240,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 art_width=art_w,
                 art_height=art_h,
             )
-    except Exception as e:
-        if isinstance(e, (RuntimeError, ValueError, FileNotFoundError)):
-            raise
+    except (RuntimeError, ValueError, FileNotFoundError):
+        raise
+    except (OSError, KeyError) as e:
         raise RuntimeError(f"Failed to read metadata for {file_path}: {e}") from e
 
 
@@ -418,9 +418,9 @@ def write_track_metadata(
             unsaved = song.save()
             if unsaved:
                 LOG.debug(f"TagLib unsaved tags for {track_info.file_path}: {unsaved}")
-    except Exception as e:
-        if isinstance(e, (RuntimeError, ValueError, FileNotFoundError)):
-            raise
+    except (RuntimeError, ValueError, FileNotFoundError):
+        raise
+    except (OSError, KeyError) as e:
         raise RuntimeError(
             f"Failed to write metadata for {track_info.file_path}: {e}"
         ) from e

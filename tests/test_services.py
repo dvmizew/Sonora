@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
+import musicbrainzngs
 
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.deezer import (
@@ -256,7 +257,9 @@ class TestServicesEngine(unittest.TestCase):
     @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_error_handling(self, mock_mb, _mock_cache):
-        mock_mb.search_recordings.side_effect = Exception("MusicBrainz server 500")
+        mock_mb.search_recordings.side_effect = musicbrainzngs.MusicBrainzError(
+            "MusicBrainz server 500"
+        )
         with self.assertRaises(RuntimeError):
             fetch_track_mbid("Artist", "Title")
 

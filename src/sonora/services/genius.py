@@ -1,3 +1,5 @@
+import httpx
+
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, clean_title, match_score
@@ -96,7 +98,7 @@ def fetch_genius_song_details(
             "producers": ", ".join(producer_names) if producer_names else None,
         }
 
-    except Exception as e:
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
         if isinstance(e, RuntimeError):
             raise
         LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {e}")
