@@ -155,21 +155,22 @@ class TestServicesEngine(unittest.TestCase):
     def test_search_discogs_without_token_returns_none(self):
         self.assertIsNone(search_discogs_release("Artist", "Album", user_token=None))
 
+    @patch("sonora.services.acoustid.get_cached_api", return_value=None)
     @patch("sonora.services.acoustid.acoustid")
-    def test_lookup_acoustid(self, mock_acoustid):
+    def test_lookup_acoustid(self, mock_acoustid, _mock_cache):
         mock_acoustid.fingerprint_file.return_value = (120.0, "fingerprint_data_str")
         mock_acoustid.lookup.return_value = {}
-        mock_acoustid.parse_lookup_result.return_value = [(0.95, "rec-id-123", "Title", "Artist")]
+        mock_acoustid.parse_lookup_result.return_value = [(0.95, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Title", "Artist")]
 
         mbid = lookup_acoustid(Path(__file__), api_key="dummy_key")
-        self.assertEqual(mbid, "rec-id-123")
+        self.assertEqual(mbid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
 
+    @patch("sonora.services.lastfm.get_cached_api", return_value=None)
     @patch("sonora.core.http.SESSION.get")
-    def test_fetch_lastfm_tags(self, mock_get):
+    def test_fetch_lastfm_tags(self, mock_get, _mock_cache):
         mock_response = MagicMock()
         mock_response.json.return_value = {"toptags": {"tag": [{"name": "pop"}, {"name": "rnb"}]}}
         mock_get.return_value = mock_response
-        # No context manager needed
 
         tags = fetch_lastfm_tags("Beyoncé", "Halo", api_key="dummy_lastfm_key")
         self.assertEqual(tags, ["Pop", "Rnb"])
@@ -194,19 +195,18 @@ class TestServicesEngine(unittest.TestCase):
         mock_resp_song.json.return_value = {"response": {"song": {"description": {"plain": "Song story description"}}}}
         mock_get.side_effect = [mock_resp_search, mock_resp_song]
 
-        # Removed
-
         desc = fetch_genius_description("Artist", "Title", api_token="dummy_genius_token")
         self.assertEqual(desc, "Song story description")
 
     def test_acoustid_no_api_key_returns_none(self):
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key=""))
 
+    @patch("sonora.services.acoustid.get_cached_api", return_value=None)
     @patch("sonora.services.acoustid.acoustid")
-    def test_acoustid_low_score_returns_none(self, mock_acoustid):
+    def test_acoustid_low_score_returns_none(self, mock_acoustid, _mock_cache):
         mock_acoustid.fingerprint_file.return_value = (100.0, "fp_data")
         mock_acoustid.lookup.return_value = {}
-        mock_acoustid.parse_lookup_result.return_value = [(0.5, "rec-id-low", "Title", "Artist")]
+        mock_acoustid.parse_lookup_result.return_value = [(0.5, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Title", "Artist")]
 
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key="dummy_key"))
 
@@ -221,7 +221,6 @@ class TestServicesEngine(unittest.TestCase):
         mock_resp2.json.return_value = {"response": {"song": {"description": {"plain": "Lyrics for this song are unavailable"}}}}
         mock_get.side_effect = [mock_resp1, mock_resp2]
 
-        # Removed
         self.assertIsNone(fetch_genius_description("Artist", "Title", api_token="token"))
 
     @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
