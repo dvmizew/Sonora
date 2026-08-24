@@ -15,17 +15,22 @@ from sonora.services.theaudiodb import fetch_artist_images
 
 def _load_normalized_image(data: bytes) -> Image.Image:
     """
-    Decodes an image from bytes, applies EXIF transposition to handle rotation metadata,
-    and composites transparent channels onto a solid white RGB canvas.
+    Decodes an image from bytes, forces full memory loading, applies EXIF transposition,
+    and flattens transparency channels (RGBA, LA, P) onto an opaque white RGB canvas.
     """
-    img = Image.open(io.BytesIO(data))
-    img = ImageOps.exif_transpose(img) or img
+    with Image.open(io.BytesIO(data)) as raw_img:
+        raw_img.load()
+        img: Image.Image = ImageOps.exif_transpose(raw_img) or raw_img.copy()
+
     if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGBA")
-        background = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        img = Image.alpha_composite(background, img).convert("RGB")
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
+        rgba = img.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        background.alpha_composite(rgba)
+        return background.convert("RGB")
+
+    if img.mode != "RGB":
+        return img.convert("RGB")
+
     return img
 
 
