@@ -1,4 +1,3 @@
-import re
 import shutil
 from pathlib import Path
 
@@ -13,25 +12,14 @@ from rich.progress import (
 )
 
 from sonora.audio.metadata import read_track_metadata
-from sonora.core.constants import PROTECTED_ARTISTS, SUPPORTED_EXTS
 from sonora.core.logger import CONSOLE, LOG
-from sonora.core.utils import normalize_str, sanitize_name
-
-_ARTIST_SEPARATORS = [
-    r"\s+fea?t\.?\s+",
-    r"\s+featuring\s+",
-    r"\s+and\s+",
-    r"\s+și\s+",
-    r"\s+si\s+",
-    r"\s+cu\s+",
-    r"\s+vs\.?\s+",
-    r"\s+[xX×]\s+",
-    r"\s*&\s*",
-    r"\s*,\s*",
-    r"\s*;\s*",
-    r"\s*/\s*",
-]
-_ARTIST_SPLIT_PATTERN = re.compile("|".join(_ARTIST_SEPARATORS), re.IGNORECASE)
+from sonora.core.utils import (
+    find_audio_files,
+    find_companion_lyrics,
+    get_primary_artist,
+    normalize_str,
+    sanitize_name,
+)
 
 
 def is_single_folder(folder_path: Path) -> bool:
@@ -43,12 +31,7 @@ def is_single_folder(folder_path: Path) -> bool:
     if not folder_path.exists() or not folder_path.is_dir():
         return False
 
-    audio_files = [
-        p
-        for p in folder_path.glob("*")
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
-    ]
-
+    audio_files = find_audio_files(folder_path, recursive=False)
     if not audio_files:
         return False
 
@@ -56,31 +39,15 @@ def is_single_folder(folder_path: Path) -> bool:
         return True
 
     albums: set[str] = set()
-    for p in audio_files:
+    for audio_file in audio_files:
         try:
-            info = read_track_metadata(p)
-            albums.add(normalize_str(info.album))
-        except (OSError, ValueError, RuntimeError) as e:
-            LOG.debug(f"Failed to read metadata for singles detection on {p}: {e}")
+            track_info = read_track_metadata(audio_file)
+            albums.add(normalize_str(track_info.album))
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.debug(
+                f"Failed to read metadata for singles detection on {audio_file}: {error}"
+            )
     return len(albums) > 1
-
-
-def get_primary_artist(artist_name: str | None) -> str:
-    """
-    Extract primary artist from raw artist string by stripping featured artists/delimiters
-    (feat., ft., &, comma, etc.), respecting PROTECTED_ARTISTS.
-    """
-    if not artist_name:
-        return "Unknown"
-
-    raw = str(artist_name).strip()
-    is_protected = any(p.lower() == raw.lower() for p in PROTECTED_ARTISTS)
-    if is_protected:
-        return sanitize_name(raw)
-
-    parts = _ARTIST_SPLIT_PATTERN.split(raw, maxsplit=1)
-    primary = parts[0].strip() if parts else raw
-    return sanitize_name(primary or "Unknown")
 
 
 def organize_library_singles(
@@ -99,11 +66,7 @@ def organize_library_singles(
     moved_count = 0
     single_folder_cache: dict[Path, bool] = {}
 
-    all_audio_files = [
-        path
-        for path in source_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
-    ]
+    all_audio_files = find_audio_files(source_dir, recursive=True)
 
     with Progress(
         SpinnerColumn(),
@@ -129,30 +92,33 @@ def organize_library_singles(
                 continue  # Skip tracks belonging to full album folders
 
             try:
-                info = read_track_metadata(path)
-                primary_artist = get_primary_artist(info.artist)
+                track_info = read_track_metadata(path)
+                primary_artist = get_primary_artist(track_info.artist)
                 artist_dir = target_singles_dir / primary_artist
                 if not dry_run:
                     artist_dir.mkdir(parents=True, exist_ok=True)
 
                 target_file = (
                     artist_dir
-                    / f"{sanitize_name(info.artist)} - {sanitize_name(info.title)}{path.suffix}"
+                    / f"{sanitize_name(track_info.artist)} - {sanitize_name(track_info.title)}{path.suffix}"
                 )
                 if path != target_file and not target_file.exists():
                     if not dry_run:
                         shutil.move(str(path), str(target_file))
                     else:
                         LOG.info(f"[DRY-RUN] Would move {path.name} -> {target_file}")
-                    lrc_path = path.with_suffix(".lrc")
-                    if lrc_path.exists():
-                        target_lrc = target_file.with_suffix(".lrc")
-                        if not target_lrc.exists():
+
+                    for companion in find_companion_lyrics(path):
+                        suffix = companion.name[len(path.stem) :]
+                        target_companion = (
+                            target_file.parent / f"{target_file.stem}{suffix}"
+                        )
+                        if not target_companion.exists():
                             if not dry_run:
-                                shutil.move(str(lrc_path), str(target_lrc))
+                                shutil.move(str(companion), str(target_companion))
                             else:
                                 LOG.info(
-                                    f"[DRY-RUN] Would move LRC {lrc_path.name} -> {target_lrc}"
+                                    f"[DRY-RUN] Would move lyrics {companion.name} -> {target_companion}"
                                 )
 
                     moved_count += 1
@@ -169,43 +135,48 @@ def organize_library_singles(
     # Phase 2 & 3: Deduplicate singles against albums
     if target_singles_dir.exists():
         album_fingerprints: set[str] = set()
-        for audio_path in source_dir.rglob("*"):
-            if (
-                audio_path.is_file()
-                and audio_path.suffix.lower() in SUPPORTED_EXTS
-                and "Singles" not in audio_path.parts
-            ):
+        for audio_path in find_audio_files(source_dir, recursive=True):
+            if "Singles" not in audio_path.parts:
                 try:
-                    meta = read_track_metadata(audio_path)
-                    primary_artist_key = get_primary_artist(meta.artist).lower()
-                    key = f"{primary_artist_key} - {meta.title.lower()}"
-                    album_fingerprints.add(key)
+                    track_metadata = read_track_metadata(audio_path)
+                    primary_artist_key = get_primary_artist(
+                        track_metadata.artist
+                    ).lower()
+                    track_identity_key = (
+                        f"{primary_artist_key} - {track_metadata.title.lower()}"
+                    )
+                    album_fingerprints.add(track_identity_key)
                 except (OSError, ValueError, RuntimeError) as error:
                     LOG.debug(
                         f"Could not read metadata for single deduplication: {error}"
                     )
 
         removed_dupes = 0
-        for single_path in list(target_singles_dir.rglob("*")):
-            if single_path.is_file() and single_path.suffix.lower() in SUPPORTED_EXTS:
-                try:
-                    meta = read_track_metadata(single_path)
-                    primary_artist_key = get_primary_artist(meta.artist).lower()
-                    key = f"{primary_artist_key} - {meta.title.lower()}"
-                    if key in album_fingerprints:
-                        if not dry_run:
-                            single_path.unlink()
-                            single_lrc = single_path.with_suffix(".lrc")
-                            if single_lrc.exists():
-                                single_lrc.unlink()
-                            LOG.info(f"   ∟ 🗑️ Removed duplicate single: {key}")
-                        else:
-                            LOG.info(
-                                f"   ∟ [DRY-RUN] Would remove duplicate single: {key}"
-                            )
-                        removed_dupes += 1
-                except (OSError, ValueError, RuntimeError) as error:
-                    LOG.debug(f"Could not read metadata for duplicate check: {error}")
+        for single_path in find_audio_files(target_singles_dir, recursive=True):
+            try:
+                track_metadata = read_track_metadata(single_path)
+                primary_artist_key = get_primary_artist(track_metadata.artist).lower()
+                track_identity_key = (
+                    f"{primary_artist_key} - {track_metadata.title.lower()}"
+                )
+                if track_identity_key in album_fingerprints:
+                    if not dry_run:
+                        single_path.unlink()
+                        for companion in find_companion_lyrics(single_path):
+                            companion.unlink(missing_ok=True)
+                        LOG.info(
+                            f"   ∟ 🗑️ Removed duplicate single: {track_identity_key}"
+                        )
+                    else:
+                        LOG.info(
+                            f"[DRY-RUN] Would remove duplicate single: {track_identity_key}"
+                        )
+                    removed_dupes += 1
+            except (OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"Could not check duplicate for {single_path}: {error}")
+
+        if removed_dupes > 0:
+            LOG.info(f"🗑️ Removed {removed_dupes} duplicate single(s).")
 
     # Cleanup empty directories
     if not dry_run:
@@ -215,7 +186,7 @@ def organize_library_singles(
 
 
 def cleanup_empty_dirs(path: Path) -> int:
-    removed = 0
+    removed_count = 0
     if not path.exists() or not path.is_dir():
         return 0
     for child in sorted(path.rglob("*"), reverse=True):
@@ -228,7 +199,7 @@ def cleanup_empty_dirs(path: Path) -> int:
             try:
                 if not any(child.iterdir()):
                     child.rmdir()
-                    removed += 1
+                    removed_count += 1
             except OSError as error:
                 LOG.debug(f"Could not remove empty dir {child}: {error}")
-    return removed
+    return removed_count

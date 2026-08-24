@@ -6,7 +6,12 @@ from typing import Any
 import syncedlyrics
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.utils import RateLimiter, normalize_str
+from sonora.core.utils import (
+    RateLimiter,
+    clean_title,
+    get_primary_artist,
+    normalize_str,
+)
 
 logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
 for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
@@ -190,11 +195,8 @@ def fetch_synced_lyrics(
 
     # ATTEMPT 3: Surgical Clean Title Fallback
     if not lyrics_content and ("(" in title or "[" in title or "feat" in title.lower()):
-        cleaned_track_title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", title).strip()
-        cleaned_track_title = re.sub(
-            r"\s+(?:fea?t|ft)\.?\s+.*$", "", cleaned_track_title, flags=re.IGNORECASE
-        ).strip()
-        primary_artist = artist.split(",")[0].split("&")[0].split(";")[0].strip()
+        cleaned_track_title = clean_title(title)
+        primary_artist = get_primary_artist(artist)
         query = f"{cleaned_track_title} {primary_artist}".strip()
         try:
             lyrics_content = _query_syncedlyrics(query, *search_args)

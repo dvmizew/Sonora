@@ -30,15 +30,15 @@ from sonora.core.models import TrackInfo
 
 def create_dummy_wav_file(dest_path: Path) -> Path:
     """Create a temporary 1-second WAV audio file with standard audio properties."""
-    sr = 44100
-    t = np.linspace(0, 1, sr, endpoint=False)
-    samples = (np.sin(2 * np.pi * 440 * t) * 16000).astype(np.int16)
+    sample_rate = 44100
+    time_axis = np.linspace(0, 1, sample_rate, endpoint=False)
+    samples = (np.sin(2 * np.pi * 440 * time_axis) * 16000).astype(np.int16)
     stereo = np.column_stack([samples, samples]).flatten()
-    with wave.open(str(dest_path), "wb") as w:
-        w.setnchannels(2)
-        w.setsampwidth(2)
-        w.setframerate(sr)
-        w.writeframes(stereo.tobytes())
+    with wave.open(str(dest_path), "wb") as wave_file:
+        wave_file.setnchannels(2)
+        wave_file.setsampwidth(2)
+        wave_file.setframerate(sample_rate)
+        wave_file.writeframes(stereo.tobytes())
     return dest_path
 
 
@@ -96,24 +96,24 @@ class TestAudioEngine(unittest.TestCase):
         self.assertTrue(verify_flac_checksum(self.dummy_audio_path))
 
     def test_calculate_track_replaygain_success(self):
-        res = calculate_track_replaygain(self.dummy_audio_path)
-        self.assertIsNotNone(res)
-        if res:
-            gain, peak = res
+        replaygain_result = calculate_track_replaygain(self.dummy_audio_path)
+        self.assertIsNotNone(replaygain_result)
+        if replaygain_result:
+            gain, peak = replaygain_result
             self.assertIsInstance(gain, float)
             self.assertIsInstance(peak, float)
             self.assertTrue(0.0 <= peak <= 1.0)
 
     def test_calculate_album_replaygain_success(self):
-        p1 = self.tmp_path / "1.wav"
-        p2 = self.tmp_path / "2.wav"
-        create_dummy_wav_file(p1)
-        create_dummy_wav_file(p2)
+        track1_path = self.tmp_path / "1.wav"
+        track2_path = self.tmp_path / "2.wav"
+        create_dummy_wav_file(track1_path)
+        create_dummy_wav_file(track2_path)
 
-        result = calculate_album_replaygain([p1, p2], force=True)
+        result = calculate_album_replaygain([track1_path, track2_path], force=True)
         self.assertTrue(result)
 
-        info1 = read_track_metadata(p1)
+        info1 = read_track_metadata(track1_path)
         self.assertIsNotNone(info1.replaygain_track_gain)
         self.assertIsNotNone(info1.replaygain_album_gain)
         self.assertIsNotNone(info1.replaygain_track_peak)
@@ -146,10 +146,10 @@ class TestAudioEngine(unittest.TestCase):
     @patch("subprocess.run")
     def test_checksum_binary_not_found(self, mock_run):
         mock_run.side_effect = FileNotFoundError()
-        flac_p = self.tmp_path / "dummy_flac_check_99.flac"
-        flac_p.write_bytes(b"dummy")
+        flac_path = self.tmp_path / "dummy_flac_check_99.flac"
+        flac_path.write_bytes(b"dummy")
         with self.assertRaises(RuntimeError):
-            verify_flac_checksum(flac_p)
+            verify_flac_checksum(flac_path)
 
     def test_calculate_album_replaygain_failure_empty(self):
         result = calculate_album_replaygain([])

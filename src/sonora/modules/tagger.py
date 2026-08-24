@@ -18,10 +18,11 @@ from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.constants import ARTIST_ALIASES, SUPPORTED_EXTS
+from sonora.core.constants import ARTIST_ALIASES
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    find_audio_files,
     is_valid_uuid,
     normalize_date,
     normalize_genre,
@@ -446,18 +447,11 @@ def tag_album_folder(
     subdirectories = [
         directory
         for directory in sorted(folder_path.iterdir())
-        if directory.is_dir()
-        and any(
-            path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
-            for path in directory.rglob("*")
-        )
+        if directory.is_dir() and find_audio_files(directory, recursive=True)
     ]
 
     # If folder_path has child album directories and NO direct audio files in its root, tag each sub-album independently
-    if subdirectories and not any(
-        path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
-        for path in folder_path.glob("*")
-    ):
+    if subdirectories and not find_audio_files(folder_path, recursive=False):
         all_results: list[TrackInfo] = []
         for subdirectory in subdirectories:
             sub_results = tag_album_folder(
@@ -477,13 +471,7 @@ def tag_album_folder(
             all_results.extend(sub_results)
         return all_results
 
-    audio_files = sorted(
-        [
-            path
-            for path in folder_path.rglob("*")
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
-        ]
-    )
+    audio_files = find_audio_files(folder_path, recursive=True)
 
     folder_name = folder_path.name
     LOG.force_info(

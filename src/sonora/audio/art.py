@@ -1,5 +1,4 @@
 import io
-import threading
 from pathlib import Path
 
 import httpx
@@ -64,20 +63,6 @@ def check_image_similarity(
         return True  # Fallback to True to allow upgrade if something fails
 
 
-_cover_locks: dict[str, threading.Lock] = {}
-_cover_meta_lock = threading.Lock()
-
-
-def _get_cover_lock(folder_path: Path) -> threading.Lock:
-    key = str(folder_path.resolve())
-    with _cover_meta_lock:
-        if len(_cover_locks) > 1000:
-            _cover_locks.clear()
-        if key not in _cover_locks:
-            _cover_locks[key] = threading.Lock()
-        return _cover_locks[key]
-
-
 def process_album_cover_art(
     folder_path: Path,
     artist: str,
@@ -92,16 +77,11 @@ def process_album_cover_art(
     Returns Path to cover.jpg if present/downloaded, else None.
     """
     cover_image_path = folder_path / "cover.jpg"
-    with _get_cover_lock(folder_path):
-        artwork_downloaded = (
-            cover_image_path.exists()
-            and cover_image_path.stat().st_size > 0
-            and not force
-        )
-        if not artwork_downloaded and not dry_run:
-            cover_image_path.touch()
+    artwork_already_present = (
+        cover_image_path.exists() and cover_image_path.stat().st_size > 0 and not force
+    )
 
-    if not artwork_downloaded:
+    if not artwork_already_present:
         artwork_url = None
         if musicbrainz_album_id:
             artwork_url = fetch_cover_art_archive_url(musicbrainz_album_id)
@@ -116,57 +96,40 @@ def process_album_cover_art(
                 response.raise_for_status()
                 new_artwork_bytes = response.content
 
-                with _get_cover_lock(folder_path):
-                    if not dry_run:
-                        existing_bytes = (
-                            cover_image_path.read_bytes()
-                            if (
-                                cover_image_path.exists()
-                                and cover_image_path.stat().st_size > 0
-                            )
-                            else None
-                        )
+                if not dry_run:
+                    existing_bytes = (
+                        cover_image_path.read_bytes()
                         if (
-                            existing_bytes
-                            and not force
-                            and not check_image_similarity(
-                                existing_bytes, new_artwork_bytes
-                            )
-                        ):
-                            LOG.info(
-                                "   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch"
-                            )
-                        else:
-                            cover_image_path.write_bytes(new_artwork_bytes)
-                            LOG.info("   ∟ 🖼️  Downloaded Cover Art")
-                    else:
-                        LOG.info(
-                            f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
+                            cover_image_path.exists()
+                            and cover_image_path.stat().st_size > 0
                         )
+                        else None
+                    )
+                    if (
+                        existing_bytes
+                        and not force
+                        and not check_image_similarity(
+                            existing_bytes, new_artwork_bytes
+                        )
+                    ):
+                        LOG.info(
+                            "   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch"
+                        )
+                    else:
+                        temp_path = cover_image_path.with_suffix(".tmp")
+                        temp_path.write_bytes(new_artwork_bytes)
+                        temp_path.replace(cover_image_path)
+                        LOG.info("   ∟ 🖼️  Downloaded Cover Art")
+                else:
+                    LOG.info(
+                        f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
+                    )
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Cover art download failed: {error}")
-                with _get_cover_lock(folder_path):
-                    if (
-                        not dry_run
-                        and cover_image_path.exists()
-                        and cover_image_path.stat().st_size == 0
-                    ):
-                        cover_image_path.unlink(missing_ok=True)
-        else:
-            with _get_cover_lock(folder_path):
-                if (
-                    not dry_run
-                    and cover_image_path.exists()
-                    and cover_image_path.stat().st_size == 0
-                ):
-                    cover_image_path.unlink(missing_ok=True)
 
-    with _get_cover_lock(folder_path):
-        if not dry_run and (
-            not cover_image_path.exists() or cover_image_path.stat().st_size == 0
-        ):
-            return None
-    return cover_image_path if cover_image_path.exists() else None
+    if cover_image_path.exists() and cover_image_path.stat().st_size > 0:
+        return cover_image_path
+    return None
 
 
 def process_artist_artwork(

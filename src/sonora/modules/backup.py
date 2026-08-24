@@ -15,8 +15,8 @@ from rich.progress import (
 )
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
-from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import CONSOLE, LOG
+from sonora.core.utils import find_audio_files
 
 _ORJSON_OPTIONS = (
     orjson.OPT_SERIALIZE_DATACLASS
@@ -34,13 +34,7 @@ def backup_library_tags(directory: Path, output_file: Path | None = None) -> Pat
         raise ValueError(f"Directory not found: {directory}")
 
     LOG.info(f"🔄 Scanning for files in {directory}...")
-    audio_files = sorted(
-        [
-            path
-            for path in directory.rglob("*")
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
-        ]
-    )
+    audio_files = find_audio_files(directory, recursive=True)
 
     timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%d_%H-%M-%S"

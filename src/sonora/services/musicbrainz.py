@@ -1,4 +1,3 @@
-import threading
 from typing import Any
 
 import httpx
@@ -30,19 +29,6 @@ def init_musicbrainz(
         LOG.debug(f"MusicBrainz User-Agent initialization failed: {error}")
 
 
-_discography_locks: dict[str, threading.Lock] = {}
-_discography_meta_lock = threading.Lock()
-
-
-def _get_discography_lock(artist_key: str) -> threading.Lock:
-    with _discography_meta_lock:
-        if len(_discography_locks) > 1000:
-            _discography_locks.clear()
-        if artist_key not in _discography_locks:
-            _discography_locks[artist_key] = threading.Lock()
-        return _discography_locks[artist_key]
-
-
 def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
     """
     Fetch and cache the entire discography (releases) of an artist from MusicBrainz in a single API call.
@@ -53,31 +39,30 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
     artist_key = normalize_str(artist)
     cache_key = f"mb_discography:{artist_key}"
 
-    with _get_discography_lock(artist_key):
-        cached = get_cached_api(cache_key)
-        if isinstance(cached, list):
-            return cached
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, list):
+        return cached
 
-        _MB_LIMITER.wait()
-        try:
-            result = musicbrainzngs.search_releases(artist=artist, limit=100)
-            releases: list[dict[str, object]] = (
-                result.get("release-list", []) if isinstance(result, dict) else []
-            )
-            set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
-            return releases
-        except (
-            MusicBrainzError,
-            OSError,
-            ValueError,
-            KeyError,
-            RuntimeError,
-        ) as error:
-            if isinstance(error, RuntimeError):
-                raise
-            raise RuntimeError(
-                f"MusicBrainz discography fetch failed for {artist}: {error}"
-            ) from error
+    _MB_LIMITER.wait()
+    try:
+        result = musicbrainzngs.search_releases(artist=artist, limit=100)
+        releases: list[dict[str, object]] = (
+            result.get("release-list", []) if isinstance(result, dict) else []
+        )
+        set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
+        return releases
+    except (
+        MusicBrainzError,
+        OSError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+    ) as error:
+        if isinstance(error, RuntimeError):
+            raise
+        raise RuntimeError(
+            f"MusicBrainz discography fetch failed for {artist}: {error}"
+        ) from error
 
 
 def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | None:
@@ -200,7 +185,7 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
 
     url = f"https://coverartarchive.org/release/{release_mbid}/front"
     try:
-        response = SESSION.head(url, allow_redirects=True, timeout=5)
+        response = SESSION.head(url, timeout=5)
         if response.status_code == 200:
             result_url = str(response.url) or url
             set_cached_api(cache_key, result_url)

@@ -62,8 +62,8 @@ def create_dummy_wav(path: Path) -> None:
     header.extend(b"\x00" * data_size)
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(header)
+    with open(path, "wb") as file_handle:
+        file_handle.write(header)
 
 
 class TestCoreModules(unittest.TestCase):
@@ -139,14 +139,18 @@ class TestCoreModules(unittest.TestCase):
 
     @patch("sonora.modules.renamer.read_track_metadata")
     def test_rename_directory_files(self, mock_read):
-        f1 = self.tmp_path / "song1.wav"
-        f2 = self.tmp_path / "song2.wav"
-        create_dummy_wav(f1)
-        create_dummy_wav(f2)
+        audio_file_1 = self.tmp_path / "song1.wav"
+        audio_file_2 = self.tmp_path / "song2.wav"
+        create_dummy_wav(audio_file_1)
+        create_dummy_wav(audio_file_2)
 
         mock_read.side_effect = [
-            TrackInfo(file_path=f1, artist="Artist", title="Title 1", track_number=1),
-            TrackInfo(file_path=f2, artist="Artist", title="Title 2", track_number=2),
+            TrackInfo(
+                file_path=audio_file_1, artist="Artist", title="Title 1", track_number=1
+            ),
+            TrackInfo(
+                file_path=audio_file_2, artist="Artist", title="Title 2", track_number=2
+            ),
         ]
 
         renamed = rename_directory_files(self.tmp_path)
@@ -162,26 +166,26 @@ class TestCoreModules(unittest.TestCase):
     def test_rename_album_folder(self):
         folder = self.tmp_path / "old_folder"
         folder.mkdir()
-        new_f = rename_album_folder(folder, "21 Savage", "Issa Album")
-        self.assertTrue(new_f.exists())
-        self.assertEqual(new_f.name, "21 Savage - Issa Album")
+        new_folder = rename_album_folder(folder, "21 Savage", "Issa Album")
+        self.assertTrue(new_folder.exists())
+        self.assertEqual(new_folder.name, "21 Savage - Issa Album")
 
     def test_is_single_folder(self):
         album_dir = self.tmp_path / "album"
         album_dir.mkdir()
 
-        f1 = album_dir / "01.wav"
-        f2 = album_dir / "02.wav"
-        f3 = album_dir / "03.wav"
-        create_dummy_wav(f1)
-        create_dummy_wav(f2)
-        create_dummy_wav(f3)
+        audio_file_1 = album_dir / "01.wav"
+        audio_file_2 = album_dir / "02.wav"
+        audio_file_3 = album_dir / "03.wav"
+        create_dummy_wav(audio_file_1)
+        create_dummy_wav(audio_file_2)
+        create_dummy_wav(audio_file_3)
 
         with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
             mock_read.side_effect = [
-                TrackInfo(file_path=f1, album="Same Album"),
-                TrackInfo(file_path=f2, album="Same Album"),
-                TrackInfo(file_path=f3, album="Same Album"),
+                TrackInfo(file_path=audio_file_1, album="Same Album"),
+                TrackInfo(file_path=audio_file_2, album="Same Album"),
+                TrackInfo(file_path=audio_file_3, album="Same Album"),
             ]
             self.assertFalse(is_single_folder(album_dir))
 
@@ -189,11 +193,11 @@ class TestCoreModules(unittest.TestCase):
     def test_organize_library_singles(self, mock_read):
         src_dir = self.tmp_path / "source"
         target_dir = self.tmp_path / "Singles"
-        f1 = src_dir / "single.wav"
-        create_dummy_wav(f1)
+        audio_file_1 = src_dir / "single.wav"
+        create_dummy_wav(audio_file_1)
 
         mock_read.return_value = TrackInfo(
-            file_path=f1, artist="Single Artist", title="Single Song"
+            file_path=audio_file_1, artist="Single Artist", title="Single Song"
         )
 
         moved = organize_library_singles(src_dir, target_dir)
@@ -206,13 +210,13 @@ class TestCoreModules(unittest.TestCase):
     def test_organize_library_singles_with_lrc(self, mock_read):
         src_dir = self.tmp_path / "source_lrc"
         target_dir = self.tmp_path / "Singles"
-        f1 = src_dir / "single.wav"
+        audio_file_1 = src_dir / "single.wav"
         lrc = src_dir / "single.lrc"
-        create_dummy_wav(f1)
+        create_dummy_wav(audio_file_1)
         lrc.write_text("[00:01.00] lyrics", encoding="utf-8")
 
         mock_read.return_value = TrackInfo(
-            file_path=f1, artist="Single Artist", title="Single Song"
+            file_path=audio_file_1, artist="Single Artist", title="Single Song"
         )
 
         moved = organize_library_singles(src_dir, target_dir)
@@ -226,11 +230,11 @@ class TestCoreModules(unittest.TestCase):
 
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library(self, mock_read):
-        f1 = self.tmp_path / "song.wav"
-        create_dummy_wav(f1)
+        audio_file_1 = self.tmp_path / "song.wav"
+        create_dummy_wav(audio_file_1)
 
         mock_read.return_value = TrackInfo(
-            file_path=f1, artist="Artist [Official]", title="Title"
+            file_path=audio_file_1, artist="Artist [Official]", title="Title"
         )
 
         report = check_library(self.tmp_path, output_json=self.tmp_path / "report.json")
@@ -261,14 +265,14 @@ class TestCoreModules(unittest.TestCase):
     @patch("sonora.modules.tagger.process_single_track")
     def test_tag_album_folder(self, mock_process):
         album_dir = self.tmp_path / "album"
-        f1 = album_dir / "01.wav"
-        f2 = album_dir / "02.wav"
-        create_dummy_wav(f1)
-        create_dummy_wav(f2)
+        audio_file_1 = album_dir / "01.wav"
+        audio_file_2 = album_dir / "02.wav"
+        create_dummy_wav(audio_file_1)
+        create_dummy_wav(audio_file_2)
 
         mock_process.side_effect = [
-            TrackInfo(file_path=f1, artist="Artist", title="T1"),
-            TrackInfo(file_path=f2, artist="Artist", title="T2"),
+            TrackInfo(file_path=audio_file_1, artist="Artist", title="T1"),
+            TrackInfo(file_path=audio_file_2, artist="Artist", title="T2"),
         ]
 
         results = tag_album_folder(album_dir, max_workers=2)
@@ -300,43 +304,47 @@ class TestCoreModules(unittest.TestCase):
 
     @patch("sonora.modules.renamer.read_track_metadata")
     def test_rename_track_file_collision_handling(self, mock_read):
-        f1 = self.tmp_path / "song1.wav"
-        f2 = self.tmp_path / "song2.wav"
-        create_dummy_wav(f1)
-        create_dummy_wav(f2)
+        audio_file_1 = self.tmp_path / "song1.wav"
+        audio_file_2 = self.tmp_path / "song2.wav"
+        create_dummy_wav(audio_file_1)
+        create_dummy_wav(audio_file_2)
 
         mock_read.side_effect = [
-            TrackInfo(file_path=f1, artist="Artist", title="Title", track_number=1),
-            TrackInfo(file_path=f2, artist="Artist", title="Title", track_number=1),
+            TrackInfo(
+                file_path=audio_file_1, artist="Artist", title="Title", track_number=1
+            ),
+            TrackInfo(
+                file_path=audio_file_2, artist="Artist", title="Title", track_number=1
+            ),
         ]
 
-        p1 = rename_track_file(f1)
-        p2 = rename_track_file(f2)
+        renamed_path_1 = rename_track_file(audio_file_1)
+        renamed_path_2 = rename_track_file(audio_file_2)
 
-        self.assertEqual(p1.name, "01 - Title.wav")
-        self.assertEqual(p2.name, "01 - Title (2).wav")
+        self.assertEqual(renamed_path_1.name, "01 - Title.wav")
+        self.assertEqual(renamed_path_2.name, "01 - Title (2).wav")
 
     def test_organize_library_singles_skips_album_folders(self):
         album_dir = self.tmp_path / "AlbumFolder"
         album_dir.mkdir()
-        f1 = album_dir / "01.wav"
-        f2 = album_dir / "02.wav"
-        f3 = album_dir / "03.wav"
-        create_dummy_wav(f1)
-        create_dummy_wav(f2)
-        create_dummy_wav(f3)
+        audio_file_1 = album_dir / "01.wav"
+        audio_file_2 = album_dir / "02.wav"
+        audio_file_3 = album_dir / "03.wav"
+        create_dummy_wav(audio_file_1)
+        create_dummy_wav(audio_file_2)
+        create_dummy_wav(audio_file_3)
 
         target_dir = self.tmp_path / "Singles"
 
         with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
             mock_read.return_value = TrackInfo(
-                file_path=f1, artist="Artist", album="Full Album"
+                file_path=audio_file_1, artist="Artist", album="Full Album"
             )
             moved = organize_library_singles(self.tmp_path, target_dir)
             self.assertEqual(moved, 0)
-            self.assertTrue(f1.exists())
-            self.assertTrue(f2.exists())
-            self.assertTrue(f3.exists())
+            self.assertTrue(audio_file_1.exists())
+            self.assertTrue(audio_file_2.exists())
+            self.assertTrue(audio_file_3.exists())
 
     @patch("sonora.modules.tagger.write_track_metadata")
     @patch("sonora.modules.tagger.search_discogs_release")
@@ -430,33 +438,37 @@ class TestCoreModules(unittest.TestCase):
 
     def test_image_similarity(self):
         # Image 1: White background with black square in top-left
-        img1 = Image.new("RGB", (64, 64), color="white")
-        draw1 = ImageDraw.Draw(img1)
-        draw1.rectangle([5, 5, 25, 25], fill="black")
+        image_1 = Image.new("RGB", (64, 64), color="white")
+        draw_1 = ImageDraw.Draw(image_1)
+        draw_1.rectangle([5, 5, 25, 25], fill="black")
 
         # Image 2: Exact copy of image 1
-        img2 = Image.new("RGB", (64, 64), color="white")
-        draw2 = ImageDraw.Draw(img2)
-        draw2.rectangle([5, 5, 25, 25], fill="black")
+        image_2 = Image.new("RGB", (64, 64), color="white")
+        draw_2 = ImageDraw.Draw(image_2)
+        draw_2.rectangle([5, 5, 25, 25], fill="black")
 
         # Image 3: Completely distinct pattern (large filled ellipse in bottom-right)
-        img3 = Image.new("RGB", (64, 64), color="white")
-        draw3 = ImageDraw.Draw(img3)
-        draw3.ellipse([30, 30, 60, 60], fill="black")
+        image_3 = Image.new("RGB", (64, 64), color="white")
+        draw_3 = ImageDraw.Draw(image_3)
+        draw_3.ellipse([30, 30, 60, 60], fill="black")
 
-        buf1, buf2, buf3 = io.BytesIO(), io.BytesIO(), io.BytesIO()
+        buffer_1, buffer_2, buffer_3 = io.BytesIO(), io.BytesIO(), io.BytesIO()
 
-        img1.save(buf1, format="JPEG")
-        img2.save(buf2, format="JPEG")
-        img3.save(buf3, format="JPEG")
+        image_1.save(buffer_1, format="JPEG")
+        image_2.save(buffer_2, format="JPEG")
+        image_3.save(buffer_3, format="JPEG")
 
-        b1 = buf1.getvalue()
-        b2 = buf2.getvalue()
-        b3 = buf3.getvalue()
+        image_bytes_1 = buffer_1.getvalue()
+        image_bytes_2 = buffer_2.getvalue()
+        image_bytes_3 = buffer_3.getvalue()
 
-        self.assertTrue(check_image_similarity(b1, b2, threshold=0.8))
-        self.assertFalse(check_image_similarity(b1, b3, max_distance=6))
-        self.assertFalse(check_image_similarity(b"", b2))
+        self.assertTrue(
+            check_image_similarity(image_bytes_1, image_bytes_2, threshold=0.8)
+        )
+        self.assertFalse(
+            check_image_similarity(image_bytes_1, image_bytes_3, max_distance=6)
+        )
+        self.assertFalse(check_image_similarity(b"", image_bytes_2))
 
     def test_cuesheet_parsing(self):
         cue_path = self.tmp_path / "test.cue"
@@ -484,9 +496,9 @@ class TestCoreModules(unittest.TestCase):
         wav_path = self.tmp_path / "song.wav"
         create_dummy_wav(wav_path)
 
-        info_init = read_track_metadata(wav_path)
-        info_init.artist = "Test Artist"
-        write_track_metadata(info_init)
+        initial_info = read_track_metadata(wav_path)
+        initial_info.artist = "Test Artist"
+        write_track_metadata(initial_info)
 
         backup_file = self.tmp_path / "backup.json"
         backup_library_tags(self.tmp_path, output_file=backup_file)
@@ -501,8 +513,8 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(reloaded.artist, "Modified Artist")
 
         # Restore
-        restored_cnt = restore_library_tags(backup_file)
-        self.assertEqual(restored_cnt, 1)
+        restored_count = restore_library_tags(backup_file)
+        self.assertEqual(restored_count, 1)
 
         restored_info = read_track_metadata(wav_path)
         self.assertEqual(restored_info.artist, "Test Artist")
@@ -510,9 +522,9 @@ class TestCoreModules(unittest.TestCase):
     @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
     @patch("sonora.services.theaudiodb.SESSION.get")
     def test_theaudiodb_service(self, mock_get, _mock_cache):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
             "artists": [
                 {
                     "strArtistThumb": "http://example.com/thumb.jpg",
@@ -520,22 +532,22 @@ class TestCoreModules(unittest.TestCase):
                 }
             ]
         }
-        mock_img_resp = MagicMock()
-        mock_img_resp.status_code = 200
-        mock_img_resp.content = b"fakeimage"
+        mock_image_response = MagicMock()
+        mock_image_response.status_code = 200
+        mock_image_response.content = b"fakeimage"
 
         mock_get.side_effect = [
-            mock_resp,
-            mock_img_resp,
-            mock_img_resp,
-            mock_resp,
-            mock_img_resp,
-            mock_img_resp,
+            mock_response,
+            mock_image_response,
+            mock_image_response,
+            mock_response,
+            mock_image_response,
+            mock_image_response,
         ]
 
-        thumb, banner = fetch_artist_images("21 Savage")
-        self.assertEqual(thumb, b"fakeimage")
-        self.assertEqual(banner, b"fakeimage")
+        thumbnail_bytes, banner_bytes = fetch_artist_images("21 Savage")
+        self.assertEqual(thumbnail_bytes, b"fakeimage")
+        self.assertEqual(banner_bytes, b"fakeimage")
 
         artist_folder = self.tmp_path / "21 Savage" / "Album"
         artist_folder.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from pathlib import Path
 from typing import TypeGuard
 
 import ftfy
@@ -14,7 +15,50 @@ from music_metadata_filter.functions import (
 )
 from rapidfuzz import fuzz
 
-from sonora.core.constants import BROAD_GENRE_KEYWORDS, GENRE_BLACKLIST, GENRE_MAP
+from sonora.core.constants import (
+    BROAD_GENRE_KEYWORDS,
+    COMPANION_LYRICS_EXTS,
+    GENRE_BLACKLIST,
+    GENRE_MAP,
+    PROTECTED_ARTISTS,
+    SUPPORTED_EXTS,
+)
+
+_ARTIST_SEPARATORS = [
+    r"\s+fea?t\.?\s+",
+    r"\s+featuring\s+",
+    r"\s+and\s+",
+    r"\s+și\s+",
+    r"\s+si\s+",
+    r"\s+cu\s+",
+    r"\s+vs\.?\s+",
+    r"\s+[xX×]\s+",
+    r"\s*&\s*",
+    r"\s*,\s*",
+    r"\s*;\s*",
+    r"\s*/\s*",
+]
+_ARTIST_SPLIT_PATTERN = re.compile("|".join(_ARTIST_SEPARATORS), re.IGNORECASE)
+
+
+def get_primary_artist(artist_name: str | None) -> str:
+    """
+    Extract primary artist from raw artist string by stripping featured artists/delimiters
+    (feat., ft., &, comma, etc.), respecting PROTECTED_ARTISTS.
+    """
+    if not artist_name:
+        return "Unknown"
+
+    raw_artist_name = str(artist_name).strip()
+    is_protected = any(
+        protected.lower() == raw_artist_name.lower() for protected in PROTECTED_ARTISTS
+    )
+    if is_protected:
+        return sanitize_name(raw_artist_name)
+
+    parts = _ARTIST_SPLIT_PATTERN.split(raw_artist_name, maxsplit=1)
+    primary = parts[0].strip() if parts else raw_artist_name
+    return sanitize_name(primary or "Unknown")
 
 
 def clean_title(title: str) -> str:
@@ -187,7 +231,7 @@ class RateLimiter:
 
     def wait(self) -> float:
         with self.lock:
-            now = time.time()
+            now = time.monotonic()
             target_time = max(now, self.last_call + self.interval)
             sleep_time = target_time - now
             self.last_call = target_time
@@ -209,3 +253,27 @@ def is_valid_uuid(uuid_candidate: object) -> TypeGuard[str]:
         return str(parsed).lower() == cleaned_uuid.lower()
     except (ValueError, AttributeError, TypeError):
         return False
+
+
+def find_audio_files(directory: Path, recursive: bool = True) -> list[Path]:
+    """Find all supported audio files in a directory, sorted lexicographically."""
+    if not directory.exists() or not directory.is_dir():
+        return []
+    glob_iter = directory.rglob("*") if recursive else directory.glob("*")
+    return sorted(
+        candidate_path
+        for candidate_path in glob_iter
+        if candidate_path.is_file() and candidate_path.suffix.lower() in SUPPORTED_EXTS
+    )
+
+
+def find_companion_lyrics(audio_file: Path) -> list[Path]:
+    """Find all existing companion lyric files (.lrc, .synced.lrc, .enhanced.lrc, .txt) for a given audio file."""
+    parent = audio_file.parent
+    stem = audio_file.stem
+    results: list[Path] = []
+    for ext in COMPANION_LYRICS_EXTS:
+        candidate = parent / f"{stem}{ext}"
+        if candidate.exists() and candidate.is_file():
+            results.append(candidate)
+    return results

@@ -27,7 +27,7 @@ from sonora.core.constants import (
 )
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import CheckReport
-from sonora.core.utils import is_valid_uuid, normalize_str
+from sonora.core.utils import find_audio_files, is_valid_uuid, normalize_str
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
 
@@ -61,17 +61,17 @@ def extract_bracket_tokens(text: str) -> list[tuple[str, set[str]]]:
     stack: list[str] = []
     start = -1
 
-    for i, char in enumerate(text):
+    for index, char in enumerate(text):
         if char in PAIRS:
             if not stack:
-                start = i
+                start = index
             stack.append(char)
         elif char in CLOSING_TO_OPENING and stack:
             expected_opening = CLOSING_TO_OPENING[char]
             if stack[-1] == expected_opening:
                 stack.pop()
                 if not stack and start != -1:
-                    full_bracket = text[start : i + 1]
+                    full_bracket = text[start : index + 1]
                     inner = full_bracket[1:-1].lower()
                     tokens = set(
                         "".join(c if c.isalnum() else " " for c in inner).split()
@@ -89,7 +89,7 @@ def is_valid_track_filename(filename: str) -> bool:
             prefix = stem.split(delim, 1)[0].strip()
             parts = prefix.split("-")
             if len(parts) in (1, 2) and all(
-                p.isdigit() and 1 <= len(p) <= 4 for p in parts
+                part.isdigit() and 1 <= len(part) <= 4 for part in parts
             ):
                 return True
     return False
@@ -308,11 +308,7 @@ def check_library(
         total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
     )
 
-    files_to_process = [
-        path
-        for path in folder_path.rglob("*")
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS
-    ]
+    files_to_process = find_audio_files(folder_path, recursive=True)
 
     # Map for folder-level checks
     folder_albums: dict[Path, set[str]] = defaultdict(set)
@@ -420,7 +416,11 @@ def check_library(
             track_numbers.sort()
             if track_numbers:
                 max_track = max(track_numbers)
-                missing = [t for t in range(1, max_track + 1) if t not in track_numbers]
+                missing = [
+                    expected_track_number
+                    for expected_track_number in range(1, max_track + 1)
+                    if expected_track_number not in track_numbers
+                ]
                 if missing:
                     folder_issues.append(
                         f"Missing track numbers in sequence for Disc {disc_idx}: {missing}"

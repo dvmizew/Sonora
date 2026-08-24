@@ -13,10 +13,14 @@ from rich.progress import (
 )
 
 from sonora.audio.metadata import read_track_metadata
-from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
-from sonora.core.utils import normalize_str, sanitize_name
+from sonora.core.utils import (
+    find_audio_files,
+    find_companion_lyrics,
+    normalize_str,
+    sanitize_name,
+)
 
 
 def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
@@ -138,43 +142,27 @@ def rename_track_file(
     folder = file_path.parent
     new_path = folder / new_name
 
-    LRC_EXTENSIONS = [".lrc", ".enhanced.lrc", ".synced.lrc", ".txt"]
-    old_lrc_path: Path | None = None
+    companion_lyrics = find_companion_lyrics(file_path)
 
-    # Step 1: Look for exact stem match
-    for lrc_ext in LRC_EXTENSIONS:
-        candidate = folder / f"{file_path.stem}{lrc_ext}"
-        if candidate.exists():
-            old_lrc_path = candidate
-            break
-
-    # Step 2: Fallback search by track number prefix
-    if not old_lrc_path and track_info.track_number:
+    # Fallback search by track number prefix if no exact stem match
+    if not companion_lyrics and track_info.track_number:
         track_clean = "".join(
             filter(str.isdigit, str(track_info.track_number).split("/")[0])
         )
         if track_clean:
             prefix = f"{int(track_clean):02d}"
             for candidate in folder.iterdir():
-                if any(
-                    candidate.name.lower().endswith(ext) for ext in LRC_EXTENSIONS
-                ) and (
+                if candidate.suffix.lower() in (".lrc", ".txt") and (
                     candidate.name.startswith(prefix)
                     or candidate.name.startswith(str(int(track_clean)))
                 ):
-                    old_lrc_path = candidate
+                    companion_lyrics.append(candidate)
                     break
 
     # Sync LRC metadata headers
-    lrc_to_sync = old_lrc_path or (
-        new_path.with_suffix(".lrc") if new_path.with_suffix(".lrc").exists() else None
-    )
-    if lrc_to_sync and lrc_to_sync.suffix.lower() == ".lrc" and not dry_run:
-        sync_lrc_metadata(lrc_to_sync, track_info.artist, track_info.title)
-
-    synced_lrc_path = folder / f"{file_path.stem}.synced.lrc"
-    if synced_lrc_path.exists() and not dry_run:
-        sync_lrc_metadata(synced_lrc_path, track_info.artist, track_info.title)
+    for companion in companion_lyrics:
+        if companion.suffix.lower() == ".lrc" and not dry_run:
+            sync_lrc_metadata(companion, track_info.artist, track_info.title)
 
     # Perform file rename
     if file_path.name != new_name or file_path.parent != new_path.parent:
@@ -207,22 +195,15 @@ def rename_track_file(
 
                 LOG.info(f"   ∟ 🎵 [dim]{file_path.name}[/] -> [white]{new_name}[/]")
 
-                # Rename main .lrc
-                if old_lrc_path and old_lrc_path.exists():
-                    new_lrc = folder / f"{new_path.stem}.lrc"
-                    if not new_lrc.exists():
-                        old_lrc_path.rename(new_lrc)
-                    else:
-                        old_lrc_path.unlink(missing_ok=True)
-
-                # Rename .synced.lrc
-                old_synced_lrc = folder / f"{file_path.stem}.synced.lrc"
-                if old_synced_lrc.exists():
-                    new_synced_lrc = folder / f"{new_path.stem}.synced.lrc"
-                    if not new_synced_lrc.exists():
-                        old_synced_lrc.rename(new_synced_lrc)
-                    else:
-                        old_synced_lrc.unlink(missing_ok=True)
+                # Rename all companion lyric files (.lrc, .synced.lrc, .txt, etc.)
+                for companion in companion_lyrics:
+                    if companion.exists():
+                        suffix = companion.name[len(file_path.stem) :]
+                        new_companion = folder / f"{new_path.stem}{suffix}"
+                        if not new_companion.exists():
+                            companion.rename(new_companion)
+                        else:
+                            companion.unlink(missing_ok=True)
             except (OSError, ValueError, RuntimeError) as error:
                 LOG.warning(f"Failed to rename file {file_path.name}: {error}")
         else:
@@ -282,10 +263,9 @@ def rename_directory_files(dir_path: Path, dry_run: bool = False) -> list[Path]:
     renamed: list[Path] = []
     folder_files: dict[Path, list[Path]] = {}
     total_files_count = 0
-    for path in sorted(dir_path.rglob("*")):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
-            folder_files.setdefault(path.parent, []).append(path)
-            total_files_count += 1
+    for path in find_audio_files(dir_path, recursive=True):
+        folder_files.setdefault(path.parent, []).append(path)
+        total_files_count += 1
 
     with Progress(
         SpinnerColumn(),

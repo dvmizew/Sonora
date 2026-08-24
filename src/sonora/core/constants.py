@@ -28,6 +28,15 @@ SUPPORTED_EXTS = frozenset(
     }
 )
 
+COMPANION_LYRICS_EXTS = frozenset(
+    {
+        ".lrc",
+        ".synced.lrc",
+        ".enhanced.lrc",
+        ".txt",
+    }
+)
+
 GENRE_MAP = {
     "Hip-Hop": "Hip-Hop/Rap",
     "Hip Hop": "Hip-Hop/Rap",

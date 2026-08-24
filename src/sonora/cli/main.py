@@ -349,14 +349,14 @@ def handle_organize(args: argparse.Namespace) -> int:
 
 
 def handle_backup(args: argparse.Namespace) -> int:
-    out = backup_library_tags(args.path, output_file=args.out)
-    LOG.success(f"Backup created at: [bold]{out}[/bold]")
+    backup_path = backup_library_tags(args.path, output_file=args.out)
+    LOG.success(f"Backup created at: [bold]{backup_path}[/bold]")
     return 0
 
 
 def handle_restore(args: argparse.Namespace) -> int:
-    count = restore_library_tags(args.backup_file)
-    LOG.success(f"Restored metadata for {count} tracks.")
+    restored_count = restore_library_tags(args.backup_file)
+    LOG.success(f"Restored metadata for {restored_count} tracks.")
     return 0
 
 
