@@ -2,7 +2,7 @@ import httpx
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.http import SESSION
-from sonora.core.utils import RateLimiter, normalize_str
+from sonora.core.utils import RateLimiter, is_valid_uuid, normalize_str
 
 _LASTFM_LIMITER = RateLimiter(interval_seconds=0.25)
 
@@ -27,7 +27,7 @@ def fetch_lastfm_tags(artist: str, title: str, api_key: str | None = None, mbid:
         "format": "json"
     }
 
-    if mbid:
+    if mbid and is_valid_uuid(mbid):
         params["mbid"] = mbid
     elif artist and title:
         params["artist"] = artist

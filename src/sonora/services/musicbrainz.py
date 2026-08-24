@@ -5,7 +5,13 @@ import httpx
 import musicbrainzngs
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.utils import RateLimiter, clean_title, match_score, normalize_str
+from sonora.core.utils import (
+    RateLimiter,
+    clean_title,
+    is_valid_uuid,
+    match_score,
+    normalize_str,
+)
 
 _MB_LIMITER = RateLimiter(interval_seconds=1.1)
 
@@ -144,7 +150,7 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
                 best_mbid = str(rec.get("id"))
 
         # Threshold check: require score >= 65 to avoid wrong MBIDs
-        if best_score < 65.0:
+        if best_score < 65.0 or not is_valid_uuid(best_mbid):
             best_mbid = None
 
         set_cached_api(cache_key, best_mbid)
@@ -162,7 +168,7 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
     Check if Cover Art Archive has front cover art for the given MusicBrainz release MBID.
     Returns front cover image URL or None.
     """
-    if not release_mbid:
+    if not release_mbid or not is_valid_uuid(release_mbid):
         return None
     cache_key = f"caa_url:{release_mbid}"
     cached = get_cached_api(cache_key)
@@ -191,7 +197,7 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
     Fetch all track recording MBIDs for an entire album release in ONE single API call.
     Returns mapping of track_position (1-indexed) -> recording_mbid.
     """
-    if not release_mbid:
+    if not release_mbid or not is_valid_uuid(release_mbid):
         return {}
 
     cache_key = f"mb_album_tracks:{release_mbid}"

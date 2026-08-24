@@ -17,7 +17,7 @@ from sonora.core.constants import (
 )
 from sonora.core.logger import LOG
 from sonora.core.models import CheckReport
-from sonora.core.utils import normalize_str
+from sonora.core.utils import is_valid_uuid, normalize_str
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
 
@@ -145,13 +145,25 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             issues.append("Missing REPLAYGAIN_TRACK_PEAK tag.")
         if not track.musicbrainz_trackid:
             issues.append("Missing MUSICBRAINZ_TRACKID tag.")
-        elif not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", track.musicbrainz_trackid.strip(), re.IGNORECASE):
+        elif not is_valid_uuid(track.musicbrainz_trackid):
             issues.append(f"Invalid UUID format in MUSICBRAINZ_TRACKID: '{track.musicbrainz_trackid}'")
 
         if not track.musicbrainz_albumid:
             issues.append("Missing MUSICBRAINZ_ALBUMID tag.")
-        elif not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", track.musicbrainz_albumid.strip(), re.IGNORECASE):
+        elif not is_valid_uuid(track.musicbrainz_albumid):
             issues.append(f"Invalid UUID format in MUSICBRAINZ_ALBUMID: '{track.musicbrainz_albumid}'")
+
+        if track.musicbrainz_artistid and not is_valid_uuid(track.musicbrainz_artistid):
+            issues.append(f"Invalid UUID format in MUSICBRAINZ_ARTISTID: '{track.musicbrainz_artistid}'")
+
+        if track.musicbrainz_albumartistid and not is_valid_uuid(track.musicbrainz_albumartistid):
+            issues.append(f"Invalid UUID format in MUSICBRAINZ_ALBUMARTISTID: '{track.musicbrainz_albumartistid}'")
+
+        if track.musicbrainz_releasegroupid and not is_valid_uuid(track.musicbrainz_releasegroupid):
+            issues.append(f"Invalid UUID format in MUSICBRAINZ_RELEASEGROUPID: '{track.musicbrainz_releasegroupid}'")
+
+        if track.musicbrainz_workid and not is_valid_uuid(track.musicbrainz_workid):
+            issues.append(f"Invalid UUID format in MUSICBRAINZ_WORKID: '{track.musicbrainz_workid}'")
 
         if track.art_width and (track.art_width < 500 or (track.art_height and track.art_height < 500)):
             issues.append(f"Low resolution cover art: {track.art_width}x{track.art_height}")

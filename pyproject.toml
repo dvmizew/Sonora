@@ -44,6 +44,7 @@ dependencies = [
     "httpx[http2]>=0.27.0",
     "ftfy>=6.2.0",
     "music-metadata-filter>=3.0.0",
+    "imagehash>=4.3.0",
 ]
 
 [project.optional-dependencies]

@@ -4,7 +4,7 @@ import acoustid
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, match_score, normalize_str
+from sonora.core.utils import RateLimiter, is_valid_uuid, match_score, normalize_str
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
@@ -58,7 +58,7 @@ def lookup_acoustid(
         best_combined_score = -1.0
 
         for score, recording_id, candidate_title, candidate_artist in acoustid.parse_lookup_result(results):
-            if score >= 0.75 and recording_id:
+            if score >= 0.75 and recording_id and is_valid_uuid(str(recording_id)):
                 combined_score = float(score) * 100.0
                 if expected_artist and expected_title and candidate_title and candidate_artist:
                     text_score = match_score(expected_artist, expected_title, str(candidate_artist), str(candidate_title))

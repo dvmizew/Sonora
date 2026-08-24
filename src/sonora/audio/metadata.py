@@ -5,7 +5,7 @@ import taglib
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
-from sonora.core.utils import normalize_date, normalize_genre
+from sonora.core.utils import is_valid_uuid, normalize_date, normalize_genre
 
 
 def read_track_metadata(file_path: Path) -> TrackInfo:
@@ -257,11 +257,11 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             if track_info.replaygain_track_peak is not None:
                 song.tags["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
 
-            if track_info.musicbrainz_trackid: song.tags["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
-            if track_info.musicbrainz_albumid: song.tags["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
-            if track_info.musicbrainz_releasegroupid: song.tags["MUSICBRAINZ_RELEASEGROUPID"] = [track_info.musicbrainz_releasegroupid]
-            if track_info.musicbrainz_artistid: song.tags["MUSICBRAINZ_ARTISTID"] = [track_info.musicbrainz_artistid]
-            if track_info.musicbrainz_workid: song.tags["MUSICBRAINZ_WORKID"] = [track_info.musicbrainz_workid]
+            if is_valid_uuid(track_info.musicbrainz_trackid): song.tags["MUSICBRAINZ_TRACKID"] = [track_info.musicbrainz_trackid]
+            if is_valid_uuid(track_info.musicbrainz_albumid): song.tags["MUSICBRAINZ_ALBUMID"] = [track_info.musicbrainz_albumid]
+            if is_valid_uuid(track_info.musicbrainz_releasegroupid): song.tags["MUSICBRAINZ_RELEASEGROUPID"] = [track_info.musicbrainz_releasegroupid]
+            if is_valid_uuid(track_info.musicbrainz_artistid): song.tags["MUSICBRAINZ_ARTISTID"] = [track_info.musicbrainz_artistid]
+            if is_valid_uuid(track_info.musicbrainz_workid): song.tags["MUSICBRAINZ_WORKID"] = [track_info.musicbrainz_workid]
             if track_info.acoustid_id: song.tags["ACOUSTID_ID"] = [track_info.acoustid_id]
             if track_info.discogs_release_id: song.tags["DISCOGS_RELEASE_ID"] = [track_info.discogs_release_id]
             if track_info.itunes_trackid: song.tags["ITUNESTRACKID"] = [track_info.itunes_trackid]
@@ -291,7 +291,7 @@ def write_track_metadata(track_info: TrackInfo, cover_art_path: Path | None = No
             if track_info.copyright: song.tags["COPYRIGHT"] = [track_info.copyright]
             if track_info.compilation is not None: song.tags["COMPILATION"] = ["1" if track_info.compilation else "0"]
             if track_info.spotify_trackid: song.tags["SPOTIFY_TRACK_ID"] = [track_info.spotify_trackid]
-            if track_info.musicbrainz_albumartistid: song.tags["MUSICBRAINZ_ALBUMARTISTID"] = [track_info.musicbrainz_albumartistid]
+            if is_valid_uuid(track_info.musicbrainz_albumartistid): song.tags["MUSICBRAINZ_ALBUMARTISTID"] = [track_info.musicbrainz_albumartistid]
             if track_info.discogs_artist_id: song.tags["DISCOGS_ARTIST_ID"] = [track_info.discogs_artist_id]
             if track_info.language: song.tags["LANGUAGE"] = [track_info.language]
             if track_info.script: song.tags["SCRIPT"] = [track_info.script]

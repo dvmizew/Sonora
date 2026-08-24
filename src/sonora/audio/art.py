@@ -2,8 +2,8 @@ import io
 import threading
 from pathlib import Path
 
-import numpy as np
-from PIL import Image, UnidentifiedImageError
+import imagehash
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
@@ -13,29 +13,48 @@ from sonora.services.musicbrainz import fetch_cover_art_archive_url
 from sonora.services.theaudiodb import fetch_artist_images
 
 
-def check_image_similarity(data1: bytes, data2: bytes, threshold: float = 0.82) -> bool:
+def _load_normalized_image(data: bytes) -> Image.Image:
     """
-    Uses grayscale correlation via NumPy to check if two images are likely the same art.
-    Returns True if correlation >= threshold, else False.
+    Decodes an image from bytes, applies EXIF transposition to handle rotation metadata,
+    and composites transparent channels onto a solid white RGB canvas.
+    """
+    img = Image.open(io.BytesIO(data))
+    img = ImageOps.exif_transpose(img) or img
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(background, img).convert("RGB")
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    return img
+
+
+def check_image_similarity(
+    data1: bytes,
+    data2: bytes,
+    max_distance: int = 12,
+    threshold: float | None = None,
+) -> bool:
+    """
+    Uses perceptual hashing (pHash) via ImageHash to check if two images represent the same artwork.
+    Applies EXIF auto-rotation and alpha channel composite normalization.
+    A Hamming distance <= max_distance (default: 12 out of 64 bits, ~81% visual similarity) indicates a match.
     """
     if not (data1 and data2):
         return False
+    if threshold is not None:
+        max_distance = round((1.0 - threshold) * 64)
+
     try:
-        img1 = Image.open(io.BytesIO(data1)).convert('L').resize((64, 64), Image.Resampling.LANCZOS)
-        img2 = Image.open(io.BytesIO(data2)).convert('L').resize((64, 64), Image.Resampling.LANCZOS)
+        img1 = _load_normalized_image(data1)
+        img2 = _load_normalized_image(data2)
 
-        arr1 = np.asarray(img1, dtype=np.float64).ravel()
-        arr2 = np.asarray(img2, dtype=np.float64).ravel()
+        hash1 = imagehash.phash(img1)
+        hash2 = imagehash.phash(img2)
 
-        std1 = np.std(arr1)
-        std2 = np.std(arr2)
-        if std1 == 0 or std2 == 0:
-            return True
-
-        corr = float(np.corrcoef(arr1, arr2)[0, 1])
-        return corr >= threshold
+        return (hash1 - hash2) <= max_distance
     except (OSError, ValueError, UnidentifiedImageError) as e:
-        LOG.debug(f"Image comparison failed: {e}")
+        LOG.debug(f"Perceptual image comparison failed: {e}")
         return True  # Fallback to True to allow upgrade if something fails
 
 _cover_locks: dict[str, threading.Lock] = {}

@@ -37,6 +37,18 @@ class TestCoreUtils(unittest.TestCase):
     def test_sanitize_name_complex_edge_cases(self):
         self.assertEqual(sanitize_name("Artist / Title <HQ>:"), "Artist _ Title HQ")
 
+    def test_is_valid_uuid(self):
+        from sonora.core.utils import is_valid_uuid
+
+        self.assertTrue(is_valid_uuid("c8b03190-306c-4125-9b32-3f9d86d60a12"))
+        self.assertTrue(is_valid_uuid("C8B03190-306C-4125-9B32-3F9D86D60A12"))
+        self.assertFalse(is_valid_uuid("not-a-uuid"))
+        self.assertFalse(is_valid_uuid("c8b03190306c41259b323f9d86d60a12"))  # 32 chars without hyphens
+        self.assertFalse(is_valid_uuid("urn:uuid:c8b03190-306c-4125-9b32-3f9d86d60a12"))
+        self.assertFalse(is_valid_uuid("{c8b03190-306c-4125-9b32-3f9d86d60a12}"))
+        self.assertFalse(is_valid_uuid(None))
+        self.assertFalse(is_valid_uuid(""))
+
 
 class TestCoreModels(unittest.TestCase):
     def test_track_info_to_dict(self):

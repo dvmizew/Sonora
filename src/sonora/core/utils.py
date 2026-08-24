@@ -2,6 +2,8 @@ import re
 import threading
 import time
 import unicodedata
+import uuid
+from typing import TypeGuard
 
 import ftfy
 from music_metadata_filter.functions import (
@@ -170,3 +172,17 @@ class RateLimiter:
         if sleep_time > 0:
             time.sleep(sleep_time)
         return sleep_time
+
+
+def is_valid_uuid(val: object) -> TypeGuard[str]:
+    """Validate that val is a 36-character canonical RFC 4122 UUID (e.g. MusicBrainz MBID)."""
+    if not val or not isinstance(val, str):
+        return False
+    val_clean = val.strip()
+    if len(val_clean) != 36:
+        return False
+    try:
+        parsed = uuid.UUID(val_clean)
+        return str(parsed).lower() == val_clean.lower()
+    except (ValueError, AttributeError, TypeError):
+        return False

@@ -231,12 +231,12 @@ class TestCoreModules(unittest.TestCase):
             TrackInfo(file_path=wav_file, artist="nane", title="Piesa"),
             TrackInfo(file_path=wav_file, artist="nane", title="Piesa"),
         ]
-        mock_mbid.return_value = "mbid-12345"
+        mock_mbid.return_value = "c8b03190-306c-4125-9b32-3f9d86d60a12"
         mock_lyrics.return_value = "[00:01.00] Vers"
 
         info = process_single_track(wav_file, fetch_bpm=False)
         self.assertEqual(info.artist, "Nane")
-        self.assertEqual(info.musicbrainz_trackid, "mbid-12345")
+        self.assertEqual(info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
         mock_write.assert_called_once()
 
     @patch("sonora.modules.tagger.process_single_track")
@@ -333,7 +333,7 @@ class TestCoreModules(unittest.TestCase):
 
         mock_read.return_value = TrackInfo(file_path=wav_file, artist="Artist", title="Title", genre=None)
         mock_mbid.return_value = None
-        mock_acoustid.return_value = "acoustid-mbid-999"
+        mock_acoustid.return_value = "c8b03190-306c-4125-9b32-3f9d86d60a12"
         mock_discogs.return_value = {"id": 123, "year": 2024}
 
         info = process_single_track(
@@ -345,7 +345,7 @@ class TestCoreModules(unittest.TestCase):
             discogs_user_token="discogs_token",
         )
 
-        self.assertEqual(info.musicbrainz_trackid, "acoustid-mbid-999")
+        self.assertEqual(info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
         self.assertEqual(info.date, "2024")
         mock_acoustid.assert_called_once()
         mock_discogs.assert_called_once()
@@ -377,35 +377,50 @@ class TestCoreModules(unittest.TestCase):
         info.release_type = "Album"
         info.release_status = "Official"
         info.release_country = "US"
-        info.musicbrainz_trackid = "mbid-12345"
-        info.musicbrainz_albumid = "mbid-album-12345"
+        info.musicbrainz_trackid = "c8b03190-306c-4125-9b32-3f9d86d60a12"
+        info.musicbrainz_albumid = "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d"
         info.label = "Test Label"
         info.barcode = "123456789012"
 
         write_track_metadata(info)
 
         reloaded = read_track_metadata(wav_path)
-        self.assertEqual(reloaded.musicbrainz_trackid, "mbid-12345")
-        self.assertEqual(reloaded.musicbrainz_albumid, "mbid-album-12345")
+        self.assertEqual(reloaded.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
+        self.assertEqual(reloaded.musicbrainz_albumid, "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d")
 
     def test_image_similarity(self):
         import io
 
-        from PIL import Image
+        from PIL import Image, ImageDraw
 
-        img1 = Image.new("RGB", (10, 10), color="red")
-        img2 = Image.new("RGB", (10, 10), color="red")
+        # Image 1: White background with black square in top-left
+        img1 = Image.new("RGB", (64, 64), color="white")
+        draw1 = ImageDraw.Draw(img1)
+        draw1.rectangle([5, 5, 25, 25], fill="black")
 
-        buf1 = io.BytesIO()
-        buf2 = io.BytesIO()
+        # Image 2: Exact copy of image 1
+        img2 = Image.new("RGB", (64, 64), color="white")
+        draw2 = ImageDraw.Draw(img2)
+        draw2.rectangle([5, 5, 25, 25], fill="black")
+
+        # Image 3: Completely distinct pattern (large filled ellipse in bottom-right)
+        img3 = Image.new("RGB", (64, 64), color="white")
+        draw3 = ImageDraw.Draw(img3)
+        draw3.ellipse([30, 30, 60, 60], fill="black")
+
+        buf1, buf2, buf3 = io.BytesIO(), io.BytesIO(), io.BytesIO()
 
         img1.save(buf1, format="JPEG")
         img2.save(buf2, format="JPEG")
+        img3.save(buf3, format="JPEG")
 
         b1 = buf1.getvalue()
         b2 = buf2.getvalue()
+        b3 = buf3.getvalue()
 
         self.assertTrue(check_image_similarity(b1, b2, threshold=0.8))
+        self.assertFalse(check_image_similarity(b1, b3, max_distance=6))
+        self.assertFalse(check_image_similarity(b"", b2))
 
     def test_cuesheet_parsing(self):
         cue_path = self.tmp_path / "test.cue"

@@ -22,7 +22,12 @@ from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.constants import ARTIST_ALIASES, SUPPORTED_EXTS
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import TrackInfo
-from sonora.core.utils import normalize_date, normalize_genre, normalize_str
+from sonora.core.utils import (
+    is_valid_uuid,
+    normalize_date,
+    normalize_genre,
+    normalize_str,
+)
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.deezer import (
     fetch_deezer_album_details,
@@ -72,7 +77,7 @@ def process_single_track(
         LOG.info(f"🎧 Processing track: [white]{file_path.name}[/]")
 
         # 1. Respect existing MBID or prioritize AcoustID (most exact) over text search
-        if (not track_info.musicbrainz_trackid or force) and acoustid_api_key:
+        if (not is_valid_uuid(track_info.musicbrainz_trackid) or force) and acoustid_api_key:
             try:
                 acoustid_mbid = lookup_acoustid(
                     file_path,
@@ -80,7 +85,7 @@ def process_single_track(
                     expected_artist=track_info.artist,
                     expected_title=track_info.title,
                 )
-                if acoustid_mbid:
+                if is_valid_uuid(acoustid_mbid):
                     track_info.musicbrainz_trackid = acoustid_mbid
                     LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
@@ -88,23 +93,24 @@ def process_single_track(
 
         # 2. Check pre-fetched album track MBIDs map first (1 single API call per album!)
         album_mbids = options.get("album_track_mbids", {}) if isinstance(options, dict) else {}
-        if (not track_info.musicbrainz_trackid or force) and track_info.track_number and track_info.track_number in album_mbids:
-            track_info.musicbrainz_trackid = album_mbids[track_info.track_number]
-            mbid_str = str(track_info.musicbrainz_trackid)
-            LOG.info(f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {mbid_str[:8]}...")
-        elif not track_info.musicbrainz_trackid or force:
+        if (not is_valid_uuid(track_info.musicbrainz_trackid) or force) and track_info.track_number and track_info.track_number in album_mbids:
+            cand_mbid = album_mbids[track_info.track_number]
+            if is_valid_uuid(cand_mbid):
+                track_info.musicbrainz_trackid = cand_mbid
+                LOG.info(f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {cand_mbid[:8]}...")
+        elif not is_valid_uuid(track_info.musicbrainz_trackid) or force:
             try:
                 mbid = fetch_track_mbid(track_info.artist, track_info.title)
-                if mbid:
+                if is_valid_uuid(mbid):
                     track_info.musicbrainz_trackid = mbid
                     LOG.info(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as e:
                 LOG.debug(f"MusicBrainz lookup failed for {track_info.title}: {e}")
 
         # 3. Fetch MusicBrainz Album ID via Discography Optimization
-        if not track_info.musicbrainz_albumid:
+        if not is_valid_uuid(track_info.musicbrainz_albumid):
             pre_album_mbid = options.get("album_mbid") if isinstance(options, dict) else None
-            if pre_album_mbid:
+            if is_valid_uuid(pre_album_mbid):
                 track_info.musicbrainz_albumid = pre_album_mbid
             else:
                 try:
@@ -112,7 +118,7 @@ def process_single_track(
                     release = search_musicbrainz_release(search_artist, track_info.album)
                     if release:
                         mb_id = release.get("id")
-                        if mb_id is not None:
+                        if is_valid_uuid(str(mb_id)):
                             track_info.musicbrainz_albumid = str(mb_id)
                         if not track_info.date:
                             date_str = release.get("date")

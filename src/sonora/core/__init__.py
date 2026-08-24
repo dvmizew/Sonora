@@ -12,7 +12,7 @@ from sonora.core.constants import (
 )
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import CheckReport, TrackInfo
-from sonora.core.utils import normalize_str, sanitize_name
+from sonora.core.utils import is_valid_uuid, normalize_str, sanitize_name
 
 __all__ = [
     "BPM_TAG_CMD",
@@ -29,6 +29,7 @@ __all__ = [
     "USER_AGENT",
     "CheckReport",
     "TrackInfo",
+    "is_valid_uuid",
     "normalize_str",
     "sanitize_name",
 ]
