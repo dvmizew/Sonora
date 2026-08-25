@@ -145,7 +145,7 @@ def process_artist_artwork(
 
     artist_dir = (
         parent
-        if parent_base not in ["FLAC", "Music", ""] and base_name != "Singles"
+        if parent_base not in ["FLAC", "Music", ""] and base_name != "Singles" # hardcoded
         else folder_path
     )
     if parent_base == "Singles":

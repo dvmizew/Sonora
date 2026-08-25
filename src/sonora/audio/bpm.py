@@ -9,10 +9,6 @@ from sonora.core.logger import LOG
 
 
 def load_audio(file_path: Path, mono: bool = False) -> tuple[np.ndarray, int] | None:
-    """
-    Load an audio file into a NumPy float32 array (2D multichannel or 1D mono) and sample rate.
-    Uses soundfile (C libsndfile) with direct ffmpeg pipe fallback.
-    """
     try:
         audio_data, sample_rate = soundfile.read(
             str(file_path), dtype="float32", always_2d=True
@@ -56,9 +52,6 @@ def load_audio(file_path: Path, mono: bool = False) -> tuple[np.ndarray, int] | 
 
 
 def calculate_bpm(file_path: Path) -> float | None:
-    """
-    Calculate the BPM of an audio file using STFT onset envelope autocorrelation via SciPy.
-    """
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 

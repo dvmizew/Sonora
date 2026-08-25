@@ -406,6 +406,7 @@ def check_library(
                     f"Duplicate track number {track_idx} (Disc {disc_idx}) found in files: {found_files}"
                 )
 
+        # Check for missing track numbers in sequence per disc
         discs: dict[int, list[int]] = defaultdict(list)
         for disc_idx, track_idx in tracks_found:
             discs[disc_idx].append(track_idx)
