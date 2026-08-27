@@ -31,6 +31,7 @@ from sonora.core.constants import (
     SUPPORTED_EXTS,
 )
 from sonora.core.http import SESSION
+from sonora.core.logger import LOG
 
 _ARTIST_SEPARATORS = [
     r"\s+fea?t\.?\s+",
@@ -96,9 +97,9 @@ def extract_series_number(text: str | None) -> int | None:
 
     clean_text = ftfy.fix_text(str(text)).strip().lower()
 
-    # Match explicit volume/part patterns (e.g. 'Vol 2', 'Pt. 2', 'Part II', 'Act 1')
+    # Match explicit volume/part patterns (e.g. 'Vol 2', 'Pt. 2', 'Part II', 'Act 1', 'Book 20')
     prefix_match = re.search(
-        r"\b(?:vol(?:ume)?|pt|part|chapter|act)\.?\s*(\d+|[ivxlcdm]+|[a-z]+)\b",
+        r"\b(?:vol(?:ume)?|pt|part|chapter|act|book)\.?\s*(\d+|[ivxlcdm]+|[a-z]+)\b",
         clean_text,
         re.IGNORECASE,
     )
@@ -112,9 +113,9 @@ def extract_series_number(text: str | None) -> int | None:
         if token in _NUMBER_WORDS:
             return _NUMBER_WORDS.index(token) + 1
 
-    # Match trailing Roman numerals (II, III, IV, etc.) or digits at the end of title
+    # Match trailing Roman numerals (II, III, IV, etc.), digits, or written number words
     trailing_match = re.search(
-        r"\b(\d{1,2}|[ivxlcdm]+)\s*$",
+        r"\b(\d{1,2}|[ivxlcdm]+|[a-z]+)\s*$",
         clean_text,
         re.IGNORECASE,
     )
@@ -125,6 +126,8 @@ def extract_series_number(text: str | None) -> int | None:
         roman_val = _parse_roman(token)
         if roman_val is not None:
             return roman_val
+        if token in _NUMBER_WORDS:
+            return _NUMBER_WORDS.index(token) + 1
 
     return None
 
@@ -142,8 +145,8 @@ def _load_user_overrides() -> dict[str, str]:
                 if isinstance(data, dict):
                     for key, value in data.items():
                         overrides[normalize_str(key)] = str(value).strip()
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as error:
+                LOG.warning(f"Failed to load user aliases from {path}: {error}")
     return overrides
 
 
@@ -539,10 +542,11 @@ class RateLimiter:
         self.lock = threading.Lock()
         self.last_call = 0.0
 
-    def wait(self) -> float:
+    def wait(self, interval_seconds: float | None = None) -> float:
+        interval = self.interval if interval_seconds is None else interval_seconds
         with self.lock:
             now = time.monotonic()
-            target_time = max(now, self.last_call + self.interval)
+            target_time = max(now, self.last_call + interval)
             sleep_time = target_time - now
             self.last_call = target_time
 
