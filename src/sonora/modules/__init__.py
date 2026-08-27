@@ -11,7 +11,6 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
-    normalize_artist_alias,
     process_single_track,
     tag_album_folder,
 )
@@ -22,7 +21,6 @@ __all__ = [
     "check_file",
     "check_library",
     "is_single_folder",
-    "normalize_artist_alias",
     "organize_library_singles",
     "process_single_track",
     "rename_directory_files",

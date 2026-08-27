@@ -40,10 +40,6 @@ from sonora.services.theaudiodb import (
 )
 
 
-def normalize_artist_alias(artist: str) -> str:
-    return resolve_artist_name(artist)
-
-
 def process_single_track(
     file_path: Path,
     fetch_bpm: bool = True,
@@ -66,7 +62,7 @@ def process_single_track(
 
         track_info = read_track_metadata(file_path)
         orig_info = dataclasses.replace(track_info)
-        track_info.artist = normalize_artist_alias(track_info.artist)
+        track_info.artist = resolve_artist_name(track_info.artist)
 
         LOG.info(f"🎧 Processing track: [white]{file_path.name}[/]")
 

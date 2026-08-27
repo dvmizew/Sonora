@@ -133,6 +133,7 @@ def extract_series_number(text: str | None) -> int | None:
     return None
 
 
+@lru_cache(maxsize=1)
 def _load_user_overrides() -> dict[str, str]:
     candidate_paths = [
         Path.home() / ".config" / "sonora" / "aliases.json",
@@ -140,14 +141,14 @@ def _load_user_overrides() -> dict[str, str]:
     ]
     overrides: dict[str, str] = {}
     for path in candidate_paths:
-        if path.exists():
-            try:
+        try:
+            if path.exists() and path.is_file() and path.stat().st_size > 0:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     for key, value in data.items():
                         overrides[normalize_str(key)] = str(value).strip()
-            except (OSError, ValueError) as error:
-                LOG.warning(f"Failed to load user aliases from {path}: {error}")
+        except (OSError, ValueError) as error:
+            LOG.warning(f"Failed to load user aliases from {path}: {error}")
     return overrides
 
 
@@ -189,7 +190,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
                 art_name.lower() == clean_name.lower()
                 and art_name == clean_name.title()
             ):
-                set_cached_api(cache_key, art_name, expire_seconds=86400 * 30)
+                set_cached_api(cache_key, art_name)
                 return art_name
         # Pass 2: High score official alias / entity match (e.g. "mgl" -> "M.G.L.", legal name -> stage name)
         for artist in artist_list:
@@ -197,13 +198,13 @@ def resolve_artist_name(raw_name: str | None) -> str:
             if score >= 90:
                 canonical_name = artist.get("name")
                 if canonical_name:
-                    set_cached_api(cache_key, canonical_name, expire_seconds=86400 * 30)
+                    set_cached_api(cache_key, canonical_name)
                     return canonical_name
         # Pass 3: Case-insensitive fallback
         for artist in artist_list:
             art_name = str(artist.get("name", "")).strip()
             if art_name.lower() == clean_name.lower():
-                set_cached_api(cache_key, art_name, expire_seconds=86400 * 30)
+                set_cached_api(cache_key, art_name)
                 return art_name
     except (
         httpx.HTTPError,
@@ -226,12 +227,12 @@ def resolve_artist_name(raw_name: str | None) -> str:
             if data and isinstance(data, list):
                 deezer_name = str(data[0].get("name", "")).strip()
                 if deezer_name and normalize_str(deezer_name) == normalized:
-                    set_cached_api(cache_key, deezer_name, expire_seconds=86400 * 30)
+                    set_cached_api(cache_key, deezer_name)
                     return deezer_name
     except (httpx.HTTPError, OSError, ValueError, RuntimeError):
         pass
 
-    set_cached_api(cache_key, clean_name, expire_seconds=86400 * 7)
+    set_cached_api(cache_key, clean_name)
     return clean_name
 
 
@@ -273,7 +274,7 @@ def is_single_group_artist(raw_name: str | None) -> bool:
             score = int(artist.get("ext:score", 0))
             artist_type = artist.get("type")
             if name_match and (score >= 95 or artist_type == "Group"):
-                set_cached_api(cache_key, True, expire_seconds=86400 * 30)
+                set_cached_api(cache_key, True)
                 return True
     except (
         httpx.HTTPError,
@@ -284,7 +285,7 @@ def is_single_group_artist(raw_name: str | None) -> bool:
     ):
         pass
 
-    set_cached_api(cache_key, False, expire_seconds=86400 * 30)
+    set_cached_api(cache_key, False)
     return False
 
 

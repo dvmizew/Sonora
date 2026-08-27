@@ -10,6 +10,10 @@ from sonora.audio.art import check_image_similarity, process_artist_artwork
 from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.models import TrackInfo
+from sonora.core.utils import (
+    get_primary_artist,
+    resolve_artist_name,
+)
 from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.checker import (
     check_brackets_corruption,
@@ -17,7 +21,6 @@ from sonora.modules.checker import (
     check_library,
 )
 from sonora.modules.organizer import (
-    get_primary_artist,
     is_single_folder,
     organize_library_singles,
 )
@@ -28,7 +31,6 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
-    normalize_artist_alias,
     process_single_track,
     tag_album_folder,
 )
@@ -74,10 +76,10 @@ class TestCoreModules(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
-    def test_normalize_artist_alias(self):
-        self.assertEqual(normalize_artist_alias("mgl"), "M.G.L.")
-        self.assertEqual(normalize_artist_alias("killa fonic"), "Killa Fonic")
-        self.assertEqual(normalize_artist_alias("nane"), "Nane")
+    def test_resolve_artist_name(self):
+        self.assertEqual(resolve_artist_name("mgl"), "M.G.L.")
+        self.assertEqual(resolve_artist_name("killa fonic"), "Killa Fonic")
+        self.assertEqual(resolve_artist_name("nane"), "Nane")
 
     def test_check_brackets_corruption(self):
         issues = check_brackets_corruption("Song Title [Official Video]")
