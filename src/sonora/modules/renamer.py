@@ -2,18 +2,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
-
 from sonora.audio.metadata import read_track_metadata
-from sonora.core.logger import CONSOLE, LOG
+from sonora.core.logger import LOG, create_progress
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     find_audio_files,
@@ -267,17 +257,7 @@ def rename_directory_files(dir_path: Path, dry_run: bool = False) -> list[Path]:
         folder_files.setdefault(path.parent, []).append(path)
         total_files_count += 1
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        TextColumn("[dim]/[/dim]"),
-        TimeRemainingColumn(),
-        console=CONSOLE,
-    ) as progress:
+    with create_progress() as progress:
         task = progress.add_task(
             "[cyan]Renaming audio files...", total=total_files_count
         )

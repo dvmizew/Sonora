@@ -1,18 +1,8 @@
 import shutil
 from pathlib import Path
 
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
-
 from sonora.audio.metadata import read_track_metadata
-from sonora.core.logger import CONSOLE, LOG
+from sonora.core.logger import LOG, create_progress
 from sonora.core.utils import (
     find_audio_files,
     find_companion_lyrics,
@@ -68,17 +58,7 @@ def organize_library_singles(
 
     all_audio_files = find_audio_files(source_dir, recursive=True)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        TextColumn("[dim]/[/dim]"),
-        TimeRemainingColumn(),
-        console=CONSOLE,
-    ) as progress:
+    with create_progress() as progress:
         task = progress.add_task(
             "[cyan]Organizing single tracks...", total=len(all_audio_files)
         )

@@ -11,15 +11,6 @@ from music_metadata_filter.functions import (
 )
 from mutagen._util import MutagenError
 from mutagen.flac import FLAC, FLACNoHeaderError
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
 
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
@@ -28,7 +19,7 @@ from sonora.core.constants import (
     FEAT_KEYWORDS,
     SUPPORTED_EXTS,
 )
-from sonora.core.logger import CONSOLE, LOG
+from sonora.core.logger import LOG, create_progress
 from sonora.core.models import CheckReport
 from sonora.core.utils import (
     find_audio_files,
@@ -311,17 +302,7 @@ def check_library(
             for path in files_to_process
         }
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TextColumn("[dim]/[/dim]"),
-            TimeRemainingColumn(),
-            console=CONSOLE,
-        ) as progress:
+        with create_progress() as progress:
             task = progress.add_task(
                 "[cyan]Checking library...", total=len(files_to_process)
             )

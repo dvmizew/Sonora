@@ -3,22 +3,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
 
 from sonora.audio.art import process_album_cover_art, process_artist_artwork
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.logger import CONSOLE, LOG
+from sonora.core.logger import LOG, create_progress
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     find_audio_files,
@@ -677,17 +668,7 @@ def tag_album_folder(
             for audio_file in audio_files
         }
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TextColumn("[dim]/[/dim]"),
-            TimeRemainingColumn(),
-            console=CONSOLE,
-        ) as progress:
+        with create_progress() as progress:
             task = progress.add_task("[cyan]Tagging tracks...", total=len(audio_files))
             for future in as_completed(future_to_file):
                 audio_file = future_to_file[future]
