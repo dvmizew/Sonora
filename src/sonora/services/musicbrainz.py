@@ -58,10 +58,7 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
         OSError,
         ValueError,
         KeyError,
-        RuntimeError,
     ) as error:
-        if isinstance(error, RuntimeError):
-            raise
         raise RuntimeError(
             f"MusicBrainz discography fetch failed for {artist}: {error}"
         ) from error
@@ -104,10 +101,7 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
         OSError,
         ValueError,
         KeyError,
-        RuntimeError,
     ) as error:
-        if isinstance(error, RuntimeError):
-            raise
         raise RuntimeError(
             f"MusicBrainz search failed for {artist} - {album}: {error}"
         ) from error
@@ -164,10 +158,7 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         OSError,
         ValueError,
         KeyError,
-        RuntimeError,
     ) as error:
-        if isinstance(error, RuntimeError):
-            raise
         raise RuntimeError(
             f"MusicBrainz track lookup failed for {artist} - {title}: {error}"
         ) from error
@@ -240,10 +231,7 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
         OSError,
         ValueError,
         KeyError,
-        RuntimeError,
     ) as error:
-        if isinstance(error, RuntimeError):
-            raise
         LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {error}")
         return {}
 
@@ -276,11 +264,11 @@ def fetch_musicbrainz_recording_details(
                 "tags",
             ],
         )
-        rec = data.get("recording", {}) if isinstance(data, dict) else {}
-        if not rec:
+        recording_dict = data.get("recording", {}) if isinstance(data, dict) else {}
+        if not recording_dict:
             return None
 
-        isrc_list = rec.get("isrc-list", [])
+        isrc_list = recording_dict.get("isrc-list", [])
         isrc = str(isrc_list[0]) if isrc_list else None
 
         composers: list[str] = []
@@ -288,29 +276,29 @@ def fetch_musicbrainz_recording_details(
         producers: list[str] = []
         remixers: list[str] = []
 
-        artist_rels = rec.get("artist-relation-list", [])
-        for rel in artist_rels:
-            rel_type = str(rel.get("type", "")).lower()
-            artist_name = rel.get("artist", {}).get("name")
+        artist_rels = recording_dict.get("artist-relation-list", [])
+        for relationship in artist_rels:
+            relationship_type = str(relationship.get("type", "")).lower()
+            artist_name = relationship.get("artist", {}).get("name")
             if not artist_name:
                 continue
-            if rel_type in ("composer", "writer"):
+            if relationship_type in ("composer", "writer"):
                 composers.append(artist_name)
-            if rel_type in ("lyricist", "writer"):
+            if relationship_type in ("lyricist", "writer"):
                 lyricists.append(artist_name)
-            if "producer" in rel_type:
+            if "producer" in relationship_type:
                 producers.append(artist_name)
-            if rel_type == "remixer":
+            if relationship_type == "remixer":
                 remixers.append(artist_name)
 
-        work_rels = rec.get("work-relation-list", [])
+        work_rels = recording_dict.get("work-relation-list", [])
         work_id = None
         if work_rels and isinstance(work_rels, list):
             work_id = work_rels[0].get("work", {}).get("id")
 
         details: dict[str, object] = {
             "isrc": isrc,
-            "disambiguation": rec.get("disambiguation"),
+            "disambiguation": recording_dict.get("disambiguation"),
             "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
             "lyricist": ", ".join(dict.fromkeys(lyricists)) if lyricists else None,
             "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
@@ -324,10 +312,7 @@ def fetch_musicbrainz_recording_details(
         OSError,
         ValueError,
         KeyError,
-        RuntimeError,
     ) as error:
-        if isinstance(error, RuntimeError):
-            raise
         LOG.debug(
             f"MusicBrainz recording details fetch failed for {recording_mbid}: {error}"
         )
@@ -363,42 +348,42 @@ def fetch_musicbrainz_release_details(
                 "tags",
             ],
         )
-        rel = data.get("release", {}) if isinstance(data, dict) else {}
-        if not rel:
+        release_dict = data.get("release", {}) if isinstance(data, dict) else {}
+        if not release_dict:
             return None
 
-        barcode = rel.get("barcode")
-        country = rel.get("country")
-        status = rel.get("status")
+        barcode = release_dict.get("barcode")
+        country = release_dict.get("country")
+        status = release_dict.get("status")
 
-        rel_group = rel.get("release-group", {})
-        release_group_id = rel_group.get("id")
-        release_type = rel_group.get("primary-type")
+        release_group = release_dict.get("release-group", {})
+        release_group_id = release_group.get("id")
+        release_type = release_group.get("primary-type")
 
         label_name = None
-        cat_no = None
-        label_info_list = rel.get("label-info-list", [])
+        catalog_number = None
+        label_info_list = release_dict.get("label-info-list", [])
         if label_info_list and isinstance(label_info_list, list):
             first_label = label_info_list[0]
             label_name = first_label.get("label", {}).get("name")
-            cat_no = first_label.get("catalog-number")
+            catalog_number = first_label.get("catalog-number")
 
-        mediums = rel.get("medium-list", [])
+        mediums = release_dict.get("medium-list", [])
         media_format = None
         total_tracks = 0
         total_discs = len(mediums) if mediums else None
         if mediums and isinstance(mediums, list):
             media_format = mediums[0].get("format")
-            for med in mediums:
-                count_val = med.get("track-count")
-                if count_val and str(count_val).isdigit():
-                    total_tracks += int(count_val)
+            for medium in mediums:
+                track_count_value = medium.get("track-count")
+                if track_count_value and str(track_count_value).isdigit():
+                    total_tracks += int(track_count_value)
 
-        text_rep = rel.get("text-representation", {})
-        language = text_rep.get("language")
-        script = text_rep.get("script")
+        text_representation = release_dict.get("text-representation", {})
+        language = text_representation.get("language")
+        script = text_representation.get("script")
 
-        artist_credits = rel.get("artist-credit", [])
+        artist_credits = release_dict.get("artist-credit", [])
         artist_sort = None
         if (
             artist_credits
@@ -416,7 +401,7 @@ def fetch_musicbrainz_release_details(
             if is_valid_uuid(release_group_id)
             else None,
             "label": label_name,
-            "catalog_number": cat_no,
+            "catalog_number": catalog_number,
             "media": media_format,
             "total_tracks": total_tracks if total_tracks > 0 else None,
             "total_discs": total_discs,
@@ -431,10 +416,7 @@ def fetch_musicbrainz_release_details(
         OSError,
         ValueError,
         KeyError,
-        RuntimeError,
     ) as error:
-        if isinstance(error, RuntimeError):
-            raise
         LOG.debug(
             f"MusicBrainz release details fetch failed for {release_mbid}: {error}"
         )

@@ -131,7 +131,7 @@ def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | 
     )
 
     release_date_raw = best_result.get("releaseDate")
-    date_val = str(release_date_raw)[:10] if release_date_raw else None
+    release_date_str = str(release_date_raw)[:10] if release_date_raw else None
 
     return {
         "genre": best_result.get("primaryGenreName"),
@@ -151,5 +151,5 @@ def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | 
         "total_tracks": best_result.get("trackCount"),
         "disc_number": best_result.get("discNumber"),
         "total_discs": best_result.get("discCount"),
-        "date": date_val,
+        "date": release_date_str,
     }

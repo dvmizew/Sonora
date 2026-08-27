@@ -101,8 +101,6 @@ def fetch_genius_song_details(
             "producers": ", ".join(producer_names) if producer_names else None,
         }
 
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
-        if isinstance(error, RuntimeError):
-            raise
+    except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
         LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {error}")
         return None

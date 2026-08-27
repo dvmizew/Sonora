@@ -59,7 +59,7 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
                 best_score = score
                 best_cover_url = cover_xl
 
-            set_cached_api(cache_key, best_cover_url)
+        set_cached_api(cache_key, best_cover_url)
         return best_cover_url
     except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
         LOG.debug(f"Deezer cover art lookup failed for {artist} - {album}: {error}")
@@ -189,16 +189,16 @@ def fetch_deezer_track_details(
         featured: list[str] = []
         producers: list[str] = []
         if isinstance(contributors, list):
-            for c in contributors:
-                if isinstance(c, dict):
-                    c_name = c.get("name")
-                    c_role = str(c.get("role", "")).lower()
-                    if not c_name:
+            for contributor in contributors:
+                if isinstance(contributor, dict):
+                    contributor_name = contributor.get("name")
+                    contributor_role = str(contributor.get("role", "")).lower()
+                    if not contributor_name:
                         continue
-                    if "featured" in c_role:
-                        featured.append(c_name)
-                    elif "producer" in c_role:
-                        producers.append(c_name)
+                    if "featured" in contributor_role:
+                        featured.append(contributor_name)
+                    elif "producer" in contributor_role:
+                        producers.append(contributor_name)
 
         result = {
             "isrc": track_data.get("isrc"),

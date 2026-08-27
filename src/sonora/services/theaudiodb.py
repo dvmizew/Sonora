@@ -91,11 +91,12 @@ def fetch_theaudiodb_track_details(
             if tracks and isinstance(tracks, list) and tracks[0]:
                 raw_track = tracks[0]
                 rating_raw = raw_track.get("intScore")
-                rating = (
-                    float(rating_raw)
-                    if rating_raw and str(rating_raw).isdigit()
-                    else None
-                )
+                rating: float | None = None
+                if rating_raw is not None:
+                    try:
+                        rating = float(rating_raw)
+                    except (ValueError, TypeError):
+                        rating = None
                 details: dict[str, object] = {
                     "music_video_url": raw_track.get("strMusicVid"),
                     "mood": raw_track.get("strMood"),
