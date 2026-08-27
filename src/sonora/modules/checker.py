@@ -45,36 +45,18 @@ _CODEC_RIP_KEYWORDS: frozenset[str] = frozenset(
     {"flac", "mp3", "320", "320kbps", "lossless", "rip", "cdrip", "webrip", "hq", "hd"}
 )
 
-PAIRS = {"(": ")", "[": "]", "{": "}"}
-CLOSING_TO_OPENING = {v: k for k, v in PAIRS.items()}
+# [text], (text), {text}
+_BRACKET_PATTERN = re.compile(r"[\(\[\{][^\(\)\[\]\{\}]+[\)\]\}]")
 
 
 def extract_bracket_tokens(text: str) -> list[tuple[str, set[str]]]:
-    """
-    Extracts all bracketed substrings and their constituent alphanumeric word tokens
-    using a character stack and pure tokenization.
-    """
+    """Extracts all bracketed substrings and their constituent alphanumeric word tokens."""
     results: list[tuple[str, set[str]]] = []
-    stack: list[str] = []
-    start = -1
-
-    for index, char in enumerate(text):
-        if char in PAIRS:
-            if not stack:
-                start = index
-            stack.append(char)
-        elif char in CLOSING_TO_OPENING and stack:
-            expected_opening = CLOSING_TO_OPENING[char]
-            if stack[-1] == expected_opening:
-                stack.pop()
-                if not stack and start != -1:
-                    full_bracket = text[start : index + 1]
-                    inner = full_bracket[1:-1].lower()
-                    tokens = set(
-                        "".join(c if c.isalnum() else " " for c in inner).split()
-                    )
-                    results.append((full_bracket, tokens))
-                    start = -1
+    for match in _BRACKET_PATTERN.finditer(text):
+        full_bracket = match.group(0)
+        inner = full_bracket[1:-1].lower()
+        tokens = set("".join(c if c.isalnum() else " " for c in inner).split())
+        results.append((full_bracket, tokens))
     return results
 
 

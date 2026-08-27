@@ -3,11 +3,12 @@ import urllib.parse
 import httpx
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import RATE_LIMIT_DEEZER
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, clean_title, match_score, normalize_str
 
-_DEEZER_LIMITER = RateLimiter(interval_seconds=0.15)
+_DEEZER_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_DEEZER)
 
 
 def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:

@@ -6,6 +6,7 @@ from typing import Any
 import syncedlyrics
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import RATE_LIMIT_LYRICS
 from sonora.core.utils import (
     RateLimiter,
     clean_title,
@@ -17,7 +18,7 @@ logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
 for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
     logging.getLogger(_provider).setLevel(logging.CRITICAL)
 
-_LYRICS_LIMITER = RateLimiter(interval_seconds=1.0)
+_LYRICS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LYRICS)
 
 
 def clean_lyrics_text(text: str | None) -> str | None:

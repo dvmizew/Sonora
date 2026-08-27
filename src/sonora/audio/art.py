@@ -6,6 +6,7 @@ import imagehash
 from PIL import Image, ImageOps, UnidentifiedImageError
 from rapidfuzz import fuzz
 
+from sonora.core.constants import ARTIST_MATCH_THRESHOLD
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import normalize_str
@@ -144,7 +145,7 @@ def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
         curr_norm = normalize_str(current.name)
         if (
             curr_norm == clean_artist
-            or fuzz.token_set_ratio(curr_norm, clean_artist) >= 85
+            or fuzz.token_set_ratio(curr_norm, clean_artist) >= ARTIST_MATCH_THRESHOLD
         ):
             return current
         if current.parent == current:

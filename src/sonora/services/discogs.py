@@ -4,17 +4,21 @@ from typing import Any
 import httpx
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import (
+    RATE_LIMIT_DISCOGS_AUTHENTICATED,
+    RATE_LIMIT_DISCOGS_UNAUTHENTICATED,
+)
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, normalize_str
 
-_DISCOGS_LIMITER = RateLimiter(interval_seconds=1.0)
+_DISCOGS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_DISCOGS_AUTHENTICATED)
 
 
 def fetch_discogs_release_details(
-    release_id: int | str, user_token: str
+    release_id: int | str, user_token: str | None = None
 ) -> dict[str, Any] | None:
-    if not release_id or not user_token:
+    if not release_id:
         return None
 
     cache_key = f"discogs_rel:{release_id}"
@@ -22,10 +26,14 @@ def fetch_discogs_release_details(
     if isinstance(cached, dict):
         return cached
 
-    _DISCOGS_LIMITER.wait()
+    _DISCOGS_LIMITER.wait(
+        RATE_LIMIT_DISCOGS_AUTHENTICATED
+        if user_token
+        else RATE_LIMIT_DISCOGS_UNAUTHENTICATED
+    )
     try:
         url = f"https://api.discogs.com/releases/{release_id}"
-        headers = {"Authorization": f"Discogs token={user_token}"}
+        headers = {"Authorization": f"Discogs token={user_token}"} if user_token else {}
         response = SESSION.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
@@ -205,7 +213,11 @@ def search_discogs_release(
     if isinstance(cached, dict):
         return cached
 
-    _DISCOGS_LIMITER.wait()
+    _DISCOGS_LIMITER.wait(
+        RATE_LIMIT_DISCOGS_AUTHENTICATED
+        if user_token
+        else RATE_LIMIT_DISCOGS_UNAUTHENTICATED
+    )
     try:
         url = "https://api.discogs.com/database/search"
         headers = {"Authorization": f"Discogs token={user_token}"}

@@ -1,11 +1,12 @@
 import urllib.parse
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import RATE_LIMIT_THEAUDIODB
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, normalize_str
 
-_THEAUDIODB_LIMITER = RateLimiter(interval_seconds=1.0)
+_THEAUDIODB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_THEAUDIODB)
 
 
 def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:

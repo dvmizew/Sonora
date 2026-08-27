@@ -4,7 +4,9 @@ import httpx
 import musicbrainzngs
 from musicbrainzngs import MusicBrainzError
 
+from sonora import __version__
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import RATE_LIMIT_MUSICBRAINZ
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import (
@@ -15,13 +17,13 @@ from sonora.core.utils import (
     normalize_str,
 )
 
-_MB_LIMITER = RateLimiter(interval_seconds=1.1)
+_MB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_MUSICBRAINZ)
 
 
 def init_musicbrainz(
     app_name: str = "Sonora",
-    version: str = "0.1.0",
-    contact: str = "danielradu02@users.noreply.github.com",
+    version: str = __version__,
+    contact: str = "https://github.com/dvmizew/Sonora",
 ) -> None:
     try:
         musicbrainzngs.set_useragent(app_name, version, contact)

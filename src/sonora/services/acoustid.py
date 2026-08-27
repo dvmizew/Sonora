@@ -3,6 +3,7 @@ from pathlib import Path
 import acoustid
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import RATE_LIMIT_ACOUSTID
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, is_valid_uuid, match_score, normalize_str
 
@@ -30,7 +31,7 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
         ) from error
 
 
-_ACOUSTID_LIMITER = RateLimiter(interval_seconds=0.4)
+_ACOUSTID_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_ACOUSTID)
 _ACOUSTID_FAILURES = 0
 _MAX_ACOUSTID_FAILURES = 3
 

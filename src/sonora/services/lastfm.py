@@ -1,10 +1,11 @@
 import httpx
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import RATE_LIMIT_LASTFM
 from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter, is_valid_uuid, normalize_str
 
-_LASTFM_LIMITER = RateLimiter(interval_seconds=0.25)
+_LASTFM_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LASTFM)
 
 
 def fetch_lastfm_tags(

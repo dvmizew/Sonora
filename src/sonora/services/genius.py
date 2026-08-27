@@ -1,10 +1,11 @@
 import httpx
 
+from sonora.core.constants import GENIUS_MATCH_THRESHOLD, RATE_LIMIT_GENIUS
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, clean_title, match_score
 
-_GENIUS_LIMITER = RateLimiter(interval_seconds=0.5)
+_GENIUS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_GENIUS)
 
 
 def fetch_genius_description(
@@ -52,7 +53,7 @@ def fetch_genius_song_details(
                 best_score = score
                 best_hit = result_item
 
-        if not best_hit or best_score < 70.0:
+        if not best_hit or best_score < GENIUS_MATCH_THRESHOLD:
             return None
 
         api_path = best_hit.get("api_path")

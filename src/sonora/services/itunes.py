@@ -1,11 +1,12 @@
 from rapidfuzz import fuzz
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import ALBUM_MATCH_THRESHOLD, RATE_LIMIT_ITUNES
 from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter, extract_series_number, normalize_str
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
-_ITUNES_LIMITER = RateLimiter(interval_seconds=3.2)
+_ITUNES_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_ITUNES)
 
 
 def search_itunes(
@@ -73,7 +74,10 @@ def fetch_itunes_cover_art_url(
             normalized_collection = normalize_str(collection_name)
 
             # Strict similarity requirement: collection_name must be fuzzy similar to album title!
-            if fuzz.token_set_ratio(normalized_target, normalized_collection) < 75.0:
+            if (
+                fuzz.token_set_ratio(normalized_target, normalized_collection)
+                < ALBUM_MATCH_THRESHOLD
+            ):
                 continue
 
             collection_series = extract_series_number(normalized_collection)
