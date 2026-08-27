@@ -1,17 +1,18 @@
 import urllib.parse
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import RATE_LIMIT_THEAUDIODB
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, normalize_str
 
-_THEAUDIODB_LIMITER = RateLimiter(interval_seconds=1.0)
+_THEAUDIODB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_THEAUDIODB)
 
 
 def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
     """
     Fetch artist avatar (artist.jpg) and wide banner (banner.jpg) from TheAudioDB with disk caching.
-    Returns (thumb_bytes, banner_bytes).
+    Returns (thumbnail_bytes, banner_bytes).
     """
     if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
         return None, None
@@ -23,74 +24,103 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
         return cached
 
     _THEAUDIODB_LIMITER.wait()
-    thumb_bytes, banner_bytes = None, None
+    thumbnail_bytes, banner_bytes = None, None
     try:
         url = f"https://www.theaudiodb.com/api/v1/json/2/search.php?s={urllib.parse.quote(artist_name)}"
-        resp = SESSION.get(url, timeout=6)
-        if resp.status_code == 200:
-            data = resp.json()
+        response = SESSION.get(url, timeout=6)
+        if response.status_code == 200:
+            data = response.json()
             artists = data.get("artists")
             if artists and isinstance(artists, list) and artists[0]:
-                art = artists[0]
-                thumb_url = art.get("strArtistThumb") or art.get("strArtistFanart")
+                artist_data = artists[0]
+                thumbnail_url = artist_data.get("strArtistThumb") or artist_data.get(
+                    "strArtistFanart"
+                )
                 banner_url = (
-                    art.get("strArtistBanner")
-                    or art.get("strArtistWideBanner")
-                    or art.get("strArtistFanart")
+                    artist_data.get("strArtistBanner")
+                    or artist_data.get("strArtistWideBanner")
+                    or artist_data.get("strArtistFanart")
                 )
 
-                if thumb_url:
+                if thumbnail_url:
                     try:
-                        r_t = SESSION.get(thumb_url, timeout=6)
-                        if r_t.status_code == 200:
-                            thumb_bytes = r_t.content
-                    except (OSError, ValueError) as e:
-                        LOG.debug(f"Failed to fetch thumb image: {e}")
+                        thumb_response = SESSION.get(thumbnail_url, timeout=6)
+                        if thumb_response.status_code == 200:
+                            thumbnail_bytes = thumb_response.content
+                    except (OSError, ValueError) as error:
+                        LOG.debug(f"Failed to fetch thumb image: {error}")
 
                 if banner_url:
                     try:
-                        r_b = SESSION.get(banner_url, timeout=6)
-                        if r_b.status_code == 200:
-                            banner_bytes = r_b.content
-                    except (OSError, ValueError) as e:
-                        LOG.debug(f"Failed to fetch banner image: {e}")
+                        banner_response = SESSION.get(banner_url, timeout=6)
+                        if banner_response.status_code == 200:
+                            banner_bytes = banner_response.content
+                    except (OSError, ValueError) as error:
+                        LOG.debug(f"Failed to fetch banner image: {error}")
 
-                res = (thumb_bytes, banner_bytes)
-                if thumb_bytes or banner_bytes:
-                    set_cached_api(cache_key, res, expire_seconds=2592000)  # 30 days
-                return res
-    except (OSError, ValueError, KeyError) as e:
-        LOG.debug(f"TheAudioDB fetch_artist_images failed for {artist_name}: {e}")
+                result = (thumbnail_bytes, banner_bytes)
+                if thumbnail_bytes or banner_bytes:
+                    set_cached_api(cache_key, result)
+                return result
+    except (OSError, ValueError, KeyError) as error:
+        LOG.debug(f"TheAudioDB fetch_artist_images failed for {artist_name}: {error}")
     return None, None
+
+
+def fetch_theaudiodb_track_details(
+    artist_name: str, track_title: str
+) -> dict[str, object] | None:
+    """
+    Fetch track details (video URL, mood, style, key, rating, description) from TheAudioDB.
+    """
+    if not artist_name or not track_title:
+        return None
+    cache_key = (
+        f"theaudiodb_track:{normalize_str(artist_name)}:{normalize_str(track_title)}"
+    )
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    _THEAUDIODB_LIMITER.wait()
+    try:
+        url = f"https://www.theaudiodb.com/api/v1/json/2/searchtrack.php?s={urllib.parse.quote(artist_name)}&t={urllib.parse.quote(track_title)}"
+        response = SESSION.get(url, timeout=6)
+        if response.status_code == 200:
+            tracks = response.json().get("track", [])
+            if tracks and isinstance(tracks, list) and tracks[0]:
+                raw_track = tracks[0]
+                rating_raw = raw_track.get("intScore")
+                rating: float | None = None
+                if rating_raw is not None:
+                    try:
+                        rating = float(rating_raw)
+                    except (ValueError, TypeError):
+                        rating = None
+                details: dict[str, object] = {
+                    "music_video_url": raw_track.get("strMusicVid"),
+                    "mood": raw_track.get("strMood"),
+                    "style": raw_track.get("strStyle"),
+                    "initial_key": raw_track.get("strKey")
+                    or raw_track.get("strOpenKey"),
+                    "rating": rating,
+                    "description": raw_track.get("strDescriptionEN"),
+                    "genre": raw_track.get("strGenre"),
+                }
+                set_cached_api(cache_key, details)
+                return details
+    except (OSError, ValueError, KeyError) as error:
+        LOG.debug(
+            f"TheAudioDB track lookup failed for {artist_name} - {track_title}: {error}"
+        )
+    return None
 
 
 def fetch_track_video_url(artist_name: str, track_title: str) -> str | None:
     """
     Fetch official music video URL (strMusicVid) from TheAudioDB track search.
     """
-    if not artist_name or not track_title:
-        return None
-    cache_key = (
-        f"theaudiodb_vid:{normalize_str(artist_name)}:{normalize_str(track_title)}"
-    )
-    cached = get_cached_api(cache_key)
-    if isinstance(cached, str):
-        return cached
-
-    _THEAUDIODB_LIMITER.wait()
-    try:
-        url = f"https://www.theaudiodb.com/api/v1/json/2/searchtrack.php?s={urllib.parse.quote(artist_name)}&t={urllib.parse.quote(track_title)}"
-        resp = SESSION.get(url, timeout=6)
-        if resp.status_code == 200:
-            tracks = resp.json().get("track", [])
-            if tracks and isinstance(tracks, list) and tracks[0]:
-                vid = tracks[0].get("strMusicVid")
-                if vid and str(vid).strip():
-                    clean_url = str(vid).strip()
-                    set_cached_api(cache_key, clean_url)
-                    return clean_url
-    except (OSError, ValueError, KeyError) as e:
-        LOG.debug(
-            f"TheAudioDB video lookup failed for {artist_name} - {track_title}: {e}"
-        )
+    details = fetch_theaudiodb_track_details(artist_name, track_title)
+    if details and details.get("music_video_url"):
+        return str(details["music_video_url"])
     return None

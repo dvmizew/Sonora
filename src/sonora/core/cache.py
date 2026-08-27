@@ -7,6 +7,7 @@ import diskcache
 
 from sonora.core.logger import LOG
 
+DEFAULT_API_TTL_SECONDS: int = 2419200  # 28 days
 _CACHE_DIR = Path.home() / ".cache" / "sonora"
 _CACHE_INSTANCE: Any = None
 _CACHE_LOCK = threading.Lock()
@@ -38,8 +39,14 @@ def get_cache() -> Any:
                             sqlite_journal_mode="wal",
                             sqlite_synchronous=0,
                         )
-                except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
-                    LOG.debug(f"Cache initialization failed: {e}")
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    RuntimeError,
+                    TypeError,
+                ) as error:
+                    LOG.debug(f"Cache initialization failed: {error}")
                     _CACHE_INSTANCE = None
     return _CACHE_INSTANCE
 
@@ -52,21 +59,32 @@ def get_cached_api(key: str) -> Any | None:
     if cache is not None:
         try:
             return cache.get(key)
-        except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
-            LOG.debug(f"Cache fetch failed for key '{key}': {e}")
+        except (OSError, ValueError, KeyError, RuntimeError, TypeError) as error:
+            LOG.debug(f"Cache fetch failed for key '{key}': {error}")
     return None
 
 
-def set_cached_api(key: str, value: Any, expire_seconds: int = 604800) -> None:
-    """Store value into disk cache with expiration (default 7 days)."""
+def set_cached_api(
+    key: str, value: Any, expire_seconds: int = DEFAULT_API_TTL_SECONDS
+) -> None:
+    """Store value into disk cache with expiration (default 28 days)."""
     if value is None:
         return
     cache = get_cache()
     if cache is not None:
         try:
             cache.set(key, value, expire=expire_seconds)
-        except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
-            LOG.debug(f"Cache store failed for key '{key}': {e}")
+        except (OSError, ValueError, KeyError, RuntimeError, TypeError) as error:
+            LOG.debug(f"Cache store failed for key '{key}': {error}")
+
+
+def clear_cache() -> None:
+    cache = get_cache()
+    if cache is not None:
+        try:
+            cache.clear()
+        except (OSError, ValueError, KeyError, RuntimeError, TypeError) as error:
+            LOG.debug(f"Cache clear failed: {error}")
 
 
 def close_cache() -> None:
@@ -75,8 +93,8 @@ def close_cache() -> None:
         if _CACHE_INSTANCE is not None:
             try:
                 _CACHE_INSTANCE.close()
-            except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
-                LOG.debug(f"Cache close failed: {e}")
+            except (OSError, ValueError, KeyError, RuntimeError, TypeError) as error:
+                LOG.debug(f"Cache close failed: {error}")
             _CACHE_INSTANCE = None
 
 

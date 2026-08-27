@@ -1,178 +1,179 @@
 import datetime
-import gc
+import gzip
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 import orjson
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
-from sonora.core.constants import SUPPORTED_EXTS
-from sonora.core.logger import CONSOLE, LOG
+from sonora.core.logger import LOG, create_progress
+from sonora.core.models import TrackInfo
+from sonora.core.utils import find_audio_files
 
-_ORJSON_OPTS = (
-    orjson.OPT_SERIALIZE_DATACLASS
-    | orjson.OPT_SERIALIZE_NUMPY
-    | orjson.OPT_NON_STR_KEYS
-)
+_GZIP_MAGIC_HEADER = b"\x1f\x8b"
 
 
-def backup_library_tags(directory: Path, output_file: Path | None = None) -> Path:
-    """
-    Stream-based backup.
-    Excludes cover art data to keep backup size lightweight.
-    """
+def _read_track_for_backup(audio_file: Path) -> tuple[str, dict[str, Any] | None]:
+    try:
+        track_info = read_track_metadata(audio_file)
+        return str(audio_file), track_info.to_dict()
+    except (OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"Error reading {audio_file} for backup: {error}")
+        return str(audio_file), None
+
+
+def _restore_single_track(
+    file_path_str: str, tags_dict: Any, base_dir: Path | None = None
+) -> tuple[bool, bool]:
+    target_path = Path(file_path_str)
+
+    # Portable path resolution fallback if original absolute path was moved or mounted elsewhere
+    if not target_path.exists() and base_dir is not None:
+        direct_candidate = base_dir / target_path.name
+        if direct_candidate.exists():
+            target_path = direct_candidate
+        else:
+            matches = list(base_dir.rglob(target_path.name))
+            if matches:
+                target_path = matches[0]
+
+    if not target_path.exists():
+        return False, True
+
+    try:
+        if isinstance(tags_dict, dict):
+            clean_tags = {
+                k: v
+                for k, v in tags_dict.items()
+                if k not in ("file_path", "file_name") and hasattr(TrackInfo, k)
+            }
+            write_track_metadata(TrackInfo(file_path=target_path, **clean_tags))
+            return True, False
+    except (OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"Failed to restore {target_path}: {error}")
+    return False, False
+
+
+def backup_library_tags(
+    directory: Path, output_file: Path | None = None, max_threads: int = 4
+) -> Path:
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")
 
     LOG.info(f"🔄 Scanning for files in {directory}...")
-    audio_files = sorted(
-        [
-            p
-            for p in directory.rglob("*")
-            if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
-        ]
-    )
+    audio_files = find_audio_files(directory, recursive=True)
 
-    timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime(
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%d_%H-%M-%S"
     )
-    out_path = output_file or Path(f"backup_{timestamp_str}.json")
+    output_path = output_file or Path(f"backup_{timestamp}.json")
 
     if not audio_files:
         LOG.warning("No audio files found to back up.")
-        out_path.write_bytes(b"{}\n")
-        return out_path
+        output_path.write_bytes(b"{}\n")
+        return output_path
 
     LOG.info(
-        f"🔄 Creating full backup for {len(audio_files)} files (streaming mode)..."
+        f"🔄 Creating full backup for {len(audio_files)} files (threads={max_threads})..."
     )
-    count = 0
+    backup_data: dict[str, Any] = {}
     failed = 0
 
+    with create_progress() as progress:
+        task = progress.add_task(
+            "[cyan]Backing up audio tags...", total=len(audio_files)
+        )
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = [
+                executor.submit(_read_track_for_backup, file_path)
+                for file_path in audio_files
+            ]
+            for future in as_completed(futures):
+                path_str, data = future.result()
+                if data is not None:
+                    backup_data[path_str] = data
+                else:
+                    failed += 1
+                progress.advance(task)
+
     try:
-        with open(out_path, "wb") as f:
-            f.write(b"{\n")
-            first = True
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                MofNCompleteColumn(),
-                TimeElapsedColumn(),
-                TextColumn("[dim]/[/dim]"),
-                TimeRemainingColumn(),
-                console=CONSOLE,
-            ) as progress:
-                task = progress.add_task(
-                    "[cyan]Backing up audio tags...", total=len(audio_files)
-                )
-                for idx, file_p in enumerate(audio_files):
-                    try:
-                        info = read_track_metadata(file_p)
-                        data = info.to_dict()
+        raw_json_bytes = orjson.dumps(backup_data, option=orjson.OPT_INDENT_2)
+        payload = (
+            gzip.compress(raw_json_bytes, compresslevel=6)
+            if output_path.name.endswith(".gz")
+            else raw_json_bytes
+        )
 
-                        if not first:
-                            f.write(b",\n")
-                        key_bytes = orjson.dumps(str(file_p), option=_ORJSON_OPTS)
-                        val_bytes = orjson.dumps(data, option=_ORJSON_OPTS)
-                        f.write(b"  " + key_bytes + b": " + val_bytes)
-                        first = False
-                        count += 1
-                    except (OSError, ValueError, RuntimeError) as e:
-                        LOG.debug(f"Error reading {file_p} for backup: {e}")
-                        failed += 1
-
-                    progress.advance(task)
-                    if (idx + 1) % 500 == 0:
-                        gc.collect()
-
-            f.write(b"\n}\n")
+        temp_output = output_path.with_suffix(f"{output_path.suffix}.tmp")
+        temp_output.write_bytes(payload)
+        temp_output.replace(output_path)
 
         LOG.info(
-            f"✅ Successfully backed up {count}/{len(audio_files)} files to {out_path}"
+            f"✅ Successfully backed up {len(backup_data)}/{len(audio_files)} files to {output_path}"
         )
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files could not be read")
-        return out_path
-    except (OSError, ValueError, TypeError) as e:
-        LOG.error(f"Failed to save backup: {e}")
+        return output_path
+    except (OSError, TypeError) as error:
+        LOG.error(f"Failed to save backup: {error}")
         raise
 
 
-def restore_library_tags(backup_file: Path) -> int:
+def restore_library_tags(
+    backup_file: Path,
+    target_directory: Path | None = None,
+    max_threads: int = 4,
+) -> int:
     """
-    High-performance restore: parses JSON via orjson at native C/Rust speed.
-    Returns the number of restored files.
+    Restore audio metadata tags from a JSON or GZipped JSON backup file.
+    Automatically resolves relative paths if tracks were moved to target_directory or backup folder.
     """
     if not backup_file.exists():
         raise FileNotFoundError(f"Backup file not found: {backup_file}")
 
-    LOG.info(f"🔄 Starting tag restoration from {backup_file} (streaming mode)...")
-    count = 0
-    failed = 0
-    missing = 0
-
+    LOG.info(
+        f"🔄 Starting tag restoration from {backup_file} (threads={max_threads})..."
+    )
     try:
         content = backup_file.read_bytes()
+        if content.startswith(_GZIP_MAGIC_HEADER) or backup_file.name.endswith(".gz"):
+            content = gzip.decompress(content)
+
         backup_dict: dict[str, Any] = orjson.loads(content)
         if not isinstance(backup_dict, dict):
             raise TypeError("Backup file is not a valid JSON object")
+    except (orjson.JSONDecodeError, OSError, ValueError) as error:
+        LOG.error(f"Failed to read backup file: {error}")
+        raise
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            console=CONSOLE,
-        ) as progress:
-            task = progress.add_task(
-                "[cyan]Restoring audio tags...", total=len(backup_dict)
-            )
-            processed = 0
-            for f_path_str, tags_dict in backup_dict.items():
-                f_path = Path(f_path_str)
-                if not f_path.exists():
+    count = 0
+    failed = 0
+    missing = 0
+    search_base_dir = target_directory or backup_file.parent
+
+    with create_progress() as progress:
+        task = progress.add_task(
+            "[cyan]Restoring audio tags...", total=len(backup_dict)
+        )
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = [
+                executor.submit(_restore_single_track, file_str, tags, search_base_dir)
+                for file_str, tags in backup_dict.items()
+            ]
+            for future in as_completed(futures):
+                success, is_missing = future.result()
+                if success:
+                    count += 1
+                elif is_missing:
                     missing += 1
                 else:
-                    try:
-                        info = read_track_metadata(f_path)
-                        if isinstance(tags_dict, dict):
-                            for k, v in tags_dict.items():
-                                if k in ("file_path", "file_name"):
-                                    continue
-                                if hasattr(info, k) and v is not None:
-                                    setattr(info, k, v)
-                            write_track_metadata(info)
-                            count += 1
-                    except (OSError, ValueError, KeyError, RuntimeError) as e:
-                        LOG.debug(f"Failed to restore {f_path}: {e}")
-                        failed += 1
-
-                processed += 1
+                    failed += 1
                 progress.advance(task)
-                if processed % 500 == 0:
-                    gc.collect()
 
-        gc.collect()
-        LOG.info(f"✅ Successfully restored {count} files")
-        if missing > 0:
-            LOG.warning(f"   ⚠️  {missing} files in backup are missing from disk")
-        if failed > 0:
-            LOG.warning(f"   ⚠️  {failed} files failed to restore")
-        return count
-    except (orjson.JSONDecodeError, OSError, ValueError, KeyError) as e:
-        LOG.error(f"Failed to read backup file: {e}")
-        raise
+    LOG.info(f"✅ Successfully restored {count} files")
+    if missing > 0:
+        LOG.warning(f"   ⚠️  {missing} files in backup are missing from disk")
+    if failed > 0:
+        LOG.warning(f"   ⚠️  {failed} files failed to restore")
+    return count

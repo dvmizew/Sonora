@@ -1,93 +1,162 @@
-import shutil
-import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
-from mutagen.flac import FLAC
-from mutagen.flac import error as FLACError
+import numpy as np
+import pyloudnorm
 
-from sonora.core.constants import METAFLAC_CMD
+from sonora.audio.bpm import load_audio
+from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG
 
 
+def calculate_track_replaygain(
+    file_path: Path, target_lufs: float = -18.0
+) -> tuple[float, float] | None:
+    """
+    Calculate ReplayGain for a single track.
+    Returns (gain_db, peak_amplitude) or None if measurement fails.
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    loaded = load_audio(file_path)
+    if loaded is None or len(loaded[0]) == 0 or loaded[1] <= 0:
+        return None
+
+    audio_data, sample_rate = loaded
+    try:
+        meter = pyloudnorm.Meter(sample_rate)
+        loudness = meter.integrated_loudness(audio_data)
+        gain_db = (
+            target_lufs - loudness
+            if not (np.isnan(loudness) or np.isinf(loudness))
+            else 0.0
+        )
+        peak_amp = float(np.max(np.abs(audio_data)))
+        return float(gain_db), float(peak_amp)
+    except (ValueError, RuntimeError) as error:
+        LOG.debug(f"pyloudnorm measurement failed for {file_path}: {error}")
+        return None
+
+
 def calculate_album_replaygain(
-    files: Sequence[Path], options: dict | None = None
+    files: Sequence[Path],
+    force: bool = False,
+    dry_run: bool = False,
+    target_lufs: float = -18.0,
 ) -> bool:
     """
-    Use metaflac to calculate both Track and Album ReplayGain for a list of FLAC files.
-    Skips if REPLAYGAIN_ALBUM_GAIN is already present.
-    Falls back to track-mode if audio properties (sample rate, channels, bit depth) are mixed.
-    Returns True if ReplayGain was calculated and added, False otherwise.
+    Calculate ReplayGain (Track and Album Mode) for all audio files.
+    Writes REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK,
+    REPLAYGAIN_ALBUM_GAIN, and REPLAYGAIN_ALBUM_PEAK tags.
     """
-    flac_files = [str(f) for f in files if f.exists() and f.suffix.lower() == ".flac"]
-    if not flac_files:
+    valid_files = [
+        file_path
+        for file_path in files
+        if file_path.exists() and file_path.suffix.lower() in SUPPORTED_EXTS
+    ]
+    if not valid_files:
         return False
 
-    if not shutil.which(METAFLAC_CMD):
-        LOG.warning(f"'{METAFLAC_CMD}' not found in PATH! ReplayGain disabled.")
-        return False
+    # 1. Check if ReplayGain is already calculated on all files
+    if not force:
+        already_tagged = True
+        for audio_path in valid_files:
+            try:
+                info = read_track_metadata(audio_path)
+                if (
+                    info.replaygain_track_gain is None
+                    or info.replaygain_album_gain is None
+                ):
+                    already_tagged = False
+                    break
+            except (OSError, ValueError, RuntimeError):
+                already_tagged = False
+                break
+        if already_tagged:
+            LOG.debug("Files already contain ReplayGain tags. Skipping.")
+            return False
 
-    options = options or {}
-    dry_run = options.get("dry_run", False)
+    LOG.info(f"🔊 Calculating ReplayGain for {len(valid_files)} track(s)...")
 
-    properties = set()
-    has_album_gain = False
+    track_results: list[tuple[Path, float, float, float, float]] = []
+    max_album_peak = 0.0
 
-    try:
-        for f in flac_files:
-            a = FLAC(f)
-            # Sample Rate, Channels, Bits must match for metaflac album mode
-            props = (a.info.sample_rate, a.info.channels, a.info.bits_per_sample)
-            properties.add(props)
-            if not has_album_gain and "REPLAYGAIN_ALBUM_GAIN" in a:
-                has_album_gain = True
-    except (FLACError, OSError, ValueError, KeyError) as e:
-        LOG.debug(f"Failed to read properties for ReplayGain: {e}")
-        return False
+    # 2. Compute individual track loudness
+    for audio_path in valid_files:
+        loaded = load_audio(audio_path)
+        if loaded is None or len(loaded[0]) == 0 or loaded[1] <= 0:
+            continue
+        audio_data, sample_rate = loaded
 
-    if has_album_gain:
-        LOG.debug("Album already has ReplayGain tags. Skipping.")
-        return False
+        try:
+            meter = pyloudnorm.Meter(sample_rate)
+            track_loudness = float(meter.integrated_loudness(audio_data))
+            duration = float(len(audio_data) / sample_rate)
+            track_peak = float(np.max(np.abs(audio_data)))
+            max_album_peak = max(max_album_peak, track_peak)
 
-    try:
-        is_uniform = len(properties) <= 1
-        if is_uniform:
-            LOG.info("🔊 Calculating ReplayGain (Album Mode)...")
-            if not dry_run:
-                cmd = [METAFLAC_CMD, "--add-replay-gain"] + flac_files
-                r = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=300, check=False
-                )
-                if r.returncode != 0:
-                    LOG.error(f"metaflac failed: {r.stderr}")
-                    return False
-            else:
-                LOG.info(
-                    f"[DRY-RUN] Would calculate ReplayGain (Album Mode) for {len(flac_files)} files"
-                )
-        else:
-            LOG.warning(
-                "⚠️  Mixed audio properties detected. Falling back to Track-only ReplayGain."
+            track_gain = (
+                target_lufs - track_loudness
+                if not (np.isnan(track_loudness) or np.isinf(track_loudness))
+                else 0.0
             )
-            any_success = False
-            for f in flac_files:
-                if not dry_run:
-                    cmd = [METAFLAC_CMD, "--add-replay-gain", f]
-                    r = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=60, check=False
-                    )
-                    if r.returncode != 0:
-                        LOG.error(f"metaflac failed for {f}: {r.stderr}")
-                    else:
-                        any_success = True
-                else:
-                    LOG.info(f"[DRY-RUN] Would calculate Track-only ReplayGain for {f}")
-                    any_success = True
-            return any_success
-        return True
-    except subprocess.TimeoutExpired:
-        LOG.error("metaflac timed out while calculating ReplayGain.")
+            track_results.append(
+                (audio_path, track_gain, track_peak, track_loudness, duration)
+            )
+        except (ValueError, RuntimeError) as error:
+            LOG.debug(f"Failed to measure loudness for {audio_path}: {error}")
+        finally:
+            del audio_data
+
+    if not track_results:
+        LOG.warning("Could not calculate loudness for any audio files.")
         return False
-    except (subprocess.SubprocessError, OSError) as e:
-        LOG.error(f"Failed to calculate ReplayGain: {e}")
-        return False
+
+    # 3. Compute album loudness via ITU-R BS.1770 duration-weighted linear energy integration
+    total_energy = sum(
+        (10.0 ** (loudness / 10.0)) * duration
+        for _, _, _, loudness, duration in track_results
+        if not (np.isnan(loudness) or np.isinf(loudness))
+    )
+    total_duration = sum(
+        duration
+        for _, _, _, loudness, duration in track_results
+        if not (np.isnan(loudness) or np.isinf(loudness))
+    )
+
+    if total_duration > 0 and total_energy > 0:
+        album_loudness = 10.0 * float(np.log10(total_energy / total_duration))
+        album_gain = (
+            target_lufs - album_loudness
+            if not (np.isnan(album_loudness) or np.isinf(album_loudness))
+            else float(np.mean([result[1] for result in track_results]))
+        )
+    else:
+        album_gain = float(np.mean([result[1] for result in track_results]))
+
+    # 4. Write ReplayGain metadata tags to each file
+    tagged_count = 0
+    for file_path, track_gain, track_peak, _, _ in track_results:
+        if dry_run:
+            LOG.info(
+                f"[DRY-RUN] Would tag {file_path.name}: Track Gain={track_gain:+.2f} dB, "
+                f"Album Gain={album_gain:+.2f} dB, Track Peak={track_peak:.6f}, Album Peak={max_album_peak:.6f}"
+            )
+            tagged_count += 1
+            continue
+
+        try:
+            info = read_track_metadata(file_path)
+            info.replaygain_track_gain = round(track_gain, 2)
+            info.replaygain_track_peak = round(track_peak, 6)
+            info.replaygain_album_gain = round(album_gain, 2)
+            info.replaygain_album_peak = round(max_album_peak, 6)
+            write_track_metadata(info)
+            tagged_count += 1
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"Failed to write ReplayGain tags to {file_path}: {error}")
+
+    LOG.info(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")
+    return tagged_count > 0

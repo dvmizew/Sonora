@@ -3,6 +3,15 @@ import threading
 from collections.abc import Sequence
 
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 from rich.theme import Theme
 
@@ -16,9 +25,9 @@ for logger_name in [
     "urllib3",
     "httpx",
 ]:
-    _l = logging.getLogger(logger_name)
-    _l.setLevel(logging.CRITICAL)
-    _l.propagate = False
+    external_logger = logging.getLogger(logger_name)
+    external_logger.setLevel(logging.CRITICAL)
+    external_logger.propagate = False
 
 _THEME = Theme(
     {"info": "cyan", "warning": "yellow", "error": "red", "success": "green bold"}
@@ -33,45 +42,45 @@ class SonoraLogger:
         self.verbose: bool = False
 
     def start_buffering(self) -> None:
-        self.local.buf = []
+        self.local.buffer = []
 
     def stop_buffering(self) -> None:
-        if hasattr(self.local, "buf"):
-            buf = self.local.buf
-            del self.local.buf
+        if hasattr(self.local, "buffer"):
+            messages = self.local.buffer
+            del self.local.buffer
             with _LOG_LOCK:
-                for msg in buf:
-                    CONSOLE.print(msg, highlight=False)
+                for message in messages:
+                    CONSOLE.print(message, highlight=False)
 
     def force_info(self, message: str) -> None:
         with _LOG_LOCK:
             CONSOLE.print(message, highlight=False)
 
-    def _log_msg(self, message: str) -> None:
-        if hasattr(self.local, "buf"):
-            self.local.buf.append(message)
+    def _log_message(self, message: str) -> None:
+        if hasattr(self.local, "buffer"):
+            self.local.buffer.append(message)
         else:
             with _LOG_LOCK:
                 CONSOLE.print(message, highlight=False)
 
     def info(self, message: str) -> None:
         if message.startswith(("   ∟", "✨", "📁", "🎧")):
-            self._log_msg(message)
+            self._log_message(message)
         else:
-            self._log_msg(f"[info]INFO:[/info] {message}")
+            self._log_message(f"[info]INFO:[/info] {message}")
 
     def success(self, message: str) -> None:
-        self._log_msg(f"[success]SUCCESS:[/success] {message}")
+        self._log_message(f"[success]SUCCESS:[/success] {message}")
 
     def warning(self, message: str) -> None:
-        self._log_msg(f"[warning]WARNING:[/warning] {message}")
+        self._log_message(f"[warning]WARNING:[/warning] {message}")
 
     def debug(self, message: str) -> None:
         if self.verbose:
-            self._log_msg(f"[dim]DEBUG:[/dim] {message}")
+            self._log_message(f"[dim]DEBUG:[/dim] {message}")
 
     def error(self, message: str) -> None:
-        self._log_msg(f"[error]ERROR:[/error] {message}")
+        self._log_message(f"[error]ERROR:[/error] {message}")
 
     def summary_table(
         self, title: str, rows: Sequence[tuple[str, str, str | None]]
@@ -79,13 +88,25 @@ class SonoraLogger:
         table = Table(title=title, show_header=True, header_style="bold magenta")
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
-        for metric, val, style in rows:
+        for metric, value, style in rows:
             if style:
-                table.add_row(metric, val, style=style)
+                table.add_row(metric, value, style=style)
             else:
-                table.add_row(metric, val)
-        with _LOG_LOCK:
-            CONSOLE.print("\n", table)
+                table.add_row(metric, value)
 
 
 LOG = SonoraLogger()
+
+
+def create_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("[dim]/[/dim]"),
+        TimeRemainingColumn(),
+        console=CONSOLE,
+    )

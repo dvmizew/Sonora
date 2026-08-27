@@ -8,47 +8,46 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 
 ## Features
 
-- **Metadata & Tagging**:
-  - AcoustID (Chromaprint) audio fingerprinting and MusicBrainz lookup.
-  - Secondary enrichment from Discogs (release date, label, catalog number, barcode), Last.fm (genres, listener stats), Deezer (ISRC, barcode, label, release date), and Genius (producer credits, featured artists, song descriptions).
-  - Synchronized and plain lyrics (`.lrc`) via `syncedlyrics` (Musixmatch, Lrclib, NetEase).
-  - Extended tags for Symfonium, Navidrome, and Plex (`ARTISTSORT`, `ALBUMARTISTSORT`, `RELEASETYPE`, `BARCODE`, `CATALOGNUMBER`, `LABEL`, `ORIGINALDATE`, `ISRC`).
-- **Cover Art Engine**:
-  - Multi-source fallback: MusicBrainz Cover Art Archive -> iTunes (up to 3000x3000px) -> Deezer (1000x1000px) -> TheAudioDB (`artist.jpg` and `banner.jpg`).
-  - Perceptual hashing (`pHash`) check via `imagehash` with EXIF transposition to prevent overwriting custom covers unless visually matched.
-- **Audio Engines**:
-  - Tempo calculation (STFT onset envelope autocorrelation via SciPy).
-  - ReplayGain 2.0 Album Mode (`metaflac`).
-  - 16kHz spectral cutoff detection (SciPy FFT spectrogram) to flag fake-lossless files.
-  - Bit-exact audio stream MD5 checksum verification (`flac -t`).
-- **Library Tools**:
-  - Library checker for corrupt FLACs, missing tags, bracket clutter, and missing lyrics.
-  - File renamer and folder structure standardizer (`NN - Title.ext` or `Disc-NN - Title.ext`).
-  - Single track organizer (moves 1-2 track releases to `Singles/` and deduplicates against albums).
-  - Streaming JSON tag backup and restore.
-  - SQLite disk caching (`~/.cache/sonora`) with 30-day TTL to minimize API requests.
+- **Metadata & Tagging**: Multi-service tag lookup with AcoustID audio fingerprinting and MusicBrainz matching.
+- **Audio Processing**: Calculates BPM and ReplayGain 2.0 (ITU-R BS.1770-4 / EBU R128) for tracks and albums.
+- **Spectral Analysis**: Detects fake lossless files (e.g. MP3 transcodes upscaled to FLAC) via FFT spectrogram cutoff checks.
+- **Artwork & Lyrics**: Downloads high-resolution cover art (up to 3000x3000px) and synchronized `.lrc` lyrics.
+- **Library Tools**: Validates audio file integrity, standardizes file names (`NN - Title.ext`), organizes singles, and backs up tags to JSON / `.json.gz`.
+
+### Supported Metadata Services
+
+| Service | Data Retrieved |
+| :--- | :--- |
+| **MusicBrainz** | Track & release metadata, MBIDs, release groups, composers, lyricists, producers |
+| **Discogs** | Record labels, catalog numbers, release year, barcodes, media formats |
+| **Apple Music / iTunes** | Cover art (up to 3000px), primary genre, parental advisory |
+| **Deezer** | ISRC, BPM, track gain, cover art, featured artists, producers |
+| **Genius** | Song descriptions, featured artists, producers |
+| **Last.fm** | Top tags (genres/moods), listener counts, play counts |
+| **TheAudioDB** | Artist avatars (`artist.jpg`), banners (`banner.jpg`), music video URLs |
+| **AcoustID** | Fingerprint-based MBID lookup using Chromaprint (`fpcalc`) |
+| **Syncedlyrics** | Synced `.lrc` and plain lyrics from Musixmatch, Lrclib, and NetEase |
+| **Cover Art Archive** | Front cover art for MusicBrainz releases |
 
 ---
 
 ## Requirements
 
-- **Python**: 3.10 or higher
-- **System Audio Tools**:
-  - `flac` (includes `metaflac` for ReplayGain 2.0 and checksum validation)
-  - `ffmpeg` (audio decoding and metadata extraction)
-  - `chromaprint` (provides `fpcalc` for AcoustID audio fingerprinting)
-
-### System Package Installation
+- Python 3.10+
+- System tools: `ffmpeg`, `flac`, and `chromaprint` (`fpcalc`)
 
 ```bash
 # Arch Linux
-sudo pacman -S python ffmpeg flac chromaprint
+sudo pacman -S ffmpeg flac chromaprint
 
 # Debian / Ubuntu
-sudo apt install python3 ffmpeg flac chromaprint
+sudo apt install ffmpeg flac chromaprint
+
+# Fedora
+sudo dnf install ffmpeg flac chromaprint
 
 # macOS
-brew install python ffmpeg flac chromaprint
+brew install ffmpeg flac chromaprint
 ```
 
 ---
@@ -65,120 +64,133 @@ pip install -e .
 
 ## Configuration
 
-Optional API keys can be set via environment variables or a `.env` file in your working directory:
+Optional API keys can be provided via environment variables or a `.env` file:
 
 ```env
 LASTFM_API_KEY=your_lastfm_key
 ACOUSTID_API_KEY=your_acoustid_key
-DISCOGS_USER_TOKEN=your_discogs_token
+DISCOGS_TOKEN=your_discogs_token
 GENIUS_API_TOKEN=your_genius_token
 ```
 
-MusicBrainz, Cover Art Archive, iTunes, and Deezer lookups work automatically without API keys.
+MusicBrainz, Cover Art Archive, iTunes, and Deezer work without an API key.
 
 ---
 
-## Usage
-
-### Global Options
-
-- `-v, --version`: Show program version.
-- `--dry-run`: Simulate operations without modifying files or directories.
-
----
+## Commands
 
 ### `sonora tag`
-Tag an album or directory automatically with metadata, artwork, lyrics, BPM, and ReplayGain:
+
+Tags audio files with metadata, cover art, lyrics, BPM, and ReplayGain.
 
 ```bash
+# Tag a folder
 sonora tag /path/to/music
+
+# Dry run (no files modified)
 sonora tag /path/to/music --dry-run
-sonora tag /path/to/music --force
-sonora tag /path/to/music -t 8
+
+# Run with 8 threads and skip cache
+sonora tag /path/to/music -t 8 --force
+
+# Save report to JSON
 sonora tag /path/to/music --json tag_report.json
 ```
 
 **Options:**
-- `path`: Directory containing audio files to tag (required).
-- `-t, --threads N`: Number of parallel worker threads (default: `4`).
-- `--force`: Force retagging by ignoring disk cache and existing MBIDs.
-- `--no-bpm`: Disable BPM calculation.
-- `--no-replaygain`: Disable ReplayGain 2.0 calculation.
-- `--no-lyrics`: Disable `.lrc` lyrics fetching.
-- `--no-art`: Disable cover art downloading.
-- `--json PATH`: Output path to save JSON report.
-- `--lastfm-key KEY`: Last.fm API key (overrides `LASTFM_API_KEY` env).
-- `--acoustid-key KEY`: AcoustID API key (overrides `ACOUSTID_API_KEY` env).
-- `--discogs-token TOKEN`: Discogs personal token (overrides `DISCOGS_TOKEN` env).
-- `--genius-token TOKEN`: Genius API token (overrides `GENIUS_API_TOKEN` env).
+- `path`: Directory to tag (required).
+- `-t, --threads N`: Number of parallel threads (default: `4`).
+- `--force`: Ignore disk cache and retag from scratch.
+- `--dry-run`: Preview actions without modifying files.
+- `--no-bpm`: Skip BPM calculation.
+- `--no-replaygain`: Skip ReplayGain calculation.
+- `--no-lyrics`: Skip `.lrc` lyrics download.
+- `--no-art`: Skip cover art download.
+- `--json PATH`: Save report to a JSON file.
+- `--lastfm-key KEY`: Last.fm API key.
+- `--acoustid-key KEY`: AcoustID API key.
+- `--discogs-token TOKEN`: Discogs user token.
+- `--genius-token TOKEN`: Genius API token.
 
 ---
 
 ### `sonora check`
-Check music library for FLAC integrity, bracket corruption, missing tags, and fake-lossless audio:
+
+Checks audio files for corruption, missing tags, bracket clutter in titles, and fake lossless audio.
 
 ```bash
+# Basic library check
 sonora check /path/to/library
-sonora check /path/to/library -t 16
-sonora check /path/to/library --spectral
-sonora check /path/to/library --json check_report.json
+
+# Check with 16 threads and run spectral analysis
+sonora check /path/to/library -t 16 --spectral
+
+# Export issues to JSON
+sonora check /path/to/library --json report.json
 ```
 
 **Options:**
-- `path`: Directory containing music library to check (required).
-- `-t, --threads N`: Number of parallel worker threads (default: `8`).
-- `--spectral`: Enable deep spectral cutoff analysis to flag fake-lossless audio (MP3 upscaled to FLAC).
-- `--json PATH`: Output path to save check JSON report.
+- `path`: Directory to check (required).
+- `-t, --threads N`: Number of parallel threads (default: `8`).
+- `--spectral`: Check for fake lossless files via FFT spectral cutoff analysis.
+- `--json PATH`: Save check results to a JSON file.
 
 ---
 
 ### `sonora rename`
-Standardize file names (`NN - Artist - Title.ext` or `Disc-NN - Title.ext`), rename album directories, and synchronize `.lrc` metadata headers:
+
+Renames audio files to `NN - Title.ext` (or `Disc-NN - Title.ext` for multi-disc albums) and updates `.lrc` metadata headers.
 
 ```bash
 sonora rename /path/to/album
-sonora rename /path/to/library --dry-run
+sonora rename /path/to/album --dry-run
 ```
 
 **Options:**
-- `path`: Directory containing audio files to rename (required).
+- `path`: Directory to rename (required).
+- `--dry-run`: Preview new file names without renaming.
 
 ---
 
 ### `sonora organize`
-Organize standalone single releases into `Singles/Primary Artist/`, deduplicate against full albums, and clean empty directories:
+
+Moves standalone 1–2 track single releases into `Singles/Artist/` and removes duplicates already present in full albums.
 
 ```bash
 sonora organize /path/to/music
 sonora organize /path/to/music --target-singles /path/to/Singles
+sonora organize /path/to/music --dry-run
 ```
 
 **Options:**
-- `path`: Source music directory (required).
-- `--target-singles PATH`: Destination directory for single tracks (default: `<path>/Singles`).
+- `path`: Source directory (required).
+- `--target-singles PATH`: Destination for singles (default: `<path>/Singles`).
+- `--dry-run`: Preview file movements.
 
 ---
 
 ### `sonora backup`
-Create a high-speed, streaming JSON backup of audio tags across your library:
+
+Backs up all audio tags in a library to a JSON or compressed `.json.gz` file.
 
 ```bash
 sonora backup /path/to/library
-sonora backup /path/to/library --out my_backup.json
+sonora backup /path/to/library --out my_backup.json.gz
 ```
 
 **Options:**
 - `path`: Music directory to back up (required).
-- `--out PATH`: Output JSON backup file path (default: `backup_YYYY-MM-DD_HH-MM-SS.json`).
+- `--out PATH`: Output path (`.json` or `.json.gz`).
 
 ---
 
 ### `sonora restore`
-Restore audio tags from a streaming JSON backup file:
+
+Restores audio tags from a JSON or `.json.gz` backup file.
 
 ```bash
-sonora restore my_backup.json
+sonora restore my_backup.json.gz
 ```
 
 **Options:**
-- `backup_file`: Path to JSON backup file (required).
+- `backup_file`: Path to the backup file (required).

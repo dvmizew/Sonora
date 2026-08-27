@@ -6,13 +6,19 @@ from typing import Any
 import syncedlyrics
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.utils import RateLimiter, normalize_str
+from sonora.core.constants import RATE_LIMIT_LYRICS
+from sonora.core.utils import (
+    RateLimiter,
+    clean_title,
+    get_primary_artist,
+    normalize_str,
+)
 
 logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
 for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
     logging.getLogger(_provider).setLevel(logging.CRITICAL)
 
-_LYRICS_LIMITER = RateLimiter(interval_seconds=1.0)
+_LYRICS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LYRICS)
 
 
 def clean_lyrics_text(text: str | None) -> str | None:
@@ -38,25 +44,28 @@ def clean_lyrics_text(text: str | None) -> str | None:
         r"^Synced by \S+$",
     ]
 
-    is_timestamped = lambda s: bool(re.match(r"^(?:\[|<\d{1,2}:\d{2})", s))
+    def is_timestamped(line_str: str) -> bool:
+        return bool(re.match(r"^(?:\[|<\d{1,2}:\d{2})", line_str))
 
     for line in lines:
-        s_line = line.strip()
-        if not s_line:
+        stripped_line = line.strip()
+        if not stripped_line:
             if cleaned and cleaned[-1] != "":
                 cleaned.append("")
             continue
 
-        if is_timestamped(s_line):
+        if is_timestamped(stripped_line):
             cleaned.append(line)
             continue
 
-        is_junk = any(re.match(p, s_line, re.IGNORECASE) for p in junk_patterns)
+        is_junk = any(
+            re.match(pattern, stripped_line, re.IGNORECASE) for pattern in junk_patterns
+        )
         if (
             not is_junk
-            and s_line.startswith("[")
-            and s_line.endswith("]")
-            and not is_timestamped(s_line)
+            and stripped_line.startswith("[")
+            and stripped_line.endswith("]")
+            and not is_timestamped(stripped_line)
         ):
             # Check for non-timestamped brackets like [Verse 1], [Chorus] if plain text
             pass  # Preserve section headers for plain text readability
@@ -133,9 +142,9 @@ def _query_syncedlyrics(
         kwargs["providers"] = providers
     if lang:
         kwargs["lang"] = lang
-    res = syncedlyrics.search(query_str, **kwargs)
-    if isinstance(res, str) and res.strip():
-        return clean_lyrics_text(res.strip())
+    result = syncedlyrics.search(query_str, **kwargs)
+    if isinstance(result, str) and result.strip():
+        return clean_lyrics_text(result.strip())
     return None
 
 
@@ -167,40 +176,37 @@ def fetch_synced_lyrics(
     search_args = (plain_only, synced_only, enhanced, providers, lang)
 
     last_exception: Exception | None = None
-    lrc = None
+    lyrics_content = None
 
     # ATTEMPT 1: ISRC LOOKUP
     if isrc:
         try:
-            lrc = _query_syncedlyrics(isrc, *search_args)
-        except (OSError, ValueError, KeyError, RuntimeError) as e:
-            last_exception = e
+            lyrics_content = _query_syncedlyrics(isrc, *search_args)
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
+            last_exception = error
 
     # ATTEMPT 2: Standard/Surgical Query
-    if not lrc:
+    if not lyrics_content:
         # Standard query format (matches unit tests)
         default_query = f"{artist.lower()} - {title.lower()}".strip()
         try:
-            lrc = _query_syncedlyrics(default_query, *search_args)
-        except (OSError, ValueError, KeyError, RuntimeError) as e:
-            last_exception = e
+            lyrics_content = _query_syncedlyrics(default_query, *search_args)
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
+            last_exception = error
 
     # ATTEMPT 3: Surgical Clean Title Fallback
-    if not lrc and ("(" in title or "[" in title or "feat" in title.lower()):
-        clean_title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", title).strip()
-        clean_title = re.sub(
-            r"\s+(?:fea?t|ft)\.?\s+.*$", "", clean_title, flags=re.IGNORECASE
-        ).strip()
-        primary_artist = artist.split(",")[0].split("&")[0].split(";")[0].strip()
-        query = f"{clean_title} {primary_artist}".strip()
+    if not lyrics_content and ("(" in title or "[" in title or "feat" in title.lower()):
+        cleaned_track_title = clean_title(title)
+        primary_artist = get_primary_artist(artist)
+        query = f"{cleaned_track_title} {primary_artist}".strip()
         try:
-            lrc = _query_syncedlyrics(query, *search_args)
-        except (OSError, ValueError, KeyError, RuntimeError) as e:
-            last_exception = e
+            lyrics_content = _query_syncedlyrics(query, *search_args)
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
+            last_exception = error
 
-    if lrc:
-        set_cached_api(cache_key, lrc)
-        return lrc
+    if lyrics_content:
+        set_cached_api(cache_key, lyrics_content)
+        return lyrics_content
 
     if last_exception:
         raise RuntimeError(
@@ -222,28 +228,30 @@ def process_track_lyrics(
     Fetches, cleans, and saves track lyrics according to quality hierarchy.
     Returns (lyrics_text, quality_tag) or (None, None).
     """
-    cur_q = detect_lrc_quality(file_path)
-    if not force and cur_q >= 3:
+    current_quality = detect_lrc_quality(file_path)
+    if not force and current_quality >= 3:
         return None, None
 
-    lrc_text = fetch_synced_lyrics(artist, title, enhanced=True, isrc=isrc)
-    if not lrc_text:
+    lyrics_text = fetch_synced_lyrics(artist, title, enhanced=True, isrc=isrc)
+    if not lyrics_text:
         return None, None
 
-    new_q = get_lyrics_quality(lrc_text)
-    if not force and cur_q > 0 and new_q <= cur_q:
+    new_quality = get_lyrics_quality(lyrics_text)
+    if not force and current_quality > 0 and new_quality <= current_quality:
         return None, None
 
     lrc_path = file_path.with_suffix(".lrc")
     if not dry_run:
-        lrc_path.write_text(lrc_text, encoding="utf-8")
-        if new_q == 3:
-            synced_copy = re.sub(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", "", lrc_text)
+        lrc_path.write_text(lyrics_text, encoding="utf-8")
+        if new_quality == 3:
+            synced_copy = re.sub(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", "", lyrics_text)
             synced_path = file_path.with_suffix(".synced.lrc")
             synced_path.write_text(synced_copy, encoding="utf-8")
         txt_path = file_path.with_suffix(".txt")
         if txt_path.exists() and lrc_path != txt_path:
             txt_path.unlink(missing_ok=True)
 
-    tag_type = "enhanced" if new_q == 3 else ("synced" if new_q == 2 else "plain")
-    return lrc_text, tag_type
+    tag_type = (
+        "enhanced" if new_quality == 3 else ("synced" if new_quality == 2 else "plain")
+    )
+    return lyrics_text, tag_type

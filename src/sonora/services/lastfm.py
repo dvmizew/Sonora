@@ -1,10 +1,11 @@
 import httpx
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.constants import RATE_LIMIT_LASTFM
 from sonora.core.http import SESSION
 from sonora.core.utils import RateLimiter, is_valid_uuid, normalize_str
 
-_LASTFM_LIMITER = RateLimiter(interval_seconds=0.25)
+_LASTFM_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LASTFM)
 
 
 def fetch_lastfm_tags(
@@ -43,31 +44,33 @@ def fetch_lastfm_tags(
 
     try:
         url = "https://ws.audioscrobbler.com/2.0/"
-        resp = SESSION.get(url, params=params, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
+        response = SESSION.get(url, params=params, timeout=5)
+        response.raise_for_status()
+        data = response.json()
         tags = data.get("toptags", {}).get("tag", [])
-        res = [
-            t["name"].title()
-            for t in tags
-            if isinstance(t, dict) and t.get("name") and isinstance(t["name"], str)
+        tag_names = [
+            tag["name"].title()
+            for tag in tags
+            if isinstance(tag, dict)
+            and tag.get("name")
+            and isinstance(tag["name"], str)
         ]
-        if not res and mbid and artist and title and not _retried:
+        if not tag_names and mbid and artist and title and not _retried:
             # Fallback to artist+title if MBID returned 0 tags
             return fetch_lastfm_tags(
                 artist, title, api_key=api_key, mbid=None, _retried=True
             )
-        final_res = res[:5]
-        set_cached_api(cache_key, final_res)
-        return final_res
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
+        final_tags = tag_names[:5]
+        set_cached_api(cache_key, final_tags)
+        return final_tags
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
         if mbid and artist and title and not _retried:
             return fetch_lastfm_tags(
                 artist, title, api_key=api_key, mbid=None, _retried=True
             )
         raise RuntimeError(
-            f"Last.fm tag fetch failed for {artist} - {title}: {e}"
-        ) from e
+            f"Last.fm tag fetch failed for {artist} - {title}: {error}"
+        ) from error
 
 
 def fetch_lastfm_track_stats(
@@ -94,20 +97,22 @@ def fetch_lastfm_track_stats(
     }
     try:
         url = "https://ws.audioscrobbler.com/2.0/"
-        resp = SESSION.get(url, params=params, timeout=5)
-        resp.raise_for_status()
-        track = resp.json().get("track", {})
+        response = SESSION.get(url, params=params, timeout=5)
+        response.raise_for_status()
+        track = response.json().get("track", {})
         listeners_str = track.get("listeners")
-        play_str = track.get("playcount")
-        res = {
+        playcount_str = track.get("playcount")
+        stats_result = {
             "listeners": int(listeners_str)
             if listeners_str and str(listeners_str).isdigit()
             else 0,
-            "playcount": int(play_str) if play_str and str(play_str).isdigit() else 0,
+            "playcount": int(playcount_str)
+            if playcount_str and str(playcount_str).isdigit()
+            else 0,
         }
-        set_cached_api(cache_key, res)
-        return res
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as e:
+        set_cached_api(cache_key, stats_result)
+        return stats_result
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
         raise RuntimeError(
-            f"Last.fm stats fetch failed for {artist} - {title}: {e}"
-        ) from e
+            f"Last.fm stats fetch failed for {artist} - {title}: {error}"
+        ) from error
