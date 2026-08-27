@@ -7,6 +7,7 @@ import diskcache
 
 from sonora.core.logger import LOG
 
+DEFAULT_API_TTL_SECONDS: int = 2419200  # 28 days
 _CACHE_DIR = Path.home() / ".cache" / "sonora"
 _CACHE_INSTANCE: Any = None
 _CACHE_LOCK = threading.Lock()
@@ -63,8 +64,10 @@ def get_cached_api(key: str) -> Any | None:
     return None
 
 
-def set_cached_api(key: str, value: Any, expire_seconds: int = 604800) -> None:
-    """Store value into disk cache with expiration (default 7 days)."""
+def set_cached_api(
+    key: str, value: Any, expire_seconds: int = DEFAULT_API_TTL_SECONDS
+) -> None:
+    """Store value into disk cache with expiration (default 28 days)."""
     if value is None:
         return
     cache = get_cache()

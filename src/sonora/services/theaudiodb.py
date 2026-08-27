@@ -60,7 +60,7 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
 
                 result = (thumbnail_bytes, banner_bytes)
                 if thumbnail_bytes or banner_bytes:
-                    set_cached_api(cache_key, result, expire_seconds=2592000)  # 30 days
+                    set_cached_api(cache_key, result)
                 return result
     except (OSError, ValueError, KeyError) as error:
         LOG.debug(f"TheAudioDB fetch_artist_images failed for {artist_name}: {error}")

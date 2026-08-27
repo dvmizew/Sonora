@@ -51,7 +51,7 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
         releases: list[dict[str, object]] = (
             result.get("release-list", []) if isinstance(result, dict) else []
         )
-        set_cached_api(cache_key, releases, expire_seconds=2419200)  # 30 days
+        set_cached_api(cache_key, releases)
         return releases
     except (
         MusicBrainzError,

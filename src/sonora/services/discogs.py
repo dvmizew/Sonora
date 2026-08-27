@@ -185,7 +185,7 @@ def fetch_discogs_release_details(
             "composer": ", ".join(composers) if composers else None,
             "track_credits": track_credits,
         }
-        set_cached_api(cache_key, release_result, expire_seconds=2419200)  # 30 days
+        set_cached_api(cache_key, release_result)
         return release_result
     except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
         LOG.debug(f"Discogs release fetch failed for ID {release_id}: {error}")
@@ -243,7 +243,7 @@ def search_discogs_release(
         # Enrich with full release details
         full_details = fetch_discogs_release_details(release_id, user_token)
         if full_details:
-            set_cached_api(cache_key, full_details, expire_seconds=2419200)
+            set_cached_api(cache_key, full_details)
             return full_details
 
         # Fallback to search result fields if full fetch failed
@@ -279,7 +279,7 @@ def search_discogs_release(
             "composer": None,
             "track_credits": {},
         }
-        set_cached_api(cache_key, release_result, expire_seconds=2419200)
+        set_cached_api(cache_key, release_result)
         return release_result
     except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
         LOG.debug(f"Discogs search failed for {artist} - {album}: {error}")
