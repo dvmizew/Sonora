@@ -23,6 +23,7 @@ from music_metadata_filter.functions import (
     replace_nbsp,
     youtube,
 )
+from pathvalidate import sanitize_filename
 from rapidfuzz import fuzz
 
 from sonora.core.cache import get_cached_api, set_cached_api
@@ -519,19 +520,16 @@ def normalize_genre(genre_value: str | None) -> str | None:
 
 def sanitize_name(name: str | None) -> str:
     """
-    Clean string for safe filesystem paths.
-    Fixes mojibake via ftfy, replaces / and \\ with _, strips invalid Windows/Linux bad chars (<>:"|?*),
+    Clean string for safe cross-platform filesystem paths.
+    Replaces / and \\ with _, strips invalid OS characters, handles Windows reserved device names,
     and strips trailing dots/whitespace.
     """
     if not name:
         return "Unknown"
-    sanitized_text = ftfy.fix_text(str(name))
-    sanitized_text = sanitized_text.replace("/", "_").replace("\\", "_")
-    bad_chars = '<>:"|?*'
-    for char in bad_chars:
-        sanitized_text = sanitized_text.replace(char, "")
-    sanitized_text = re.sub(r"\s+", " ", sanitized_text).strip().rstrip(".")
-    return sanitized_text or "Unknown"
+    fixed_text = ftfy.fix_text(str(name)).replace("/", "_").replace("\\", "_")
+    sanitized = sanitize_filename(fixed_text, replacement_text="")
+    sanitized = re.sub(r"\s+", " ", sanitized).strip().rstrip(".")
+    return sanitized or "Unknown"
 
 
 class RateLimiter:

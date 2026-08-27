@@ -209,7 +209,7 @@ def rename_album_folder(
         return folder_path
 
     folder_now = folder_path.name
-    is_in_singles = "singles" in str(folder_path).lower().replace("\\", "/").split("/")
+    is_in_singles = "singles" in (p.lower() for p in folder_path.parts)
 
     expected_name = sanitize_name(f"{artist} - {album}")
 

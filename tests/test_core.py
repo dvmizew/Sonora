@@ -42,6 +42,8 @@ class TestCoreUtils(unittest.TestCase):
 
     def test_sanitize_name_complex_edge_cases(self):
         self.assertEqual(sanitize_name("Artist / Title <HQ>:"), "Artist _ Title HQ")
+        self.assertEqual(sanitize_name("CON"), "CON_")
+        self.assertEqual(sanitize_name("NUL"), "NUL_")
 
     def test_is_valid_uuid(self):
         self.assertTrue(is_valid_uuid("c8b03190-306c-4125-9b32-3f9d86d60a12"))
