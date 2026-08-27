@@ -277,7 +277,7 @@ def check_library(
     folder_path: Path,
     output_json: Path | None = None,
     check_spectral: bool = False,
-    max_workers: int = 8,
+    max_threads: int = 8,
 ) -> CheckReport:
     if not folder_path.exists():
         raise FileNotFoundError(f"Directory not found: {folder_path}")
@@ -295,7 +295,7 @@ def check_library(
         lambda: defaultdict(list)
     )
 
-    executor = ThreadPoolExecutor(max_workers=max_workers)
+    executor = ThreadPoolExecutor(max_workers=max_threads)
     try:
         future_to_path = {
             executor.submit(_check_single_file, path, check_spectral): path

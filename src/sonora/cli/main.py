@@ -1,8 +1,3 @@
-"""
-Sonora Command-Line Interface.
-Declarative CLI powered by Cyclopts and Rich.
-"""
-
 import datetime
 import os
 import socket
@@ -114,11 +109,11 @@ def tag(
             help="Genius API token for song descriptions",
         ),
     ] = None,
-    worker_threads: Annotated[
+    threads: Annotated[
         int,
         Parameter(
-            name=["-w", "--workers", "-t", "--threads"],
-            help="Number of parallel worker threads",
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
         ),
     ] = 4,
     dry_run: Annotated[
@@ -139,13 +134,17 @@ def tag(
 
     resolved_lastfm_key = lastfm_api_key or os.environ.get("LASTFM_API_KEY")
     resolved_acoustid_key = acoustid_api_key or os.environ.get("ACOUSTID_API_KEY")
-    resolved_discogs_token = discogs_user_token or os.environ.get("DISCOGS_TOKEN")
+    resolved_discogs_token = (
+        discogs_user_token
+        or os.environ.get("DISCOGS_TOKEN")
+        or os.environ.get("DISCOGS_USER_TOKEN")
+    )
     resolved_genius_token = genius_api_token or os.environ.get("GENIUS_API_TOKEN")
 
     LOG.info(f"Tagging album directory: [bold]{path}[/bold]")
     tagged_tracks = tag_album_folder(
         path,
-        max_workers=worker_threads,
+        max_threads=threads,
         fetch_bpm=fetch_bpm,
         fetch_replaygain=fetch_replaygain,
         fetch_lyrics=fetch_lyrics,
@@ -219,7 +218,7 @@ def tag(
             "execution": {
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "target_path": str(path.resolve()),
-                "workers_used": worker_threads,
+                "threads_used": threads,
             },
             "statistics": {
                 "total_tracks": total_tracks,
@@ -270,11 +269,11 @@ def check(
             help="Enable deep spectral cutoff analysis for fake lossless detection (slow)",
         ),
     ] = False,
-    worker_threads: Annotated[
+    threads: Annotated[
         int,
         Parameter(
-            name=["-w", "--workers", "-t", "--threads"],
-            help="Number of parallel worker threads",
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
         ),
     ] = 8,
 ) -> int:
@@ -286,7 +285,7 @@ def check(
         path,
         output_json=json_report,
         check_spectral=spectral_analysis,
-        max_workers=worker_threads,
+        max_threads=threads,
     )
     LOG.success(
         f"Check completed: {check_report.total_files} files scanned, {len(check_report.issues)} issues identified."

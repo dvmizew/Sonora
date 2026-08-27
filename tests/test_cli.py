@@ -34,7 +34,7 @@ class TestCLIInterface(unittest.TestCase):
     @patch("sonora.cli.main.tag_album_folder")
     def test_handle_tag_subcommand(self, mock_tag_album_folder):
         mock_tag_album_folder.return_value = [TrackInfo(file_path=Path("dummy.flac"))]
-        exit_code = main(["tag", str(self.temporary_path), "-w", "2"])
+        exit_code = main(["tag", str(self.temporary_path), "-t", "2"])
         self.assertEqual(exit_code, 0)
         mock_tag_album_folder.assert_called_once()
 

@@ -572,7 +572,7 @@ def process_single_track(
 
 def tag_album_folder(
     folder_path: Path,
-    max_workers: int = 4,
+    max_threads: int = 4,
     fetch_bpm: bool = True,
     fetch_replaygain: bool = True,
     fetch_lyrics: bool = True,
@@ -600,7 +600,7 @@ def tag_album_folder(
         for subdirectory in subdirectories:
             sub_results = tag_album_folder(
                 subdirectory,
-                max_workers=max_workers,
+                max_threads=max_threads,
                 fetch_bpm=fetch_bpm,
                 fetch_replaygain=fetch_replaygain,
                 fetch_lyrics=fetch_lyrics,
@@ -646,7 +646,7 @@ def tag_album_folder(
 
     results: list[TrackInfo] = []
 
-    executor = ThreadPoolExecutor(max_workers=max_workers)
+    executor = ThreadPoolExecutor(max_workers=max_threads)
     try:
         future_to_file = {
             executor.submit(

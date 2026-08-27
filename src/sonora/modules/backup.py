@@ -56,7 +56,7 @@ def _restore_single_track(
 
 
 def backup_library_tags(
-    directory: Path, output_file: Path | None = None, max_workers: int = 4
+    directory: Path, output_file: Path | None = None, max_threads: int = 4
 ) -> Path:
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")
@@ -75,7 +75,7 @@ def backup_library_tags(
         return output_path
 
     LOG.info(
-        f"🔄 Creating full backup for {len(audio_files)} files (workers={max_workers})..."
+        f"🔄 Creating full backup for {len(audio_files)} files (threads={max_threads})..."
     )
     backup_data: dict[str, Any] = {}
     failed = 0
@@ -84,7 +84,7 @@ def backup_library_tags(
         task = progress.add_task(
             "[cyan]Backing up audio tags...", total=len(audio_files)
         )
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
             futures = [
                 executor.submit(_read_track_for_backup, file_path)
                 for file_path in audio_files
@@ -123,7 +123,7 @@ def backup_library_tags(
 def restore_library_tags(
     backup_file: Path,
     target_directory: Path | None = None,
-    max_workers: int = 4,
+    max_threads: int = 4,
 ) -> int:
     """
     Restore audio metadata tags from a JSON or GZipped JSON backup file.
@@ -133,7 +133,7 @@ def restore_library_tags(
         raise FileNotFoundError(f"Backup file not found: {backup_file}")
 
     LOG.info(
-        f"🔄 Starting tag restoration from {backup_file} (workers={max_workers})..."
+        f"🔄 Starting tag restoration from {backup_file} (threads={max_threads})..."
     )
     try:
         content = backup_file.read_bytes()
@@ -156,7 +156,7 @@ def restore_library_tags(
         task = progress.add_task(
             "[cyan]Restoring audio tags...", total=len(backup_dict)
         )
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
             futures = [
                 executor.submit(_restore_single_track, file_str, tags, search_base_dir)
                 for file_str, tags in backup_dict.items()

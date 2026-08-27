@@ -279,7 +279,7 @@ class TestCoreModules(unittest.TestCase):
             TrackInfo(file_path=audio_file_2, artist="Artist", title="T2"),
         ]
 
-        results = tag_album_folder(album_dir, max_workers=2)
+        results = tag_album_folder(album_dir, max_threads=2)
         self.assertEqual(len(results), 2)
 
     def test_check_file_blacklisted_genre(self):
