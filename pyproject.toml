@@ -46,6 +46,7 @@ dependencies = [
     "imagehash>=4.3.0",
     "pyloudnorm>=0.2.0",
     "pathvalidate>=3.2.0",
+    "cyclopts>=4.0.0",
 ]
 
 [project.optional-dependencies]

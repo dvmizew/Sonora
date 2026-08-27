@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
 
-from sonora.cli.main import build_parser, main
+from sonora.cli.main import app, main
 from sonora.core.models import CheckReport, TrackInfo
 
 
@@ -24,9 +24,8 @@ class TestCLIInterface(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
-    def test_build_parser_version(self):
-        parser = build_parser()
-        self.assertEqual(parser.prog, "sonora")
+    def test_app_configuration(self):
+        self.assertIn("sonora", app.name)
 
     def test_main_no_args_returns_zero(self):
         exit_code = main([])
