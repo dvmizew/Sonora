@@ -80,7 +80,7 @@ def calculate_album_replaygain(
 
     LOG.info(f"🔊 Calculating ReplayGain for {len(valid_files)} track(s)...")
 
-    track_results: list[tuple[Path, float, float, np.ndarray, int]] = []
+    track_results: list[tuple[Path, float, float, float, float]] = []
     max_album_peak = 0.0
 
     # 2. Compute individual track loudness
@@ -92,49 +92,47 @@ def calculate_album_replaygain(
 
         try:
             meter = pyloudnorm.Meter(sample_rate)
-            track_loudness = meter.integrated_loudness(audio_data)
+            track_loudness = float(meter.integrated_loudness(audio_data))
+            duration = float(len(audio_data) / sample_rate)
+            track_peak = float(np.max(np.abs(audio_data)))
+            max_album_peak = max(max_album_peak, track_peak)
+
             track_gain = (
                 target_lufs - track_loudness
                 if not (np.isnan(track_loudness) or np.isinf(track_loudness))
                 else 0.0
             )
-            track_peak = float(np.max(np.abs(audio_data)))
-            max_album_peak = max(max_album_peak, track_peak)
             track_results.append(
-                (audio_path, track_gain, track_peak, audio_data, sample_rate)
+                (audio_path, track_gain, track_peak, track_loudness, duration)
             )
         except (ValueError, RuntimeError) as error:
             LOG.debug(f"Failed to measure loudness for {audio_path}: {error}")
+        finally:
+            del audio_data
 
     if not track_results:
         LOG.warning("Could not calculate loudness for any audio files.")
         return False
 
-    # 3. Compute album loudness across all tracks
-    sample_rates = {result[4] for result in track_results}
-    if len(sample_rates) == 1:
-        common_sample_rate = track_results[0][4]
-        aligned_arrays = []
-        for _, _, _, audio_data, _ in track_results:
-            if audio_data.ndim == 1:
-                aligned_arrays.append(np.column_stack([audio_data, audio_data]))
-            elif audio_data.shape[1] == 1:
-                aligned_arrays.append(
-                    np.column_stack([audio_data[:, 0], audio_data[:, 0]])
-                )
-            else:
-                aligned_arrays.append(audio_data)
-        try:
-            concatenated = np.concatenate(aligned_arrays, axis=0)
-            album_meter = pyloudnorm.Meter(common_sample_rate)
-            album_loudness = album_meter.integrated_loudness(concatenated)
-            album_gain = (
-                target_lufs - album_loudness
-                if not (np.isnan(album_loudness) or np.isinf(album_loudness))
-                else float(np.mean([result[1] for result in track_results]))
-            )
-        except (ValueError, RuntimeError):
-            album_gain = float(np.mean([result[1] for result in track_results]))
+    # 3. Compute album loudness via ITU-R BS.1770 duration-weighted linear energy integration
+    total_energy = sum(
+        (10.0 ** (loudness / 10.0)) * duration
+        for _, _, _, loudness, duration in track_results
+        if not (np.isnan(loudness) or np.isinf(loudness))
+    )
+    total_duration = sum(
+        duration
+        for _, _, _, loudness, duration in track_results
+        if not (np.isnan(loudness) or np.isinf(loudness))
+    )
+
+    if total_duration > 0 and total_energy > 0:
+        album_loudness = 10.0 * float(np.log10(total_energy / total_duration))
+        album_gain = (
+            target_lufs - album_loudness
+            if not (np.isnan(album_loudness) or np.isinf(album_loudness))
+            else float(np.mean([result[1] for result in track_results]))
+        )
     else:
         album_gain = float(np.mean([result[1] for result in track_results]))
 
