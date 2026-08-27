@@ -3,6 +3,15 @@ import threading
 from collections.abc import Sequence
 
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 from rich.theme import Theme
 
@@ -84,8 +93,20 @@ class SonoraLogger:
                 table.add_row(metric, value, style=style)
             else:
                 table.add_row(metric, value)
-        with _LOG_LOCK:
-            CONSOLE.print("\n", table)
 
 
 LOG = SonoraLogger()
+
+
+def create_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TextColumn("[dim]/[/dim]"),
+        TimeRemainingColumn(),
+        console=CONSOLE,
+    )

@@ -540,6 +540,60 @@ class TestCoreModules(unittest.TestCase):
         restored_info = read_track_metadata(wav_path)
         self.assertEqual(restored_info.artist, "Test Artist")
 
+    def test_backup_and_restore_gzipped(self):
+        wav_path = self.tmp_path / "song_gz.wav"
+        create_dummy_wav(wav_path)
+
+        initial_info = read_track_metadata(wav_path)
+        initial_info.artist = "Gzip Artist"
+        write_track_metadata(initial_info)
+
+        gz_backup = self.tmp_path / "backup.json.gz"
+        backup_library_tags(self.tmp_path, output_file=gz_backup)
+        self.assertTrue(gz_backup.exists())
+
+        # Modify
+        initial_info.artist = "Changed Artist"
+        write_track_metadata(initial_info)
+
+        # Restore from gzip
+        restored = restore_library_tags(gz_backup)
+        self.assertGreaterEqual(restored, 1)
+
+        reloaded = read_track_metadata(wav_path)
+        self.assertEqual(reloaded.artist, "Gzip Artist")
+
+    def test_backup_and_restore_portable_relocation(self):
+        old_dir = self.tmp_path / "old_location"
+        old_dir.mkdir()
+        wav_path = old_dir / "portable.wav"
+        create_dummy_wav(wav_path)
+
+        info = read_track_metadata(wav_path)
+        info.artist = "Original Artist"
+        write_track_metadata(info)
+
+        backup_file = self.tmp_path / "portable_backup.json"
+        backup_library_tags(old_dir, output_file=backup_file)
+
+        # Now move the audio file to a brand new folder (simulating disk move/NAS mount change)
+        new_dir = self.tmp_path / "new_location"
+        new_dir.mkdir()
+        new_wav = new_dir / "portable.wav"
+        wav_path.rename(new_wav)
+
+        # Modify tags in new location
+        mod_info = read_track_metadata(new_wav)
+        mod_info.artist = "Altered Artist"
+        write_track_metadata(mod_info)
+
+        # Restore pointing target_directory to new_dir
+        restored = restore_library_tags(backup_file, target_directory=new_dir)
+        self.assertEqual(restored, 1)
+
+        final_info = read_track_metadata(new_wav)
+        self.assertEqual(final_info.artist, "Original Artist")
+
     @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
     @patch("sonora.services.theaudiodb.SESSION.get")
     def test_theaudiodb_service(self, mock_get, _mock_cache):
