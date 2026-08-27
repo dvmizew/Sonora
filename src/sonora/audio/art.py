@@ -4,9 +4,11 @@ from pathlib import Path
 import httpx
 import imagehash
 from PIL import Image, ImageOps, UnidentifiedImageError
+from rapidfuzz import fuzz
 
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
+from sonora.core.utils import normalize_str
 from sonora.services.deezer import fetch_deezer_cover_art_url
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.musicbrainz import fetch_cover_art_archive_url
@@ -132,6 +134,33 @@ def process_album_cover_art(
     return None
 
 
+def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
+    """Dynamically determine artist root folder by walking the directory hierarchy."""
+    clean_artist = normalize_str(artist_name)
+    current = folder_path.resolve()
+
+    # Traverse up directory tree to find matching artist folder
+    for _ in range(4):
+        curr_norm = normalize_str(current.name)
+        if (
+            curr_norm == clean_artist
+            or fuzz.token_set_ratio(curr_norm, clean_artist) >= 85
+        ):
+            return current
+        if current.parent == current:
+            break
+        current = current.parent
+
+    # If folder is an album subdirectory (e.g. /Music/Artist/Album), return its parent
+    if (
+        folder_path.parent != folder_path
+        and folder_path.parent != folder_path.parent.parent
+    ):
+        return folder_path.parent
+
+    return folder_path
+
+
 def process_artist_artwork(
     folder_path: Path, artist_name: str, dry_run: bool = False
 ) -> None:
@@ -139,17 +168,7 @@ def process_artist_artwork(
     if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
         return
 
-    parent = folder_path.parent
-    base_name = folder_path.name
-    parent_base = parent.name
-
-    artist_dir = (
-        parent
-        if parent_base not in ["FLAC", "Music", ""] and base_name != "Singles" # hardcoded
-        else folder_path
-    )
-    if parent_base == "Singles":
-        artist_dir = parent.parent
+    artist_dir = _find_artist_directory(folder_path, artist_name)
 
     has_artist_image = any(
         (artist_dir / filename).exists()

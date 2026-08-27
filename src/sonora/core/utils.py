@@ -11,11 +11,17 @@ from typing import TypeGuard
 import ftfy
 import httpx
 import musicbrainzngs
+from music_metadata_filter.filter import MetadataFilter
 from music_metadata_filter.functions import (
+    fix_track_suffix,
     remove_clean_explicit,
     remove_feature,
+    remove_parody,
     remove_reissue,
     remove_remastered,
+    remove_zero_width,
+    replace_nbsp,
+    youtube,
 )
 from rapidfuzz import fuzz
 
@@ -42,54 +48,41 @@ _ARTIST_SEPARATORS = [
 ]
 _ARTIST_SPLIT_PATTERN = re.compile("|".join(_ARTIST_SEPARATORS), re.IGNORECASE)
 
-_WORD_NUMBERS: dict[str, int] = {
-    "one": 1,
-    "two": 2,
-    "three": 3,
-    "four": 4,
-    "five": 5,
-    "six": 6,
-    "seven": 7,
-    "eight": 8,
-    "nine": 9,
-    "ten": 10,
-    "eleven": 11,
-    "twelve": 12,
-    "thirteen": 13,
-    "fourteen": 14,
-    "fifteen": 15,
-    "sixteen": 16,
-    "seventeen": 17,
-    "eighteen": 18,
-    "nineteen": 19,
-    "twenty": 20,
-}
-
-_ROMAN_MAP: dict[str, int] = {
-    "i": 1,
-    "v": 5,
-    "x": 10,
-    "l": 50,
-    "c": 100,
-    "d": 500,
-    "m": 1000,
-}
+_ROMAN_VALUES: dict[str, int] = dict(zip("ivxlcdm", (1, 5, 10, 50, 100, 500, 1000)))
+_NUMBER_WORDS: tuple[str, ...] = (
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+)
 
 
 def _parse_roman(token: str) -> int | None:
-    """Parse Roman numerals (I to MMMCMXCIX) to integer."""
+    """Parse Roman numeral (I to MMMCMXCIX) to integer."""
     s = token.lower().strip()
-    if not s or not all(c in _ROMAN_MAP for c in s) or len(s) > 10:
+    if not s or not all(c in _ROMAN_VALUES for c in s) or len(s) > 10:
         return None
-    total = 0
-    prev_val = 0
+    total, prev_val = 0, 0
     for c in reversed(s):
-        val = _ROMAN_MAP[c]
-        if val < prev_val:
-            total -= val
-        else:
-            total += val
-            prev_val = val
+        val = _ROMAN_VALUES[c]
+        total += -val if val < prev_val else val
+        prev_val = val
     return total if total > 0 else None
 
 
@@ -116,8 +109,8 @@ def extract_series_number(text: str | None) -> int | None:
         roman_val = _parse_roman(token)
         if roman_val is not None:
             return roman_val
-        if token in _WORD_NUMBERS:
-            return _WORD_NUMBERS[token]
+        if token in _NUMBER_WORDS:
+            return _NUMBER_WORDS.index(token) + 1
 
     # Match trailing Roman numerals (II, III, IV, etc.) or digits at the end of title
     trailing_match = re.search(
@@ -309,21 +302,48 @@ def get_primary_artist(artist_name: str | None) -> str:
     return sanitize_name(resolve_artist_name(primary) or "Unknown")
 
 
+_METADATA_FILTER = MetadataFilter(
+    {
+        "track": (
+            remove_zero_width,
+            replace_nbsp,
+            youtube,
+            remove_clean_explicit,
+            remove_reissue,
+            remove_remastered,
+            remove_parody,
+            remove_feature,
+            fix_track_suffix,
+        ),
+        "album": (
+            remove_zero_width,
+            replace_nbsp,
+            remove_clean_explicit,
+            remove_reissue,
+            remove_remastered,
+            fix_track_suffix,
+        ),
+        "artist": (
+            remove_zero_width,
+            replace_nbsp,
+        ),
+    }
+)
+
+
 def clean_title(title: str) -> str:
     """Clean track title by removing feat./ft./with brackets, remaster suffixes, and mojibake text."""
     if not title:
         return ""
-    title_text = ftfy.fix_text(str(title))
-    # Apply official music-metadata-filter standard pipeline
-    title_text = remove_clean_explicit(remove_reissue(remove_remastered(title_text)))
-    title_text = remove_feature(title_text)
-    title_text = re.sub(
-        r"\s*[\(\[\{](?:\d{4}\s+)?(?:remaster(?:ed)?|deluxe|bonus\s+track|mono|stereo|official(?:\s+(?:video|audio))?|hq|hd).*?[\)\]\}]",
+    fixed_title = ftfy.fix_text(str(title))
+    cleaned = _METADATA_FILTER.filter_field("track", fixed_title)
+    cleaned = re.sub(
+        r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd).*?[\)\]\}]",
         "",
-        title_text,
+        cleaned,
         flags=re.IGNORECASE,
     )
-    return title_text.strip()
+    return cleaned.strip()
 
 
 _VERSION_OR_REMIX_KEYWORDS = frozenset(

@@ -4,6 +4,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import orjson
+from music_metadata_filter.functions import (
+    remove_clean_explicit,
+    remove_remastered,
+    youtube,
+)
 from mutagen._util import MutagenError
 from mutagen.flac import FLAC, FLACNoHeaderError
 from rich.progress import (
@@ -29,28 +34,16 @@ from sonora.core.utils import (
     find_audio_files,
     is_single_group_artist,
     is_valid_uuid,
+    is_version_or_remix,
     normalize_genre,
     normalize_str,
 )
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
 
-JUNK_BRACKET_KEYWORDS = {
-    "official",
-    "video",
-    "audio",
-    "flac",
-    "mp3",
-    "320",
-    "320kbps",
-    "hq",
-    "hd",
-    "rip",
-    "cdrip",
-    "webrip",
-    "lossless",
-    "remastered",
-}
+_CODEC_RIP_KEYWORDS: frozenset[str] = frozenset(
+    {"flac", "mp3", "320", "320kbps", "lossless", "rip", "cdrip", "webrip", "hq", "hd"}
+)
 
 PAIRS = {"(": ")", "[": "]", "{": "}"}
 CLOSING_TO_OPENING = {v: k for k, v in PAIRS.items()}
@@ -99,14 +92,29 @@ def is_valid_track_filename(filename: str) -> bool:
     return False
 
 
+def _is_corrupt_bracket(full_bracket: str, tokens: set[str]) -> bool:
+    if is_version_or_remix(full_bracket):
+        return False
+
+    dummy_title = f"Track {full_bracket}"
+    if (
+        youtube(dummy_title) == "Track"
+        or remove_remastered(dummy_title) == "Track"
+        or remove_clean_explicit(dummy_title) == "Track"
+    ):
+        return True
+
+    return bool(tokens & _CODEC_RIP_KEYWORDS)
+
+
 def check_brackets_corruption(name: str) -> list[str]:
     """
     Check if a filename or tag contains corrupt/unwanted bracket metadata
-    (e.g., [FLAC], (Official Video), [HQ]) using set intersection.
+    (e.g., [FLAC], (Official Video), [HQ], (2011 Remaster), (320kbps)).
     """
     issues = []
     for full_bracket, tokens in extract_bracket_tokens(name):
-        if tokens & JUNK_BRACKET_KEYWORDS:
+        if _is_corrupt_bracket(full_bracket, tokens):
             issues.append(f"Corrupt bracket metadata: '{full_bracket}'")
     return issues
 

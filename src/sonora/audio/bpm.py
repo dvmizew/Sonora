@@ -40,11 +40,12 @@ def load_audio(file_path: Path, mono: bool = False) -> tuple[np.ndarray, int] | 
         ]
         result = subprocess.run(command, capture_output=True, check=True)
         if result.stdout:
-            raw_data = np.frombuffer(result.stdout, dtype=np.float32)
-            if not mono:
-                raw_data = raw_data.reshape(-1, 2)
-            if len(raw_data) > 0:
-                return raw_data, 44100
+            buffer_data = np.frombuffer(result.stdout, dtype=np.float32)
+            audio_array: np.ndarray = (
+                buffer_data.reshape(-1, 2) if not mono else buffer_data
+            )
+            if len(audio_array) > 0:
+                return audio_array, 44100
     except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"ffmpeg decode failed for {file_path}: {error}")
 
