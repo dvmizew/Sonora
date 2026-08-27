@@ -242,10 +242,13 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue((self.tmp_path / "report.json").exists())
 
     @patch("sonora.modules.tagger.write_track_metadata")
+    @patch("sonora.modules.tagger.fetch_itunes_track_metadata")
     @patch("sonora.services.lyrics.fetch_synced_lyrics")
     @patch("sonora.modules.tagger.fetch_track_mbid")
     @patch("sonora.modules.tagger.read_track_metadata")
-    def test_process_single_track(self, mock_read, mock_mbid, mock_lyrics, mock_write):
+    def test_process_single_track(
+        self, mock_read, mock_mbid, mock_lyrics, mock_itunes, mock_write
+    ):
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
 
@@ -253,6 +256,7 @@ class TestCoreModules(unittest.TestCase):
             file_path=wav_file, artist="nane", title="Piesa"
         )
         mock_mbid.return_value = "c8b03190-306c-4125-9b32-3f9d86d60a12"
+        mock_itunes.return_value = None
         mock_lyrics.return_value = "[00:01.00] Vers"
 
         info = process_single_track(wav_file, fetch_bpm=False)
@@ -347,12 +351,13 @@ class TestCoreModules(unittest.TestCase):
             self.assertTrue(audio_file_3.exists())
 
     @patch("sonora.modules.tagger.write_track_metadata")
+    @patch("sonora.modules.tagger.fetch_itunes_track_metadata")
     @patch("sonora.modules.tagger.search_discogs_release")
     @patch("sonora.modules.tagger.lookup_acoustid")
     @patch("sonora.modules.tagger.fetch_track_mbid")
     @patch("sonora.modules.tagger.read_track_metadata")
     def test_process_single_track_acoustid_discogs_fallback(
-        self, mock_read, mock_mbid, mock_acoustid, mock_discogs, mock_write
+        self, mock_read, mock_mbid, mock_acoustid, mock_discogs, mock_itunes, mock_write
     ):
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
@@ -361,6 +366,7 @@ class TestCoreModules(unittest.TestCase):
             file_path=wav_file, artist="Artist", title="Title", genre=None
         )
         mock_mbid.return_value = None
+        mock_itunes.return_value = None
         mock_acoustid.return_value = "c8b03190-306c-4125-9b32-3f9d86d60a12"
         mock_discogs.return_value = {"id": 123, "year": 2024}
 

@@ -10,7 +10,10 @@ from sonora.services.deezer import (
     fetch_deezer_album_details,
     fetch_deezer_track_details,
 )
-from sonora.services.discogs import search_discogs_release
+from sonora.services.discogs import (
+    fetch_discogs_release_details,
+    search_discogs_release,
+)
 from sonora.services.genius import fetch_genius_description
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
@@ -169,6 +172,31 @@ class TestServicesEngine(unittest.TestCase):
 
     def test_search_discogs_without_token_returns_none(self):
         self.assertIsNone(search_discogs_release("Artist", "Album", user_token=None))
+
+    @patch("sonora.services.discogs.get_cached_api", return_value=None)
+    @patch("sonora.services.discogs.SESSION.get")
+    def test_fetch_discogs_release_details_without_token(self, mock_get, _mock_cache):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": 12345,
+            "title": "Public Release",
+            "year": 2023,
+            "artists": [{"id": 1, "name": "Artist"}],
+        }
+        mock_get.return_value = mock_response
+
+        details = fetch_discogs_release_details(12345, user_token=None)
+        self.assertIsNotNone(details)
+        if details:
+            self.assertEqual(details["id"], 12345)
+            self.assertEqual(details["title"], "Public Release")
+        mock_get.assert_called_once_with(
+            "https://api.discogs.com/releases/12345", headers={}, timeout=10
+        )
+
+    def test_fetch_discogs_release_details_empty_id(self):
+        self.assertIsNone(fetch_discogs_release_details("", user_token=None))
 
     @patch("sonora.services.acoustid.get_cached_api", return_value=None)
     @patch("sonora.services.acoustid.acoustid")

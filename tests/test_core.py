@@ -55,12 +55,57 @@ class TestCoreUtils(unittest.TestCase):
         self.assertFalse(is_valid_uuid(None))
         self.assertFalse(is_valid_uuid(""))
 
+    def test_extract_series_number_all_formats(self):
+        from sonora.core.utils import extract_series_number
+
+        # Arabic numbers
+        self.assertEqual(extract_series_number("Savage Mode 2"), 2)
+        self.assertEqual(extract_series_number("Part 3"), 3)
+        self.assertEqual(extract_series_number("Vol. 4"), 4)
+
+        # Roman numerals
+        self.assertEqual(extract_series_number("Savage Mode II"), 2)
+        self.assertEqual(extract_series_number("Act IV"), 4)
+        self.assertEqual(extract_series_number("Chapter IX"), 9)
+        self.assertEqual(extract_series_number("Volume XIV"), 14)
+        self.assertEqual(extract_series_number("Part XX"), 20)
+
+        # Number words (1..20)
+        self.assertEqual(extract_series_number("Volume One"), 1)
+        self.assertEqual(extract_series_number("Part Three"), 3)
+        self.assertEqual(extract_series_number("Act Seven"), 7)
+        self.assertEqual(extract_series_number("Chapter Twelve"), 12)
+        self.assertEqual(extract_series_number("Book Twenty"), 20)
+
+        # None / Edge cases
+        self.assertIsNone(extract_series_number("Savage Mode"))
+        self.assertIsNone(extract_series_number("Live in Paris"))
+        self.assertIsNone(extract_series_number(""))
+        self.assertIsNone(extract_series_number(None))
+
     def test_clean_title_remaster_and_features(self):
         self.assertEqual(clean_title("In the End (2020 Remaster)"), "In the End")
         self.assertEqual(clean_title("Rockstar (feat. 21 Savage)"), "Rockstar")
         self.assertEqual(clean_title("Song [Explicit]"), "Song")
         self.assertEqual(clean_title("Track (Deluxe Edition)"), "Track")
+        self.assertEqual(clean_title("Video [Official Music Video]"), "Video")
+        self.assertEqual(clean_title("Audio (Official Audio)"), "Audio")
+        self.assertEqual(clean_title("Clean [Clean Version]"), "Clean")
+        self.assertEqual(clean_title("Parody [Parody]"), "Parody")
+        self.assertEqual(clean_title("Spaces\u200b\u00a0Track"), "Spaces Track")
         self.assertEqual(clean_title(""), "")
+
+    def test_load_user_overrides_corrupt_json(self):
+        from unittest.mock import patch
+
+        from sonora.core.utils import _load_user_overrides
+
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.read_text", return_value="INVALID JSON {{"),
+        ):
+            overrides = _load_user_overrides()
+            self.assertEqual(overrides, {})
 
     def test_normalize_genre_mapping_and_filtering(self):
         self.assertEqual(normalize_genre("Hip Hop"), "Hip-Hop/Rap")
