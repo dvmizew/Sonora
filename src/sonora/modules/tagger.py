@@ -583,111 +583,113 @@ def tag_album_folder(
     if not folder_path.exists() or not folder_path.is_dir():
         raise FileNotFoundError(f"Album folder not found: {folder_path}")
 
-    # Check if folder_path contains child directories with audio files
-    subdirectories = [
-        directory
-        for directory in sorted(folder_path.iterdir())
-        if directory.is_dir() and find_audio_files(directory, recursive=True)
-    ]
-
-    # If folder_path has child album directories and NO direct audio files in its root, tag each sub-album independently
-    if subdirectories and not find_audio_files(folder_path, recursive=False):
-        all_results: list[TrackInfo] = []
-        for subdirectory in subdirectories:
-            sub_results = tag_album_folder(
-                subdirectory,
-                max_threads=max_threads,
-                fetch_bpm=fetch_bpm,
-                fetch_replaygain=fetch_replaygain,
-                fetch_lyrics=fetch_lyrics,
-                fetch_itunes_art=fetch_itunes_art,
-                lastfm_api_key=lastfm_api_key,
-                acoustid_api_key=acoustid_api_key,
-                discogs_user_token=discogs_user_token,
-                genius_api_token=genius_api_token,
-                force=force,
-                dry_run=dry_run,
-            )
-            all_results.extend(sub_results)
-        return all_results
-
-    audio_files = find_audio_files(folder_path, recursive=True)
-
-    folder_name = folder_path.name
-    LOG.force_info(
-        f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]"
-    )
-
-    if not audio_files:
+    all_audio_files = find_audio_files(folder_path, recursive=True)
+    if not all_audio_files:
         return []
 
-    # Pre-resolve Cuesheet content once for entire album
-    cue_files = list(folder_path.glob("*.cue"))
-    album_cue_content = read_cuesheet_content(cue_files[0]) if cue_files else None
-
-    # Batch Optimization: Fetch entire album track MBIDs and album MBID in 1 single API call
-    album_musicbrainz_id: str | None = None
-    album_track_mbids: dict[int, str] | None = None
-    try:
-        sample_meta = read_track_metadata(audio_files[0])
-        sample_artist = sample_meta.album_artist or sample_meta.artist
-        sample_album = sample_meta.album
-        if sample_artist and sample_album:
-            release_info = search_musicbrainz_release(sample_artist, sample_album)
-            if release_info and release_info.get("id"):
-                album_musicbrainz_id = str(release_info["id"])
-                album_track_mbids = fetch_album_track_mbids(album_musicbrainz_id)
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
-        LOG.debug(f"Pre-fetching album track MBIDs failed: {error}")
+    # Group tracks by album folder (parent directory)
+    album_groups: dict[Path, list[Path]] = {}
+    for audio_file in all_audio_files:
+        album_groups.setdefault(audio_file.parent, []).append(audio_file)
 
     results: list[TrackInfo] = []
 
-    executor = ThreadPoolExecutor(max_workers=max_threads)
-    try:
-        future_to_file = {
-            executor.submit(
-                process_single_track,
-                file_path=audio_file,
-                fetch_bpm=fetch_bpm,
-                fetch_lyrics=fetch_lyrics,
-                fetch_itunes_art=fetch_itunes_art,
-                lastfm_api_key=lastfm_api_key,
-                acoustid_api_key=acoustid_api_key,
-                discogs_user_token=discogs_user_token,
-                genius_api_token=genius_api_token,
-                force=force,
-                dry_run=dry_run,
-                album_mbid=album_musicbrainz_id,
-                album_track_mbids=album_track_mbids,
-                cuesheet_content=album_cue_content,
-            ): audio_file
-            for audio_file in audio_files
-        }
-
-        with create_progress() as progress:
-            task = progress.add_task("[cyan]Tagging tracks...", total=len(audio_files))
-            for future in as_completed(future_to_file):
-                audio_file = future_to_file[future]
-                try:
-                    track_info = future.result()
-                    results.append(track_info)
-                except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
-                    LOG.warning(f"Failed to process {audio_file.name}: {error}")
-                progress.advance(task)
-    except KeyboardInterrupt:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-
-    if fetch_replaygain:
-        calculate_album_replaygain(audio_files, force=force, dry_run=dry_run)
-
-    if results:
-        primary_artist = results[0].album_artist or results[0].artist
+    with create_progress() as progress:
+        task = progress.add_task("[cyan]Tagging tracks...", total=len(all_audio_files))
+        executor = ThreadPoolExecutor(max_workers=max_threads)
         try:
-            process_artist_artwork(folder_path, primary_artist, dry_run=dry_run)
-        except (OSError, ValueError, RuntimeError) as error:
-            LOG.debug(f"Artist art download failed: {error}")
+            for album_dir, audio_files in album_groups.items():
+                folder_name = album_dir.name
+                LOG.force_info(
+                    f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]"
+                )
+
+                # Pre-resolve Cuesheet content once for entire album
+                cue_files = list(album_dir.glob("*.cue"))
+                album_cue_content = (
+                    read_cuesheet_content(cue_files[0]) if cue_files else None
+                )
+
+                # Batch Optimization: Fetch entire album track MBIDs and album MBID in 1 single API call
+                album_musicbrainz_id: str | None = None
+                album_track_mbids: dict[int, str] | None = None
+                try:
+                    sample_meta = read_track_metadata(audio_files[0])
+                    sample_artist = sample_meta.album_artist or sample_meta.artist
+                    sample_album = sample_meta.album
+                    if sample_artist and sample_album:
+                        release_info = search_musicbrainz_release(
+                            sample_artist, sample_album
+                        )
+                        if release_info and release_info.get("id"):
+                            album_musicbrainz_id = str(release_info["id"])
+                            album_track_mbids = fetch_album_track_mbids(
+                                album_musicbrainz_id
+                            )
+                except (
+                    httpx.HTTPError,
+                    OSError,
+                    ValueError,
+                    RuntimeError,
+                ) as error:
+                    LOG.debug(f"Pre-fetching album track MBIDs failed: {error}")
+
+                album_results: list[TrackInfo] = []
+                future_to_file = {
+                    executor.submit(
+                        process_single_track,
+                        file_path=audio_file,
+                        fetch_bpm=fetch_bpm,
+                        fetch_lyrics=fetch_lyrics,
+                        fetch_itunes_art=fetch_itunes_art,
+                        lastfm_api_key=lastfm_api_key,
+                        acoustid_api_key=acoustid_api_key,
+                        discogs_user_token=discogs_user_token,
+                        genius_api_token=genius_api_token,
+                        force=force,
+                        dry_run=dry_run,
+                        album_mbid=album_musicbrainz_id,
+                        album_track_mbids=album_track_mbids,
+                        cuesheet_content=album_cue_content,
+                    ): audio_file
+                    for audio_file in audio_files
+                }
+
+                for future in as_completed(future_to_file):
+                    audio_file = future_to_file[future]
+                    try:
+                        track_info = future.result()
+                        album_results.append(track_info)
+                    except (
+                        httpx.HTTPError,
+                        OSError,
+                        ValueError,
+                        RuntimeError,
+                    ) as error:
+                        LOG.warning(f"Failed to process {audio_file.name}: {error}")
+                    progress.advance(task)
+
+                if fetch_replaygain:
+                    calculate_album_replaygain(
+                        audio_files, force=force, dry_run=dry_run
+                    )
+
+                if album_results:
+                    primary_artist = (
+                        album_results[0].album_artist or album_results[0].artist
+                    )
+                    try:
+                        process_artist_artwork(
+                            album_dir, primary_artist, dry_run=dry_run
+                        )
+                    except (OSError, ValueError, RuntimeError) as error:
+                        LOG.debug(f"Artist art download failed: {error}")
+
+                results.extend(album_results)
+        except KeyboardInterrupt:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     return results
