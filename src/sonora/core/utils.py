@@ -554,11 +554,23 @@ class RateLimiter:
         return sleep_time
 
 
-def is_valid_uuid(uuid_candidate: object) -> TypeGuard[str]:
-    """Validate that uuid_candidate is a 36-character canonical RFC 4122 UUID (e.g. MusicBrainz MBID)."""
+def is_valid_uuid(
+    uuid_candidate: object, allow_multivalue: bool = False
+) -> TypeGuard[str]:
+    """
+    Validate that uuid_candidate is a 36-character canonical RFC 4122 UUID (e.g. MusicBrainz MBID).
+    If allow_multivalue is True, also validates multiple UUIDs delimited by ';', '/', or ','.
+    """
     if not uuid_candidate or not isinstance(uuid_candidate, str):
         return False
     cleaned_uuid = uuid_candidate.strip()
+    if not cleaned_uuid:
+        return False
+    if allow_multivalue and any(delim in cleaned_uuid for delim in (";", "/", ",")):
+        tokens = [t.strip() for t in re.split(r"[;/,\s]+", cleaned_uuid) if t.strip()]
+        return bool(tokens) and all(
+            is_valid_uuid(t, allow_multivalue=False) for t in tokens
+        )
     if len(cleaned_uuid) != 36:
         return False
     try:
@@ -568,16 +580,27 @@ def is_valid_uuid(uuid_candidate: object) -> TypeGuard[str]:
         return False
 
 
-def find_audio_files(directory: Path, recursive: bool = True) -> list[Path]:
-    """Find all supported audio files in a directory, sorted lexicographically."""
+def find_audio_files(
+    directory: Path, recursive: bool = True, include_hidden: bool = False
+) -> list[Path]:
+    """Find all supported audio files in a directory, ignoring hidden directories/files by default."""
     if not directory.exists() or not directory.is_dir():
         return []
     glob_iter = directory.rglob("*") if recursive else directory.glob("*")
-    return sorted(
-        candidate_path
-        for candidate_path in glob_iter
-        if candidate_path.is_file() and candidate_path.suffix.lower() in SUPPORTED_EXTS
-    )
+    files: list[Path] = []
+    for candidate in glob_iter:
+        if not candidate.is_file() or candidate.suffix.lower() not in SUPPORTED_EXTS:
+            continue
+        if not include_hidden:
+            try:
+                rel_parts = candidate.relative_to(directory).parts
+                if any(part.startswith(".") for part in rel_parts):
+                    continue
+            except ValueError:
+                if any(part.startswith(".") for part in candidate.parts):
+                    continue
+        files.append(candidate)
+    return sorted(files)
 
 
 def find_companion_lyrics(audio_file: Path) -> list[Path]:

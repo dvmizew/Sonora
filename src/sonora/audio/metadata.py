@@ -335,7 +335,9 @@ def write_track_metadata(
             for field, tag_keys in _TAG_SCHEMA.items():
                 val = getattr(track_info, field, None)
                 if val:
-                    if field in _UUID_FIELDS and not is_valid_uuid(val):
+                    if field in _UUID_FIELDS and not is_valid_uuid(
+                        val, allow_multivalue=True
+                    ):
                         continue
                     song.tags[tag_keys[0]] = [str(val)]
 

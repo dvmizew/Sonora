@@ -11,7 +11,9 @@ from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    find_audio_files,
     get_primary_artist,
+    is_valid_uuid,
     resolve_artist_name,
 )
 from sonora.modules.backup import backup_library_tags, restore_library_tags
@@ -631,6 +633,40 @@ class TestCoreModules(unittest.TestCase):
         process_artist_artwork(artist_folder, "21 Savage")
         self.assertTrue((self.tmp_path / "21 Savage" / "artist.jpg").exists())
         self.assertTrue((self.tmp_path / "21 Savage" / "banner.jpg").exists())
+
+    def test_find_audio_files_ignores_hidden_directories(self):
+        normal_wav = self.tmp_path / "normal.wav"
+        create_dummy_wav(normal_wav)
+
+        hidden_dir = self.tmp_path / ".venv" / "lib"
+        hidden_dir.mkdir(parents=True, exist_ok=True)
+        hidden_wav = hidden_dir / "test.wav"
+        create_dummy_wav(hidden_wav)
+
+        dot_wav = self.tmp_path / "._hidden.flac"
+        dot_wav.write_bytes(b"dummy")
+
+        files = find_audio_files(self.tmp_path)
+        self.assertEqual(files, [normal_wav])
+
+        # When include_hidden=True, hidden files are included
+        all_files = find_audio_files(self.tmp_path, include_hidden=True)
+        self.assertIn(hidden_wav, all_files)
+        self.assertIn(dot_wav, all_files)
+
+    def test_is_valid_uuid_multivalue(self):
+        uuid1 = "1c59ae05-207b-4fbd-9ee9-569489af6121"
+        uuid2 = "bd81ebc9-d1c4-4dc3-b48e-718bdc5fde50"
+
+        # Single UUID
+        self.assertTrue(is_valid_uuid(uuid1))
+        self.assertFalse(is_valid_uuid("invalid-uuid"))
+
+        # Multiple UUIDs with allow_multivalue
+        self.assertTrue(is_valid_uuid(f"{uuid1}; {uuid2}", allow_multivalue=True))
+        self.assertTrue(is_valid_uuid(f"{uuid1} / {uuid2}", allow_multivalue=True))
+        self.assertTrue(is_valid_uuid(f"{uuid1}, {uuid2}", allow_multivalue=True))
+        self.assertFalse(is_valid_uuid(f"{uuid1}; invalid", allow_multivalue=True))
 
 
 if __name__ == "__main__":
