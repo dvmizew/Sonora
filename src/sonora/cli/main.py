@@ -167,6 +167,33 @@ def tag(
         1 for track in tagged_tracks if track.musicbrainz_trackid is not None
     )
     genre_count = sum(1 for track in tagged_tracks if track.genre is not None)
+    lyrics_count = sum(
+        1
+        for track in tagged_tracks
+        if track.lyrics is not None or track.synced_lyrics is not None
+    )
+    isrc_count = sum(1 for track in tagged_tracks if track.isrc is not None)
+    discogs_count = sum(
+        1 for track in tagged_tracks if track.discogs_release_id is not None
+    )
+    genius_count = sum(
+        1
+        for track in tagged_tracks
+        if track.genius_song_id is not None or track.comment is not None
+    )
+    theaudiodb_count = sum(
+        1
+        for track in tagged_tracks
+        if track.initial_key is not None
+        or track.music_video_url is not None
+        or track.mood is not None
+    )
+    key_count = sum(1 for track in tagged_tracks if track.initial_key is not None)
+    composer_count = sum(1 for track in tagged_tracks if track.composer is not None)
+    producers_count = sum(1 for track in tagged_tracks if track.producers is not None)
+    advisory_count = sum(1 for track in tagged_tracks if track.advisory is not None)
+    lossless_count = sum(1 for track in tagged_tracks if track.is_lossless)
+    lossy_count = total_tracks - lossless_count
 
     bpm_percentage = (bpm_count / total_tracks * 100) if total_tracks > 0 else 0.0
     replaygain_percentage = (
@@ -176,27 +203,86 @@ def tag(
         (musicbrainz_count / total_tracks * 100) if total_tracks > 0 else 0.0
     )
     genre_percentage = (genre_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    lyrics_percentage = (lyrics_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    isrc_percentage = (isrc_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    key_percentage = (key_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    composer_percentage = (
+        (composer_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    )
+    producers_percentage = (
+        (producers_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    )
+    advisory_percentage = (
+        (advisory_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    )
+    discogs_percentage = (
+        (discogs_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    )
+    genius_percentage = (genius_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    theaudiodb_percentage = (
+        (theaudiodb_count / total_tracks * 100) if total_tracks > 0 else 0.0
+    )
 
     tag_summary_rows = [
         ("Total Tracks Processed", str(total_tracks), None),
-        (
-            "BPM Calculated",
-            f"{bpm_count}/{total_tracks} ({bpm_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "ReplayGain Calculated",
-            f"{replaygain_count}/{total_tracks} ({replaygain_percentage:.0f}%)",
-            None,
-        ),
         (
             "MusicBrainz Matched",
             f"{musicbrainz_count}/{total_tracks} ({musicbrainz_percentage:.0f}%)",
             None,
         ),
         (
-            "Genre Tagged",
+            "Genre & Styles Tagged",
             f"{genre_count}/{total_tracks} ({genre_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "Lyrics Attached (.lrc)",
+            f"{lyrics_count}/{total_tracks} ({lyrics_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "ISRC Registered",
+            f"{isrc_count}/{total_tracks} ({isrc_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "Tempo / BPM Calculated",
+            f"{bpm_count}/{total_tracks} ({bpm_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "ReplayGain Loudness",
+            f"{replaygain_count}/{total_tracks} ({replaygain_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "Musical Key / Tonality",
+            f"{key_count}/{total_tracks} ({key_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "Composers & Writers",
+            f"{composer_count}/{total_tracks} ({composer_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "Producers & Studio Credits",
+            f"{producers_count}/{total_tracks} ({producers_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "Song Stories & Annotations",
+            f"{genius_count}/{total_tracks} ({genius_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "Parental Advisory",
+            f"{advisory_count}/{total_tracks} ({advisory_percentage:.0f}%)",
+            None,
+        ),
+        (
+            "Audio Quality Breakdown",
+            f"{lossless_count} Lossless / {lossy_count} Lossy",
             None,
         ),
     ]
@@ -205,10 +291,11 @@ def tag(
     if json_report:
         summary_text = (
             f"Successfully processed {total_tracks} tracks. "
+            f"MusicBrainz {musicbrainz_count}/{total_tracks} ({musicbrainz_percentage:.0f}%), "
+            f"Genre {genre_count}/{total_tracks} ({genre_percentage:.0f}%), "
+            f"Lyrics {lyrics_count}/{total_tracks} ({lyrics_percentage:.0f}%), "
             f"BPM {bpm_count}/{total_tracks} ({bpm_percentage:.0f}%), "
-            f"ReplayGain {replaygain_count}/{total_tracks} ({replaygain_percentage:.0f}%), "
-            f"MusicBrainz MBID {musicbrainz_count}/{total_tracks} ({musicbrainz_percentage:.0f}%), "
-            f"Genre {genre_count}/{total_tracks} ({genre_percentage:.0f}%)."
+            f"ReplayGain {replaygain_count}/{total_tracks} ({replaygain_percentage:.0f}%)."
         )
         report_data = {
             "schema": "tag_report_v1",
@@ -223,14 +310,36 @@ def tag(
             "statistics": {
                 "total_tracks": total_tracks,
                 "enrichment": {
-                    "bpm_calculated_count": bpm_count,
-                    "bpm_percentage": round(bpm_percentage, 1),
-                    "replaygain_calculated_count": replaygain_count,
-                    "replaygain_percentage": round(replaygain_percentage, 1),
                     "musicbrainz_matched_count": musicbrainz_count,
                     "musicbrainz_percentage": round(musicbrainz_percentage, 1),
                     "genre_tagged_count": genre_count,
                     "genre_percentage": round(genre_percentage, 1),
+                    "lyrics_tagged_count": lyrics_count,
+                    "lyrics_percentage": round(lyrics_percentage, 1),
+                    "isrc_tagged_count": isrc_count,
+                    "isrc_percentage": round(isrc_percentage, 1),
+                    "bpm_calculated_count": bpm_count,
+                    "bpm_percentage": round(bpm_percentage, 1),
+                    "replaygain_calculated_count": replaygain_count,
+                    "replaygain_percentage": round(replaygain_percentage, 1),
+                    "initial_key_count": key_count,
+                    "initial_key_percentage": round(key_percentage, 1),
+                    "composer_tagged_count": composer_count,
+                    "composer_percentage": round(composer_percentage, 1),
+                    "producers_tagged_count": producers_count,
+                    "producers_percentage": round(producers_percentage, 1),
+                    "advisory_tagged_count": advisory_count,
+                    "advisory_percentage": round(advisory_percentage, 1),
+                    "discogs_matched_count": discogs_count,
+                    "discogs_percentage": round(discogs_percentage, 1),
+                    "genius_matched_count": genius_count,
+                    "genius_percentage": round(genius_percentage, 1),
+                    "theaudiodb_matched_count": theaudiodb_count,
+                    "theaudiodb_percentage": round(theaudiodb_percentage, 1),
+                },
+                "audio_formats": {
+                    "lossless_tracks": lossless_count,
+                    "lossy_tracks": lossy_count,
                 },
             },
             "tracks": [track.to_dict() for track in tagged_tracks],
@@ -408,12 +517,26 @@ def backup(
             help="Output JSON backup file path",
         ),
     ] = None,
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
+        ),
+    ] = 4,
 ) -> int:
     """
     Create JSON backup of audio tags.
     """
-    backup_path = backup_library_tags(path, output_file=output_file)
+    backup_path = backup_library_tags(
+        path, output_file=output_file, max_threads=threads
+    )
     LOG.success(f"Backup created at: [bold]{backup_path}[/bold]")
+    backup_summary_rows = [
+        ("Source Directory", str(path.resolve()), None),
+        ("Backup Archive", str(backup_path), "green"),
+    ]
+    LOG.summary_table("Backup Summary", backup_summary_rows)
     return 0
 
 
@@ -423,12 +546,28 @@ def restore(
         Path,
         Parameter(help="Path to JSON backup file"),
     ],
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
+        ),
+    ] = 4,
 ) -> int:
     """
     Restore audio tags from JSON backup file.
     """
-    restored_count = restore_library_tags(backup_file)
+    restored_count = restore_library_tags(backup_file, max_threads=threads)
     LOG.success(f"Restored metadata for {restored_count} tracks.")
+    restore_summary_rows = [
+        ("Backup File", str(backup_file.resolve()), None),
+        (
+            "Tracks Restored",
+            str(restored_count),
+            "green" if restored_count else "white",
+        ),
+    ]
+    LOG.summary_table("Restoration Summary", restore_summary_rows)
     return 0
 
 

@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
@@ -79,59 +79,12 @@ class TrackInfo:
 
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""
-        return {
-            "file_path": str(self.file_path),
-            "file_name": self.file_path.name,
-            "artist": self.artist,
-            "title": self.title,
-            "album": self.album,
-            "album_artist": self.album_artist or self.artist,
-            "track_number": self.track_number,
-            "total_tracks": self.total_tracks,
-            "disc_number": self.disc_number,
-            "total_discs": self.total_discs,
-            "date": self.date,
-            "genre": self.genre,
-            "isrc": self.isrc,
-            "bpm": self.bpm,
-            "replaygain_track_gain": self.replaygain_track_gain,
-            "replaygain_track_peak": self.replaygain_track_peak,
-            "replaygain_album_gain": self.replaygain_album_gain,
-            "replaygain_album_peak": self.replaygain_album_peak,
-            "musicbrainz_trackid": self.musicbrainz_trackid,
-            "musicbrainz_albumid": self.musicbrainz_albumid,
-            "musicbrainz_releasegroupid": self.musicbrainz_releasegroupid,
-            "musicbrainz_artistid": self.musicbrainz_artistid,
-            "discogs_release_id": self.discogs_release_id,
-            "release_type": self.release_type,
-            "release_country": self.release_country,
-            "label": self.label,
-            "barcode": self.barcode,
-            "composer": self.composer,
-            "lyricist": self.lyricist,
-            "remixer": self.remixer,
-            "initial_key": self.initial_key,
-            "copyright": self.copyright,
-            "compilation": self.compilation,
-            "spotify_trackid": self.spotify_trackid,
-            "musicbrainz_albumartistid": self.musicbrainz_albumartistid,
-            "discogs_artist_id": self.discogs_artist_id,
-            "language": self.language,
-            "script": self.script,
-            "mood": self.mood,
-            "style": self.style,
-            "disambiguation": self.disambiguation,
-            "rating": self.rating,
-            "featured_artists": self.featured_artists,
-            "producers": self.producers,
-            "genius_song_id": self.genius_song_id,
-            "listeners": self.listeners,
-            "playcount": self.playcount,
-            "music_video_url": self.music_video_url,
-            "is_lossless": self.is_lossless,
-            "sample_rate": self.sample_rate,
-            "bitrate": self.bitrate,
-        }
+        data: dict[str, object] = asdict(self)
+        data["file_path"] = str(self.file_path)
+        data["file_name"] = self.file_path.name
+        if not data.get("album_artist"):
+            data["album_artist"] = self.album_artist or self.artist
+        return data
 
 
 @dataclass
