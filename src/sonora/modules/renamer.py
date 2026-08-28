@@ -142,7 +142,7 @@ def rename_track_file(
         if track_clean:
             prefix = f"{int(track_clean):02d}"
             for candidate in folder.iterdir():
-                if candidate.suffix.lower() in (".lrc", ".txt") and (
+                if candidate.suffix.lower() == ".lrc" and (
                     candidate.name.startswith(prefix)
                     or candidate.name.startswith(str(int(track_clean)))
                 ):
@@ -185,7 +185,7 @@ def rename_track_file(
 
                 LOG.info(f"   ∟ 🎵 [dim]{file_path.name}[/] -> [white]{new_name}[/]")
 
-                # Rename all companion lyric files (.lrc, .synced.lrc, .txt, etc.)
+                # Rename companion lyric files (.lrc)
                 for companion in companion_lyrics:
                     if companion.exists():
                         suffix = companion.name[len(file_path.stem) :]

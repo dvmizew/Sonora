@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,7 +18,11 @@ from sonora.services.discogs import (
 from sonora.services.genius import fetch_genius_description
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
-from sonora.services.lyrics import clean_lyrics_text, fetch_synced_lyrics
+from sonora.services.lyrics import (
+    clean_lyrics_text,
+    fetch_synced_lyrics,
+    process_track_lyrics,
+)
 from sonora.services.musicbrainz import (
     fetch_cover_art_archive_url,
     fetch_track_mbid,
@@ -429,6 +434,43 @@ class TestServicesEngine(unittest.TestCase):
                 release_result["id"], "c8b03190-306c-4125-9b32-3f9d86d60a12"
             )
             self.assertEqual(release_result["country"], "US")
+
+    @patch("sonora.services.lyrics.fetch_synced_lyrics")
+    def test_process_track_lyrics_quality_upgrade(self, mock_fetch):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_file = Path(tmp_dir) / "track.flac"
+            audio_file.write_bytes(b"dummy")
+            lrc_file = Path(tmp_dir) / "track.lrc"
+
+            # 1. Enhanced (Quality 3) skips remote call when not force
+            lrc_file.write_text("<00:01.00> Enhanced word synced", encoding="utf-8")
+            lyrics, tag_type = process_track_lyrics(
+                audio_file, "Artist", "Title", force=False
+            )
+            self.assertEqual(lyrics, "<00:01.00> Enhanced word synced")
+            self.assertEqual(tag_type, "enhanced")
+            mock_fetch.assert_not_called()
+
+            # 2. Plain text (Quality 1) upgrades to Synced (Quality 2)
+            lrc_file.write_text("Just plain lyrics", encoding="utf-8")
+            mock_fetch.return_value = "[00:01.00] Synced line lyrics"
+            lyrics, tag_type = process_track_lyrics(
+                audio_file, "Artist", "Title", force=False
+            )
+            self.assertEqual(lyrics, "[00:01.00] Synced line lyrics")
+            self.assertEqual(tag_type, "synced")
+            self.assertEqual(
+                lrc_file.read_text(encoding="utf-8"),
+                "[00:01.00] Synced line lyrics",
+            )
+
+            # 3. Synced line lyrics (Quality 2) upgrades to Enhanced (Quality 3)
+            mock_fetch.return_value = "<00:01.00> Word enhanced lyrics"
+            lyrics, tag_type = process_track_lyrics(
+                audio_file, "Artist", "Title", force=False
+            )
+            self.assertEqual(lyrics, "<00:01.00> Word enhanced lyrics")
+            self.assertEqual(tag_type, "enhanced")
 
 
 if __name__ == "__main__":

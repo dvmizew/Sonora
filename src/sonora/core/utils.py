@@ -604,7 +604,7 @@ def find_audio_files(
 
 
 def find_companion_lyrics(audio_file: Path) -> list[Path]:
-    """Find all existing companion lyric files (.lrc, .synced.lrc, .enhanced.lrc, .txt) for a given audio file."""
+    """Find all existing companion lyric files (.lrc) for a given audio file."""
     parent = audio_file.parent
     stem = audio_file.stem
     results: list[Path] = []

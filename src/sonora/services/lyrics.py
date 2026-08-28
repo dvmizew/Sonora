@@ -7,6 +7,7 @@ import syncedlyrics
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_LYRICS
+from sonora.core.logger import LOG
 from sonora.core.utils import (
     RateLimiter,
     clean_title,
@@ -112,14 +113,10 @@ def get_lyrics_quality(text: str | None) -> int:
 def detect_lrc_quality(file_path: Path) -> int:
     """Detect quality level of existing lyrics file on disk for a given track path."""
     lrc_path = file_path.with_suffix(".lrc")
-    txt_path = file_path.with_suffix(".txt")
-    target_path = (
-        lrc_path if lrc_path.exists() else (txt_path if txt_path.exists() else None)
-    )
-    if not target_path:
+    if not lrc_path.exists():
         return 0
     try:
-        content = target_path.read_text(encoding="utf-8", errors="ignore")
+        content = lrc_path.read_text(encoding="utf-8", errors="ignore")
         return get_lyrics_quality(content)
     except (OSError, ValueError):
         return 0
@@ -225,28 +222,64 @@ def process_track_lyrics(
     isrc: str | None = None,
 ) -> tuple[str | None, str | None]:
     """
-    Fetches, cleans, and saves track lyrics according to quality hierarchy.
+    Fetches, cleans, and saves track lyrics to an accompanying .lrc file.
+    Supports smart quality upgrade:
+      - Enhanced (quality 3, word-synced): Maximum quality, skip network query unless force=True.
+      - Line-synced (quality 2): Queries online to attempt upgrade to Enhanced (quality 3).
+      - Plain text (quality 1): Queries online to attempt upgrade to Synced or Enhanced (quality 2/3).
+      - Missing (quality 0): Queries online for any available lyrics.
     Returns (lyrics_text, quality_tag) or (None, None).
     """
+    lrc_path = file_path.with_suffix(".lrc")
     current_quality = detect_lrc_quality(file_path)
-    if not force and current_quality >= 3:
-        return None, None
+    existing_content: str | None = None
 
-    lyrics_text = fetch_synced_lyrics(artist, title, enhanced=True, isrc=isrc)
+    if lrc_path.exists() and lrc_path.stat().st_size > 0:
+        try:
+            existing_content = lrc_path.read_text(
+                encoding="utf-8", errors="ignore"
+            ).strip()
+        except (OSError, ValueError):
+            existing_content = None
+
+    # Fast-path: Already at maximum quality (Enhanced word-synced)
+    if not force and current_quality >= 3 and existing_content:
+        return existing_content, "enhanced"
+
+    # Attempt to fetch higher quality lyrics online
+    try:
+        lyrics_text = fetch_synced_lyrics(artist, title, enhanced=True, isrc=isrc)
+    except (OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"Lyrics lookup error for {title}: {error}")
+        lyrics_text = None
+
     if not lyrics_text:
+        # Remote search returned nothing: preserve existing local lyrics if any
+        if existing_content and current_quality > 0:
+            tag_type = (
+                "enhanced"
+                if current_quality == 3
+                else ("synced" if current_quality == 2 else "plain")
+            )
+            return existing_content, tag_type
         return None, None
 
     new_quality = get_lyrics_quality(lyrics_text)
+
+    # If not forcing and remote lyrics are not better than existing local lyrics, keep existing
     if not force and current_quality > 0 and new_quality <= current_quality:
+        if existing_content:
+            tag_type = (
+                "enhanced"
+                if current_quality == 3
+                else ("synced" if current_quality == 2 else "plain")
+            )
+            return existing_content, tag_type
         return None, None
 
-    lrc_path = file_path.with_suffix(".lrc")
+    # Upgrade / Save new lyrics to .lrc
     if not dry_run:
         lrc_path.write_text(lyrics_text, encoding="utf-8")
-        if new_quality == 3:
-            synced_copy = re.sub(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", "", lyrics_text)
-            synced_path = file_path.with_suffix(".synced.lrc")
-            synced_path.write_text(synced_copy, encoding="utf-8")
         txt_path = file_path.with_suffix(".txt")
         if txt_path.exists() and lrc_path != txt_path:
             txt_path.unlink(missing_ok=True)

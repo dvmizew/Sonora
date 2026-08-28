@@ -27,9 +27,6 @@ SUPPORTED_EXTS = frozenset(
 COMPANION_LYRICS_EXTS = frozenset(
     {
         ".lrc",
-        ".synced.lrc",
-        ".enhanced.lrc",
-        ".txt",
     }
 )
 
