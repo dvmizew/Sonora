@@ -51,7 +51,14 @@ def get_cached_api(key: str) -> Any | None:
         try:
             with _CACHE_LOCK:
                 return cache.get(key)
-        except Exception as error:
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            diskcache.Timeout,
+        ) as error:
             LOG.debug(f"Cache fetch failed for key '{key}': {error}")
     return None
 
@@ -67,7 +74,14 @@ def set_cached_api(
         try:
             with _CACHE_LOCK:
                 cache.set(key, value, expire=expire_seconds)
-        except Exception as error:
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            diskcache.Timeout,
+        ) as error:
             LOG.debug(f"Cache store failed for key '{key}': {error}")
 
 
@@ -77,7 +91,14 @@ def clear_cache() -> None:
         try:
             with _CACHE_LOCK:
                 cache.clear()
-        except Exception as error:
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            diskcache.Timeout,
+        ) as error:
             LOG.debug(f"Cache clear failed: {error}")
 
 
@@ -87,7 +108,14 @@ def close_cache() -> None:
         if _CACHE_INSTANCE is not None:
             try:
                 _CACHE_INSTANCE.close()
-            except Exception as error:
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                RuntimeError,
+                TypeError,
+                diskcache.Timeout,
+            ) as error:
                 LOG.debug(f"Cache close failed: {error}")
             _CACHE_INSTANCE = None
 
