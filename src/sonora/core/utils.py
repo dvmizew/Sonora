@@ -196,7 +196,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
         for artist in artist_list:
             score = int(artist.get("ext:score", 0))
             if score >= 90:
-                canonical_name = artist.get("name")
+                canonical_name = str(artist.get("name", "")).strip()
                 if canonical_name:
                     set_cached_api(cache_key, canonical_name)
                     return canonical_name
