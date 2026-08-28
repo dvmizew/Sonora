@@ -1,10 +1,16 @@
 import contextlib
 import dataclasses
+import select
+import sys
+import threading
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+import acoustid
 import httpx
+from musicbrainzngs import MusicBrainzError
 
 from sonora.audio.art import process_album_cover_art, process_artist_artwork
 from sonora.audio.bpm import calculate_bpm
@@ -42,6 +48,77 @@ from sonora.services.theaudiodb import (
 )
 
 LAST_TAGGING_FAILURES: list[dict[str, str]] = []
+_NETWORK_EXCEPTIONS = (
+    MusicBrainzError,
+    acoustid.AcoustidError,
+    acoustid.WebServiceError,
+    httpx.HTTPError,
+    OSError,
+    ValueError,
+    RuntimeError,
+    TypeError,
+    KeyError,
+    AttributeError,
+    TimeoutError,
+)
+_PAUSE_EVENT = threading.Event()
+_PAUSE_EVENT.set()
+
+
+def _wait_if_paused(poll_interval: float = 0.2) -> None:
+    while not _PAUSE_EVENT.wait(timeout=poll_interval):
+        pass
+
+
+@contextlib.contextmanager
+def _interactive_pause_listener() -> Generator[None, None, None]:
+    if not sys.stdin.isatty():
+        yield
+        return
+
+    _PAUSE_EVENT.set()
+    stop_event = threading.Event()
+
+    def _loop() -> None:
+        try:
+            import termios
+            import tty
+
+            orig_term = termios.tcgetattr(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno())
+        except (ImportError, OSError, ValueError):
+            return
+
+        try:
+            while not stop_event.is_set():
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if rlist and not stop_event.is_set():
+                    char = sys.stdin.read(1)
+                    if char in (" ", "p", "P"):
+                        if _PAUSE_EVENT.is_set():
+                            _PAUSE_EVENT.clear()
+                            LOG.warning(
+                                "⏸️  [bold yellow]PAUSED[/] - Press [bold cyan][Space][/] or [bold cyan]'p'[/] to resume..."
+                            )
+                        else:
+                            _PAUSE_EVENT.set()
+                            LOG.info(
+                                "▶️  [bold green]RESUMED[/] - Continuing execution..."
+                            )
+        finally:
+            with contextlib.suppress(Exception):
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, orig_term)
+
+    listener = threading.Thread(target=_loop, name="SonoraPauseListener", daemon=True)
+    listener.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        _PAUSE_EVENT.set()
+        listener.join(timeout=0.5)
+
+
 _SKIP_DIFF_FIELDS: frozenset[str] = frozenset(
     {
         "file_path",
@@ -67,17 +144,21 @@ def _apply_mapping(
     data: dict[str, Any],
     field_map: dict[str, str],
 ) -> None:
-    """Populate unset fields on TrackInfo from a source dictionary."""
     for src_key, target_attr in field_map.items():
         val = data.get(src_key)
-        if val is not None:
-            val_str = str(val).strip()
-            if (
-                val_str
-                and val_str.lower() not in ("none", "null")
-                and not getattr(track_info, target_attr)
-            ):
-                setattr(track_info, target_attr, val_str)
+        if val is None:
+            continue
+        val_str = str(val).strip()
+        if not val_str or val_str.lower() in ("none", "null"):
+            continue
+
+        if target_attr == "genre":
+            val_str = normalize_genre(val_str) or val_str
+        elif target_attr == "date":
+            val_str = normalize_date(val_str) or val_str
+
+        if not getattr(track_info, target_attr):
+            setattr(track_info, target_attr, val_str)
 
 
 def _enrich_acoustid(
@@ -99,7 +180,7 @@ def _enrich_acoustid(
             if is_valid_uuid(acoustid_mbid):
                 track_info.musicbrainz_trackid = acoustid_mbid
                 LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
-        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+        except _NETWORK_EXCEPTIONS as error:
             LOG.debug(f"AcoustID lookup failed for {track_info.title}: {error}")
 
 
@@ -110,172 +191,180 @@ def _enrich_musicbrainz(
     album_mb_release_details: dict[str, object] | None,
     force: bool = False,
 ) -> None:
-    album_mbids = album_track_mbids or {}
-    if (
-        (not is_valid_uuid(track_info.musicbrainz_trackid) or force)
-        and track_info.track_number
-        and track_info.track_number in album_mbids
-    ):
-        candidate_mbid = album_mbids[track_info.track_number]
-        if is_valid_uuid(candidate_mbid):
-            track_info.musicbrainz_trackid = candidate_mbid
-            LOG.info(
-                f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {candidate_mbid[:8]}..."
-            )
-    elif not is_valid_uuid(track_info.musicbrainz_trackid) or force:
-        mbid = fetch_track_mbid(track_info.artist, track_info.title)
-        if is_valid_uuid(mbid):
-            track_info.musicbrainz_trackid = mbid
-            LOG.info(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
+    try:
+        album_mbids = album_track_mbids or {}
+        if (
+            (not is_valid_uuid(track_info.musicbrainz_trackid) or force)
+            and track_info.track_number
+            and track_info.track_number in album_mbids
+        ):
+            candidate_mbid = album_mbids[track_info.track_number]
+            if is_valid_uuid(candidate_mbid):
+                track_info.musicbrainz_trackid = candidate_mbid
+                LOG.info(
+                    f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {candidate_mbid[:8]}..."
+                )
+        elif not is_valid_uuid(track_info.musicbrainz_trackid) or force:
+            mbid = fetch_track_mbid(track_info.artist, track_info.title)
+            if is_valid_uuid(mbid):
+                track_info.musicbrainz_trackid = mbid
+                LOG.info(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
 
-    if not is_valid_uuid(track_info.musicbrainz_albumid):
-        if is_valid_uuid(album_mbid):
-            track_info.musicbrainz_albumid = str(album_mbid)
-        else:
-            search_artist = (
-                track_info.album_artist
-                if track_info.album_artist
-                else track_info.artist
-            )
-            release = search_musicbrainz_release(search_artist, track_info.album)
-            if release:
-                musicbrainz_id = release.get("id")
-                if is_valid_uuid(str(musicbrainz_id)):
-                    track_info.musicbrainz_albumid = str(musicbrainz_id)
-                if not track_info.date:
-                    date_str = release.get("date")
-                    if isinstance(date_str, str) and len(date_str) >= 4:
-                        track_info.date = normalize_date(date_str)
+        if not is_valid_uuid(track_info.musicbrainz_albumid):
+            if is_valid_uuid(album_mbid):
+                track_info.musicbrainz_albumid = str(album_mbid)
+            else:
+                search_artist = (
+                    track_info.album_artist
+                    if track_info.album_artist
+                    else track_info.artist
+                )
+                release = search_musicbrainz_release(search_artist, track_info.album)
+                if release:
+                    musicbrainz_id = release.get("id")
+                    if is_valid_uuid(str(musicbrainz_id)):
+                        track_info.musicbrainz_albumid = str(musicbrainz_id)
+                    if not track_info.date:
+                        date_str = release.get("date")
+                        if isinstance(date_str, str) and len(date_str) >= 4:
+                            track_info.date = normalize_date(date_str)
 
-    if is_valid_uuid(track_info.musicbrainz_trackid):
-        mb_rec = fetch_musicbrainz_recording_details(track_info.musicbrainz_trackid)
-        if mb_rec:
-            _apply_mapping(
-                track_info,
-                mb_rec,
-                {
-                    "isrc": "isrc",
-                    "disambiguation": "disambiguation",
-                    "composer": "composer",
-                    "lyricist": "lyricist",
-                    "producers": "producers",
-                    "remixer": "remixer",
-                    "musicbrainz_workid": "musicbrainz_workid",
-                },
-            )
+        if is_valid_uuid(track_info.musicbrainz_trackid):
+            mb_rec = fetch_musicbrainz_recording_details(track_info.musicbrainz_trackid)
+            if mb_rec:
+                _apply_mapping(
+                    track_info,
+                    mb_rec,
+                    {
+                        "isrc": "isrc",
+                        "disambiguation": "disambiguation",
+                        "composer": "composer",
+                        "lyricist": "lyricist",
+                        "producers": "producers",
+                        "remixer": "remixer",
+                        "musicbrainz_workid": "musicbrainz_workid",
+                    },
+                )
 
-    if is_valid_uuid(track_info.musicbrainz_albumid):
-        mb_rel = (
-            album_mb_release_details
-            if (
+        if is_valid_uuid(track_info.musicbrainz_albumid):
+            mb_rel = (
                 album_mb_release_details
-                and album_mbid
-                and track_info.musicbrainz_albumid == str(album_mbid)
+                if (
+                    album_mb_release_details
+                    and album_mbid
+                    and track_info.musicbrainz_albumid == str(album_mbid)
+                )
+                else fetch_musicbrainz_release_details(track_info.musicbrainz_albumid)
             )
-            else fetch_musicbrainz_release_details(track_info.musicbrainz_albumid)
-        )
-        if mb_rel:
-            _apply_mapping(
-                track_info,
-                mb_rel,
-                {
-                    "barcode": "barcode",
-                    "release_country": "release_country",
-                    "release_status": "release_status",
-                    "release_type": "release_type",
-                    "musicbrainz_releasegroupid": "musicbrainz_releasegroupid",
-                    "label": "label",
-                    "catalog_number": "catalog_number",
-                    "media": "media",
-                    "language": "language",
-                    "script": "script",
-                    "artist_sort": "artist_sort",
-                },
-            )
-            if mb_rel.get("total_tracks") and not track_info.total_tracks:
-                track_info.total_tracks = int(str(mb_rel["total_tracks"]))
-            if mb_rel.get("total_discs") and not track_info.total_discs:
-                track_info.total_discs = int(str(mb_rel["total_discs"]))
+            if mb_rel:
+                _apply_mapping(
+                    track_info,
+                    mb_rel,
+                    {
+                        "barcode": "barcode",
+                        "release_country": "release_country",
+                        "release_status": "release_status",
+                        "release_type": "release_type",
+                        "musicbrainz_releasegroupid": "musicbrainz_releasegroupid",
+                        "label": "label",
+                        "catalog_number": "catalog_number",
+                        "media": "media",
+                        "language": "language",
+                        "script": "script",
+                        "artist_sort": "artist_sort",
+                    },
+                )
+                if mb_rel.get("total_tracks") and not track_info.total_tracks:
+                    track_info.total_tracks = int(str(mb_rel["total_tracks"]))
+                if mb_rel.get("total_discs") and not track_info.total_discs:
+                    track_info.total_discs = int(str(mb_rel["total_discs"]))
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"MusicBrainz enrichment failed for {track_info.title}: {error}")
 
 
 def _enrich_itunes(track_info: TrackInfo) -> None:
-    data = fetch_itunes_track_metadata(track_info.artist, track_info.title)
-    if not data:
-        return
-    if data.get("genre") and not track_info.genre:
-        track_info.genre = normalize_genre(str(data["genre"])) or track_info.genre
-    if data.get("date") and not track_info.date:
-        track_info.date = normalize_date(str(data["date"]))
-    _apply_mapping(
-        track_info,
-        data,
-        {
-            "advisory": "advisory",
-            "copyright": "copyright",
-            "itunes_trackid": "itunes_trackid",
-            "itunes_collectionid": "itunes_collectionid",
-            "itunes_artistid": "itunes_artistid",
-            "release_country": "release_country",
-        },
-    )
+    try:
+        data = fetch_itunes_track_metadata(track_info.artist, track_info.title)
+        if data:
+            _apply_mapping(
+                track_info,
+                data,
+                {
+                    "genre": "genre",
+                    "date": "date",
+                    "advisory": "advisory",
+                    "copyright": "copyright",
+                    "itunes_trackid": "itunes_trackid",
+                    "itunes_collectionid": "itunes_collectionid",
+                    "itunes_artistid": "itunes_artistid",
+                    "release_country": "release_country",
+                },
+            )
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"iTunes enrichment failed for {track_info.title}: {error}")
 
 
 def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
     if not lastfm_api_key:
         return
-    tags = fetch_lastfm_tags(
-        track_info.artist,
-        track_info.title,
-        api_key=lastfm_api_key,
-        mbid=track_info.musicbrainz_trackid,
-    )
-    if tags:
-        if not track_info.genre:
-            raw_genre = tags[0]
-            normalized_genre = normalize_genre(raw_genre)
-            if normalized_genre:
-                track_info.genre = normalized_genre
-                LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
-        if len(tags) > 1 and not track_info.style:
-            subgenres = [
-                t for t in tags[1:4] if t.lower() != (track_info.genre or "").lower()
-            ]
-            if subgenres:
-                track_info.style = ", ".join(subgenres)
-        if not track_info.mood:
-            mood_keywords = {
-                "chill",
-                "dark",
-                "sad",
-                "happy",
-                "energetic",
-                "melancholic",
-                "relax",
-                "relaxing",
-                "aggressive",
-                "ambient",
-                "party",
-                "romantic",
-                "hype",
-                "mellow",
-                "atmospheric",
-                "epic",
-                "somber",
-                "upbeat",
-            }
-            for t in tags:
-                if t.lower() in mood_keywords:
-                    track_info.mood = t.title()
-                    break
+    try:
+        tags = fetch_lastfm_tags(
+            track_info.artist,
+            track_info.title,
+            api_key=lastfm_api_key,
+            mbid=track_info.musicbrainz_trackid,
+        )
+        if tags:
+            if not track_info.genre:
+                raw_genre = tags[0]
+                normalized_genre = normalize_genre(raw_genre)
+                if normalized_genre:
+                    track_info.genre = normalized_genre
+                    LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
+            if len(tags) > 1 and not track_info.style:
+                subgenres = [
+                    t
+                    for t in tags[1:4]
+                    if t.lower() != (track_info.genre or "").lower()
+                ]
+                if subgenres:
+                    track_info.style = ", ".join(subgenres)
+            if not track_info.mood:
+                mood_keywords = {
+                    "chill",
+                    "dark",
+                    "sad",
+                    "happy",
+                    "energetic",
+                    "melancholic",
+                    "relax",
+                    "relaxing",
+                    "aggressive",
+                    "ambient",
+                    "party",
+                    "romantic",
+                    "hype",
+                    "mellow",
+                    "atmospheric",
+                    "epic",
+                    "somber",
+                    "upbeat",
+                }
+                for t in tags:
+                    if t.lower() in mood_keywords:
+                        track_info.mood = t.title()
+                        break
 
-    stats = fetch_lastfm_track_stats(
-        track_info.artist, track_info.title, api_key=lastfm_api_key
-    )
-    if stats:
-        if stats.get("listeners"):
-            track_info.listeners = stats["listeners"]
-        if stats.get("playcount"):
-            track_info.playcount = stats["playcount"]
+        stats = fetch_lastfm_track_stats(
+            track_info.artist, track_info.title, api_key=lastfm_api_key
+        )
+        if stats:
+            if stats.get("listeners"):
+                track_info.listeners = stats["listeners"]
+            if stats.get("playcount"):
+                track_info.playcount = stats["playcount"]
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"Last.fm enrichment failed for {track_info.title}: {error}")
 
 
 def _enrich_discogs(
@@ -285,59 +374,62 @@ def _enrich_discogs(
 ) -> None:
     if not discogs_user_token:
         return
-    release = album_discogs_release or search_discogs_release(
-        track_info.artist, track_info.album, user_token=discogs_user_token
-    )
-    if not release:
-        return
-    if release.get("released") and not track_info.date:
-        track_info.date = normalize_date(str(release["released"]))
-    elif release.get("year") and not track_info.date:
-        track_info.date = normalize_date(str(release["year"]))
+    try:
+        release = album_discogs_release or search_discogs_release(
+            track_info.artist, track_info.album, user_token=discogs_user_token
+        )
+        if not release:
+            return
 
-    genres_val = release.get("genres")
-    if isinstance(genres_val, list) and genres_val and not track_info.genre:
-        track_info.genre = normalize_genre(str(genres_val[0])) or track_info.genre
+        styles_val = release.get("styles")
+        if isinstance(styles_val, list) and styles_val and not track_info.style:
+            track_info.style = ", ".join(str(s) for s in styles_val[:3])
 
-    styles_val = release.get("styles")
-    if isinstance(styles_val, list) and styles_val and not track_info.style:
-        track_info.style = ", ".join(str(s) for s in styles_val[:3])
+        genres_val = release.get("genres")
+        if isinstance(genres_val, list) and genres_val and not track_info.genre:
+            track_info.genre = normalize_genre(str(genres_val[0])) or track_info.genre
 
-    _apply_mapping(
-        track_info,
-        release,
-        {
-            "id": "discogs_release_id",
-            "artist_id": "discogs_artist_id",
-            "country": "release_country",
-            "label": "label",
-            "catalog_number": "catalog_number",
-            "barcode": "barcode",
-            "media": "media",
-            "composer": "composer",
-            "producers": "producers",
-            "remixer": "remixer",
-        },
-    )
+        _apply_mapping(
+            track_info,
+            release,
+            {
+                "released": "date",
+                "year": "date",
+                "id": "discogs_release_id",
+                "artist_id": "discogs_artist_id",
+                "country": "release_country",
+                "label": "label",
+                "catalog_number": "catalog_number",
+                "barcode": "barcode",
+                "media": "media",
+                "composer": "composer",
+                "producers": "producers",
+                "remixer": "remixer",
+            },
+        )
 
-    track_credits_dict = release.get("track_credits")
-    if isinstance(track_credits_dict, dict):
-        track_key = str(track_info.track_number) if track_info.track_number else None
-        specific = None
-        if track_key and track_key in track_credits_dict:
-            specific = track_credits_dict[track_key]
-        elif track_info.title and track_info.title.lower() in track_credits_dict:
-            specific = track_credits_dict[track_info.title.lower()]
-        if isinstance(specific, dict):
-            _apply_mapping(
-                track_info,
-                specific,
-                {
-                    "producers": "producers",
-                    "remixer": "remixer",
-                    "composer": "composer",
-                },
+        track_credits_dict = release.get("track_credits")
+        if isinstance(track_credits_dict, dict):
+            track_key = (
+                str(track_info.track_number) if track_info.track_number else None
             )
+            specific = None
+            if track_key and track_key in track_credits_dict:
+                specific = track_credits_dict[track_key]
+            elif track_info.title and track_info.title.lower() in track_credits_dict:
+                specific = track_credits_dict[track_info.title.lower()]
+            if isinstance(specific, dict):
+                _apply_mapping(
+                    track_info,
+                    specific,
+                    {
+                        "producers": "producers",
+                        "remixer": "remixer",
+                        "composer": "composer",
+                    },
+                )
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"Discogs enrichment failed for {track_info.title}: {error}")
 
 
 def _enrich_deezer(
@@ -345,36 +437,47 @@ def _enrich_deezer(
     album_deezer_details: dict[str, Any] | None,
     force: bool = False,
 ) -> None:
-    album = album_deezer_details or fetch_deezer_album_details(
-        track_info.artist, track_info.album
-    )
-    if album:
-        if album.get("release_date") and not track_info.date:
-            track_info.date = normalize_date(str(album["release_date"]))
-        if album.get("genre") and not track_info.genre:
-            track_info.genre = normalize_genre(str(album["genre"])) or track_info.genre
-        _apply_mapping(track_info, album, {"label": "label", "barcode": "barcode"})
+    try:
+        album = album_deezer_details or fetch_deezer_album_details(
+            track_info.artist, track_info.album
+        )
+        if album:
+            _apply_mapping(
+                track_info,
+                album,
+                {
+                    "release_date": "date",
+                    "genre": "genre",
+                    "label": "label",
+                    "barcode": "barcode",
+                },
+            )
 
-    track = fetch_deezer_track_details(track_info.artist, track_info.title)
-    if not track:
-        return
-    if track.get("featured_artists") and (not track_info.featured_artists or force):
-        track_info.featured_artists = str(track["featured_artists"])
-    if track.get("producers") and (not track_info.producers or force):
-        track_info.producers = str(track["producers"])
-    if track.get("track_position") is not None and track_info.track_number is None:
-        track_info.track_number = int(str(track["track_position"]))
-    if track.get("disk_number") is not None and track_info.disc_number is None:
-        track_info.disc_number = int(str(track["disk_number"]))
-    if track.get("release_date") and not track_info.date:
-        track_info.date = normalize_date(str(track["release_date"]))
-    if track.get("explicit_lyrics") and not track_info.advisory:
-        track_info.advisory = "Explicit"
-    _apply_mapping(
-        track_info,
-        track,
-        {"isrc": "isrc", "composer": "composer", "lyricist": "lyricist"},
-    )
+        track = fetch_deezer_track_details(track_info.artist, track_info.title)
+        if not track:
+            return
+        if track.get("featured_artists") and (not track_info.featured_artists or force):
+            track_info.featured_artists = str(track["featured_artists"])
+        if track.get("producers") and (not track_info.producers or force):
+            track_info.producers = str(track["producers"])
+        if track.get("track_position") is not None and track_info.track_number is None:
+            track_info.track_number = int(str(track["track_position"]))
+        if track.get("disk_number") is not None and track_info.disc_number is None:
+            track_info.disc_number = int(str(track["disk_number"]))
+        if track.get("explicit_lyrics") and not track_info.advisory:
+            track_info.advisory = "Explicit"
+        _apply_mapping(
+            track_info,
+            track,
+            {
+                "release_date": "date",
+                "isrc": "isrc",
+                "composer": "composer",
+                "lyricist": "lyricist",
+            },
+        )
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"Deezer enrichment failed for {track_info.title}: {error}")
 
 
 def _enrich_genius(
@@ -384,32 +487,34 @@ def _enrich_genius(
 ) -> None:
     if not genius_api_token:
         return
-    genius_details = fetch_genius_song_details(
-        track_info.artist, track_info.title, api_token=genius_api_token
-    )
-    if not genius_details:
-        return
-    if genius_details.get("description") and (not track_info.comment or force):
-        track_info.comment = str(genius_details["description"])
-    if genius_details.get("featured_artists") and (
-        not track_info.featured_artists or force
-    ):
-        track_info.featured_artists = str(genius_details["featured_artists"])
-    if genius_details.get("producers") and (not track_info.producers or force):
-        track_info.producers = str(genius_details["producers"])
-    if genius_details.get("release_date") and not track_info.date:
-        track_info.date = normalize_date(str(genius_details["release_date"]))
-    _apply_mapping(
-        track_info,
-        genius_details,
-        {
-            "genius_song_id": "genius_song_id",
-            "writers": "composer",
-        },
-    )
-    if genius_details.get("writers") and not track_info.lyricist:
-        track_info.lyricist = str(genius_details["writers"])
-    LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
+    try:
+        genius_details = fetch_genius_song_details(
+            track_info.artist, track_info.title, api_token=genius_api_token
+        )
+        if not genius_details:
+            return
+        if genius_details.get("description") and (not track_info.comment or force):
+            track_info.comment = str(genius_details["description"])
+        if genius_details.get("featured_artists") and (
+            not track_info.featured_artists or force
+        ):
+            track_info.featured_artists = str(genius_details["featured_artists"])
+        if genius_details.get("producers") and (not track_info.producers or force):
+            track_info.producers = str(genius_details["producers"])
+        _apply_mapping(
+            track_info,
+            genius_details,
+            {
+                "release_date": "date",
+                "genius_song_id": "genius_song_id",
+                "writers": "composer",
+            },
+        )
+        if genius_details.get("writers") and not track_info.lyricist:
+            track_info.lyricist = str(genius_details["writers"])
+        LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"Genius enrichment failed for {track_info.title}: {error}")
 
 
 def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
@@ -422,30 +527,32 @@ def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
         or not track_info.comment
     ):
         return
-    tadb_details = fetch_theaudiodb_track_details(track_info.artist, track_info.title)
-    if not tadb_details:
-        return
-    if tadb_details.get("genre") and not track_info.genre:
-        track_info.genre = (
-            normalize_genre(str(tadb_details["genre"])) or track_info.genre
+    try:
+        tadb_details = fetch_theaudiodb_track_details(
+            track_info.artist, track_info.title
         )
-    if tadb_details.get("rating") is not None and track_info.rating is None:
-        with contextlib.suppress(ValueError, TypeError):
-            track_info.rating = float(str(tadb_details["rating"]))
-    if tadb_details.get("description") and (not track_info.comment or force):
-        desc_str = str(tadb_details["description"]).strip()
-        if desc_str and desc_str.lower() not in ("none", "null"):
-            track_info.comment = desc_str
-    _apply_mapping(
-        track_info,
-        tadb_details,
-        {
-            "music_video_url": "music_video_url",
-            "mood": "mood",
-            "style": "style",
-            "initial_key": "initial_key",
-        },
-    )
+        if not tadb_details:
+            return
+        if tadb_details.get("rating") is not None and track_info.rating is None:
+            with contextlib.suppress(ValueError, TypeError):
+                track_info.rating = float(str(tadb_details["rating"]))
+        if tadb_details.get("description") and (not track_info.comment or force):
+            desc_str = str(tadb_details["description"]).strip()
+            if desc_str and desc_str.lower() not in ("none", "null"):
+                track_info.comment = desc_str
+        _apply_mapping(
+            track_info,
+            tadb_details,
+            {
+                "genre": "genre",
+                "music_video_url": "music_video_url",
+                "mood": "mood",
+                "style": "style",
+                "initial_key": "initial_key",
+            },
+        )
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"TheAudioDB enrichment failed for {track_info.title}: {error}")
 
 
 def _enrich_cuesheet(
@@ -495,7 +602,7 @@ def _enrich_artwork(
             force=force,
             dry_run=dry_run,
         )
-    except (OSError, ValueError, RuntimeError) as error:
+    except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Cover art downloading failed for {track_info.title}: {error}")
         return None
 
@@ -530,7 +637,7 @@ def _enrich_lyrics(
                 LOG.info(
                     f"   ∟ [yellow]🔄 Updated {tag_type} lyrics for {file_path.name}[/]"
                 )
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Lyrics fetch failed for {track_info.title}: {error}")
 
 
@@ -576,6 +683,7 @@ def process_single_track(
 ) -> TrackInfo:
     LOG.start_buffering()
     try:
+        _wait_if_paused()
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -586,6 +694,7 @@ def process_single_track(
         LOG.info(f"🎧 Processing track: [white]{file_path.name}[/]")
 
         # 1. External metadata enrichment pipeline
+        _wait_if_paused()
         _enrich_acoustid(track_info, file_path, acoustid_api_key, force=force)
         _enrich_musicbrainz(
             track_info,
@@ -669,12 +778,14 @@ def tag_album_folder(
         album_groups.setdefault(audio_file.parent, []).append(audio_file)
 
     results: list[TrackInfo] = []
+    current_album_results: list[TrackInfo] = []
 
-    with create_progress() as progress:
+    with create_progress() as progress, _interactive_pause_listener():
         task = progress.add_task("[cyan]Tagging tracks...", total=len(all_audio_files))
         executor = ThreadPoolExecutor(max_workers=max_threads)
         try:
             for album_dir, audio_files in album_groups.items():
+                _wait_if_paused()
                 folder_name = album_dir.name
                 LOG.force_info(
                     f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]"
@@ -722,15 +833,10 @@ def tag_album_folder(
                             )
                             if discogs_info:
                                 album_discogs_release = discogs_info
-                except (
-                    httpx.HTTPError,
-                    OSError,
-                    ValueError,
-                    RuntimeError,
-                ) as error:
+                except _NETWORK_EXCEPTIONS as error:
                     LOG.debug(f"Pre-fetching album metadata failed: {error}")
 
-                album_results: list[TrackInfo] = []
+                current_album_results = []
                 future_to_file = {
                     executor.submit(
                         process_single_track,
@@ -758,16 +864,8 @@ def tag_album_folder(
                     audio_file = future_to_file[future]
                     try:
                         track_info = future.result()
-                        album_results.append(track_info)
-                    except (
-                        httpx.HTTPError,
-                        OSError,
-                        ValueError,
-                        RuntimeError,
-                        TypeError,
-                        KeyError,
-                        AttributeError,
-                    ) as error:
+                        current_album_results.append(track_info)
+                    except _NETWORK_EXCEPTIONS as error:
                         LOG.warning(f"Failed to process {audio_file.name}: {error}")
                         LAST_TAGGING_FAILURES.append(
                             {
@@ -787,25 +885,23 @@ def tag_album_folder(
                         max_threads=max_threads,
                     )
 
-                if album_results:
+                if current_album_results:
                     primary_artist = (
-                        album_results[0].album_artist or album_results[0].artist
+                        current_album_results[0].album_artist
+                        or current_album_results[0].artist
                     )
                     try:
                         process_artist_artwork(
                             album_dir, primary_artist, dry_run=dry_run
                         )
-                    except (
-                        httpx.HTTPError,
-                        OSError,
-                        ValueError,
-                        RuntimeError,
-                    ) as error:
+                    except _NETWORK_EXCEPTIONS as error:
                         LOG.debug(f"Artist art download failed: {error}")
 
-                results.extend(album_results)
+                results.extend(current_album_results)
+                current_album_results = []
         except KeyboardInterrupt:
             executor.shutdown(wait=False, cancel_futures=True)
+            results.extend(current_album_results)
             raise
         finally:
             executor.shutdown(wait=False, cancel_futures=True)

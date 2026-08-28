@@ -50,44 +50,51 @@ _ARTIST_SEPARATORS = [
 ]
 _ARTIST_SPLIT_PATTERN = re.compile("|".join(_ARTIST_SEPARATORS), re.IGNORECASE)
 
-_ROMAN_VALUES: dict[str, int] = dict(
-    zip("ivxlcdm", (1, 5, 10, 50, 100, 500, 1000), strict=True)
-)
-_NUMBER_WORDS: tuple[str, ...] = (
-    "one",
-    "two",
-    "three",
-    "four",
-    "five",
-    "six",
-    "seven",
-    "eight",
-    "nine",
-    "ten",
-    "eleven",
-    "twelve",
-    "thirteen",
-    "fourteen",
-    "fifteen",
-    "sixteen",
-    "seventeen",
-    "eighteen",
-    "nineteen",
-    "twenty",
-)
+_ROMAN_MAP: dict[str, int] = {
+    "i": 1,
+    "ii": 2,
+    "iii": 3,
+    "iv": 4,
+    "v": 5,
+    "vi": 6,
+    "vii": 7,
+    "viii": 8,
+    "ix": 9,
+    "x": 10,
+    "xi": 11,
+    "xii": 12,
+    "xiii": 13,
+    "xiv": 14,
+    "xv": 15,
+    "xvi": 16,
+    "xvii": 17,
+    "xviii": 18,
+    "xix": 19,
+    "xx": 20,
+}
 
-
-def _parse_roman(token: str) -> int | None:
-    """Parse Roman numeral (I to MMMCMXCIX) to integer."""
-    s = token.lower().strip()
-    if not s or not all(c in _ROMAN_VALUES for c in s) or len(s) > 10:
-        return None
-    total, prev_val = 0, 0
-    for c in reversed(s):
-        val = _ROMAN_VALUES[c]
-        total += -val if val < prev_val else val
-        prev_val = val
-    return total if total > 0 else None
+_WORD_NUMBER_MAP: dict[str, int] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
 
 
 def extract_series_number(text: str | None) -> int | None:
@@ -100,25 +107,21 @@ def extract_series_number(text: str | None) -> int | None:
 
     clean_text = ftfy.fix_text(str(text)).strip().lower()
 
-    # Match explicit volume/part patterns (e.g. 'Vol 2', 'Pt. 2', 'Part II', 'Act 1', 'Book 20')
     prefix_match = re.search(
-        r"\b(?:vol(?:ume)?|pt|part|chapter|act|book)\.?\s*(\d+|[ivxlcdm]+|[a-z]+)\b",
+        r"\b(?:vol(?:ume)?|pt|part|chapter|act|book)\.?\s*(\d{1,2}|[a-z]+)\b",
         clean_text,
         re.IGNORECASE,
     )
     if prefix_match:
         token = prefix_match.group(1).lower()
-        if token.isdigit() and len(token) <= 2:
+        if token.isdigit():
             return int(token)
-        roman_val = _parse_roman(token)
-        if roman_val is not None:
-            return roman_val
-        if token in _NUMBER_WORDS:
-            return _NUMBER_WORDS.index(token) + 1
+        if token in _ROMAN_MAP:
+            return _ROMAN_MAP[token]
+        return _WORD_NUMBER_MAP.get(token)
 
-    # Match trailing Roman numerals (II, III, IV, etc.), digits, or written number words
     trailing_match = re.search(
-        r"\b(\d{1,2}|[ivxlcdm]+|[a-z]+)\s*$",
+        r"\b(\d{1,2}|[a-z]+)\s*$",
         clean_text,
         re.IGNORECASE,
     )
@@ -126,11 +129,9 @@ def extract_series_number(text: str | None) -> int | None:
         token = trailing_match.group(1).lower()
         if token.isdigit():
             return int(token)
-        roman_val = _parse_roman(token)
-        if roman_val is not None:
-            return roman_val
-        if token in _NUMBER_WORDS:
-            return _NUMBER_WORDS.index(token) + 1
+        if token in _ROMAN_MAP:
+            return _ROMAN_MAP[token]
+        return _WORD_NUMBER_MAP.get(token)
 
     return None
 

@@ -1,5 +1,7 @@
+import contextlib
 import datetime
 import os
+import signal
 import socket
 import sys
 from collections.abc import Sequence
@@ -13,6 +15,7 @@ from dotenv import load_dotenv
 from sonora import __version__
 from sonora.core.cache import set_ignore_cache
 from sonora.core.logger import LOG
+from sonora.core.models import TrackInfo
 from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.checker import check_library
 from sonora.modules.organizer import organize_library_singles
@@ -23,6 +26,13 @@ from sonora.services.musicbrainz import init_musicbrainz
 
 load_dotenv()
 socket.setdefaulttimeout(15)
+
+if hasattr(signal, "SIGCONT"):
+    with contextlib.suppress(Exception):
+        signal.signal(
+            signal.SIGCONT,
+            lambda *_: LOG.info("▶️ [green]Resumed execution.[/]"),
+        )
 
 app = App(
     name="sonora",
@@ -166,21 +176,35 @@ def tag(
         )
 
     LOG.info(f"Tagging album directory: [bold]{path}[/bold]")
-    tagged_tracks = tag_album_folder(
-        path,
-        max_threads=threads,
-        fetch_bpm=fetch_bpm,
-        fetch_replaygain=fetch_replaygain,
-        fetch_lyrics=fetch_lyrics,
-        fetch_itunes_art=fetch_artwork,
-        lastfm_api_key=resolved_lastfm_key,
-        acoustid_api_key=resolved_acoustid_key,
-        discogs_user_token=resolved_discogs_token,
-        genius_api_token=resolved_genius_token,
-        force=force,
-        dry_run=dry_run,
-    )
-    LOG.success(f"Successfully tagged {len(tagged_tracks)} tracks.")
+    tagged_tracks: list[TrackInfo] = []
+    interrupted = False
+    try:
+        tagged_tracks = tag_album_folder(
+            path,
+            max_threads=threads,
+            fetch_bpm=fetch_bpm,
+            fetch_replaygain=fetch_replaygain,
+            fetch_lyrics=fetch_lyrics,
+            fetch_itunes_art=fetch_artwork,
+            lastfm_api_key=resolved_lastfm_key,
+            acoustid_api_key=resolved_acoustid_key,
+            discogs_user_token=resolved_discogs_token,
+            genius_api_token=resolved_genius_token,
+            force=force,
+            dry_run=dry_run,
+        )
+    except KeyboardInterrupt:
+        interrupted = True
+        LOG.warning(
+            "Tagging interrupted by user. Generating report for processed tracks..."
+        )
+
+    if not interrupted:
+        LOG.success(f"Successfully tagged {len(tagged_tracks)} tracks.")
+    else:
+        LOG.warning(
+            f"Partially processed {len(tagged_tracks)} tracks before interruption."
+        )
 
     total_tracks = len(tagged_tracks)
     bpm_count = sum(1 for track in tagged_tracks if track.bpm is not None)
@@ -315,7 +339,7 @@ def tag(
     if json_report:
         failures = get_last_tagging_failures()
         summary_text = (
-            f"Successfully processed {total_tracks} tracks ({len(failures)} failures). "
+            f"Processed {total_tracks} tracks ({len(failures)} failures). "
             f"MusicBrainz {musicbrainz_count}/{total_tracks} ({musicbrainz_percentage:.0f}%), "
             f"Genre {genre_count}/{total_tracks} ({genre_percentage:.0f}%), "
             f"Lyrics {lyrics_count}/{total_tracks} ({lyrics_percentage:.0f}%), "
@@ -327,6 +351,7 @@ def tag(
             "generator": "Sonora",
             "version": __version__,
             "summary_text": summary_text,
+            "aborted_by_user": interrupted,
             "execution": {
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "target_path": str(path.resolve()),
@@ -381,6 +406,8 @@ def tag(
         )
         LOG.info(f"Saved tagging JSON report to [bold]{json_report}[/bold]")
 
+    if interrupted:
+        return 130
     return 0
 
 
