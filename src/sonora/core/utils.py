@@ -338,12 +338,32 @@ _METADATA_FILTER = MetadataFilter(
 )
 
 
+_DUPLICATE_FEAT_PATTERN = re.compile(
+    r"\s+(?:cu|și|si|with|fea?t\.?|featuring)\s+([A-Za-z0-9\s\.\'\-]+?)(?=\s*[\(\[\{]\s*(?:fea?t\.?|featuring|with|cu)\s+\1[\)\]\}])",
+    re.IGNORECASE,
+)
+
+
+def deduplicate_title_features(title: str | None) -> str:
+    if not title:
+        return ""
+    cleaned = _DUPLICATE_FEAT_PATTERN.sub("", str(title))
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def clean_title(title: str) -> str:
     """Clean track title by removing feat./ft./with brackets, remaster suffixes, and mojibake text."""
     if not title:
         return ""
     fixed_title = ftfy.fix_text(str(title))
-    cleaned = _METADATA_FILTER.filter_field("track", fixed_title)
+    deduped = deduplicate_title_features(fixed_title)
+    cleaned = _METADATA_FILTER.filter_field("track", deduped)
+    cleaned = re.sub(
+        r"\s*[\(\[\{]\s*(?:cu|și|si)\s+.*?[\)\]\}]",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(
         r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd).*?[\)\]\}]",
         "",
@@ -538,13 +558,23 @@ def sanitize_name(name: str | None) -> str:
 class RateLimiter:
     """Thread-safe rate limiter with precise target_time scheduling."""
 
+    _disabled: bool = False
+
     def __init__(self, interval_seconds: float) -> None:
         self.interval = interval_seconds
         self.lock = threading.Lock()
         self.last_call = 0.0
 
+    @classmethod
+    def set_disabled(cls, disabled: bool) -> None:
+        cls._disabled = disabled
+
     def wait(self, interval_seconds: float | None = None) -> float:
+        if self._disabled:
+            return 0.0
         interval = self.interval if interval_seconds is None else interval_seconds
+        if interval <= 0:
+            return 0.0
         with self.lock:
             now = time.monotonic()
             target_time = max(now, self.last_call + interval)

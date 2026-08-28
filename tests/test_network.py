@@ -45,6 +45,31 @@ from sonora.services.theaudiodb import (
 
 
 class TestNetwork(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        RateLimiter.set_disabled(True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        RateLimiter.set_disabled(False)
+
+    def setUp(self) -> None:
+        services = [
+            "sonora.services.itunes",
+            "sonora.services.lyrics",
+            "sonora.services.musicbrainz",
+            "sonora.services.discogs",
+            "sonora.services.acoustid",
+            "sonora.services.lastfm",
+            "sonora.services.genius",
+            "sonora.services.deezer",
+            "sonora.services.theaudiodb",
+        ]
+        for service in services:
+            patcher = patch(f"{service}.get_cached_api", return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_http_session_transport_configuration(self) -> None:
         self.assertEqual(SESSION.headers.get("User-Agent"), USER_AGENT)
         transport = SESSION._transport
@@ -56,21 +81,15 @@ class TestNetwork(unittest.TestCase):
 
     # --- TheAudioDB Tests ---
 
-    @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
     @patch("sonora.services.theaudiodb.SESSION.get")
-    def test_theaudiodb_server_disconnect(
-        self, mock_get: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_theaudiodb_server_disconnect(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.RemoteProtocolError("Server disconnected")
         thumb, banner = fetch_artist_images("Emil Lassaria")
         self.assertIsNone(thumb)
         self.assertIsNone(banner)
 
-    @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
     @patch("sonora.services.theaudiodb.SESSION.get")
-    def test_theaudiodb_image_download_disconnect(
-        self, mock_get: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_theaudiodb_image_download_disconnect(self, mock_get: MagicMock) -> None:
         mock_json_response = MagicMock()
         mock_json_response.status_code = 200
         mock_json_response.json.return_value = {
@@ -91,10 +110,9 @@ class TestNetwork(unittest.TestCase):
         self.assertIsNone(thumb)
         self.assertIsNone(banner)
 
-    @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
     @patch("sonora.services.theaudiodb.SESSION.get")
     def test_theaudiodb_track_details_503_and_broken_json(
-        self, mock_get: MagicMock, _mock_cache: MagicMock
+        self, mock_get: MagicMock
     ) -> None:
         mock_response_503 = MagicMock()
         mock_response_503.status_code = 503
@@ -113,10 +131,9 @@ class TestNetwork(unittest.TestCase):
 
     # --- MusicBrainz & Cover Art Archive Tests ---
 
-    @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_recording_lookup_network_errors(
-        self, mock_mb: MagicMock, _mock_cache: MagicMock
+        self, mock_mb: MagicMock
     ) -> None:
         mock_mb.search_recordings.side_effect = musicbrainzngs.MusicBrainzError(
             "Service Unavailable 503"
@@ -138,11 +155,8 @@ class TestNetwork(unittest.TestCase):
             fetch_musicbrainz_release_details("c8b03190-306c-4125-9b32-3f9d86d60a12")
         )
 
-    @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.SESSION.head")
-    def test_cover_art_archive_network_timeout(
-        self, mock_head: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_cover_art_archive_network_timeout(self, mock_head: MagicMock) -> None:
         mock_head.side_effect = httpx.ConnectTimeout("Connect timeout")
         self.assertIsNone(
             fetch_cover_art_archive_url("c8b03190-306c-4125-9b32-3f9d86d60a12")
@@ -150,11 +164,8 @@ class TestNetwork(unittest.TestCase):
 
     # --- iTunes Tests ---
 
-    @patch("sonora.services.itunes.get_cached_api", return_value=None)
     @patch("sonora.services.itunes.SESSION.get")
-    def test_itunes_rate_limit_and_timeout(
-        self, mock_get: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_itunes_rate_limit_and_timeout(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.HTTPStatusError(
             "429 Too Many Requests",
             request=MagicMock(),
@@ -169,21 +180,15 @@ class TestNetwork(unittest.TestCase):
 
     # --- Deezer & Discogs Tests ---
 
-    @patch("sonora.services.deezer.get_cached_api", return_value=None)
     @patch("sonora.services.deezer.SESSION.get")
-    def test_deezer_server_disconnect(
-        self, mock_get: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_deezer_server_disconnect(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.RemoteProtocolError("Server disconnected")
         self.assertIsNone(fetch_deezer_cover_art_url("Artist", "Album"))
         self.assertIsNone(fetch_deezer_album_details("Artist", "Album"))
         self.assertIsNone(fetch_deezer_track_details("Artist", "Title"))
 
-    @patch("sonora.services.discogs.get_cached_api", return_value=None)
     @patch("sonora.services.discogs.SESSION.get")
-    def test_discogs_network_errors(
-        self, mock_get: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_discogs_network_errors(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.HTTPError("401 Unauthorized")
         self.assertIsNone(
             search_discogs_release("Artist", "Album", user_token="bad_token")
@@ -194,11 +199,8 @@ class TestNetwork(unittest.TestCase):
 
     # --- Last.fm & Genius Tests ---
 
-    @patch("sonora.services.lastfm.get_cached_api", return_value=None)
     @patch("sonora.services.lastfm.SESSION.get")
-    def test_lastfm_disconnect(
-        self, mock_get: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_lastfm_disconnect(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.RemoteProtocolError("Server disconnected")
         self.assertEqual(
             fetch_lastfm_tags("Artist", "Title", api_key="dummy_lastfm_key"), []
@@ -207,11 +209,8 @@ class TestNetwork(unittest.TestCase):
             fetch_lastfm_track_stats("Artist", "Title", api_key="dummy_lastfm_key")
         )
 
-    @patch("sonora.services.genius.get_cached_api", return_value=None)
     @patch("sonora.services.genius.SESSION.get")
-    def test_genius_network_error(
-        self, mock_get: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_genius_network_error(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.ConnectError("Connection refused")
         self.assertIsNone(
             fetch_genius_song_details("Artist", "Title", api_token="dummy_token")
@@ -219,11 +218,8 @@ class TestNetwork(unittest.TestCase):
 
     # --- SyncedLyrics Tests ---
 
-    @patch("sonora.services.lyrics.get_cached_api", return_value=None)
     @patch("sonora.services.lyrics.syncedlyrics.search")
-    def test_lyrics_upstream_exception(
-        self, mock_search: MagicMock, _mock_cache: MagicMock
-    ) -> None:
+    def test_lyrics_upstream_exception(self, mock_search: MagicMock) -> None:
         mock_search.side_effect = httpx.RemoteProtocolError(
             "Musixmatch connection dropped"
         )
@@ -239,38 +235,43 @@ class TestNetwork(unittest.TestCase):
     # --- Concurrency & Rate Limiting Tests ---
 
     def test_rate_limiter_spacing(self) -> None:
-        limiter = RateLimiter(interval_seconds=0.05)
-        timestamps: list[float] = []
-        lock = threading.Lock()
+        RateLimiter.set_disabled(False)
+        try:
+            limiter = RateLimiter(interval_seconds=0.05)
+            timestamps: list[float] = []
+            lock = threading.Lock()
 
-        def worker() -> None:
-            limiter.wait()
-            with lock:
-                timestamps.append(time.monotonic())
+            def worker() -> None:
+                limiter.wait()
+                with lock:
+                    timestamps.append(time.monotonic())
 
-        threads = [threading.Thread(target=worker) for _ in range(6)]
-        start_time = time.monotonic()
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            start_time = time.monotonic()
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
-        elapsed = time.monotonic() - start_time
-        self.assertGreaterEqual(elapsed, 0.20)
-        self.assertEqual(len(timestamps), 6)
+            elapsed = time.monotonic() - start_time
+            self.assertGreaterEqual(elapsed, 0.20)
+            self.assertEqual(len(timestamps), 6)
 
-        sorted_timestamps = sorted(timestamps)
-        for i in range(1, len(sorted_timestamps)):
-            diff = sorted_timestamps[i] - sorted_timestamps[i - 1]
-            self.assertGreaterEqual(diff, 0.03)
+            sorted_timestamps = sorted(timestamps)
+            for i in range(1, len(sorted_timestamps)):
+                diff = sorted_timestamps[i] - sorted_timestamps[i - 1]
+                self.assertGreaterEqual(diff, 0.03)
+        finally:
+            RateLimiter.set_disabled(True)
 
     # --- Smart Field Gating Tests ---
 
     @patch("sonora.modules.tagger.fetch_theaudiodb_track_details")
     @patch("sonora.modules.tagger.read_track_metadata")
-    @patch("sonora.modules.tagger.write_track_metadata")
     def test_smart_gating_skips_complete_tracks(
-        self, _mock_write: MagicMock, mock_read: MagicMock, mock_tadb: MagicMock
+        self,
+        mock_read: MagicMock,
+        mock_tadb: MagicMock,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             song_path = Path(tmp_dir) / "song.flac"
@@ -290,13 +291,45 @@ class TestNetwork(unittest.TestCase):
             )
             mock_read.return_value = complete_track
 
-            result = process_single_track(
-                file_path=song_path,
-                fetch_bpm=False,
-                fetch_lyrics=False,
-                fetch_itunes_art=False,
-                force=False,
-            )
+            with (
+                patch(
+                    "sonora.modules.tagger.fetch_genius_song_details",
+                    return_value=None,
+                ),
+                patch(
+                    "sonora.modules.tagger.fetch_deezer_track_details",
+                    return_value=None,
+                ),
+                patch(
+                    "sonora.modules.tagger.fetch_deezer_album_details",
+                    return_value=None,
+                ),
+                patch(
+                    "sonora.modules.tagger.fetch_musicbrainz_recording_details",
+                    return_value=None,
+                ),
+                patch("sonora.modules.tagger.fetch_track_mbid", return_value=None),
+                patch(
+                    "sonora.modules.tagger.search_musicbrainz_release",
+                    return_value=None,
+                ),
+                patch(
+                    "sonora.modules.tagger.fetch_itunes_track_metadata",
+                    return_value=None,
+                ),
+                patch(
+                    "sonora.modules.tagger.resolve_artist_name",
+                    side_effect=lambda x: x,
+                ),
+                patch("sonora.modules.tagger.write_track_metadata"),
+            ):
+                result = process_single_track(
+                    file_path=song_path,
+                    fetch_bpm=False,
+                    fetch_lyrics=False,
+                    fetch_itunes_art=False,
+                    force=False,
+                )
 
             mock_tadb.assert_not_called()
             self.assertEqual(result.mood, "Energetic")

@@ -1,4 +1,3 @@
-from functools import lru_cache
 from pathlib import Path
 
 import acoustid
@@ -8,13 +7,7 @@ from sonora.core.constants import RATE_LIMIT_ACOUSTID
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, is_valid_uuid, match_score, normalize_str
 
-
-@lru_cache(maxsize=2048)
-def _fingerprint_file_cached(
-    resolved_path: str, mtime_ns: int, size: int
-) -> tuple[float, str]:
-    duration, fingerprint = acoustid.fingerprint_file(resolved_path)
-    return float(duration), str(fingerprint)
+_ACOUSTID_CACHE: dict[tuple[str, int, int], tuple[float, str]] = {}
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
@@ -28,9 +21,14 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
 
     try:
         stat = file_path.stat()
-        return _fingerprint_file_cached(
-            str(file_path.resolve()), stat.st_mtime_ns, stat.st_size
-        )
+        cache_key = (str(file_path.resolve()), stat.st_mtime_ns, stat.st_size)
+        if cache_key in _ACOUSTID_CACHE:
+            return _ACOUSTID_CACHE[cache_key]
+
+        duration, fingerprint = acoustid.fingerprint_file(str(file_path.resolve()))
+        result = (float(duration), str(fingerprint))
+        _ACOUSTID_CACHE[cache_key] = result
+        return result
     except (
         acoustid.AcoustidError,
         acoustid.WebServiceError,

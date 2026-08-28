@@ -6,6 +6,7 @@ from sonora.audio.metadata import read_track_metadata
 from sonora.core.logger import LOG, create_progress
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    deduplicate_title_features,
     find_audio_files,
     find_companion_lyrics,
     normalize_str,
@@ -71,7 +72,7 @@ def build_new_filename(
     if not title:
         return None
 
-    clean_title = sanitize_name(title)
+    clean_title = sanitize_name(deduplicate_title_features(title))
     track_number_str = str(track_number).split("/")[0] if track_number else ""
     track_digits = "".join(filter(str.isdigit, track_number_str))
 
@@ -120,7 +121,7 @@ def rename_track_file(
     else:
         num = track_info.track_number or 1
         artist_clean = sanitize_name(track_info.artist)
-        title_clean = sanitize_name(track_info.title)
+        title_clean = sanitize_name(deduplicate_title_features(track_info.title))
         new_stem = format_pattern.format(
             track_number=num,
             artist=artist_clean,
@@ -156,6 +157,7 @@ def rename_track_file(
 
     # Perform file rename
     if file_path.name != new_name or file_path.parent != new_path.parent:
+        base_stem = Path(new_name).stem
         if new_path.exists() and (
             file_path.parent != new_path.parent
             or file_path.name.lower() != new_path.name.lower()
@@ -165,7 +167,7 @@ def rename_track_file(
                 file_path.parent != new_path.parent
                 or file_path.name.lower() != new_path.name.lower()
             ):
-                new_name = f"{new_path.stem} ({counter}){file_path.suffix}"
+                new_name = f"{base_stem} ({counter}){file_path.suffix}"
                 new_path = folder / new_name
                 counter += 1
 
@@ -222,12 +224,25 @@ def rename_album_folder(
                 return folder_path
 
         new_folder = folder_path.with_name(expected_name)
-        if new_folder.exists() and folder_path.resolve() != new_folder.resolve():
+        if (
+            new_folder.exists()
+            and folder_path.resolve() != new_folder.resolve()
+            and folder_path.name.lower() != new_folder.name.lower()
+        ):
             return folder_path
 
         if not dry_run:
             try:
-                folder_path.rename(new_folder)
+                # Safe case-only directory rename
+                if (
+                    folder_path.name.lower() == new_folder.name.lower()
+                    and folder_path.name != new_folder.name
+                ):
+                    tmp_folder = folder_path.with_name(f".tmp_{folder_path.name}")
+                    folder_path.rename(tmp_folder)
+                    tmp_folder.rename(new_folder)
+                else:
+                    folder_path.rename(new_folder)
                 LOG.info(
                     f"   ∟ 📂 Album folder renamed: [dim]{folder_now}[/] -> [cyan]{expected_name}[/]"
                 )

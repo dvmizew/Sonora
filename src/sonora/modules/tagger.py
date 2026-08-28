@@ -231,9 +231,7 @@ def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
                 LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
         if len(tags) > 1 and not track_info.style:
             subgenres = [
-                t
-                for t in tags[1:4]
-                if t.lower() != (track_info.genre or "").lower()
+                t for t in tags[1:4] if t.lower() != (track_info.genre or "").lower()
             ]
             if subgenres:
                 track_info.style = ", ".join(subgenres)
@@ -353,9 +351,7 @@ def _enrich_deezer(
     track = fetch_deezer_track_details(track_info.artist, track_info.title)
     if not track:
         return
-    if track.get("featured_artists") and (
-        not track_info.featured_artists or force
-    ):
+    if track.get("featured_artists") and (not track_info.featured_artists or force):
         track_info.featured_artists = str(track["featured_artists"])
     if track.get("producers") and (not track_info.producers or force):
         track_info.producers = str(track["producers"])
@@ -419,9 +415,7 @@ def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
         or not track_info.comment
     ):
         return
-    tadb_details = fetch_theaudiodb_track_details(
-        track_info.artist, track_info.title
-    )
+    tadb_details = fetch_theaudiodb_track_details(track_info.artist, track_info.title)
     if not tadb_details:
         return
     if tadb_details.get("genre") and not track_info.genre:
@@ -789,7 +783,12 @@ def tag_album_folder(
                         process_artist_artwork(
                             album_dir, primary_artist, dry_run=dry_run
                         )
-                    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                    except (
+                        httpx.HTTPError,
+                        OSError,
+                        ValueError,
+                        RuntimeError,
+                    ) as error:
                         LOG.debug(f"Artist art download failed: {error}")
 
                 results.extend(album_results)

@@ -8,6 +8,7 @@ import unittest
 from sonora.core.models import CheckReport, TrackInfo
 from sonora.core.utils import (
     clean_title,
+    deduplicate_title_features,
     is_valid_uuid,
     normalize_genre,
     normalize_str,
@@ -95,7 +96,30 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(clean_title("Clean [Clean Version]"), "Clean")
         self.assertEqual(clean_title("Parody [Parody]"), "Parody")
         self.assertEqual(clean_title("Spaces\u200b\u00a0Track"), "Spaces Track")
+        self.assertEqual(
+            clean_title("Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"),
+            "Melodie",
+        )
+        self.assertEqual(clean_title("Melodie (cu Vlad Dobrescu)"), "Melodie")
         self.assertEqual(clean_title(""), "")
+
+    def test_deduplicate_title_features(self):
+        self.assertEqual(
+            deduplicate_title_features(
+                "Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"
+            ),
+            "Melodie (feat. Vlad Dobrescu)",
+        )
+        self.assertEqual(
+            deduplicate_title_features("Piesa cu Nane [feat. Nane]"),
+            "Piesa [feat. Nane]",
+        )
+        self.assertEqual(
+            deduplicate_title_features("Dans cu Lupii (feat. Vlad Dobrescu)"),
+            "Dans cu Lupii (feat. Vlad Dobrescu)",
+        )
+        self.assertEqual(deduplicate_title_features(""), "")
+        self.assertEqual(deduplicate_title_features(None), "")
 
     def test_load_user_overrides_corrupt_json(self):
         from unittest.mock import patch

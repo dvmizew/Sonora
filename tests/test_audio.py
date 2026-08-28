@@ -119,20 +119,22 @@ class TestAudioEngine(unittest.TestCase):
         self.assertIsNotNone(info1.replaygain_track_peak)
         self.assertIsNotNone(info1.replaygain_album_peak)
 
-    @patch(
-        "sonora.audio.bpm.load_audio",
-        return_value=(np.random.rand(44100 * 10).astype(np.float32), 44100),
-    )
-    @patch(
-        "scipy.signal.spectrogram",
-        return_value=(None, None, np.tile(np.linspace(1, 10, 100), (10, 1))),
-    )
-    def test_calculate_bpm_with_scipy(self, mock_spec, mock_load):
-        bpm = calculate_bpm(self.dummy_audio_path)
-        self.assertIsNotNone(bpm)
-        self.assertIsInstance(bpm, float)
-        if bpm:
-            self.assertTrue(40.0 <= bpm <= 220.0)
+    def test_calculate_bpm_with_scipy(self):
+        with (
+            patch(
+                "sonora.audio.bpm.load_audio",
+                return_value=(np.random.rand(44100 * 10).astype(np.float32), 44100),
+            ),
+            patch(
+                "scipy.signal.spectrogram",
+                return_value=(None, None, np.tile(np.linspace(1, 10, 100), (10, 1))),
+            ),
+        ):
+            bpm = calculate_bpm(self.dummy_audio_path)
+            self.assertIsNotNone(bpm)
+            self.assertIsInstance(bpm, float)
+            if bpm:
+                self.assertTrue(40.0 <= bpm <= 220.0)
 
     @patch("taglib.File")
     def test_read_metadata_unsupported_format(self, mock_file):

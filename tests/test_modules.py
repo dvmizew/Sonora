@@ -11,6 +11,7 @@ from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    RateLimiter,
     find_audio_files,
     get_primary_artist,
     is_valid_uuid,
@@ -71,9 +72,20 @@ def create_dummy_wav(path: Path) -> None:
 
 
 class TestCoreModules(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        RateLimiter.set_disabled(True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        RateLimiter.set_disabled(False)
+
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp_dir.name)
+        patcher = patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self.tmp_dir.cleanup()
@@ -246,12 +258,15 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue((self.tmp_path / "report.json").exists())
 
     @patch("sonora.modules.tagger.write_track_metadata")
-    @patch("sonora.modules.tagger.fetch_itunes_track_metadata")
     @patch("sonora.services.lyrics.fetch_synced_lyrics")
     @patch("sonora.modules.tagger.fetch_track_mbid")
     @patch("sonora.modules.tagger.read_track_metadata")
     def test_process_single_track(
-        self, mock_read, mock_mbid, mock_lyrics, mock_itunes, mock_write
+        self,
+        mock_read,
+        mock_mbid,
+        mock_lyrics,
+        mock_write,
     ):
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
@@ -260,10 +275,40 @@ class TestCoreModules(unittest.TestCase):
             file_path=wav_file, artist="nane", title="Piesa"
         )
         mock_mbid.return_value = "c8b03190-306c-4125-9b32-3f9d86d60a12"
-        mock_itunes.return_value = None
         mock_lyrics.return_value = "[00:01.00] Vers"
 
-        info = process_single_track(wav_file, fetch_bpm=False)
+        with (
+            patch("sonora.modules.tagger.process_album_cover_art", return_value=None),
+            patch(
+                "sonora.modules.tagger.fetch_theaudiodb_track_details",
+                return_value=None,
+            ),
+            patch("sonora.modules.tagger.fetch_genius_song_details", return_value=None),
+            patch(
+                "sonora.modules.tagger.fetch_deezer_track_details", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_deezer_album_details", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_musicbrainz_recording_details",
+                return_value={
+                    "track_number": 3,
+                    "date": "2021-04-30",
+                    "isrc": "ROGRA2101575",
+                    "advisory": "Explicit",
+                },
+            ),
+            patch(
+                "sonora.modules.tagger.search_musicbrainz_release", return_value=None
+            ),
+            patch("sonora.modules.tagger.resolve_artist_name", return_value="Nane"),
+            patch(
+                "sonora.modules.tagger.fetch_itunes_track_metadata", return_value=None
+            ),
+        ):
+            info = process_single_track(wav_file, fetch_bpm=False)
+
         self.assertEqual(info.artist, "Nane")
         self.assertEqual(
             info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
@@ -283,7 +328,15 @@ class TestCoreModules(unittest.TestCase):
             TrackInfo(file_path=audio_file_2, artist="Artist", title="T2"),
         ]
 
-        results = tag_album_folder(album_dir, max_threads=2)
+        with (
+            patch(
+                "sonora.modules.tagger.search_musicbrainz_release", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_deezer_album_details", return_value=None
+            ),
+        ):
+            results = tag_album_folder(album_dir, max_threads=2)
         self.assertEqual(len(results), 2)
 
     def test_check_file_blacklisted_genre(self):
@@ -314,8 +367,10 @@ class TestCoreModules(unittest.TestCase):
     def test_rename_track_file_collision_handling(self, mock_read):
         audio_file_1 = self.tmp_path / "song1.wav"
         audio_file_2 = self.tmp_path / "song2.wav"
+        audio_file_3 = self.tmp_path / "song3.wav"
         create_dummy_wav(audio_file_1)
         create_dummy_wav(audio_file_2)
+        create_dummy_wav(audio_file_3)
 
         mock_read.side_effect = [
             TrackInfo(
@@ -324,13 +379,18 @@ class TestCoreModules(unittest.TestCase):
             TrackInfo(
                 file_path=audio_file_2, artist="Artist", title="Title", track_number=1
             ),
+            TrackInfo(
+                file_path=audio_file_3, artist="Artist", title="Title", track_number=1
+            ),
         ]
 
         renamed_path_1 = rename_track_file(audio_file_1)
         renamed_path_2 = rename_track_file(audio_file_2)
+        renamed_path_3 = rename_track_file(audio_file_3)
 
         self.assertEqual(renamed_path_1.name, "01 - Title.wav")
         self.assertEqual(renamed_path_2.name, "01 - Title (2).wav")
+        self.assertEqual(renamed_path_3.name, "01 - Title (3).wav")
 
     def test_organize_library_singles_skips_album_folders(self):
         album_dir = self.tmp_path / "AlbumFolder"
@@ -355,13 +415,17 @@ class TestCoreModules(unittest.TestCase):
             self.assertTrue(audio_file_3.exists())
 
     @patch("sonora.modules.tagger.write_track_metadata")
-    @patch("sonora.modules.tagger.fetch_itunes_track_metadata")
     @patch("sonora.modules.tagger.search_discogs_release")
     @patch("sonora.modules.tagger.lookup_acoustid")
     @patch("sonora.modules.tagger.fetch_track_mbid")
     @patch("sonora.modules.tagger.read_track_metadata")
     def test_process_single_track_acoustid_discogs_fallback(
-        self, mock_read, mock_mbid, mock_acoustid, mock_discogs, mock_itunes, mock_write
+        self,
+        mock_read,
+        mock_mbid,
+        mock_acoustid,
+        mock_discogs,
+        mock_write,
     ):
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
@@ -370,18 +434,45 @@ class TestCoreModules(unittest.TestCase):
             file_path=wav_file, artist="Artist", title="Title", genre=None
         )
         mock_mbid.return_value = None
-        mock_itunes.return_value = None
         mock_acoustid.return_value = "c8b03190-306c-4125-9b32-3f9d86d60a12"
         mock_discogs.return_value = {"id": 123, "year": 2024}
 
-        info = process_single_track(
-            wav_file,
-            fetch_bpm=False,
-            fetch_lyrics=False,
-            fetch_itunes_art=False,
-            acoustid_api_key="acoustid_key",
-            discogs_user_token="discogs_token",
-        )
+        with (
+            patch("sonora.modules.tagger.process_album_cover_art", return_value=None),
+            patch(
+                "sonora.modules.tagger.fetch_theaudiodb_track_details",
+                return_value=None,
+            ),
+            patch("sonora.modules.tagger.fetch_genius_song_details", return_value=None),
+            patch(
+                "sonora.modules.tagger.fetch_deezer_track_details", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_deezer_album_details", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_musicbrainz_recording_details",
+                return_value=None,
+            ),
+            patch(
+                "sonora.modules.tagger.search_musicbrainz_release", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.resolve_artist_name",
+                side_effect=lambda x: str(x).strip(),
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_itunes_track_metadata", return_value=None
+            ),
+        ):
+            info = process_single_track(
+                wav_file,
+                fetch_bpm=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+                acoustid_api_key="acoustid_key",
+                discogs_user_token="discogs_token",
+            )
 
         self.assertEqual(
             info.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
@@ -389,6 +480,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue(str(info.date).startswith("2024"))
         mock_acoustid.assert_called_once()
         mock_discogs.assert_called_once()
+        mock_write.assert_called_once()
 
     @patch("sonora.modules.checker.detect_fake_lossless")
     @patch("sonora.modules.checker.verify_flac_checksum")
@@ -598,9 +690,8 @@ class TestCoreModules(unittest.TestCase):
         final_info = read_track_metadata(new_wav)
         self.assertEqual(final_info.artist, "Original Artist")
 
-    @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
     @patch("sonora.services.theaudiodb.SESSION.get")
-    def test_theaudiodb_service(self, mock_get, _mock_cache):
+    def test_theaudiodb_service(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
