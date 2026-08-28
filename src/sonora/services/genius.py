@@ -94,11 +94,23 @@ def fetch_genius_song_details(
             if isinstance(producer, dict) and producer.get("name")
         ]
 
+        # Parse writers / composers
+        writer_list = song_data.get("writer_artists", [])
+        writer_names = [
+            str(writer["name"])
+            for writer in writer_list
+            if isinstance(writer, dict) and writer.get("name")
+        ]
+
+        release_date = song_data.get("release_date")
+
         return {
             "genius_song_id": genius_song_id,
             "description": plain_description,
             "featured_artists": ", ".join(featured_names) if featured_names else None,
             "producers": ", ".join(producer_names) if producer_names else None,
+            "writers": ", ".join(writer_names) if writer_names else None,
+            "release_date": release_date,
         }
 
     except (httpx.HTTPError, OSError, ValueError, KeyError) as error:

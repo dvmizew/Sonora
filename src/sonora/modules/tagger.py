@@ -255,7 +255,7 @@ def process_single_track(
         except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
             LOG.debug(f"iTunes track lookup failed for {track_info.title}: {error}")
 
-        # 5. Fetch Last.fm genre/mood tags
+        # 5. Fetch Last.fm genre/mood/style tags
         if lastfm_api_key:
             try:
                 tags = fetch_lastfm_tags(
@@ -264,12 +264,48 @@ def process_single_track(
                     api_key=lastfm_api_key,
                     mbid=track_info.musicbrainz_trackid,
                 )
-                if tags and not track_info.genre:
-                    raw_genre = tags[0]
-                    normalized_genre = normalize_genre(raw_genre)
-                    if normalized_genre:
-                        track_info.genre = normalized_genre
-                        LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
+                if tags:
+                    if not track_info.genre:
+                        raw_genre = tags[0]
+                        normalized_genre = normalize_genre(raw_genre)
+                        if normalized_genre:
+                            track_info.genre = normalized_genre
+                            LOG.info(
+                                f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]"
+                            )
+                    if len(tags) > 1 and not track_info.style:
+                        subgenres = [
+                            t
+                            for t in tags[1:4]
+                            if t.lower() != (track_info.genre or "").lower()
+                        ]
+                        if subgenres:
+                            track_info.style = ", ".join(subgenres)
+                    if not track_info.mood:
+                        mood_keywords = {
+                            "chill",
+                            "dark",
+                            "sad",
+                            "happy",
+                            "energetic",
+                            "melancholic",
+                            "relax",
+                            "relaxing",
+                            "aggressive",
+                            "ambient",
+                            "party",
+                            "romantic",
+                            "hype",
+                            "mellow",
+                            "atmospheric",
+                            "epic",
+                            "somber",
+                            "upbeat",
+                        }
+                        for t in tags:
+                            if t.lower() in mood_keywords:
+                                track_info.mood = t.title()
+                                break
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Last.fm lookup failed for {track_info.title}: {error}")
 
@@ -328,7 +364,7 @@ def process_single_track(
                     if release.get("composer") and not track_info.composer:
                         track_info.composer = str(release["composer"])
 
-                    # Check track-specific credits or album-level credits for producers and remixer
+                    # Check track-specific credits or album-level credits for producers, remixer, and composer
                     track_credits_dict = release.get("track_credits")
                     track_specific_credits = None
                     if isinstance(track_credits_dict, dict):
@@ -360,6 +396,13 @@ def process_single_track(
                             and not track_info.remixer
                         ):
                             track_info.remixer = str(track_specific_credits["remixer"])
+                        if (
+                            track_specific_credits.get("composer")
+                            and not track_info.composer
+                        ):
+                            track_info.composer = str(
+                                track_specific_credits["composer"]
+                            )
 
                     if release.get("producers") and not track_info.producers:
                         track_info.producers = str(release["producers"])
@@ -368,7 +411,7 @@ def process_single_track(
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Discogs lookup failed for {track_info.title}: {error}")
 
-        # 7. Deezer metadata enrichment (BPM, Gain, Contributors, ISRC, Label, Barcode, Release Date, Genre)
+        # 7. Deezer metadata enrichment (BPM, Gain, Contributors, ISRC, Label, Barcode, Release Date, Genre, Composer, Lyricist)
         try:
             deezer_album: dict[str, Any] | None
             if album_deezer_details:
@@ -410,12 +453,33 @@ def process_single_track(
                     not track_info.producers or force
                 ):
                     track_info.producers = str(deezer_track["producers"])
+                if deezer_track.get("composer") and not track_info.composer:
+                    track_info.composer = str(deezer_track["composer"])
+                if deezer_track.get("lyricist") and not track_info.lyricist:
+                    track_info.lyricist = str(deezer_track["lyricist"])
+                if (
+                    deezer_track.get("track_position")
+                    and track_info.track_number is None
+                ):
+                    try:
+                        track_info.track_number = int(
+                            str(deezer_track["track_position"])
+                        )
+                    except (ValueError, TypeError):
+                        pass
+                if deezer_track.get("disk_number") and track_info.disc_number is None:
+                    try:
+                        track_info.disc_number = int(str(deezer_track["disk_number"]))
+                    except (ValueError, TypeError):
+                        pass
+                if deezer_track.get("release_date") and not track_info.date:
+                    track_info.date = normalize_date(str(deezer_track["release_date"]))
                 if deezer_track.get("explicit_lyrics") and not track_info.advisory:
                     track_info.advisory = "Explicit"
         except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
             LOG.debug(f"Deezer enrichment failed for {track_info.title}: {error}")
 
-        # 8. Genius song details (description, genius_song_id, featured_artists, producers)
+        # 8. Genius song details (description, genius_song_id, featured_artists, producers, writers)
         if genius_api_token:
             try:
                 genius_details = fetch_genius_song_details(
@@ -442,6 +506,14 @@ def process_single_track(
                         not track_info.producers or force
                     ):
                         track_info.producers = str(genius_details["producers"])
+                    if genius_details.get("writers") and not track_info.composer:
+                        track_info.composer = str(genius_details["writers"])
+                    if genius_details.get("writers") and not track_info.lyricist:
+                        track_info.lyricist = str(genius_details["writers"])
+                    if genius_details.get("release_date") and not track_info.date:
+                        track_info.date = normalize_date(
+                            str(genius_details["release_date"])
+                        )
                     LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Genius lookup failed for {track_info.title}: {error}")
@@ -462,7 +534,7 @@ def process_single_track(
                     f"Last.fm stats lookup failed for {track_info.title}: {error}"
                 )
 
-        # 10. TheAudioDB Details (mood, style, initial_key, rating, music_video_url, description)
+        # 10. TheAudioDB Details (mood, style, initial_key, rating, music_video_url, description, genre)
         try:
             tadb_details = fetch_theaudiodb_track_details(
                 track_info.artist, track_info.title
@@ -477,6 +549,10 @@ def process_single_track(
                     track_info.mood = str(tadb_details["mood"])
                 if tadb_details.get("style") and not track_info.style:
                     track_info.style = str(tadb_details["style"])
+                if tadb_details.get("genre") and not track_info.genre:
+                    normalized_genre = normalize_genre(str(tadb_details["genre"]))
+                    if normalized_genre:
+                        track_info.genre = normalized_genre
                 if tadb_details.get("initial_key") and not track_info.initial_key:
                     track_info.initial_key = str(tadb_details["initial_key"])
                 if tadb_details.get("rating") is not None and track_info.rating is None:

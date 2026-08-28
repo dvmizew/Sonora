@@ -188,6 +188,8 @@ def fetch_deezer_track_details(
         contributors = track_data.get("contributors", [])
         featured: list[str] = []
         producers: list[str] = []
+        composers: list[str] = []
+        lyricists: list[str] = []
         if isinstance(contributors, list):
             for contributor in contributors:
                 if isinstance(contributor, dict):
@@ -199,6 +201,14 @@ def fetch_deezer_track_details(
                         featured.append(contributor_name)
                     elif "producer" in contributor_role:
                         producers.append(contributor_name)
+                    elif "composer" in contributor_role:
+                        composers.append(contributor_name)
+                    elif (
+                        "author" in contributor_role
+                        or "lyricist" in contributor_role
+                        or "writer" in contributor_role
+                    ):
+                        lyricists.append(contributor_name)
 
         result = {
             "isrc": track_data.get("isrc"),
@@ -209,6 +219,8 @@ def fetch_deezer_track_details(
             if featured
             else None,
             "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
+            "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
+            "lyricist": ", ".join(dict.fromkeys(lyricists)) if lyricists else None,
             "track_position": track_data.get("track_position"),
             "disk_number": track_data.get("disk_number"),
             "release_date": track_data.get("release_date"),

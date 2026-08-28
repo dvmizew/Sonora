@@ -137,6 +137,7 @@ def fetch_discogs_release_details(
                     track_title = str(track.get("title", "")).strip()
                     track_producers: list[str] = []
                     track_remixers: list[str] = []
+                    track_composers: list[str] = []
                     for track_extra_artist in track.get("extraartists", []):
                         if (
                             isinstance(track_extra_artist, dict)
@@ -157,11 +158,26 @@ def fetch_discogs_release_details(
                                 and track_artist_name not in track_remixers
                             ):
                                 track_remixers.append(track_artist_name)
+                            elif (
+                                any(
+                                    kw in track_artist_role
+                                    for kw in (
+                                        "written",
+                                        "composer",
+                                        "music by",
+                                        "words by",
+                                    )
+                                )
+                                and track_artist_name not in track_composers
+                            ):
+                                track_composers.append(track_artist_name)
                     credits_dict: dict[str, str] = {}
                     if track_producers:
                         credits_dict["producers"] = ", ".join(track_producers)
                     if track_remixers:
                         credits_dict["remixer"] = ", ".join(track_remixers)
+                    if track_composers:
+                        credits_dict["composer"] = ", ".join(track_composers)
                     if position:
                         track_credits[position] = credits_dict
                     if track_title:
