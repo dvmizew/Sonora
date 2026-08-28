@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,35 @@ from sonora.audio.bpm import load_audio
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG
+
+
+def _measure_track_loudness(
+    audio_path: Path, target_lufs: float = -18.0
+) -> tuple[Path, float, float, float, float] | None:
+    """
+    Measures loudness and peak amplitude of a single track.
+    Returns (audio_path, track_gain, track_peak, track_loudness, duration) or None.
+    """
+    try:
+        loaded = load_audio(audio_path)
+        if loaded is None or len(loaded[0]) == 0 or loaded[1] <= 0:
+            return None
+        audio_data, sample_rate = loaded
+
+        meter = pyloudnorm.Meter(sample_rate)
+        track_loudness = float(meter.integrated_loudness(audio_data))
+        duration = float(len(audio_data) / sample_rate)
+        track_peak = float(np.max(np.abs(audio_data)))
+
+        track_gain = (
+            target_lufs - track_loudness
+            if not (np.isnan(track_loudness) or np.isinf(track_loudness))
+            else 0.0
+        )
+        return (audio_path, track_gain, track_peak, track_loudness, duration)
+    except (ValueError, RuntimeError, OSError) as error:
+        LOG.debug(f"Failed to measure loudness for {audio_path}: {error}")
+        return None
 
 
 def calculate_track_replaygain(
@@ -20,24 +50,11 @@ def calculate_track_replaygain(
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    loaded = load_audio(file_path)
-    if loaded is None or len(loaded[0]) == 0 or loaded[1] <= 0:
+    res = _measure_track_loudness(file_path, target_lufs=target_lufs)
+    if res is None:
         return None
-
-    audio_data, sample_rate = loaded
-    try:
-        meter = pyloudnorm.Meter(sample_rate)
-        loudness = meter.integrated_loudness(audio_data)
-        gain_db = (
-            target_lufs - loudness
-            if not (np.isnan(loudness) or np.isinf(loudness))
-            else 0.0
-        )
-        peak_amp = float(np.max(np.abs(audio_data)))
-        return float(gain_db), float(peak_amp)
-    except (ValueError, RuntimeError) as error:
-        LOG.debug(f"pyloudnorm measurement failed for {file_path}: {error}")
-        return None
+    _, track_gain, track_peak, _, _ = res
+    return float(track_gain), float(track_peak)
 
 
 def calculate_album_replaygain(
@@ -45,9 +62,10 @@ def calculate_album_replaygain(
     force: bool = False,
     dry_run: bool = False,
     target_lufs: float = -18.0,
+    max_threads: int = 4,
 ) -> bool:
     """
-    Calculate ReplayGain (Track and Album Mode) for all audio files.
+    Calculate ReplayGain (Track and Album Mode) for all audio files in parallel.
     Writes REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK,
     REPLAYGAIN_ALBUM_GAIN, and REPLAYGAIN_ALBUM_PEAK tags.
     """
@@ -80,35 +98,20 @@ def calculate_album_replaygain(
 
     LOG.info(f"🔊 Calculating ReplayGain for {len(valid_files)} track(s)...")
 
+    # 2. Compute individual track loudness in parallel across threads
     track_results: list[tuple[Path, float, float, float, float]] = []
     max_album_peak = 0.0
 
-    # 2. Compute individual track loudness
-    for audio_path in valid_files:
-        loaded = load_audio(audio_path)
-        if loaded is None or len(loaded[0]) == 0 or loaded[1] <= 0:
-            continue
-        audio_data, sample_rate = loaded
-
-        try:
-            meter = pyloudnorm.Meter(sample_rate)
-            track_loudness = float(meter.integrated_loudness(audio_data))
-            duration = float(len(audio_data) / sample_rate)
-            track_peak = float(np.max(np.abs(audio_data)))
-            max_album_peak = max(max_album_peak, track_peak)
-
-            track_gain = (
-                target_lufs - track_loudness
-                if not (np.isnan(track_loudness) or np.isinf(track_loudness))
-                else 0.0
-            )
-            track_results.append(
-                (audio_path, track_gain, track_peak, track_loudness, duration)
-            )
-        except (ValueError, RuntimeError) as error:
-            LOG.debug(f"Failed to measure loudness for {audio_path}: {error}")
-        finally:
-            del audio_data
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = [
+            executor.submit(_measure_track_loudness, audio_path, target_lufs)
+            for audio_path in valid_files
+        ]
+        for future in futures:
+            res = future.result()
+            if res is not None:
+                track_results.append(res)
+                max_album_peak = max(max_album_peak, res[2])
 
     if not track_results:
         LOG.warning("Could not calculate loudness for any audio files.")
@@ -136,17 +139,15 @@ def calculate_album_replaygain(
     else:
         album_gain = float(np.mean([result[1] for result in track_results]))
 
-    # 4. Write ReplayGain metadata tags to each file
-    tagged_count = 0
-    for file_path, track_gain, track_peak, _, _ in track_results:
+    # 4. Write ReplayGain metadata tags to each file in parallel
+    def _write_tags(entry: tuple[Path, float, float, float, float]) -> bool:
+        file_path, track_gain, track_peak, _, _ = entry
         if dry_run:
             LOG.info(
                 f"[DRY-RUN] Would tag {file_path.name}: Track Gain={track_gain:+.2f} dB, "
                 f"Album Gain={album_gain:+.2f} dB, Track Peak={track_peak:.6f}, Album Peak={max_album_peak:.6f}"
             )
-            tagged_count += 1
-            continue
-
+            return True
         try:
             info = read_track_metadata(file_path)
             info.replaygain_track_gain = round(track_gain, 2)
@@ -154,9 +155,14 @@ def calculate_album_replaygain(
             info.replaygain_album_gain = round(album_gain, 2)
             info.replaygain_album_peak = round(max_album_peak, 6)
             write_track_metadata(info)
-            tagged_count += 1
-        except (OSError, ValueError, RuntimeError) as error:
-            LOG.debug(f"Failed to write ReplayGain tags to {file_path}: {error}")
+            return True
+        except (OSError, ValueError, RuntimeError) as err:
+            LOG.debug(f"Failed to write ReplayGain tags to {file_path}: {err}")
+            return False
 
+    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        write_results = list(executor.map(_write_tags, track_results))
+
+    tagged_count = sum(1 for success in write_results if success)
     LOG.info(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")
     return tagged_count > 0

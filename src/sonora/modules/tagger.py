@@ -671,7 +671,10 @@ def tag_album_folder(
 
                 if fetch_replaygain:
                     calculate_album_replaygain(
-                        audio_files, force=force, dry_run=dry_run
+                        audio_files,
+                        force=force,
+                        dry_run=dry_run,
+                        max_threads=max_threads,
                     )
 
                 if album_results:
