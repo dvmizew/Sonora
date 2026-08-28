@@ -321,8 +321,8 @@ class TestServicesEngine(unittest.TestCase):
         mock_mb.search_recordings.side_effect = musicbrainzngs.MusicBrainzError(
             "MusicBrainz server 500"
         )
-        with self.assertRaises(RuntimeError):
-            fetch_track_mbid("Artist", "Title")
+        mbid_result = fetch_track_mbid("Artist", "Title")
+        self.assertIsNone(mbid_result)
 
     @patch("sonora.services.discogs.get_cached_api", return_value=None)
     @patch("sonora.services.discogs.SESSION.get")

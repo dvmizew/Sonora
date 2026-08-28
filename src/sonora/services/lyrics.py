@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import httpx
 import syncedlyrics
 
 from sonora.core.cache import get_cached_api, set_cached_api
@@ -27,8 +28,10 @@ def clean_lyrics_text(text: str | None) -> str | None:
     Strips web scraping artifacts (Genius, Musixmatch, AZLyrics, Lrclib junk)
     while preserving timestamped LRC lines ([mm:ss.xx] and <mm:ss.xx>).
     """
-    if not text:
-        return text
+    if text is None:
+        return None
+    if not text.strip():
+        return ""
 
     lines = text.splitlines()
     cleaned: list[str] = []
@@ -59,25 +62,11 @@ def clean_lyrics_text(text: str | None) -> str | None:
             cleaned.append(line)
             continue
 
-        is_junk = any(
-            re.match(pattern, stripped_line, re.IGNORECASE) for pattern in junk_patterns
-        )
-        if (
-            not is_junk
-            and stripped_line.startswith("[")
-            and stripped_line.endswith("]")
-            and not is_timestamped(stripped_line)
-        ):
-            # Check for non-timestamped brackets like [Verse 1], [Chorus] if plain text
-            pass  # Preserve section headers for plain text readability
+        if any(re.search(pat, stripped_line, re.IGNORECASE) for pat in junk_patterns):
+            continue
 
-        if not is_junk:
-            cleaned.append(line)
+        cleaned.append(line)
 
-    if not cleaned:
-        return ""
-
-    # Strip trailing "Embed" or digit+Embed on the last non-empty line
     while cleaned and (
         re.search(r"\bEmbed\b\s*$", cleaned[-1], re.IGNORECASE) or cleaned[-1] == ""
     ):
@@ -93,27 +82,30 @@ def clean_lyrics_text(text: str | None) -> str | None:
     return "\n".join(cleaned).strip()
 
 
-def get_lyrics_quality(text: str | None) -> int:
+def get_lyrics_quality(lyrics_text: str | None) -> int:
     """
-    Returns quality level for lyrics text:
-      0: missing or empty
-      1: plain text
-      2: line-synced [00:12.34]
-      3: enhanced word-synced <00:12.34>
+    Determines quality tier of LRC lyrics string:
+      3: Enhanced / Word-level synced (<00:01.23> word timestamps)
+      2: Synced / Line-level synced ([00:01.23] line timestamps)
+      1: Plain text (no timestamps)
+      0: None or empty
     """
-    if not text or not text.strip():
+    if not lyrics_text or not lyrics_text.strip():
         return 0
-    if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", text):
+    if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", lyrics_text):
         return 3
-    if re.search(r"\[\d{2}:\d{2}[\.:]\d{2,3}\]", text):
+    if re.search(r"^\[\d{1,2}:\d{2}[\.:]\d{2,3}\]", lyrics_text, re.MULTILINE):
         return 2
     return 1
 
 
-def detect_lrc_quality(file_path: Path) -> int:
-    """Detect quality level of existing lyrics file on disk for a given track path."""
-    lrc_path = file_path.with_suffix(".lrc")
-    if not lrc_path.exists():
+def detect_lrc_quality(audio_path: Path) -> int:
+    """
+    Check the quality of existing .lrc lyrics alongside an audio file.
+    Returns 3 for enhanced, 2 for synced, 1 for plain, 0 for missing.
+    """
+    lrc_path = audio_path.with_suffix(".lrc")
+    if not lrc_path.exists() or lrc_path.stat().st_size == 0:
         return 0
     try:
         content = lrc_path.read_text(encoding="utf-8", errors="ignore")
@@ -124,18 +116,18 @@ def detect_lrc_quality(file_path: Path) -> int:
 
 def _query_syncedlyrics(
     query_str: str,
-    plain_only: bool = False,
-    synced_only: bool = False,
-    enhanced: bool = False,
-    providers: list[str] | None = None,
-    lang: str | None = None,
+    plain_only: bool,
+    synced_only: bool,
+    enhanced: bool,
+    providers: list[str] | None,
+    lang: str | None,
 ) -> str | None:
     kwargs: dict[str, Any] = {
         "plain_only": plain_only,
         "synced_only": synced_only,
         "enhanced": enhanced,
     }
-    if providers is not None:
+    if providers:
         kwargs["providers"] = providers
     if lang:
         kwargs["lang"] = lang
@@ -179,7 +171,16 @@ def fetch_synced_lyrics(
     if isrc:
         try:
             lyrics_content = _query_syncedlyrics(isrc, *search_args)
-        except (OSError, ValueError, KeyError, RuntimeError) as error:
+        except (
+            httpx.HTTPError,
+            OSError,
+            ValueError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            AttributeError,
+            TimeoutError,
+        ) as error:
             last_exception = error
 
     # ATTEMPT 2: Standard/Surgical Query
@@ -188,7 +189,16 @@ def fetch_synced_lyrics(
         default_query = f"{artist.lower()} - {title.lower()}".strip()
         try:
             lyrics_content = _query_syncedlyrics(default_query, *search_args)
-        except (OSError, ValueError, KeyError, RuntimeError) as error:
+        except (
+            httpx.HTTPError,
+            OSError,
+            ValueError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            AttributeError,
+            TimeoutError,
+        ) as error:
             last_exception = error
 
     # ATTEMPT 3: Surgical Clean Title Fallback
@@ -198,7 +208,16 @@ def fetch_synced_lyrics(
         query = f"{cleaned_track_title} {primary_artist}".strip()
         try:
             lyrics_content = _query_syncedlyrics(query, *search_args)
-        except (OSError, ValueError, KeyError, RuntimeError) as error:
+        except (
+            httpx.HTTPError,
+            OSError,
+            ValueError,
+            KeyError,
+            RuntimeError,
+            TypeError,
+            AttributeError,
+            TimeoutError,
+        ) as error:
             last_exception = error
 
     if lyrics_content:
@@ -249,7 +268,16 @@ def process_track_lyrics(
     # Attempt to fetch higher quality lyrics online
     try:
         lyrics_text = fetch_synced_lyrics(artist, title, enhanced=True, isrc=isrc)
-    except (OSError, ValueError, RuntimeError) as error:
+    except (
+        httpx.HTTPError,
+        OSError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+        TypeError,
+        AttributeError,
+        TimeoutError,
+    ) as error:
         LOG.debug(f"Lyrics lookup error for {title}: {error}")
         lyrics_text = None
 

@@ -1,5 +1,6 @@
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
+
+import httpx
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_THEAUDIODB
@@ -13,11 +14,12 @@ _THEAUDIODB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_THEAUDIODB)
 def _download_artwork_bytes(url: str | None) -> bytes | None:
     if not url:
         return None
+    _THEAUDIODB_LIMITER.wait()
     try:
-        response = SESSION.get(url, timeout=6)
+        response = SESSION.get(url, timeout=10)
         if response.status_code == 200:
             return response.content
-    except (OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"Failed to fetch artwork from {url}: {error}")
     return None
 
@@ -25,7 +27,6 @@ def _download_artwork_bytes(url: str | None) -> bytes | None:
 def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
     """
     Fetch artist avatar (artist.jpg) and wide banner (banner.jpg) from TheAudioDB with disk caching.
-    Downloads both images in parallel for maximum network throughput.
     Returns (thumbnail_bytes, banner_bytes).
     """
     if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
@@ -57,22 +58,16 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
                     or artist_data.get("strArtistFanart")
                 )
 
-                if thumbnail_url or banner_url:
-                    with ThreadPoolExecutor(max_workers=2) as executor:
-                        fut_thumb = executor.submit(
-                            _download_artwork_bytes, thumbnail_url
-                        )
-                        fut_banner = executor.submit(
-                            _download_artwork_bytes, banner_url
-                        )
-                        thumbnail_bytes = fut_thumb.result()
-                        banner_bytes = fut_banner.result()
+                if thumbnail_url:
+                    thumbnail_bytes = _download_artwork_bytes(thumbnail_url)
+                if banner_url:
+                    banner_bytes = _download_artwork_bytes(banner_url)
 
                 result = (thumbnail_bytes, banner_bytes)
                 if thumbnail_bytes or banner_bytes:
                     set_cached_api(cache_key, result)
                 return result
-    except (OSError, ValueError, KeyError) as error:
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
         LOG.debug(f"TheAudioDB fetch_artist_images failed for {artist_name}: {error}")
     return None, None
 
@@ -119,7 +114,7 @@ def fetch_theaudiodb_track_details(
                 }
                 set_cached_api(cache_key, details)
                 return details
-    except (OSError, ValueError, KeyError) as error:
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
         LOG.debug(
             f"TheAudioDB track lookup failed for {artist_name} - {track_title}: {error}"
         )

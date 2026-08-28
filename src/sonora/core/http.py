@@ -6,7 +6,7 @@ from sonora.core.constants import USER_AGENT
 
 SESSION = httpx.Client(
     transport=httpx.HTTPTransport(
-        http2=True,
+        http2=False,
         retries=3,
         limits=httpx.Limits(
             max_connections=100, max_keepalive_connections=20, keepalive_expiry=30.0

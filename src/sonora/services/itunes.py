@@ -1,8 +1,10 @@
+import httpx
 from rapidfuzz import fuzz
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import ALBUM_MATCH_THRESHOLD, RATE_LIMIT_ITUNES
 from sonora.core.http import SESSION
+from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, extract_series_number, normalize_str
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
@@ -38,10 +40,9 @@ def search_itunes(
         ]
         set_cached_api(cache_key, results)
         return results
-    except (OSError, ValueError, KeyError, RuntimeError) as error:
-        raise RuntimeError(
-            f"iTunes Search API request failed for {query_term}: {error}"
-        ) from error
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+        LOG.debug(f"iTunes Search API request failed for {query_term}: {error}")
+        return []
 
 
 def fetch_itunes_cover_art_url(

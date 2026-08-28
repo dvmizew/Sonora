@@ -20,7 +20,7 @@ from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.checker import check_library
 from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import rename_directory_files
-from sonora.modules.tagger import tag_album_folder
+from sonora.modules.tagger import get_last_tagging_failures, tag_album_folder
 from sonora.services.musicbrainz import init_musicbrainz
 
 app = App(
@@ -289,8 +289,9 @@ def tag(
     LOG.summary_table("Tagging Summary", tag_summary_rows)
 
     if json_report:
+        failures = get_last_tagging_failures()
         summary_text = (
-            f"Successfully processed {total_tracks} tracks. "
+            f"Successfully processed {total_tracks} tracks ({len(failures)} failures). "
             f"MusicBrainz {musicbrainz_count}/{total_tracks} ({musicbrainz_percentage:.0f}%), "
             f"Genre {genre_count}/{total_tracks} ({genre_percentage:.0f}%), "
             f"Lyrics {lyrics_count}/{total_tracks} ({lyrics_percentage:.0f}%), "
@@ -309,6 +310,7 @@ def tag(
             },
             "statistics": {
                 "total_tracks": total_tracks,
+                "total_failures": len(failures),
                 "enrichment": {
                     "musicbrainz_matched_count": musicbrainz_count,
                     "musicbrainz_percentage": round(musicbrainz_percentage, 1),
@@ -342,6 +344,7 @@ def tag(
                     "lossy_tracks": lossy_count,
                 },
             },
+            "failures": failures,
             "tracks": [track.to_dict() for track in tagged_tracks],
         }
         json_report.write_bytes(

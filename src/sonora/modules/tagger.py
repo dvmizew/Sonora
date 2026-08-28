@@ -40,6 +40,13 @@ from sonora.services.theaudiodb import (
     fetch_theaudiodb_track_details,
 )
 
+LAST_TAGGING_FAILURES: list[dict[str, str]] = []
+
+
+def get_last_tagging_failures() -> list[dict[str, str]]:
+    """Return failures recorded during the latest tagging run."""
+    return list(LAST_TAGGING_FAILURES)
+
 
 def process_single_track(
     file_path: Path,
@@ -535,36 +542,49 @@ def process_single_track(
                 )
 
         # 10. TheAudioDB Details (mood, style, initial_key, rating, music_video_url, description, genre)
-        try:
-            tadb_details = fetch_theaudiodb_track_details(
-                track_info.artist, track_info.title
-            )
-            if tadb_details:
-                if (
-                    tadb_details.get("music_video_url")
-                    and not track_info.music_video_url
-                ):
-                    track_info.music_video_url = str(tadb_details["music_video_url"])
-                if tadb_details.get("mood") and not track_info.mood:
-                    track_info.mood = str(tadb_details["mood"])
-                if tadb_details.get("style") and not track_info.style:
-                    track_info.style = str(tadb_details["style"])
-                if tadb_details.get("genre") and not track_info.genre:
-                    normalized_genre = normalize_genre(str(tadb_details["genre"]))
-                    if normalized_genre:
-                        track_info.genre = normalized_genre
-                if tadb_details.get("initial_key") and not track_info.initial_key:
-                    track_info.initial_key = str(tadb_details["initial_key"])
-                if tadb_details.get("rating") is not None and track_info.rating is None:
-                    track_info.rating = float(str(tadb_details["rating"]))
-                if tadb_details.get("description") and (
-                    not track_info.comment or force
-                ):
-                    track_info.comment = str(tadb_details["description"])
-        except (OSError, ValueError, RuntimeError) as error:
-            LOG.debug(
-                f"TheAudioDB details lookup failed for {track_info.title}: {error}"
-            )
+        if (
+            force
+            or not track_info.music_video_url
+            or not track_info.mood
+            or not track_info.initial_key
+            or track_info.rating is None
+            or not track_info.comment
+        ):
+            try:
+                tadb_details = fetch_theaudiodb_track_details(
+                    track_info.artist, track_info.title
+                )
+                if tadb_details:
+                    if (
+                        tadb_details.get("music_video_url")
+                        and not track_info.music_video_url
+                    ):
+                        track_info.music_video_url = str(
+                            tadb_details["music_video_url"]
+                        )
+                    if tadb_details.get("mood") and not track_info.mood:
+                        track_info.mood = str(tadb_details["mood"])
+                    if tadb_details.get("style") and not track_info.style:
+                        track_info.style = str(tadb_details["style"])
+                    if tadb_details.get("genre") and not track_info.genre:
+                        normalized_genre = normalize_genre(str(tadb_details["genre"]))
+                        if normalized_genre:
+                            track_info.genre = normalized_genre
+                    if tadb_details.get("initial_key") and not track_info.initial_key:
+                        track_info.initial_key = str(tadb_details["initial_key"])
+                    if (
+                        tadb_details.get("rating") is not None
+                        and track_info.rating is None
+                    ):
+                        track_info.rating = float(str(tadb_details["rating"]))
+                    if tadb_details.get("description") and (
+                        not track_info.comment or force
+                    ):
+                        track_info.comment = str(tadb_details["description"])
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(
+                    f"TheAudioDB details lookup failed for {track_info.title}: {error}"
+                )
 
         # 11. Embed Cuesheet content
         if cuesheet_content:
@@ -678,6 +698,9 @@ def tag_album_folder(
     if not folder_path.exists() or not folder_path.is_dir():
         raise FileNotFoundError(f"Album folder not found: {folder_path}")
 
+    global LAST_TAGGING_FAILURES
+    LAST_TAGGING_FAILURES = []
+
     all_audio_files = find_audio_files(folder_path, recursive=True)
     if not all_audio_files:
         return []
@@ -783,8 +806,19 @@ def tag_album_folder(
                         OSError,
                         ValueError,
                         RuntimeError,
+                        TypeError,
+                        KeyError,
+                        AttributeError,
                     ) as error:
                         LOG.warning(f"Failed to process {audio_file.name}: {error}")
+                        LAST_TAGGING_FAILURES.append(
+                            {
+                                "file": str(audio_file.resolve()),
+                                "filename": audio_file.name,
+                                "error": str(error),
+                                "error_type": type(error).__name__,
+                            }
+                        )
                     progress.advance(task)
 
                 if fetch_replaygain:
@@ -803,7 +837,7 @@ def tag_album_folder(
                         process_artist_artwork(
                             album_dir, primary_artist, dry_run=dry_run
                         )
-                    except (OSError, ValueError, RuntimeError) as error:
+                    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                         LOG.debug(f"Artist art download failed: {error}")
 
                 results.extend(album_results)

@@ -183,7 +183,12 @@ def process_artist_artwork(
     if has_artist_image and has_banner_image:
         return
 
-    thumbnail_bytes, banner_bytes = fetch_artist_images(artist_name)
+    try:
+        thumbnail_bytes, banner_bytes = fetch_artist_images(artist_name)
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"Failed to fetch artist artwork for {artist_name}: {error}")
+        return
+
     if thumbnail_bytes and not has_artist_image and not dry_run:
         try:
             (artist_dir / "artist.jpg").write_bytes(thumbnail_bytes)

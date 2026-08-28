@@ -3,6 +3,7 @@ import httpx
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_LASTFM
 from sonora.core.http import SESSION
+from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, is_valid_uuid, normalize_str
 
 _LASTFM_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LASTFM)
@@ -68,9 +69,8 @@ def fetch_lastfm_tags(
             return fetch_lastfm_tags(
                 artist, title, api_key=api_key, mbid=None, _retried=True
             )
-        raise RuntimeError(
-            f"Last.fm tag fetch failed for {artist} - {title}: {error}"
-        ) from error
+        LOG.debug(f"Last.fm tag fetch failed for {artist} - {title}: {error}")
+        return []
 
 
 def fetch_lastfm_track_stats(
@@ -113,6 +113,5 @@ def fetch_lastfm_track_stats(
         set_cached_api(cache_key, stats_result)
         return stats_result
     except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
-        raise RuntimeError(
-            f"Last.fm stats fetch failed for {artist} - {title}: {error}"
-        ) from error
+        LOG.debug(f"Last.fm stats fetch failed for {artist} - {title}: {error}")
+        return None

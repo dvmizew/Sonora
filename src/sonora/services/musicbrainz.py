@@ -55,13 +55,14 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
         return releases
     except (
         MusicBrainzError,
+        httpx.HTTPError,
         OSError,
         ValueError,
         KeyError,
+        RuntimeError,
     ) as error:
-        raise RuntimeError(
-            f"MusicBrainz discography fetch failed for {artist}: {error}"
-        ) from error
+        LOG.debug(f"MusicBrainz discography fetch failed for {artist}: {error}")
+        return []
 
 
 def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | None:
@@ -98,13 +99,14 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
         return target_release
     except (
         MusicBrainzError,
+        httpx.HTTPError,
         OSError,
         ValueError,
         KeyError,
+        RuntimeError,
     ) as error:
-        raise RuntimeError(
-            f"MusicBrainz search failed for {artist} - {album}: {error}"
-        ) from error
+        LOG.debug(f"MusicBrainz search failed for {artist} - {album}: {error}")
+        return None
 
 
 def fetch_track_mbid(artist: str, title: str) -> str | None:
@@ -155,13 +157,14 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         return best_mbid
     except (
         MusicBrainzError,
+        httpx.HTTPError,
         OSError,
         ValueError,
         KeyError,
+        RuntimeError,
     ) as error:
-        raise RuntimeError(
-            f"MusicBrainz track lookup failed for {artist} - {title}: {error}"
-        ) from error
+        LOG.debug(f"MusicBrainz track lookup failed for {artist} - {title}: {error}")
+        return None
 
 
 def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
