@@ -33,7 +33,7 @@ _THEME = Theme(
     {"info": "cyan", "warning": "yellow", "error": "red", "success": "green bold"}
 )
 CONSOLE = Console(theme=_THEME, force_terminal=True)
-_LOG_LOCK = threading.Lock()
+_LOG_LOCK = threading.RLock()
 
 
 class SonoraLogger:

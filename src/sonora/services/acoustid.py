@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import acoustid
@@ -8,6 +9,7 @@ from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, is_valid_uuid, match_score, normalize_str
 
 _ACOUSTID_CACHE: dict[tuple[str, int, int], tuple[float, str]] = {}
+_ACOUSTID_LOCK = threading.RLock()
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
@@ -22,12 +24,14 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
     try:
         stat = file_path.stat()
         cache_key = (str(file_path.resolve()), stat.st_mtime_ns, stat.st_size)
-        if cache_key in _ACOUSTID_CACHE:
-            return _ACOUSTID_CACHE[cache_key]
+        with _ACOUSTID_LOCK:
+            if cache_key in _ACOUSTID_CACHE:
+                return _ACOUSTID_CACHE[cache_key]
 
         duration, fingerprint = acoustid.fingerprint_file(str(file_path.resolve()))
         result = (float(duration), str(fingerprint))
-        _ACOUSTID_CACHE[cache_key] = result
+        with _ACOUSTID_LOCK:
+            _ACOUSTID_CACHE[cache_key] = result
         return result
     except (
         acoustid.AcoustidError,

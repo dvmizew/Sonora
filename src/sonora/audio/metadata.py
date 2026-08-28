@@ -1,4 +1,5 @@
 import dataclasses
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from sonora.core.models import TrackInfo
 from sonora.core.utils import is_valid_uuid, normalize_date, normalize_genre
 
 _METADATA_CACHE: dict[tuple[str, int, int], TrackInfo] = {}
+_METADATA_CACHE_LOCK = threading.RLock()
 _MAX_METADATA_CACHE_SIZE = 8192
 
 _UUID_FIELDS = {
@@ -122,9 +124,10 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
 
     stat = file_path.stat()
     cache_key = (str(file_path.resolve()), stat.st_mtime_ns, stat.st_size)
-    cached = _METADATA_CACHE.get(cache_key)
-    if cached is not None:
-        return dataclasses.replace(cached)
+    with _METADATA_CACHE_LOCK:
+        cached = _METADATA_CACHE.get(cache_key)
+        if cached is not None:
+            return dataclasses.replace(cached)
 
     try:
         with taglib.File(str(file_path)) as song:
@@ -383,9 +386,10 @@ def write_track_metadata(
                     new_stat.st_mtime_ns,
                     new_stat.st_size,
                 )
-                if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
-                    _METADATA_CACHE.clear()
-                _METADATA_CACHE[new_key] = dataclasses.replace(track_info)
+                with _METADATA_CACHE_LOCK:
+                    if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
+                        _METADATA_CACHE.clear()
+                    _METADATA_CACHE[new_key] = dataclasses.replace(track_info)
             except OSError:
                 pass
     except (RuntimeError, ValueError, FileNotFoundError):

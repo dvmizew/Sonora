@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -69,8 +70,14 @@ def _apply_mapping(
     """Populate unset fields on TrackInfo from a source dictionary."""
     for src_key, target_attr in field_map.items():
         val = data.get(src_key)
-        if val is not None and not getattr(track_info, target_attr):
-            setattr(track_info, target_attr, str(val))
+        if val is not None:
+            val_str = str(val).strip()
+            if (
+                val_str
+                and val_str.lower() not in ("none", "null")
+                and not getattr(track_info, target_attr)
+            ):
+                setattr(track_info, target_attr, val_str)
 
 
 def _enrich_acoustid(
@@ -423,9 +430,12 @@ def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
             normalize_genre(str(tadb_details["genre"])) or track_info.genre
         )
     if tadb_details.get("rating") is not None and track_info.rating is None:
-        track_info.rating = float(str(tadb_details["rating"]))
+        with contextlib.suppress(ValueError, TypeError):
+            track_info.rating = float(str(tadb_details["rating"]))
     if tadb_details.get("description") and (not track_info.comment or force):
-        track_info.comment = str(tadb_details["description"])
+        desc_str = str(tadb_details["description"]).strip()
+        if desc_str and desc_str.lower() not in ("none", "null"):
+            track_info.comment = desc_str
     _apply_mapping(
         track_info,
         tadb_details,
@@ -531,15 +541,17 @@ def _render_tag_diffs(orig_info: TrackInfo, track_info: TrackInfo) -> list[str]:
             continue
         old_val = getattr(orig_info, field_info.name)
         new_val = getattr(track_info, field_info.name)
-        if old_val != new_val:
-            if old_val in (None, "", [], ()):
+        old_clean = None if old_val in (None, "", [], ()) else old_val
+        new_clean = None if new_val in (None, "", [], ()) else new_val
+        if old_clean != new_clean:
+            if old_clean is None:
                 color, sym = "green", "+"
-            elif new_val in (None, "", [], ()):
+            elif new_clean is None:
                 color, sym = "red", "-"
             else:
                 color, sym = "yellow", "*"
             diff_lines.append(
-                f"\n       [{color}][{sym}] {field_info.name}: {old_val} -> {new_val}[/]"
+                f"\n       [{color}][{sym}] {field_info.name}: {old_clean} -> {new_clean}[/]"
             )
     return diff_lines
 
