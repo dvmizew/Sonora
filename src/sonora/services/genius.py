@@ -1,9 +1,10 @@
 import httpx
 
+from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import GENIUS_MATCH_THRESHOLD, RATE_LIMIT_GENIUS
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, clean_title, match_score
+from sonora.core.utils import RateLimiter, clean_title, match_score, normalize_str
 
 _GENIUS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_GENIUS)
 
@@ -23,9 +24,14 @@ def fetch_genius_song_details(
     if not api_token or not artist or not title:
         return None
 
+    cleaned_title = clean_title(title)
+    cache_key = f"genius_song:{normalize_str(artist)}:{normalize_str(cleaned_title)}"
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
     _GENIUS_LIMITER.wait()
     try:
-        cleaned_title = clean_title(title)
         query = f"{artist} {cleaned_title}"
         search_url = "https://api.genius.com/search"
         response = SESSION.get(
@@ -104,7 +110,7 @@ def fetch_genius_song_details(
 
         release_date = song_data.get("release_date")
 
-        return {
+        result = {
             "genius_song_id": genius_song_id,
             "description": plain_description,
             "featured_artists": ", ".join(featured_names) if featured_names else None,
@@ -112,6 +118,8 @@ def fetch_genius_song_details(
             "writers": ", ".join(writer_names) if writer_names else None,
             "release_date": release_date,
         }
+        set_cached_api(cache_key, result)
+        return result
 
     except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
         LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {error}")

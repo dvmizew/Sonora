@@ -227,8 +227,9 @@ class TestServicesEngine(unittest.TestCase):
         tags = fetch_lastfm_tags("Beyoncé", "Halo", api_key="dummy_lastfm_key")
         self.assertEqual(tags, ["Pop", "Rnb"])
 
+    @patch("sonora.services.genius.get_cached_api", return_value=None)
     @patch("sonora.core.http.SESSION.get")
-    def test_fetch_genius_description(self, mock_get):
+    def test_fetch_genius_description(self, mock_get, _mock_cache):
         mock_search_response = MagicMock()
         mock_search_response.json.return_value = {
             "response": {
@@ -245,7 +246,16 @@ class TestServicesEngine(unittest.TestCase):
         }
         mock_song_response = MagicMock()
         mock_song_response.json.return_value = {
-            "response": {"song": {"description": {"plain": "Song story description"}}}
+            "response": {
+                "song": {
+                    "id": 123,
+                    "description": {"plain": "Song story description"},
+                    "featured_artists": [{"name": "Feat Artist"}],
+                    "producer_artists": [{"name": "Producer 1"}],
+                    "writer_artists": [{"name": "Writer 1"}],
+                    "release_date": "2023-01-01",
+                }
+            }
         }
         mock_get.side_effect = [mock_search_response, mock_song_response]
 
@@ -253,6 +263,19 @@ class TestServicesEngine(unittest.TestCase):
             "Artist", "Title", api_token="dummy_genius_token"
         )
         self.assertEqual(song_description, "Song story description")
+
+    @patch("sonora.services.genius.get_cached_api")
+    def test_fetch_genius_song_details_cached(self, mock_cache):
+        mock_cache.return_value = {
+            "genius_song_id": 999,
+            "description": "Cached story",
+            "featured_artists": None,
+            "producers": None,
+            "writers": None,
+            "release_date": None,
+        }
+        details = fetch_genius_description("Artist", "Title", api_token="dummy_token")
+        self.assertEqual(details, "Cached story")
 
     def test_acoustid_no_api_key_returns_none(self):
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key=""))
@@ -271,8 +294,9 @@ class TestServicesEngine(unittest.TestCase):
     def test_lastfm_no_api_key_returns_empty(self):
         self.assertEqual(fetch_lastfm_tags("Artist", "Title", api_key=None), [])
 
+    @patch("sonora.services.genius.get_cached_api", return_value=None)
     @patch("sonora.core.http.SESSION.get")
-    def test_genius_rejects_lyrics_unavailable_text(self, mock_get):
+    def test_genius_rejects_lyrics_unavailable_text(self, mock_get, _mock_cache):
         mock_search_response = MagicMock()
         mock_search_response.json.return_value = {
             "response": {"hits": [{"result": {"api_path": "/songs/1"}}]}
