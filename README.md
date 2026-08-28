@@ -62,18 +62,27 @@ pip install -e .
 
 ---
 
-## Configuration
+## Configuration (API Keys)
 
-Optional API keys can be provided via environment variables or a `.env` file:
+Sonora works out of the box without keys. To unlock full metadata and higher rate limits, add a `.env` file in your folder:
 
 ```env
-LASTFM_API_KEY=your_lastfm_key
-ACOUSTID_API_KEY=your_acoustid_key
-DISCOGS_TOKEN=your_discogs_token
-GENIUS_API_TOKEN=your_genius_token
+DISCOGS_TOKEN="your_token"          # https://www.discogs.com/settings/developers -> Generate token
+ACOUSTID_API_KEY="your_api_key"     # https://acoustid.org/api-key -> Get API key
+GENIUS_API_TOKEN="your_token"       # https://genius.com/api-clients -> Create client -> Generate Access Token
+LASTFM_API_KEY="your_api_key"       # https://www.lastfm.com/api/account/create -> Create API account
+MUSIXMATCH_TOKEN="your_token"       # (Optional) Desktop app/web token for word-synced lyrics
 ```
 
-MusicBrainz, Cover Art Archive, iTunes, and Deezer work without an API key.
+| Key | Where to get it | What it unlocks |
+| :--- | :--- | :--- |
+| **`DISCOGS_TOKEN`** | [Discogs Developers](https://www.discogs.com/settings/developers) | 60 req/min limit, labels, catalog numbers, barcodes |
+| **`ACOUSTID_API_KEY`** | [AcoustID API](https://acoustid.org/api-key) | Audio fingerprinting (identifies tracks with 0 initial tags) |
+| **`GENIUS_API_TOKEN`** | [Genius API Clients](https://genius.com/api-clients) | Song descriptions and background stories in comment tag |
+| **`LASTFM_API_KEY`** | [Last.fm API](https://www.last.fm/api) | Dynamic mood & style tags, listeners and playcount stats |
+| **`MUSIXMATCH_TOKEN`** | Desktop app / web dump | Word-by-word synced lyrics (`<mm:ss.xx>`) |
+
+*MusicBrainz, Cover Art Archive, Apple Music/iTunes, TheAudioDB, and Deezer require no keys.*
 
 ---
 
