@@ -1,6 +1,7 @@
 import dataclasses
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -54,6 +55,9 @@ def process_single_track(
     album_mbid: str | None = None,
     album_track_mbids: dict[int, str] | None = None,
     cuesheet_content: str | None = None,
+    album_mb_release_details: dict[str, object] | None = None,
+    album_discogs_release: dict[str, object] | None = None,
+    album_deezer_details: dict[str, Any] | None = None,
 ) -> TrackInfo:
     LOG.start_buffering()
     try:
@@ -165,9 +169,17 @@ def process_single_track(
 
         if is_valid_uuid(track_info.musicbrainz_albumid):
             try:
-                mb_rel = fetch_musicbrainz_release_details(
-                    track_info.musicbrainz_albumid
-                )
+                mb_rel: dict[str, object] | None
+                if (
+                    album_mb_release_details
+                    and album_mbid
+                    and track_info.musicbrainz_albumid == str(album_mbid)
+                ):
+                    mb_rel = album_mb_release_details
+                else:
+                    mb_rel = fetch_musicbrainz_release_details(
+                        track_info.musicbrainz_albumid
+                    )
                 if mb_rel:
                     if mb_rel.get("barcode") and not track_info.barcode:
                         track_info.barcode = str(mb_rel["barcode"])
@@ -264,11 +276,14 @@ def process_single_track(
         # 6. Discogs metadata enrichment
         if discogs_user_token:
             try:
-                release = search_discogs_release(
-                    track_info.artist,
-                    track_info.album,
-                    user_token=discogs_user_token,
-                )
+                if album_discogs_release:
+                    release = album_discogs_release
+                else:
+                    release = search_discogs_release(
+                        track_info.artist,
+                        track_info.album,
+                        user_token=discogs_user_token,
+                    )
                 if release:
                     if release.get("id") and not track_info.discogs_release_id:
                         track_info.discogs_release_id = str(release["id"])
@@ -355,9 +370,13 @@ def process_single_track(
 
         # 7. Deezer metadata enrichment (BPM, Gain, Contributors, ISRC, Label, Barcode, Release Date, Genre)
         try:
-            deezer_album = fetch_deezer_album_details(
-                track_info.artist, track_info.album
-            )
+            deezer_album: dict[str, Any] | None
+            if album_deezer_details:
+                deezer_album = album_deezer_details
+            else:
+                deezer_album = fetch_deezer_album_details(
+                    track_info.artist, track_info.album
+                )
             if deezer_album:
                 if deezer_album.get("label") and not track_info.label:
                     track_info.label = str(deezer_album["label"])
@@ -610,9 +629,13 @@ def tag_album_folder(
                     read_cuesheet_content(cue_files[0]) if cue_files else None
                 )
 
-                # Batch Optimization: Fetch entire album track MBIDs and album MBID in 1 single API call
+                # Batch Optimization: Fetch entire album track MBIDs, release details, Deezer, and Discogs once per album
                 album_musicbrainz_id: str | None = None
                 album_track_mbids: dict[int, str] | None = None
+                album_mb_release_details: dict[str, object] | None = None
+                album_discogs_release: dict[str, object] | None = None
+                album_deezer_details: dict[str, Any] | None = None
+
                 try:
                     sample_meta = read_track_metadata(audio_files[0])
                     sample_artist = sample_meta.album_artist or sample_meta.artist
@@ -626,13 +649,29 @@ def tag_album_folder(
                             album_track_mbids = fetch_album_track_mbids(
                                 album_musicbrainz_id
                             )
+                            album_mb_release_details = (
+                                fetch_musicbrainz_release_details(album_musicbrainz_id)
+                            )
+                        deezer_info = fetch_deezer_album_details(
+                            sample_artist, sample_album
+                        )
+                        if deezer_info:
+                            album_deezer_details = deezer_info
+                        if discogs_user_token:
+                            discogs_info = search_discogs_release(
+                                sample_artist,
+                                sample_album,
+                                user_token=discogs_user_token,
+                            )
+                            if discogs_info:
+                                album_discogs_release = discogs_info
                 except (
                     httpx.HTTPError,
                     OSError,
                     ValueError,
                     RuntimeError,
                 ) as error:
-                    LOG.debug(f"Pre-fetching album track MBIDs failed: {error}")
+                    LOG.debug(f"Pre-fetching album metadata failed: {error}")
 
                 album_results: list[TrackInfo] = []
                 future_to_file = {
@@ -651,6 +690,9 @@ def tag_album_folder(
                         album_mbid=album_musicbrainz_id,
                         album_track_mbids=album_track_mbids,
                         cuesheet_content=album_cue_content,
+                        album_mb_release_details=album_mb_release_details,
+                        album_discogs_release=album_discogs_release,
+                        album_deezer_details=album_deezer_details,
                     ): audio_file
                     for audio_file in audio_files
                 }

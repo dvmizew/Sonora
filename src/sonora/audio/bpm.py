@@ -8,11 +8,21 @@ import soundfile
 from sonora.core.logger import LOG
 
 
-def load_audio(file_path: Path, mono: bool = False) -> tuple[np.ndarray, int] | None:
+def load_audio(
+    file_path: Path, mono: bool = False, max_seconds: float | None = None
+) -> tuple[np.ndarray, int] | None:
     try:
-        audio_data, sample_rate = soundfile.read(
-            str(file_path), dtype="float32", always_2d=True
-        )
+        if max_seconds and max_seconds > 0:
+            with soundfile.SoundFile(str(file_path)) as sf:
+                sample_rate = int(sf.samplerate)
+                frames = int(sample_rate * max_seconds)
+                audio_data = sf.read(frames=frames, dtype="float32", always_2d=True)
+        else:
+            audio_data, sample_rate_val = soundfile.read(
+                str(file_path), dtype="float32", always_2d=True
+            )
+            sample_rate = int(sample_rate_val)
+
         if mono:
             audio_data = (
                 np.mean(audio_data, axis=1)
@@ -28,6 +38,7 @@ def load_audio(file_path: Path, mono: bool = False) -> tuple[np.ndarray, int] | 
             "ffmpeg",
             "-i",
             str(file_path),
+            *(["-t", str(max_seconds)] if max_seconds and max_seconds > 0 else []),
             "-f",
             "f32le",
             "-ar",
@@ -57,17 +68,13 @@ def calculate_bpm(file_path: Path) -> float | None:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        loaded = load_audio(file_path, mono=True)
+        loaded = load_audio(file_path, mono=True, max_seconds=90.0)
         if loaded is None:
             return None
 
         audio_mono, sample_rate = loaded
         if len(audio_mono) == 0:
             return None
-
-        # Limit analysis to max 120 seconds to save CPU
-        if len(audio_mono) > sample_rate * 120:
-            audio_mono = audio_mono[: sample_rate * 120]
 
         # STFT Spectrogram onset envelope autocorrelation via SciPy
         _, _, spectrogram = scipy.signal.spectrogram(
