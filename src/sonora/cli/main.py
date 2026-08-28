@@ -15,12 +15,20 @@ from dotenv import load_dotenv
 from sonora import __version__
 from sonora.core.cache import set_ignore_cache
 from sonora.core.logger import LOG
-from sonora.core.models import TrackInfo
-from sonora.modules.backup import backup_library_tags, restore_library_tags
-from sonora.modules.checker import check_library
+from sonora.core.models import CheckReport, TrackInfo
+from sonora.modules.backup import (
+    backup_library_tags,
+    get_last_restored_count,
+    restore_library_tags,
+)
+from sonora.modules.checker import check_library, get_last_check_report
 from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import rename_directory_files
-from sonora.modules.tagger import get_last_tagging_failures, tag_album_folder
+from sonora.modules.tagger import (
+    get_last_tagged_tracks,
+    get_last_tagging_failures,
+    tag_album_folder,
+)
 from sonora.services.lyrics import init_musixmatch_token
 from sonora.services.musicbrainz import init_musicbrainz
 
@@ -195,8 +203,9 @@ def tag(
         )
     except KeyboardInterrupt:
         interrupted = True
+        tagged_tracks = get_last_tagged_tracks()
         LOG.warning(
-            "Tagging interrupted by user. Generating report for processed tracks..."
+            "\n⏹️  [bold yellow]INTERRUPTED[/] - Tagging stopped by user (Ctrl+C). Generating summary for processed tracks..."
         )
 
     if not interrupted:
@@ -444,15 +453,31 @@ def check(
     Check music library for FLAC integrity, bracket corruption & missing LRCs.
     """
     LOG.info(f"Checking music library: [bold]{path}[/bold]")
-    check_report = check_library(
-        path,
-        output_json=json_report,
-        check_spectral=spectral_analysis,
-        max_threads=threads,
-    )
-    LOG.success(
-        f"Check completed: {check_report.total_files} files scanned, {len(check_report.issues)} issues identified."
-    )
+    interrupted = False
+    try:
+        check_report = check_library(
+            path,
+            output_json=json_report,
+            check_spectral=spectral_analysis,
+            max_threads=threads,
+        )
+    except KeyboardInterrupt:
+        interrupted = True
+        check_report = get_last_check_report() or CheckReport(
+            total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
+        )
+        LOG.warning(
+            "\n⏹️  [bold yellow]INTERRUPTED[/] - Check stopped by user (Ctrl+C). Generating summary for scanned files..."
+        )
+
+    if not interrupted:
+        LOG.success(
+            f"Check completed: {check_report.total_files} files scanned, {len(check_report.issues)} issues identified."
+        )
+    else:
+        LOG.warning(
+            f"Partially scanned {check_report.total_files} files before interruption."
+        )
 
     validation_summary_rows = [
         ("Total Files Scanned", str(check_report.total_files), None),
@@ -478,6 +503,8 @@ def check(
         ),
     ]
     LOG.summary_table("Validation Summary", validation_summary_rows)
+    if interrupted:
+        return 130
     return 0
 
 
@@ -611,8 +638,21 @@ def restore(
     """
     Restore audio tags from JSON backup file.
     """
-    restored_count = restore_library_tags(backup_file, max_threads=threads)
-    LOG.success(f"Restored metadata for {restored_count} tracks.")
+    interrupted = False
+    try:
+        restored_count = restore_library_tags(backup_file, max_threads=threads)
+    except KeyboardInterrupt:
+        interrupted = True
+        restored_count = get_last_restored_count()
+        LOG.warning(
+            "\n⏹️  [bold yellow]INTERRUPTED[/] - Restoration stopped by user (Ctrl+C). Generating summary for restored files..."
+        )
+
+    if not interrupted:
+        LOG.success(f"Restored metadata for {restored_count} tracks.")
+    else:
+        LOG.warning(f"Partially restored {restored_count} tracks before interruption.")
+
     restore_summary_rows = [
         ("Backup File", str(backup_file.resolve()), None),
         (
@@ -622,6 +662,8 @@ def restore(
         ),
     ]
     LOG.summary_table("Restoration Summary", restore_summary_rows)
+    if interrupted:
+        return 130
     return 0
 
 

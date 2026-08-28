@@ -277,6 +277,14 @@ def _check_single_file(
     return path, file_issues, album, album_artist, disc_number, track_number
 
 
+LAST_CHECK_REPORT: CheckReport | None = None
+
+
+def get_last_check_report() -> CheckReport | None:
+    """Return the most recent or partially completed check report."""
+    return LAST_CHECK_REPORT
+
+
 def check_library(
     folder_path: Path,
     output_json: Path | None = None,
@@ -286,9 +294,11 @@ def check_library(
     if not folder_path.exists():
         raise FileNotFoundError(f"Directory not found: {folder_path}")
 
+    global LAST_CHECK_REPORT
     report = CheckReport(
         total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
     )
+    LAST_CHECK_REPORT = report
 
     files_to_process = find_audio_files(folder_path, recursive=True)
 

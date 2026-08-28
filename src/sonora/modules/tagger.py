@@ -3,7 +3,7 @@ import dataclasses
 import select
 import sys
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -48,6 +48,7 @@ from sonora.services.theaudiodb import (
 )
 
 LAST_TAGGING_FAILURES: list[dict[str, str]] = []
+LAST_TAGGED_TRACKS: list[TrackInfo] = []
 _NETWORK_EXCEPTIONS = (
     MusicBrainzError,
     acoustid.AcoustidError,
@@ -71,7 +72,10 @@ def _wait_if_paused(poll_interval: float = 0.2) -> None:
 
 
 @contextlib.contextmanager
-def _interactive_pause_listener() -> Generator[None, None, None]:
+def _interactive_pause_listener(
+    on_pause: Callable[[], None] | None = None,
+    on_resume: Callable[[], None] | None = None,
+) -> Generator[None, None, None]:
     if not sys.stdin.isatty():
         yield
         return
@@ -97,11 +101,17 @@ def _interactive_pause_listener() -> Generator[None, None, None]:
                     if char in (" ", "p", "P"):
                         if _PAUSE_EVENT.is_set():
                             _PAUSE_EVENT.clear()
+                            if on_pause:
+                                with contextlib.suppress(Exception):
+                                    on_pause()
                             LOG.warning(
                                 "⏸️  [bold yellow]PAUSED[/] - Press [bold cyan][Space][/] or [bold cyan]'p'[/] to resume..."
                             )
                         else:
                             _PAUSE_EVENT.set()
+                            if on_resume:
+                                with contextlib.suppress(Exception):
+                                    on_resume()
                             LOG.info(
                                 "▶️  [bold green]RESUMED[/] - Continuing execution..."
                             )
@@ -143,6 +153,11 @@ _SKIP_DIFF_FIELDS: frozenset[str] = frozenset(
 def get_last_tagging_failures() -> list[dict[str, str]]:
     """Return failures recorded during the latest tagging run."""
     return list(LAST_TAGGING_FAILURES)
+
+
+def get_last_tagged_tracks() -> list[TrackInfo]:
+    """Return successfully tagged tracks recorded during the latest tagging run."""
+    return list(LAST_TAGGED_TRACKS)
 
 
 def _apply_mapping(
@@ -678,9 +693,9 @@ def process_single_track(
     album_discogs_release: dict[str, object] | None = None,
     album_deezer_details: dict[str, Any] | None = None,
 ) -> TrackInfo:
+    _wait_if_paused()
     LOG.start_buffering()
     try:
-        _wait_if_paused()
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -691,9 +706,7 @@ def process_single_track(
         LOG.info(f"🎧 Processing track: [white]{file_path.name}[/]")
 
         # 1. External metadata enrichment pipeline
-        _wait_if_paused()
         _enrich_acoustid(track_info, file_path, acoustid_api_key, force=force)
-        _wait_if_paused()
         _enrich_musicbrainz(
             track_info,
             album_mbid,
@@ -701,25 +714,16 @@ def process_single_track(
             album_mb_release_details,
             force=force,
         )
-        _wait_if_paused()
         _enrich_itunes(track_info)
-        _wait_if_paused()
         _enrich_lastfm(track_info, lastfm_api_key)
-        _wait_if_paused()
         _enrich_discogs(track_info, discogs_user_token, album_discogs_release)
-        _wait_if_paused()
         _enrich_deezer(track_info, album_deezer_details, force=force)
-        _wait_if_paused()
         _enrich_genius(track_info, genius_api_token, force=force)
-        _wait_if_paused()
         _enrich_theaudiodb(track_info, force=force)
 
         # 2. Audio features, artwork, cuesheet & lyrics
-        _wait_if_paused()
         _enrich_cuesheet(track_info, file_path, cuesheet_content)
-        _wait_if_paused()
         _enrich_bpm(track_info, file_path, fetch_bpm, force=force)
-        _wait_if_paused()
         cover_image = _enrich_artwork(
             track_info,
             file_path,
@@ -727,7 +731,6 @@ def process_single_track(
             force=force,
             dry_run=dry_run,
         )
-        _wait_if_paused()
         _enrich_lyrics(
             track_info,
             file_path,
@@ -735,7 +738,6 @@ def process_single_track(
             force=force,
             dry_run=dry_run,
         )
-        _wait_if_paused()
 
         # 3. Compute tag diffs and persist metadata
         diff_lines = _render_tag_diffs(orig_info, track_info)
@@ -754,7 +756,6 @@ def process_single_track(
 
         return track_info
     finally:
-        _wait_if_paused()
         LOG.stop_buffering()
 
 
@@ -775,8 +776,9 @@ def tag_album_folder(
     if not folder_path.exists() or not folder_path.is_dir():
         raise FileNotFoundError(f"Album folder not found: {folder_path}")
 
-    global LAST_TAGGING_FAILURES
+    global LAST_TAGGING_FAILURES, LAST_TAGGED_TRACKS
     LAST_TAGGING_FAILURES = []
+    LAST_TAGGED_TRACKS = []
 
     all_audio_files = find_audio_files(folder_path, recursive=True)
     if not all_audio_files:
@@ -790,133 +792,162 @@ def tag_album_folder(
     results: list[TrackInfo] = []
     current_album_results: list[TrackInfo] = []
 
-    with create_progress() as progress, _interactive_pause_listener():
+    with create_progress() as progress:
         task = progress.add_task("[cyan]Tagging tracks...", total=len(all_audio_files))
-        executor = ThreadPoolExecutor(max_workers=max_threads)
-        try:
-            for album_dir, audio_files in album_groups.items():
-                _wait_if_paused()
-                folder_name = album_dir.name
-                LOG.force_info(
-                    f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]"
-                )
+        pause_start_time: float | None = None
 
-                # Pre-resolve Cuesheet content once for entire album
-                cue_files = list(album_dir.glob("*.cue"))
-                album_cue_content = (
-                    read_cuesheet_content(cue_files[0]) if cue_files else None
-                )
+        def _on_pause() -> None:
+            nonlocal pause_start_time
+            pause_start_time = progress.get_time()
+            progress.stop_task(task)
+            progress.update(
+                task,
+                description="[bold yellow]⏸️  PAUSED (Press [Space] or 'p' to resume)[/]",
+            )
+            progress.refresh()
 
-                # Batch Optimization: Fetch entire album track MBIDs, release details, Deezer, and Discogs once per album
-                album_musicbrainz_id: str | None = None
-                album_track_mbids: dict[int, str] | None = None
-                album_mb_release_details: dict[str, object] | None = None
-                album_discogs_release: dict[str, object] | None = None
-                album_deezer_details: dict[str, Any] | None = None
+        def _on_resume() -> None:
+            nonlocal pause_start_time
+            if pause_start_time is not None:
+                pause_duration = progress.get_time() - pause_start_time
+                task_obj = progress._tasks.get(task)
+                if task_obj and task_obj.start_time is not None:
+                    task_obj.start_time += pause_duration
+                if task_obj:
+                    task_obj.stop_time = None
+                pause_start_time = None
+            progress.update(task, description="[cyan]Tagging tracks...")
+            progress.refresh()
 
-                try:
-                    sample_meta = read_track_metadata(audio_files[0])
-                    sample_artist = sample_meta.album_artist or sample_meta.artist
-                    sample_album = sample_meta.album
-                    if sample_artist and sample_album:
-                        release_info = search_musicbrainz_release(
-                            sample_artist, sample_album
-                        )
-                        if release_info and release_info.get("id"):
-                            album_musicbrainz_id = str(release_info["id"])
-                            album_track_mbids = fetch_album_track_mbids(
-                                album_musicbrainz_id
-                            )
-                            album_mb_release_details = (
-                                fetch_musicbrainz_release_details(album_musicbrainz_id)
-                            )
-                        deezer_info = fetch_deezer_album_details(
-                            sample_artist, sample_album
-                        )
-                        if deezer_info:
-                            album_deezer_details = deezer_info
-                        if discogs_user_token:
-                            discogs_info = search_discogs_release(
-                                sample_artist,
-                                sample_album,
-                                user_token=discogs_user_token,
-                            )
-                            if discogs_info:
-                                album_discogs_release = discogs_info
-                except _NETWORK_EXCEPTIONS as error:
-                    LOG.debug(f"Pre-fetching album metadata failed: {error}")
-
-                current_album_results = []
-                future_to_file = {
-                    executor.submit(
-                        process_single_track,
-                        file_path=audio_file,
-                        fetch_bpm=fetch_bpm,
-                        fetch_lyrics=fetch_lyrics,
-                        fetch_itunes_art=fetch_itunes_art,
-                        lastfm_api_key=lastfm_api_key,
-                        acoustid_api_key=acoustid_api_key,
-                        discogs_user_token=discogs_user_token,
-                        genius_api_token=genius_api_token,
-                        force=force,
-                        dry_run=dry_run,
-                        album_mbid=album_musicbrainz_id,
-                        album_track_mbids=album_track_mbids,
-                        cuesheet_content=album_cue_content,
-                        album_mb_release_details=album_mb_release_details,
-                        album_discogs_release=album_discogs_release,
-                        album_deezer_details=album_deezer_details,
-                    ): audio_file
-                    for audio_file in audio_files
-                }
-
-                for future in as_completed(future_to_file):
+        with _interactive_pause_listener(on_pause=_on_pause, on_resume=_on_resume):
+            executor = ThreadPoolExecutor(max_workers=max_threads)
+            try:
+                for album_dir, audio_files in album_groups.items():
                     _wait_if_paused()
-                    audio_file = future_to_file[future]
-                    try:
-                        track_info = future.result()
-                        current_album_results.append(track_info)
-                    except _NETWORK_EXCEPTIONS as error:
-                        LOG.warning(f"Failed to process {audio_file.name}: {error}")
-                        LAST_TAGGING_FAILURES.append(
-                            {
-                                "file": str(audio_file.resolve()),
-                                "filename": audio_file.name,
-                                "error": str(error),
-                                "error_type": type(error).__name__,
-                            }
-                        )
-                    progress.advance(task)
-
-                if fetch_replaygain:
-                    _wait_if_paused()
-                    calculate_album_replaygain(
-                        audio_files,
-                        force=force,
-                        dry_run=dry_run,
-                        max_threads=max_threads,
+                    folder_name = album_dir.name
+                    LOG.force_info(
+                        f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]"
                     )
 
-                if current_album_results:
-                    _wait_if_paused()
-                    primary_artist = (
-                        current_album_results[0].album_artist
-                        or current_album_results[0].artist
+                    # Pre-resolve Cuesheet content once for entire album
+                    cue_files = list(album_dir.glob("*.cue"))
+                    album_cue_content = (
+                        read_cuesheet_content(cue_files[0]) if cue_files else None
                     )
-                    try:
-                        process_artist_artwork(
-                            album_dir, primary_artist, dry_run=dry_run
-                        )
-                    except _NETWORK_EXCEPTIONS as error:
-                        LOG.debug(f"Artist art download failed: {error}")
 
+                    # Batch Optimization: Fetch entire album track MBIDs, release details, Deezer, and Discogs once per album
+                    album_musicbrainz_id: str | None = None
+                    album_track_mbids: dict[int, str] | None = None
+                    album_mb_release_details: dict[str, object] | None = None
+                    album_discogs_release: dict[str, object] | None = None
+                    album_deezer_details: dict[str, Any] | None = None
+
+                    try:
+                        sample_meta = read_track_metadata(audio_files[0])
+                        sample_artist = sample_meta.album_artist or sample_meta.artist
+                        sample_album = sample_meta.album
+                        if sample_artist and sample_album:
+                            release_info = search_musicbrainz_release(
+                                sample_artist, sample_album
+                            )
+                            if release_info and release_info.get("id"):
+                                album_musicbrainz_id = str(release_info["id"])
+                                album_track_mbids = fetch_album_track_mbids(
+                                    album_musicbrainz_id
+                                )
+                                album_mb_release_details = (
+                                    fetch_musicbrainz_release_details(
+                                        album_musicbrainz_id
+                                    )
+                                )
+                            deezer_info = fetch_deezer_album_details(
+                                sample_artist, sample_album
+                            )
+                            if deezer_info:
+                                album_deezer_details = deezer_info
+                            if discogs_user_token:
+                                discogs_info = search_discogs_release(
+                                    sample_artist,
+                                    sample_album,
+                                    user_token=discogs_user_token,
+                                )
+                                if discogs_info:
+                                    album_discogs_release = discogs_info
+                    except _NETWORK_EXCEPTIONS as error:
+                        LOG.debug(f"Pre-fetching album metadata failed: {error}")
+
+                    current_album_results = []
+                    future_to_file = {
+                        executor.submit(
+                            process_single_track,
+                            file_path=audio_file,
+                            fetch_bpm=fetch_bpm,
+                            fetch_lyrics=fetch_lyrics,
+                            fetch_itunes_art=fetch_itunes_art,
+                            lastfm_api_key=lastfm_api_key,
+                            acoustid_api_key=acoustid_api_key,
+                            discogs_user_token=discogs_user_token,
+                            genius_api_token=genius_api_token,
+                            force=force,
+                            dry_run=dry_run,
+                            album_mbid=album_musicbrainz_id,
+                            album_track_mbids=album_track_mbids,
+                            cuesheet_content=album_cue_content,
+                            album_mb_release_details=album_mb_release_details,
+                            album_discogs_release=album_discogs_release,
+                            album_deezer_details=album_deezer_details,
+                        ): audio_file
+                        for audio_file in audio_files
+                    }
+
+                    for future in as_completed(future_to_file):
+                        _wait_if_paused()
+                        audio_file = future_to_file[future]
+                        try:
+                            track_info = future.result()
+                            current_album_results.append(track_info)
+                            LAST_TAGGED_TRACKS.append(track_info)
+                        except _NETWORK_EXCEPTIONS as error:
+                            LOG.warning(f"Failed to process {audio_file.name}: {error}")
+                            LAST_TAGGING_FAILURES.append(
+                                {
+                                    "file": str(audio_file.resolve()),
+                                    "filename": audio_file.name,
+                                    "error": str(error),
+                                    "error_type": type(error).__name__,
+                                }
+                            )
+                        progress.advance(task)
+
+                    if fetch_replaygain:
+                        _wait_if_paused()
+                        calculate_album_replaygain(
+                            audio_files,
+                            force=force,
+                            dry_run=dry_run,
+                            max_threads=max_threads,
+                        )
+
+                    if current_album_results:
+                        _wait_if_paused()
+                        primary_artist = (
+                            current_album_results[0].album_artist
+                            or current_album_results[0].artist
+                        )
+                        try:
+                            process_artist_artwork(
+                                album_dir, primary_artist, dry_run=dry_run
+                            )
+                        except _NETWORK_EXCEPTIONS as error:
+                            LOG.debug(f"Artist art download failed: {error}")
+
+                    results.extend(current_album_results)
+                    current_album_results = []
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
                 results.extend(current_album_results)
-                current_album_results = []
-        except KeyboardInterrupt:
-            executor.shutdown(wait=False, cancel_futures=True)
-            results.extend(current_album_results)
-            raise
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
     return results

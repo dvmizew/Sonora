@@ -126,6 +126,14 @@ def backup_library_tags(
         raise
 
 
+LAST_RESTORED_COUNT: int = 0
+
+
+def get_last_restored_count() -> int:
+    """Return the number of files restored during the most recent or interrupted restore run."""
+    return LAST_RESTORED_COUNT
+
+
 def restore_library_tags(
     backup_file: Path,
     target_directory: Path | None = None,
@@ -137,6 +145,9 @@ def restore_library_tags(
     """
     if not backup_file.exists():
         raise FileNotFoundError(f"Backup file not found: {backup_file}")
+
+    global LAST_RESTORED_COUNT
+    LAST_RESTORED_COUNT = 0
 
     LOG.info(
         f"🔄 Starting tag restoration from {backup_file} (threads={max_threads})..."
@@ -172,6 +183,7 @@ def restore_library_tags(
                 success, is_missing = future.result()
                 if success:
                     count += 1
+                    LAST_RESTORED_COUNT = count
                 elif is_missing:
                     missing += 1
                 else:
