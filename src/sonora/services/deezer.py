@@ -210,10 +210,24 @@ def fetch_deezer_track_details(
                     ):
                         lyricists.append(contributor_name)
 
+        pos_val = track_data.get("track_position")
+        track_pos: int | None = None
+        if pos_val is not None:
+            try:
+                track_pos = int(str(pos_val))
+            except (ValueError, TypeError):
+                track_pos = None
+
+        disk_val = track_data.get("disk_number")
+        disk_num: int | None = None
+        if disk_val is not None:
+            try:
+                disk_num = int(str(disk_val))
+            except (ValueError, TypeError):
+                disk_num = None
+
         result = {
             "isrc": track_data.get("isrc"),
-            "bpm": track_data.get("bpm"),
-            "gain": track_data.get("gain"),
             "explicit_lyrics": track_data.get("explicit_lyrics"),
             "featured_artists": ", ".join(dict.fromkeys(featured))
             if featured
@@ -221,8 +235,8 @@ def fetch_deezer_track_details(
             "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
             "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
             "lyricist": ", ".join(dict.fromkeys(lyricists)) if lyricists else None,
-            "track_position": track_data.get("track_position"),
-            "disk_number": track_data.get("disk_number"),
+            "track_position": track_pos,
+            "disk_number": disk_num,
             "release_date": track_data.get("release_date"),
         }
         set_cached_api(cache_key, result)

@@ -403,8 +403,6 @@ class TestServicesEngine(unittest.TestCase):
         mock_track.status_code = 200
         mock_track.json.return_value = {
             "isrc": "USUM71703861",
-            "bpm": 128.0,
-            "gain": -5.5,
             "explicit_lyrics": True,
         }
         mock_get.side_effect = [mock_search, mock_track]
@@ -413,7 +411,6 @@ class TestServicesEngine(unittest.TestCase):
         self.assertIsNotNone(track_details)
         if track_details:
             self.assertEqual(track_details["isrc"], "USUM71703861")
-            self.assertEqual(track_details["bpm"], 128.0)
 
     @patch("sonora.services.musicbrainz.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.SESSION.head")
