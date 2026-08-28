@@ -1,4 +1,5 @@
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_THEAUDIODB
@@ -9,9 +10,22 @@ from sonora.core.utils import RateLimiter, normalize_str
 _THEAUDIODB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_THEAUDIODB)
 
 
+def _download_artwork_bytes(url: str | None) -> bytes | None:
+    if not url:
+        return None
+    try:
+        response = SESSION.get(url, timeout=6)
+        if response.status_code == 200:
+            return response.content
+    except (OSError, ValueError) as error:
+        LOG.debug(f"Failed to fetch artwork from {url}: {error}")
+    return None
+
+
 def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
     """
     Fetch artist avatar (artist.jpg) and wide banner (banner.jpg) from TheAudioDB with disk caching.
+    Downloads both images in parallel for maximum network throughput.
     Returns (thumbnail_bytes, banner_bytes).
     """
     if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
@@ -24,7 +38,8 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
         return cached
 
     _THEAUDIODB_LIMITER.wait()
-    thumbnail_bytes, banner_bytes = None, None
+    thumbnail_bytes: bytes | None = None
+    banner_bytes: bytes | None = None
     try:
         url = f"https://www.theaudiodb.com/api/v1/json/2/search.php?s={urllib.parse.quote(artist_name)}"
         response = SESSION.get(url, timeout=6)
@@ -42,21 +57,16 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
                     or artist_data.get("strArtistFanart")
                 )
 
-                if thumbnail_url:
-                    try:
-                        thumb_response = SESSION.get(thumbnail_url, timeout=6)
-                        if thumb_response.status_code == 200:
-                            thumbnail_bytes = thumb_response.content
-                    except (OSError, ValueError) as error:
-                        LOG.debug(f"Failed to fetch thumb image: {error}")
-
-                if banner_url:
-                    try:
-                        banner_response = SESSION.get(banner_url, timeout=6)
-                        if banner_response.status_code == 200:
-                            banner_bytes = banner_response.content
-                    except (OSError, ValueError) as error:
-                        LOG.debug(f"Failed to fetch banner image: {error}")
+                if thumbnail_url or banner_url:
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        fut_thumb = executor.submit(
+                            _download_artwork_bytes, thumbnail_url
+                        )
+                        fut_banner = executor.submit(
+                            _download_artwork_bytes, banner_url
+                        )
+                        thumbnail_bytes = fut_thumb.result()
+                        banner_bytes = fut_banner.result()
 
                 result = (thumbnail_bytes, banner_bytes)
                 if thumbnail_bytes or banner_bytes:
