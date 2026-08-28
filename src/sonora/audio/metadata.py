@@ -175,19 +175,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             raw_rating = _get_tag(tags, "RATING", "POPM")
             rating = float(raw_rating) if raw_rating else None
 
-            raw_listeners = _get_tag(tags, "LISTENERS", "TXXX:LASTFM_LISTENERS")
-            listeners = (
-                int(raw_listeners)
-                if raw_listeners and raw_listeners.isdigit()
-                else None
-            )
-            raw_playcount = _get_tag(tags, "PLAYCOUNT", "TXXX:LASTFM_PLAYCOUNT")
-            playcount = (
-                int(raw_playcount)
-                if raw_playcount and raw_playcount.isdigit()
-                else None
-            )
-
             raw_compilation = _get_tag(tags, "COMPILATION", "TCMP")
             compilation = (
                 True
@@ -241,8 +228,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 genre=genre,
                 bpm=bpm,
                 rating=rating,
-                listeners=listeners,
-                playcount=playcount,
                 compilation=compilation,
                 sample_rate=song.sampleRate,
                 bitrate=song.bitrate,
@@ -323,10 +308,6 @@ def write_track_metadata(
                 song.tags["BPM"] = [f"{track_info.bpm:.1f}"]
             if track_info.rating is not None:
                 song.tags["RATING"] = [f"{track_info.rating:.1f}"]
-            if track_info.listeners is not None:
-                song.tags["LISTENERS"] = [str(track_info.listeners)]
-            if track_info.playcount is not None:
-                song.tags["PLAYCOUNT"] = [str(track_info.playcount)]
             if track_info.compilation is not None:
                 song.tags["COMPILATION"] = ["1" if track_info.compilation else "0"]
 

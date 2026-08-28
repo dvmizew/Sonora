@@ -29,7 +29,7 @@ from sonora.services.itunes import (
     fetch_itunes_track_metadata,
     search_itunes,
 )
-from sonora.services.lastfm import fetch_lastfm_tags, fetch_lastfm_track_stats
+from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import fetch_synced_lyrics, process_track_lyrics
 from sonora.services.musicbrainz import (
     fetch_album_track_mbids,
@@ -204,9 +204,6 @@ class TestNetwork(unittest.TestCase):
         mock_get.side_effect = httpx.RemoteProtocolError("Server disconnected")
         self.assertEqual(
             fetch_lastfm_tags("Artist", "Title", api_key="dummy_lastfm_key"), []
-        )
-        self.assertIsNone(
-            fetch_lastfm_track_stats("Artist", "Title", api_key="dummy_lastfm_key")
         )
 
     @patch("sonora.services.genius.SESSION.get")

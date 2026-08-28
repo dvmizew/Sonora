@@ -79,7 +79,7 @@ MUSIXMATCH_TOKEN="your_token"       # (Optional) Desktop app/web token for word-
 | **`DISCOGS_TOKEN`** | [Discogs Developers](https://www.discogs.com/settings/developers) | 60 req/min limit, labels, catalog numbers, barcodes |
 | **`ACOUSTID_API_KEY`** | [AcoustID API](https://acoustid.org/api-key) | Audio fingerprinting (identifies tracks with 0 initial tags) |
 | **`GENIUS_API_TOKEN`** | [Genius API Clients](https://genius.com/api-clients) | Song descriptions and background stories in comment tag |
-| **`LASTFM_API_KEY`** | [Last.fm API](https://www.last.fm/api) | Dynamic mood & style tags, listeners and playcount stats |
+| **`LASTFM_API_KEY`** | [Last.fm API](https://www.last.fm/api) | Dynamic mood & style tags |
 | **`MUSIXMATCH_TOKEN`** | Desktop app / web dump | Word-by-word synced lyrics (`<mm:ss.xx>`) |
 
 *MusicBrainz, Cover Art Archive, Apple Music/iTunes, TheAudioDB, and Deezer require no keys.*

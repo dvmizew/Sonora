@@ -34,7 +34,7 @@ from sonora.services.deezer import (
 from sonora.services.discogs import search_discogs_release
 from sonora.services.genius import fetch_genius_song_details
 from sonora.services.itunes import fetch_itunes_track_metadata
-from sonora.services.lastfm import fetch_lastfm_tags, fetch_lastfm_track_stats
+from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import process_track_lyrics
 from sonora.services.musicbrainz import (
     fetch_album_track_mbids,
@@ -105,6 +105,12 @@ def _interactive_pause_listener() -> Generator[None, None, None]:
                             LOG.info(
                                 "▶️  [bold green]RESUMED[/] - Continuing execution..."
                             )
+                        while True:
+                            dlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                            if dlist:
+                                sys.stdin.read(1)
+                            else:
+                                break
         finally:
             with contextlib.suppress(Exception):
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, orig_term)
@@ -354,15 +360,6 @@ def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
                     if t.lower() in mood_keywords:
                         track_info.mood = t.title()
                         break
-
-        stats = fetch_lastfm_track_stats(
-            track_info.artist, track_info.title, api_key=lastfm_api_key
-        )
-        if stats:
-            if stats.get("listeners"):
-                track_info.listeners = stats["listeners"]
-            if stats.get("playcount"):
-                track_info.playcount = stats["playcount"]
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Last.fm enrichment failed for {track_info.title}: {error}")
 
@@ -696,6 +693,7 @@ def process_single_track(
         # 1. External metadata enrichment pipeline
         _wait_if_paused()
         _enrich_acoustid(track_info, file_path, acoustid_api_key, force=force)
+        _wait_if_paused()
         _enrich_musicbrainz(
             track_info,
             album_mbid,
@@ -703,16 +701,25 @@ def process_single_track(
             album_mb_release_details,
             force=force,
         )
+        _wait_if_paused()
         _enrich_itunes(track_info)
+        _wait_if_paused()
         _enrich_lastfm(track_info, lastfm_api_key)
+        _wait_if_paused()
         _enrich_discogs(track_info, discogs_user_token, album_discogs_release)
+        _wait_if_paused()
         _enrich_deezer(track_info, album_deezer_details, force=force)
+        _wait_if_paused()
         _enrich_genius(track_info, genius_api_token, force=force)
+        _wait_if_paused()
         _enrich_theaudiodb(track_info, force=force)
 
         # 2. Audio features, artwork, cuesheet & lyrics
+        _wait_if_paused()
         _enrich_cuesheet(track_info, file_path, cuesheet_content)
+        _wait_if_paused()
         _enrich_bpm(track_info, file_path, fetch_bpm, force=force)
+        _wait_if_paused()
         cover_image = _enrich_artwork(
             track_info,
             file_path,
@@ -720,6 +727,7 @@ def process_single_track(
             force=force,
             dry_run=dry_run,
         )
+        _wait_if_paused()
         _enrich_lyrics(
             track_info,
             file_path,
@@ -727,6 +735,7 @@ def process_single_track(
             force=force,
             dry_run=dry_run,
         )
+        _wait_if_paused()
 
         # 3. Compute tag diffs and persist metadata
         diff_lines = _render_tag_diffs(orig_info, track_info)
@@ -745,6 +754,7 @@ def process_single_track(
 
         return track_info
     finally:
+        _wait_if_paused()
         LOG.stop_buffering()
 
 
@@ -861,6 +871,7 @@ def tag_album_folder(
                 }
 
                 for future in as_completed(future_to_file):
+                    _wait_if_paused()
                     audio_file = future_to_file[future]
                     try:
                         track_info = future.result()
@@ -878,6 +889,7 @@ def tag_album_folder(
                     progress.advance(task)
 
                 if fetch_replaygain:
+                    _wait_if_paused()
                     calculate_album_replaygain(
                         audio_files,
                         force=force,
@@ -886,6 +898,7 @@ def tag_album_folder(
                     )
 
                 if current_album_results:
+                    _wait_if_paused()
                     primary_artist = (
                         current_album_results[0].album_artist
                         or current_album_results[0].artist

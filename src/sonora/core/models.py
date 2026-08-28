@@ -67,8 +67,6 @@ class TrackInfo:
     featured_artists: str | None = None
     producers: str | None = None
     genius_song_id: str | None = None
-    listeners: int | None = None
-    playcount: int | None = None
     music_video_url: str | None = None
     sample_rate: int | None = None
     bitrate: int | None = None
