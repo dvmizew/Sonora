@@ -102,7 +102,8 @@ def calculate_album_replaygain(
     track_results: list[tuple[Path, float, float, float, float]] = []
     max_album_peak = 0.0
 
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+    executor = ThreadPoolExecutor(max_workers=max_threads)
+    try:
         futures = [
             executor.submit(_measure_track_loudness, audio_path, target_lufs)
             for audio_path in valid_files
@@ -112,6 +113,11 @@ def calculate_album_replaygain(
             if res is not None:
                 track_results.append(res)
                 max_album_peak = max(max_album_peak, res[2])
+    except KeyboardInterrupt:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     if not track_results:
         LOG.warning("Could not calculate loudness for any audio files.")
@@ -160,8 +166,14 @@ def calculate_album_replaygain(
             LOG.debug(f"Failed to write ReplayGain tags to {file_path}: {err}")
             return False
 
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        write_results = list(executor.map(_write_tags, track_results))
+    executor_write = ThreadPoolExecutor(max_workers=max_threads)
+    try:
+        write_results = list(executor_write.map(_write_tags, track_results))
+    except KeyboardInterrupt:
+        executor_write.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        executor_write.shutdown(wait=False, cancel_futures=True)
 
     tagged_count = sum(1 for success in write_results if success)
     LOG.info(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")

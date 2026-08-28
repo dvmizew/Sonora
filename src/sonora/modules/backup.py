@@ -84,7 +84,8 @@ def backup_library_tags(
         task = progress.add_task(
             "[cyan]Backing up audio tags...", total=len(audio_files)
         )
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_threads)
+        try:
             futures = [
                 executor.submit(_read_track_for_backup, file_path)
                 for file_path in audio_files
@@ -96,6 +97,11 @@ def backup_library_tags(
                 else:
                     failed += 1
                 progress.advance(task)
+        except KeyboardInterrupt:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     try:
         raw_json_bytes = orjson.dumps(backup_data, option=orjson.OPT_INDENT_2)
@@ -156,7 +162,8 @@ def restore_library_tags(
         task = progress.add_task(
             "[cyan]Restoring audio tags...", total=len(backup_dict)
         )
-        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+        executor = ThreadPoolExecutor(max_workers=max_threads)
+        try:
             futures = [
                 executor.submit(_restore_single_track, file_str, tags, search_base_dir)
                 for file_str, tags in backup_dict.items()
@@ -170,6 +177,11 @@ def restore_library_tags(
                 else:
                     failed += 1
                 progress.advance(task)
+        except KeyboardInterrupt:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     LOG.info(f"✅ Successfully restored {count} files")
     if missing > 0:
