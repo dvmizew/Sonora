@@ -22,7 +22,7 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
         return False
 
     try:
-        with open(lrc_path, "r", encoding="utf-8", errors="ignore") as file_handle:
+        with lrc_path.open(encoding="utf-8", errors="ignore") as file_handle:
             lines = file_handle.readlines()
 
         new_lines: list[str] = []
@@ -48,7 +48,7 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
         if headers:
             new_lines = headers + new_lines
 
-        with open(lrc_path, "w", encoding="utf-8") as file_handle:
+        with lrc_path.open("w", encoding="utf-8") as file_handle:
             file_handle.writelines(new_lines)
         return True
 

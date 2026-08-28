@@ -78,8 +78,7 @@ def organize_library_singles(
             # Skip target singles directory itself during folder classification
             try:
                 if folder == target_singles_dir or target_singles_dir in folder.parents:
-                    for path in files:
-                        progress.advance(task)
+                    progress.advance(task, advance=len(files))
                     continue
             except (ValueError, OSError):
                 pass

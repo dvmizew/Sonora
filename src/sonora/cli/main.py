@@ -10,9 +10,6 @@ import orjson
 from cyclopts import App, Parameter
 from dotenv import load_dotenv
 
-load_dotenv()
-socket.setdefaulttimeout(15)
-
 from sonora import __version__
 from sonora.core.cache import set_ignore_cache
 from sonora.core.logger import LOG
@@ -23,6 +20,9 @@ from sonora.modules.renamer import rename_directory_files
 from sonora.modules.tagger import get_last_tagging_failures, tag_album_folder
 from sonora.services.lyrics import init_musixmatch_token
 from sonora.services.musicbrainz import init_musicbrainz
+
+load_dotenv()
+socket.setdefaulttimeout(15)
 
 app = App(
     name="sonora",

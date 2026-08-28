@@ -42,7 +42,7 @@ _ARTIST_SEPARATORS = [
     r"\s+si\s+",
     r"\s+cu\s+",
     r"\s+vs\.?\s+",
-    r"\s+[xX×]\s+",
+    r"\s+[xX\u00d7]\s+",
     r"\s*&\s*",
     r"\s*,\s*",
     r"\s*;\s*",
@@ -50,7 +50,9 @@ _ARTIST_SEPARATORS = [
 ]
 _ARTIST_SPLIT_PATTERN = re.compile("|".join(_ARTIST_SEPARATORS), re.IGNORECASE)
 
-_ROMAN_VALUES: dict[str, int] = dict(zip("ivxlcdm", (1, 5, 10, 50, 100, 500, 1000)))
+_ROMAN_VALUES: dict[str, int] = dict(
+    zip("ivxlcdm", (1, 5, 10, 50, 100, 500, 1000), strict=True)
+)
 _NUMBER_WORDS: tuple[str, ...] = (
     "one",
     "two",

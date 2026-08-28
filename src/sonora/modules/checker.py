@@ -219,7 +219,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             )
 
         # Check for unsplit artists (e.g. Artist A & Artist B)
-        delimiters = [r"\s&\s", r"\s×\s", r"\sfeat\.?\s", r"\sft\.?\s"]
+        delimiters = [r"\s&\s", r"\s\u00d7\s", r"\sfeat\.?\s", r"\sft\.?\s"]
         if not is_single_group_artist(track.artist):
             for delimiter in delimiters:
                 if re.search(delimiter, track.artist, re.IGNORECASE):

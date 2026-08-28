@@ -30,7 +30,7 @@ COMPANION_LYRICS_EXTS = frozenset(
     }
 )
 
-FEAT_KEYWORDS = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))|×"
+FEAT_KEYWORDS = r"\b(?:fea?t(?:uring)?|ft)(?:\.?(?!\w))|\u00d7"
 
 USER_AGENT = f"Sonora/{__version__} (+https://github.com/dvmizew/Sonora)"
 

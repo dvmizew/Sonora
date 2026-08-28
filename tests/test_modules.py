@@ -66,7 +66,7 @@ def create_dummy_wav(path: Path) -> None:
     header.extend(b"\x00" * data_size)
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as file_handle:
+    with path.open("wb") as file_handle:
         file_handle.write(header)
 
 
