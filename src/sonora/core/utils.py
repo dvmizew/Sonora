@@ -184,30 +184,48 @@ def resolve_artist_name(raw_name: str | None) -> str:
         res = musicbrainzngs.search_artists(
             query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
         )
-        artist_list = res.get("artist-list", [])
-        # Pass 1: Exact case-insensitive ASCII match (prioritize "Nane" over accented "Nané")
-        for artist in artist_list:
+        for artist in res.get("artist-list", []):
             art_name = str(artist.get("name", "")).strip()
-            if (
-                art_name.lower() == clean_name.lower()
-                and art_name == clean_name.title()
-            ):
+            if not art_name:
+                continue
+            if normalize_str(art_name) == normalized:
                 set_cached_api(cache_key, art_name)
                 return art_name
-        # Pass 2: High score official alias / entity match (e.g. "mgl" -> "M.G.L.", legal name -> stage name)
-        for artist in artist_list:
+            for alias_item in artist.get("alias-list", []):
+                alias_name = (
+                    alias_item.get("alias")
+                    if isinstance(alias_item, dict)
+                    else str(alias_item)
+                )
+                if alias_name and normalize_str(alias_name) == normalized:
+                    set_cached_api(cache_key, art_name)
+                    return art_name
+            # Fallback for MusicBrainz WS/2 search summaries that omit alias-list
             score = int(artist.get("ext:score", 0))
-            if score >= 90:
-                canonical_name = str(artist.get("name", "")).strip()
-                if canonical_name:
-                    set_cached_api(cache_key, canonical_name)
-                    return canonical_name
-        # Pass 3: Case-insensitive fallback
-        for artist in artist_list:
-            art_name = str(artist.get("name", "")).strip()
-            if art_name.lower() == clean_name.lower():
-                set_cached_api(cache_key, art_name)
-                return art_name
+            artist_id = str(artist.get("id", "")).strip()
+            if score >= 95 and is_valid_uuid(artist_id):
+                try:
+                    artist_data = musicbrainzngs.get_artist_by_id(
+                        artist_id, includes=["aliases"]
+                    )
+                    full_aliases = artist_data.get("artist", {}).get("alias-list", [])
+                    for alias_item in full_aliases:
+                        alias_name = (
+                            alias_item.get("alias")
+                            if isinstance(alias_item, dict)
+                            else str(alias_item)
+                        )
+                        if alias_name and normalize_str(alias_name) == normalized:
+                            set_cached_api(cache_key, art_name)
+                            return art_name
+                except (
+                    httpx.HTTPError,
+                    OSError,
+                    ValueError,
+                    RuntimeError,
+                    musicbrainzngs.MusicBrainzError,
+                ):
+                    pass
     except (
         httpx.HTTPError,
         OSError,

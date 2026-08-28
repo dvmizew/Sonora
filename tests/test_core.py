@@ -4,11 +4,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
+from unittest.mock import patch
 
 from sonora.core.models import CheckReport, TrackInfo
 from sonora.core.utils import (
     clean_title,
     deduplicate_title_features,
+    get_primary_artist,
+    is_single_group_artist,
     is_valid_uuid,
     normalize_genre,
     normalize_str,
@@ -122,8 +125,6 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(deduplicate_title_features(None), "")
 
     def test_load_user_overrides_corrupt_json(self):
-        from unittest.mock import patch
-
         from sonora.core.utils import _load_user_overrides
 
         with (
@@ -143,6 +144,52 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(normalize_genre("12345"))  # Digits
         self.assertIsNone(normalize_genre(""))
         self.assertIsNone(normalize_genre(None))
+
+    @patch("sonora.core.utils.musicbrainzngs.search_artists")
+    def test_is_single_group_artist(self, mock_search):
+        is_single_group_artist.cache_clear()
+        mock_search.return_value = {
+            "artist-list": [
+                {
+                    "name": "Above & Beyond",
+                    "type": "Group",
+                    "ext:score": "100",
+                }
+            ]
+        }
+        self.assertTrue(is_single_group_artist("Above & Beyond"))
+
+        is_single_group_artist.cache_clear()
+        mock_search.return_value = {
+            "artist-list": [{"name": "Drake", "type": "Person", "ext:score": "80"}]
+        }
+        self.assertFalse(is_single_group_artist("Drake & 21 Savage"))
+        self.assertFalse(is_single_group_artist("SingleArtist"))
+        self.assertFalse(is_single_group_artist(""))
+        self.assertFalse(is_single_group_artist(None))
+
+    @patch("sonora.core.utils.musicbrainzngs.search_artists")
+    def test_get_primary_artist(self, mock_search):
+        is_single_group_artist.cache_clear()
+        mock_search.return_value = {
+            "artist-list": [
+                {
+                    "name": "Above & Beyond",
+                    "type": "Group",
+                    "ext:score": "100",
+                }
+            ]
+        }
+        self.assertEqual(get_primary_artist("Above & Beyond"), "Above & Beyond")
+
+        is_single_group_artist.cache_clear()
+        mock_search.return_value = {"artist-list": []}
+        self.assertEqual(
+            get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
+        )
+        self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
+        self.assertEqual(get_primary_artist(""), "Unknown")
+        self.assertEqual(get_primary_artist(None), "Unknown")
 
 
 class TestCoreModels(unittest.TestCase):

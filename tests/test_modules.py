@@ -14,6 +14,7 @@ from sonora.core.utils import (
     RateLimiter,
     find_audio_files,
     get_primary_artist,
+    is_single_group_artist,
     is_valid_uuid,
     resolve_artist_name,
 )
@@ -90,7 +91,25 @@ class TestCoreModules(unittest.TestCase):
     def tearDown(self):
         self.tmp_dir.cleanup()
 
-    def test_resolve_artist_name(self):
+    @patch("sonora.core.utils.musicbrainzngs.search_artists")
+    def test_resolve_artist_name(self, mock_search):
+        resolve_artist_name.cache_clear()
+        mock_search.return_value = {
+            "artist-list": [
+                {
+                    "name": "M.G.L.",
+                    "alias-list": [{"alias": "mgl"}],
+                },
+                {
+                    "name": "Killa Fonic",
+                    "alias-list": [],
+                },
+                {
+                    "name": "Nane",
+                    "alias-list": [],
+                },
+            ]
+        }
         self.assertEqual(resolve_artist_name("mgl"), "M.G.L.")
         self.assertEqual(resolve_artist_name("killa fonic"), "Killa Fonic")
         self.assertEqual(resolve_artist_name("nane"), "Nane")
@@ -172,7 +191,18 @@ class TestCoreModules(unittest.TestCase):
         renamed = rename_directory_files(self.tmp_path)
         self.assertEqual(len(renamed), 2)
 
-    def test_get_primary_artist(self):
+    @patch("sonora.core.utils.musicbrainzngs.search_artists")
+    def test_get_primary_artist(self, mock_search):
+        is_single_group_artist.cache_clear()
+        mock_search.return_value = {
+            "artist-list": [
+                {
+                    "name": "Above & Beyond",
+                    "type": "Group",
+                    "ext:score": "100",
+                }
+            ]
+        }
         self.assertEqual(
             get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
         )
