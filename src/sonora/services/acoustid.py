@@ -1,3 +1,4 @@
+from functools import lru_cache
 from pathlib import Path
 
 import acoustid
@@ -8,17 +9,28 @@ from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter, is_valid_uuid, match_score, normalize_str
 
 
+@lru_cache(maxsize=2048)
+def _fingerprint_file_cached(
+    resolved_path: str, mtime_ns: int, size: int
+) -> tuple[float, str]:
+    duration, fingerprint = acoustid.fingerprint_file(resolved_path)
+    return float(duration), str(fingerprint)
+
+
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
     """
     Generate Chromaprint acoustic fingerprint for an audio file.
+    Caches results in memory based on path, mtime, and size to avoid duplicate decoding.
     Returns (duration, fingerprint_string).
     """
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        duration, fingerprint = acoustid.fingerprint_file(str(file_path))
-        return float(duration), str(fingerprint)
+        stat = file_path.stat()
+        return _fingerprint_file_cached(
+            str(file_path.resolve()), stat.st_mtime_ns, stat.st_size
+        )
     except (
         acoustid.AcoustidError,
         acoustid.WebServiceError,

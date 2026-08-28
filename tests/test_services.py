@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import musicbrainzngs
 
-from sonora.services.acoustid import lookup_acoustid
+from sonora.services.acoustid import fingerprint_audio_file, lookup_acoustid
 from sonora.services.deezer import (
     fetch_deezer_album_details,
     fetch_deezer_track_details,
@@ -471,6 +471,24 @@ class TestServicesEngine(unittest.TestCase):
             )
             self.assertEqual(lyrics, "<00:01.00> Word enhanced lyrics")
             self.assertEqual(tag_type, "enhanced")
+
+    @patch("sonora.services.acoustid.acoustid.fingerprint_file")
+    def test_fingerprint_in_memory_cache(self, mock_fp):
+        mock_fp.return_value = (180.0, "AQADtEmSJEqiJE")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_file = Path(tmp_dir) / "track.flac"
+            audio_file.write_bytes(b"dummy audio data for fingerprint")
+
+            dur1, fp1 = fingerprint_audio_file(audio_file)
+            self.assertEqual(dur1, 180.0)
+            self.assertEqual(fp1, "AQADtEmSJEqiJE")
+            self.assertEqual(mock_fp.call_count, 1)
+
+            # Second call hits in-memory cache without calling acoustid.fingerprint_file again
+            dur2, fp2 = fingerprint_audio_file(audio_file)
+            self.assertEqual(dur2, 180.0)
+            self.assertEqual(fp2, "AQADtEmSJEqiJE")
+            self.assertEqual(mock_fp.call_count, 1)
 
 
 if __name__ == "__main__":

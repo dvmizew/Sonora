@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,9 @@ from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import is_valid_uuid, normalize_date, normalize_genre
+
+_METADATA_CACHE: dict[tuple[str, int, int], TrackInfo] = {}
+_MAX_METADATA_CACHE_SIZE = 8192
 
 _UUID_FIELDS = {
     "musicbrainz_trackid",
@@ -116,6 +120,12 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
     if file_path.suffix.lower() not in SUPPORTED_EXTS:
         raise ValueError(f"Unsupported audio format: {file_path}")
 
+    stat = file_path.stat()
+    cache_key = (str(file_path.resolve()), stat.st_mtime_ns, stat.st_size)
+    cached = _METADATA_CACHE.get(cache_key)
+    if cached is not None:
+        return dataclasses.replace(cached)
+
     try:
         with taglib.File(str(file_path)) as song:
             tags = song.tags
@@ -213,7 +223,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 for field, tag_keys in _TAG_SCHEMA.items()
             }
 
-            return TrackInfo(
+            track_info = TrackInfo(
                 file_path=file_path,
                 artist=artist,
                 title=title,
@@ -242,6 +252,10 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 art_height=art_height,
                 **mapped_fields,
             )
+            if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
+                _METADATA_CACHE.clear()
+            _METADATA_CACHE[cache_key] = dataclasses.replace(track_info)
+            return track_info
     except (RuntimeError, ValueError, FileNotFoundError):
         raise
     except (OSError, KeyError) as error:
@@ -361,6 +375,19 @@ def write_track_metadata(
             unsaved = song.save()
             if unsaved:
                 LOG.debug(f"TagLib unsaved tags for {track_info.file_path}: {unsaved}")
+
+            try:
+                new_stat = track_info.file_path.stat()
+                new_key = (
+                    str(track_info.file_path.resolve()),
+                    new_stat.st_mtime_ns,
+                    new_stat.st_size,
+                )
+                if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
+                    _METADATA_CACHE.clear()
+                _METADATA_CACHE[new_key] = dataclasses.replace(track_info)
+            except OSError:
+                pass
     except (RuntimeError, ValueError, FileNotFoundError):
         raise
     except (OSError, KeyError) as error:

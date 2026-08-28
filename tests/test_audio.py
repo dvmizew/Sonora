@@ -161,6 +161,28 @@ class TestAudioEngine(unittest.TestCase):
         result = calculate_album_replaygain([fail_wav])
         self.assertFalse(result)
 
+    def test_metadata_in_memory_cache(self):
+        wav_path = self.tmp_path / "cached_track.wav"
+        create_dummy_wav_file(wav_path)
+
+        with patch("taglib.File") as mock_taglib_file:
+            mock_song = MagicMock()
+            mock_song.tags = {"ARTIST": ["Cached Artist"], "TITLE": ["Cached Title"]}
+            mock_song.sampleRate = 44100
+            mock_song.bitrate = 1411
+            mock_song.channels = 2
+            mock_song.pictures = []
+            mock_taglib_file.return_value.__enter__.return_value = mock_song
+
+            info1 = read_track_metadata(wav_path)
+            self.assertEqual(info1.artist, "Cached Artist")
+            self.assertEqual(mock_taglib_file.call_count, 1)
+
+            # Second read from same unmodified file returns from in-memory cache without taglib.File call
+            info2 = read_track_metadata(wav_path)
+            self.assertEqual(info2.artist, "Cached Artist")
+            self.assertEqual(mock_taglib_file.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
