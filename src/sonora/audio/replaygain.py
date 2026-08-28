@@ -109,10 +109,20 @@ def calculate_album_replaygain(
             for audio_path in valid_files
         ]
         for future in futures:
-            res = future.result()
-            if res is not None:
-                track_results.append(res)
-                max_album_peak = max(max_album_peak, res[2])
+            try:
+                res = future.result()
+                if res is not None:
+                    track_results.append(res)
+                    max_album_peak = max(max_album_peak, res[2])
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                TypeError,
+                KeyError,
+                AttributeError,
+            ) as error:
+                LOG.debug(f"Track loudness measurement failed: {error}")
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         raise

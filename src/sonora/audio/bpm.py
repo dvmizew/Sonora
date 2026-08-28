@@ -110,6 +110,6 @@ def calculate_bpm(file_path: Path) -> float | None:
 
         return round(float(bpm_value), 1)
 
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError, ValueError, RuntimeError, IndexError, TypeError) as error:
         LOG.debug(f"BPM calculation failed for {file_path}: {error}")
         return None
