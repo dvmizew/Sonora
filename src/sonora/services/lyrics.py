@@ -1,5 +1,9 @@
+import json
 import logging
+import os
 import re
+import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +25,58 @@ for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser
     logging.getLogger(_provider).setLevel(logging.CRITICAL)
 
 _LYRICS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LYRICS)
+
+
+def init_musixmatch_token(token_str: str | None = None) -> bool:
+    """
+    Initialize Musixmatch token in syncedlyrics cache from env or explicit argument.
+    Supports raw user token or URL-encoded JSON cookie dump containing web-desktop-app-v1.0.
+    """
+    raw = (
+        token_str
+        if token_str is not None
+        else (
+            os.environ.get("MUSIXMATCH_TOKEN")
+            or os.environ.get("MUSIXMATCH_USER_TOKEN")
+        )
+    )
+    if not raw or not raw.strip():
+        return False
+
+    extracted_token: str | None = None
+    try:
+        decoded = urllib.parse.unquote(raw.strip())
+        if decoded.startswith("{") and "tokens" in decoded:
+            data = json.loads(decoded)
+            tokens = data.get("tokens", {})
+            extracted_token = (
+                tokens.get("web-desktop-app-v1.0")
+                or tokens.get("mxm-account-v1.0")
+                or tokens.get("user_token")
+            )
+        elif decoded.startswith("{") and "token" in decoded:
+            data = json.loads(decoded)
+            extracted_token = data.get("token") or data.get("user_token")
+        else:
+            extracted_token = decoded
+    except (ValueError, KeyError):
+        extracted_token = raw.strip()
+
+    if extracted_token:
+        try:
+            from syncedlyrics.utils import get_cache_path
+
+            token_path = get_cache_path("syncedlyrics", False) / "musixmatch_token.json"
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_data = {
+                "token": extracted_token,
+                "expiration_time": int(time.time()) + 31536000,  # 1 year
+            }
+            token_path.write_text(json.dumps(token_data), encoding="utf-8")
+            return True
+        except (OSError, ValueError):
+            pass
+    return False
 
 
 def clean_lyrics_text(text: str | None) -> str | None:

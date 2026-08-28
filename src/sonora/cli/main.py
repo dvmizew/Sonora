@@ -21,6 +21,7 @@ from sonora.modules.checker import check_library
 from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import rename_directory_files
 from sonora.modules.tagger import get_last_tagging_failures, tag_album_folder
+from sonora.services.lyrics import init_musixmatch_token
 from sonora.services.musicbrainz import init_musicbrainz
 
 app = App(
@@ -128,6 +129,7 @@ def tag(
     Tag audio files and albums automatically with all metadata, artwork, BPM, ReplayGain & lyrics.
     """
     init_musicbrainz()
+    init_musixmatch_token()
 
     if force:
         set_ignore_cache(True)
@@ -140,6 +142,28 @@ def tag(
         or os.environ.get("DISCOGS_USER_TOKEN")
     )
     resolved_genius_token = genius_api_token or os.environ.get("GENIUS_API_TOKEN")
+    has_musixmatch = bool(
+        os.environ.get("MUSIXMATCH_TOKEN") or os.environ.get("MUSIXMATCH_USER_TOKEN")
+    )
+
+    active_keys: list[str] = []
+    if resolved_discogs_token:
+        active_keys.append("[bold green]Discogs[/]")
+    if resolved_acoustid_key:
+        active_keys.append("[bold green]AcoustID[/]")
+    if resolved_genius_token:
+        active_keys.append("[bold green]Genius[/]")
+    if resolved_lastfm_key:
+        active_keys.append("[bold green]Last.fm[/]")
+    if has_musixmatch:
+        active_keys.append("[bold green]Musixmatch[/]")
+
+    if active_keys:
+        LOG.info(f"🔑 [bold]Active API Keys/Tokens:[/] {', '.join(active_keys)}")
+    else:
+        LOG.info(
+            "🔑 [dim]Active API Keys/Tokens:[/] [yellow]None (using free unauthenticated tiers)[/]"
+        )
 
     LOG.info(f"Tagging album directory: [bold]{path}[/bold]")
     tagged_tracks = tag_album_folder(
