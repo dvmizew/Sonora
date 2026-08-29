@@ -90,19 +90,9 @@ def organize_library_singles(
         with interactive_pause_listener(progress, task):
             for folder, files in folder_files.items():
                 wait_if_paused()
-                # Skip target singles directory itself during folder classification
-                try:
-                    if (
-                        folder == target_singles_dir
-                        or target_singles_dir in folder.parents
-                    ):
-                        progress.advance(task, advance=len(files))
-                        continue
-                except (ValueError, OSError):
-                    pass
-
-                # Determine if folder is a single folder (<= 2 tracks or multiple album tags)
-                is_single = len(files) <= 2
+                is_single = len(files) <= 2 or "singles" in (
+                    p.lower() for p in folder.parts
+                )
                 folder_track_infos: list[tuple[Path, TrackInfo]] = []
                 albums_in_folder: set[str] = set()
 
@@ -111,7 +101,11 @@ def organize_library_singles(
                     try:
                         info = read_track_metadata(path)
                         folder_track_infos.append((path, info))
-                        if info.album and info.album != "Unknown Album":
+                        if info.album and info.album.lower() not in [
+                            "singles",
+                            "unknown album",
+                            "unknown",
+                        ]:
                             albums_in_folder.add(normalize_str(info.album))
                     except (OSError, ValueError, RuntimeError) as error:
                         LOG.warning(f"Failed to read metadata for {path}: {error}")
@@ -154,13 +148,33 @@ def organize_library_singles(
             removed_dupes += 1
             continue
 
-        artist_dir = target_singles_dir / primary_artist
+        single_folder_name = sanitize_name(f"{primary_artist} - {track_info.title}")
+        primary_artist_clean = sanitize_name(primary_artist)
+
+        if target_singles_dir and target_singles_dir != source_dir / "Singles":
+            base_parent = target_singles_dir
+        elif source_dir.name.lower() == primary_artist_clean.lower():
+            base_parent = source_dir
+        else:
+            try:
+                subdirs = [
+                    p
+                    for p in source_dir.iterdir()
+                    if p.is_dir() and not p.name.startswith(".")
+                ]
+                if len(subdirs) > 5 and any(" - " not in p.name for p in subdirs):
+                    base_parent = source_dir / primary_artist_clean
+                else:
+                    base_parent = source_dir
+            except OSError:
+                base_parent = source_dir
+
+        single_folder = base_parent / single_folder_name
         if not dry_run:
-            artist_dir.mkdir(parents=True, exist_ok=True)
+            single_folder.mkdir(parents=True, exist_ok=True)
 
         target_file = (
-            artist_dir
-            / f"{sanitize_name(track_info.artist)} - {sanitize_name(track_info.title)}{path.suffix}"
+            single_folder / f"01 - {sanitize_name(track_info.title)}{path.suffix}"
         )
 
         # Handle destination collisions cleanly
@@ -176,16 +190,31 @@ def organize_library_singles(
                         continue
                     else:
                         counter = 2
-                        base_stem = f"{sanitize_name(track_info.artist)} - {sanitize_name(track_info.title)}"
+                        base_stem = f"01 - {sanitize_name(track_info.title)}"
                         while target_file.exists():
                             target_file = (
-                                artist_dir / f"{base_stem} ({counter}){path.suffix}"
+                                single_folder / f"{base_stem} ({counter}){path.suffix}"
                             )
                             counter += 1
                 except OSError:
                     pass
 
             if not dry_run:
+                # Also move companion artwork from old single folder if changing folders
+                if path.parent != single_folder:
+                    for art_name in [
+                        "cover.jpg",
+                        "cover.png",
+                        "folder.jpg",
+                        "front.jpg",
+                    ]:
+                        old_art = path.parent / art_name
+                        new_art = single_folder / art_name
+                        if old_art.exists() and not new_art.exists():
+                            try:
+                                shutil.move(str(old_art), str(new_art))
+                            except OSError:
+                                pass
                 shutil.move(str(path), str(target_file))
             else:
                 LOG.info(f"[DRY-RUN] Would move {path.name} -> {target_file}")
@@ -198,28 +227,38 @@ def organize_library_singles(
     if removed_dupes > 0:
         LOG.info(f"🗑️ Removed {removed_dupes} duplicate single(s).")
 
-    # Cleanup empty directories
+    # Cleanup empty/orphaned directories
     if not dry_run:
         cleanup_empty_dirs(source_dir)
 
     return moved_count
 
 
-def cleanup_empty_dirs(path: Path) -> int:
+def cleanup_empty_dirs(path: Path, target_singles_dir: Path | None = None) -> int:
     removed_count = 0
     if not path.exists() or not path.is_dir():
         return 0
     for child in sorted(path.rglob("*"), reverse=True):
-        if child.is_dir() and child.name not in (
+        if not child.is_dir():
+            continue
+        if child.name in (
             ".git",
             ".idea",
             ".vscode",
             "__pycache__",
         ):
-            try:
-                if not any(child.iterdir()):
-                    child.rmdir()
-                    removed_count += 1
-            except OSError as error:
-                LOG.debug(f"Could not remove empty dir {child}: {error}")
+            continue
+        if target_singles_dir and (
+            child == target_singles_dir
+            or target_singles_dir in child.parents
+            or child in target_singles_dir.parents
+        ):
+            continue
+        try:
+            audio_files = find_audio_files(child, recursive=True)
+            if not audio_files:
+                shutil.rmtree(str(child), ignore_errors=True)
+                removed_count += 1
+        except OSError as error:
+            LOG.debug(f"Could not remove empty/orphaned dir {child}: {error}")
     return removed_count

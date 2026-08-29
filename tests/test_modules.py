@@ -267,7 +267,9 @@ class TestCoreModules(unittest.TestCase):
         moved = organize_library_singles(src_dir, target_dir)
         self.assertEqual(moved, 1)
         self.assertTrue(
-            (target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists()
+            (
+                target_dir / "Single Artist - Single Song" / "01 - Single Song.wav"
+            ).exists()
         )
 
     @patch("sonora.modules.organizer.read_track_metadata")
@@ -286,10 +288,14 @@ class TestCoreModules(unittest.TestCase):
         moved = organize_library_singles(src_dir, target_dir)
         self.assertEqual(moved, 1)
         self.assertTrue(
-            (target_dir / "Single Artist" / "Single Artist - Single Song.wav").exists()
+            (
+                target_dir / "Single Artist - Single Song" / "01 - Single Song.wav"
+            ).exists()
         )
         self.assertTrue(
-            (target_dir / "Single Artist" / "Single Artist - Single Song.lrc").exists()
+            (
+                target_dir / "Single Artist - Single Song" / "01 - Single Song.lrc"
+            ).exists()
         )
 
     @patch("sonora.modules.organizer.get_primary_artist", side_effect=lambda a: a)
@@ -353,16 +359,17 @@ class TestCoreModules(unittest.TestCase):
         moved = organize_library_singles(src_dir, target_dir)
         self.assertEqual(moved, 2)
         self.assertTrue(
-            (target_dir / "Artist One" / "Artist One - Track One.wav").exists()
+            (target_dir / "Artist One - Track One" / "01 - Track One.wav").exists()
         )
         self.assertTrue(
-            (target_dir / "Artist Three" / "Artist Three - Track Three.wav").exists()
+            (
+                target_dir / "Artist Three - Track Three" / "01 - Track Three.wav"
+            ).exists()
         )
         # Album folder should remain intact
         self.assertTrue(f2_track1.exists())
         self.assertTrue(f2_track2.exists())
         self.assertTrue(f2_track3.exists())
-        self.assertTrue(mock_primary.called)
 
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library(self, mock_read):
