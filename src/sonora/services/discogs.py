@@ -1,4 +1,3 @@
-import re
 from typing import Any
 
 import httpx
@@ -10,7 +9,12 @@ from sonora.core.constants import (
 )
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, match_score, normalize_str
+from sonora.core.utils import (
+    RateLimiter,
+    clean_disambiguation,
+    match_score,
+    normalize_str,
+)
 
 _DISCOGS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_DISCOGS_AUTHENTICATED)
 
@@ -105,7 +109,7 @@ def fetch_discogs_release_details(
                     and extra_artist.get("name")
                     and extra_artist.get("role")
                 ):
-                    name = re.sub(r"\s*\(\d+\)$", "", str(extra_artist["name"])).strip()
+                    name = clean_disambiguation(str(extra_artist["name"]))
                     role = str(extra_artist["role"]).lower()
                     if (
                         "producer" in role or "produced by" in role
@@ -138,39 +142,43 @@ def fetch_discogs_release_details(
                     track_producers: list[str] = []
                     track_remixers: list[str] = []
                     track_composers: list[str] = []
-                    for track_extra_artist in track.get("extraartists", []):
-                        if (
-                            isinstance(track_extra_artist, dict)
-                            and track_extra_artist.get("name")
-                            and track_extra_artist.get("role")
-                        ):
-                            track_artist_name = re.sub(
-                                r"\s*\(\d+\)$", "", str(track_extra_artist["name"])
-                            ).strip()
-                            track_artist_role = str(track_extra_artist["role"]).lower()
+                    track_extra_artists = track.get("extraartists", [])
+                    if isinstance(track_extra_artists, list):
+                        for track_extra_artist in track_extra_artists:
                             if (
-                                "producer" in track_artist_role
-                                or "produced by" in track_artist_role
-                            ) and track_artist_name not in track_producers:
-                                track_producers.append(track_artist_name)
-                            elif (
-                                "remix" in track_artist_role
-                                and track_artist_name not in track_remixers
+                                isinstance(track_extra_artist, dict)
+                                and track_extra_artist.get("name")
+                                and track_extra_artist.get("role")
                             ):
-                                track_remixers.append(track_artist_name)
-                            elif (
-                                any(
-                                    kw in track_artist_role
-                                    for kw in (
-                                        "written",
-                                        "composer",
-                                        "music by",
-                                        "words by",
-                                    )
+                                track_artist_name = clean_disambiguation(
+                                    str(track_extra_artist["name"])
                                 )
-                                and track_artist_name not in track_composers
-                            ):
-                                track_composers.append(track_artist_name)
+                                track_artist_role = str(
+                                    track_extra_artist["role"]
+                                ).lower()
+                                if (
+                                    "producer" in track_artist_role
+                                    or "produced by" in track_artist_role
+                                ) and track_artist_name not in track_producers:
+                                    track_producers.append(track_artist_name)
+                                elif (
+                                    "remix" in track_artist_role
+                                    and track_artist_name not in track_remixers
+                                ):
+                                    track_remixers.append(track_artist_name)
+                                elif (
+                                    any(
+                                        kw in track_artist_role
+                                        for kw in (
+                                            "written",
+                                            "composer",
+                                            "music by",
+                                            "words by",
+                                        )
+                                    )
+                                    and track_artist_name not in track_composers
+                                ):
+                                    track_composers.append(track_artist_name)
                     credits_dict: dict[str, str] = {}
                     if track_producers:
                         credits_dict["producers"] = ", ".join(track_producers)

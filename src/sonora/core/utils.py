@@ -149,6 +149,19 @@ def extract_series_number(text: str | None) -> int | None:
     return None
 
 
+_DISAMBIGUATION_PATTERN = re.compile(r"\s*\((?:[A-Z]{2,4}|\d+)\)$")
+
+
+def clean_disambiguation(name: str | None) -> str:
+    """
+    Strips disambiguation country codes or numeric suffixes
+    (e.g., 'Armin (ROU)' -> 'Armin', 'IDK (ROU)' -> 'IDK', 'Jony (10)' -> 'Jony').
+    """
+    if not name:
+        return ""
+    return _DISAMBIGUATION_PATTERN.sub("", str(name)).strip()
+
+
 @lru_cache(maxsize=1)
 def _load_user_overrides() -> dict[str, str]:
     candidate_paths = [

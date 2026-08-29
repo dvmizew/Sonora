@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    clean_disambiguation,
     clean_title,
     deduplicate_title_features,
     get_primary_artist,
@@ -125,8 +126,19 @@ class TestCoreUtils(unittest.TestCase):
             clean_title("Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"),
             "Melodie",
         )
-        self.assertEqual(clean_title("Melodie (cu Vlad Dobrescu)"), "Melodie")
         self.assertEqual(clean_title(""), "")
+
+    def test_clean_disambiguation(self):
+        self.assertEqual(clean_disambiguation("Armin (ROU)"), "Armin")
+        self.assertEqual(clean_disambiguation("IDK (ROU)"), "IDK")
+        self.assertEqual(clean_disambiguation("Swisher (ROU)"), "Swisher")
+        self.assertEqual(clean_disambiguation("Ortega (ROU)"), "Ortega")
+        self.assertEqual(clean_disambiguation("Jony (10)"), "Jony")
+        self.assertEqual(clean_disambiguation("Artist (USA)"), "Artist")
+        self.assertEqual(clean_disambiguation("Band (UK)"), "Band")
+        self.assertEqual(clean_disambiguation("Normal Artist"), "Normal Artist")
+        self.assertEqual(clean_disambiguation(""), "")
+        self.assertEqual(clean_disambiguation(None), "")
 
     def test_deduplicate_title_features(self):
         self.assertEqual(

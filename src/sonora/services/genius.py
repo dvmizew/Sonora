@@ -4,7 +4,13 @@ from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import GENIUS_MATCH_THRESHOLD, RATE_LIMIT_GENIUS
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, clean_title, match_score, normalize_str
+from sonora.core.utils import (
+    RateLimiter,
+    clean_disambiguation,
+    clean_title,
+    match_score,
+    normalize_str,
+)
 
 _GENIUS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_GENIUS)
 
@@ -87,7 +93,7 @@ def fetch_genius_song_details(
         # Parse featured artists
         featured_list = song_data.get("featured_artists", [])
         featured_names = [
-            str(featured["name"])
+            clean_disambiguation(str(featured["name"]))
             for featured in featured_list
             if isinstance(featured, dict) and featured.get("name")
         ]
@@ -95,7 +101,7 @@ def fetch_genius_song_details(
         # Parse producers
         producer_list = song_data.get("producer_artists", [])
         producer_names = [
-            str(producer["name"])
+            clean_disambiguation(str(producer["name"]))
             for producer in producer_list
             if isinstance(producer, dict) and producer.get("name")
         ]
@@ -103,7 +109,7 @@ def fetch_genius_song_details(
         # Parse writers / composers
         writer_list = song_data.get("writer_artists", [])
         writer_names = [
-            str(writer["name"])
+            clean_disambiguation(str(writer["name"]))
             for writer in writer_list
             if isinstance(writer, dict) and writer.get("name")
         ]
