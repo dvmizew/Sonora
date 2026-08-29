@@ -240,9 +240,10 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 art_height=art_height,
                 **mapped_fields,
             )
-            if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
-                _METADATA_CACHE.clear()
-            _METADATA_CACHE[cache_key] = dataclasses.replace(track_info)
+            with _METADATA_CACHE_LOCK:
+                if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
+                    _METADATA_CACHE.clear()
+                _METADATA_CACHE[cache_key] = dataclasses.replace(track_info)
             return track_info
     except (RuntimeError, ValueError, FileNotFoundError):
         raise
