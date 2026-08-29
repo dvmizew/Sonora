@@ -47,7 +47,7 @@ def load_audio(
             "quiet",
             "-",
         ]
-        result = subprocess.run(command, capture_output=True, check=True)
+        result = subprocess.run(command, capture_output=True, check=True, timeout=15.0)
         if result.stdout:
             buffer_data = np.frombuffer(result.stdout, dtype=np.float32)
             audio_array: np.ndarray = (
