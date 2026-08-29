@@ -1,5 +1,6 @@
 import contextlib
 import dataclasses
+import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -126,23 +127,34 @@ def _enrich_acoustid(
     track_info: TrackInfo,
     file_path: Path,
     acoustid_api_key: str | None,
+    album_track_mbids: dict[int, str] | None = None,
     force: bool = False,
 ) -> None:
+    if not acoustid_api_key:
+        return
+    # If the album match already resolved an authoritative MBID for this track, skip expensive audio fingerprinting
+    album_mbids = album_track_mbids or {}
     if (
-        not is_valid_uuid(track_info.musicbrainz_trackid) or force
-    ) and acoustid_api_key:
-        try:
-            acoustid_mbid = lookup_acoustid(
-                file_path,
-                api_key=acoustid_api_key,
-                expected_artist=track_info.artist,
-                expected_title=track_info.title,
-            )
-            if is_valid_uuid(acoustid_mbid):
-                track_info.musicbrainz_trackid = acoustid_mbid
-                LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
-        except _NETWORK_EXCEPTIONS as error:
-            LOG.debug(f"AcoustID lookup failed for {track_info.title}: {error}")
+        track_info.track_number
+        and track_info.track_number in album_mbids
+        and is_valid_uuid(album_mbids[track_info.track_number])
+        and not force
+    ):
+        return
+    if is_valid_uuid(track_info.musicbrainz_trackid) and not force:
+        return
+    try:
+        acoustid_mbid = lookup_acoustid(
+            file_path,
+            api_key=acoustid_api_key,
+            expected_artist=track_info.artist,
+            expected_title=track_info.title,
+        )
+        if is_valid_uuid(acoustid_mbid):
+            track_info.musicbrainz_trackid = acoustid_mbid
+            LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"AcoustID lookup failed for {track_info.title}: {error}")
 
 
 def _enrich_musicbrainz(
@@ -441,15 +453,11 @@ def _enrich_deezer(
 
         track: dict[str, Any] | None = None
         if album and isinstance(album, dict):
-            t_by_pos: dict[Any, Any] = (
-                album.get("tracks_by_position", {})  # type: ignore[assignment]
-                if isinstance(album.get("tracks_by_position"), dict)
-                else {}
-            )
+            raw_pos = album.get("tracks_by_position")
+            t_by_pos: dict[Any, Any] = raw_pos if isinstance(raw_pos, dict) else {}
+            raw_title = album.get("tracks_by_title")
             t_by_title: dict[Any, Any] = (
-                album.get("tracks_by_title", {})  # type: ignore[assignment]
-                if isinstance(album.get("tracks_by_title"), dict)
-                else {}
+                raw_title if isinstance(raw_title, dict) else {}
             )
             if isinstance(t_by_pos, dict) and track_info.track_number in t_by_pos:
                 track = t_by_pos[track_info.track_number]
@@ -693,6 +701,7 @@ def process_single_track(
     album_discogs_release: dict[str, object] | None = None,
     album_deezer_details: dict[str, Any] | None = None,
     album_itunes_details: dict[str, Any] | None = None,
+    album_cover_path: Path | None = None,
 ) -> TrackInfo:
     wait_if_paused()
     LOG.start_buffering()
@@ -707,7 +716,13 @@ def process_single_track(
         LOG.info(f"🎧 Processing track: [white]{file_path.name}[/]")
 
         # 1. External metadata enrichment pipeline
-        _enrich_acoustid(track_info, file_path, acoustid_api_key, force=force)
+        _enrich_acoustid(
+            track_info,
+            file_path,
+            acoustid_api_key,
+            album_track_mbids=album_track_mbids,
+            force=force,
+        )
         _enrich_musicbrainz(
             track_info,
             album_mbid,
@@ -725,12 +740,16 @@ def process_single_track(
         # 2. Audio features, artwork, cuesheet & lyrics
         _enrich_cuesheet(track_info, file_path, cuesheet_content)
         _enrich_bpm(track_info, file_path, fetch_bpm, force=force)
-        cover_image = _enrich_artwork(
-            track_info,
-            file_path,
-            fetch_itunes_art,
-            force=force,
-            dry_run=dry_run,
+        cover_image = (
+            album_cover_path
+            if album_cover_path and album_cover_path.exists()
+            else _enrich_artwork(
+                track_info,
+                file_path,
+                fetch_itunes_art,
+                force=force,
+                dry_run=dry_run,
+            )
         )
         _enrich_lyrics(
             track_info,
@@ -829,6 +848,7 @@ def tag_album_folder(
                     album_discogs_release: dict[str, object] | None = None
                     album_deezer_details: dict[str, Any] | None = None
                     album_itunes_details: dict[str, Any] | None = None
+                    album_cover_path: Path | None = None
 
                     try:
                         sample_meta = read_track_metadata(audio_files[0])
@@ -866,6 +886,17 @@ def tag_album_folder(
                                 )
                                 if discogs_info:
                                     album_discogs_release = discogs_info
+                            if fetch_itunes_art:
+                                cover_file = process_album_cover_art(
+                                    album_dir,
+                                    sample_artist,
+                                    sample_album,
+                                    musicbrainz_album_id=album_musicbrainz_id,
+                                    force=force,
+                                    dry_run=dry_run,
+                                )
+                                if cover_file:
+                                    album_cover_path = cover_file
                     except _NETWORK_EXCEPTIONS as error:
                         LOG.debug(f"Pre-fetching album metadata failed: {error}")
 
@@ -890,6 +921,7 @@ def tag_album_folder(
                             album_discogs_release=album_discogs_release,
                             album_deezer_details=album_deezer_details,
                             album_itunes_details=album_itunes_details,
+                            album_cover_path=album_cover_path,
                         ): audio_file
                         for audio_file in audio_files
                     }
@@ -937,12 +969,15 @@ def tag_album_folder(
 
                     results.extend(current_album_results)
                     current_album_results = []
+                    future_to_file.clear()
+                    gc.collect()
             except KeyboardInterrupt:
                 executor.shutdown(wait=False, cancel_futures=True)
                 results.extend(current_album_results)
                 raise
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
+                gc.collect()
 
     return results
 
@@ -1081,10 +1116,13 @@ def normalize_library(
                             dry_run=dry_run,
                             max_threads=max_threads,
                         )
+                    futures.clear()
+                    gc.collect()
             except KeyboardInterrupt:
                 executor.shutdown(wait=False, cancel_futures=True)
                 raise
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
+                gc.collect()
 
     return results

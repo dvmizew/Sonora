@@ -34,6 +34,8 @@ def _measure_track_loudness(
             if not (np.isnan(track_loudness) or np.isinf(track_loudness))
             else 0.0
         )
+        del audio_data
+        del meter
         return (audio_path, track_gain, track_peak, track_loudness, duration)
     except (ValueError, RuntimeError, OSError) as error:
         LOG.debug(f"Failed to measure loudness for {audio_path}: {error}")
@@ -102,7 +104,7 @@ def calculate_album_replaygain(
     track_results: list[tuple[Path, float, float, float, float]] = []
     max_album_peak = 0.0
 
-    executor = ThreadPoolExecutor(max_workers=max_threads)
+    executor = ThreadPoolExecutor(max_workers=min(max_threads, 4))
     try:
         futures = [
             executor.submit(_measure_track_loudness, audio_path, target_lufs)

@@ -77,7 +77,7 @@ class TestNetwork(unittest.TestCase):
         if isinstance(transport, httpx.HTTPTransport):
             pool = getattr(transport, "_pool", None)
             if pool and hasattr(pool, "_http2"):
-                self.assertFalse(pool._http2)
+                self.assertTrue(pool._http2)
 
     # --- TheAudioDB Tests ---
 

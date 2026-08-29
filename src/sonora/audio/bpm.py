@@ -12,16 +12,14 @@ def load_audio(
     file_path: Path, mono: bool = False, max_seconds: float | None = None
 ) -> tuple[np.ndarray, int] | None:
     try:
-        if max_seconds and max_seconds > 0:
-            with soundfile.SoundFile(str(file_path)) as sf:
-                sample_rate = int(sf.samplerate)
-                frames = int(sample_rate * max_seconds)
-                audio_data = sf.read(frames=frames, dtype="float32", always_2d=True)
-        else:
-            audio_data, sample_rate_val = soundfile.read(
-                str(file_path), dtype="float32", always_2d=True
+        with soundfile.SoundFile(str(file_path)) as sf:
+            sample_rate = int(sf.samplerate)
+            frames = (
+                int(sample_rate * max_seconds)
+                if (max_seconds and max_seconds > 0)
+                else -1
             )
-            sample_rate = int(sample_rate_val)
+            audio_data = sf.read(frames=frames, dtype="float32", always_2d=True)
 
         if mono:
             audio_data = (
@@ -68,7 +66,7 @@ def calculate_bpm(file_path: Path) -> float | None:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        loaded = load_audio(file_path, mono=True, max_seconds=90.0)
+        loaded = load_audio(file_path, mono=True, max_seconds=60.0)
         if loaded is None:
             return None
 
@@ -76,9 +74,16 @@ def calculate_bpm(file_path: Path) -> float | None:
         if len(audio_mono) == 0:
             return None
 
-        # STFT Spectrogram onset envelope autocorrelation via SciPy
+        # Downsample to ~22,050 Hz
+        decimation = sample_rate // 22050
+        if decimation > 1:
+            audio_mono = audio_mono[::decimation]
+            sample_rate = sample_rate // decimation
+
+        nperseg = 512 if sample_rate <= 24000 else 1024
+        noverlap = nperseg // 2
         _, _, spectrogram = scipy.signal.spectrogram(
-            audio_mono, fs=sample_rate, nperseg=1024, noverlap=512
+            audio_mono, fs=sample_rate, nperseg=nperseg, noverlap=noverlap
         )
         onset_env = np.diff(np.mean(spectrogram, axis=0))
         onset_env = np.maximum(0, onset_env)
@@ -86,10 +91,12 @@ def calculate_bpm(file_path: Path) -> float | None:
         if len(onset_env) == 0 or np.all(onset_env == 0):
             return None
 
-        autocorr = scipy.signal.correlate(onset_env, onset_env, mode="full")
+        autocorr = scipy.signal.correlate(
+            onset_env, onset_env, mode="full", method="fft"
+        )
         autocorr = autocorr[len(autocorr) // 2 :]
 
-        frame_rate = sample_rate / 512.0
+        frame_rate = sample_rate / float(nperseg - noverlap)
         min_lag = int(frame_rate * 60 / 200)  # 200 BPM
         max_lag = int(frame_rate * 60 / 60)  # 60 BPM
 
@@ -108,7 +115,12 @@ def calculate_bpm(file_path: Path) -> float | None:
         while bpm_value > 190.0:
             bpm_value /= 2.0
 
-        return round(float(bpm_value), 1)
+        bpm_result = round(float(bpm_value), 1)
+        del spectrogram
+        del onset_env
+        del autocorr
+        del audio_mono
+        return bpm_result
 
     except (OSError, ValueError, RuntimeError, IndexError, TypeError) as error:
         LOG.debug(f"BPM calculation failed for {file_path}: {error}")

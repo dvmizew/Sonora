@@ -12,7 +12,7 @@ from sonora.core.utils import is_valid_uuid, normalize_date, normalize_genre
 
 _METADATA_CACHE: dict[tuple[str, int, int], TrackInfo] = {}
 _METADATA_CACHE_LOCK = threading.RLock()
-_MAX_METADATA_CACHE_SIZE = 8192
+_MAX_METADATA_CACHE_SIZE = 1024
 
 _UUID_FIELDS = {
     "musicbrainz_trackid",

@@ -59,11 +59,12 @@ def check_image_similarity(
 
         first_hash = imagehash.phash(first_image)
         second_hash = imagehash.phash(second_image)
-
-        return (first_hash - second_hash) <= max_distance
+        first_image.close()
+        second_image.close()
+        return bool((first_hash - second_hash) <= max_distance)
     except (OSError, ValueError, UnidentifiedImageError) as error:
         LOG.debug(f"Perceptual image comparison failed: {error}")
-        return True  # Fallback to True to allow upgrade if something fails
+        return True
 
 
 def process_album_cover_art(

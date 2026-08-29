@@ -149,17 +149,20 @@ def extract_series_number(text: str | None) -> int | None:
     return None
 
 
-_DISAMBIGUATION_PATTERN = re.compile(r"\s*\((?:[A-Z]{2,4}|\d+)\)$")
+_DISAMBIGUATION_PATTERN = re.compile(r"\s*\((?:[A-Za-z]{2,4}|\d+)\)(?=\s*(?:[,;/]|$))")
+_COLLAPSE_SPACES_PATTERN = re.compile(r"\s+")
 
 
+@lru_cache(maxsize=8192)
 def clean_disambiguation(name: str | None) -> str:
     """
-    Strips disambiguation country codes or numeric suffixes
-    (e.g., 'Armin (ROU)' -> 'Armin', 'IDK (ROU)' -> 'IDK', 'Jony (10)' -> 'Jony').
+    Strips disambiguation country codes or numeric suffixes anywhere in an artist string
+    (e.g., 'Armin (ROU)' -> 'Armin', 'Rafoo, Armin (ROU), ASSAF (ROU)' -> 'Rafoo, Armin, ASSAF', 'Jony (10)' -> 'Jony').
     """
     if not name:
         return ""
-    return _DISAMBIGUATION_PATTERN.sub("", str(name)).strip()
+    cleaned = _DISAMBIGUATION_PATTERN.sub("", str(name)).strip()
+    return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned)
 
 
 @lru_cache(maxsize=1)
@@ -201,7 +204,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
     if not raw_name or not str(raw_name).strip():
         return "Unknown Artist"
 
-    clean_name = str(raw_name).strip()
+    clean_name = clean_disambiguation(str(raw_name).strip())
     normalized = normalize_str(clean_name)
     if not normalized:
         return clean_name
@@ -425,13 +428,24 @@ _DUPLICATE_FEAT_PATTERN = re.compile(
 )
 
 
+_TITLE_ROMANIAN_FEAT_PATTERN = re.compile(
+    r"\s*[\(\[\{]\s*(?:cu|și|si)\s+.*?[\)\]\}]", re.IGNORECASE
+)
+_TITLE_EDITION_PATTERN = re.compile(
+    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd).*?[\)\]\}]",
+    re.IGNORECASE,
+)
+
+
+@lru_cache(maxsize=8192)
 def deduplicate_title_features(title: str | None) -> str:
     if not title:
         return ""
     cleaned = _DUPLICATE_FEAT_PATTERN.sub("", str(title))
-    return re.sub(r"\s+", " ", cleaned).strip()
+    return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned).strip()
 
 
+@lru_cache(maxsize=8192)
 def clean_title(title: str) -> str:
     """Clean track title by removing feat./ft./with brackets, remaster suffixes, and mojibake text."""
     if not title:
@@ -439,18 +453,8 @@ def clean_title(title: str) -> str:
     fixed_title = ftfy.fix_text(str(title))
     deduped = deduplicate_title_features(fixed_title)
     cleaned = _METADATA_FILTER.filter_field("track", deduped)
-    cleaned = re.sub(
-        r"\s*[\(\[\{]\s*(?:cu|și|si)\s+.*?[\)\]\}]",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd).*?[\)\]\}]",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
+    cleaned = _TITLE_ROMANIAN_FEAT_PATTERN.sub("", cleaned)
+    cleaned = _TITLE_EDITION_PATTERN.sub("", cleaned)
     return cleaned.strip()
 
 
@@ -547,6 +551,12 @@ def match_score(
     return float(title_score)
 
 
+_NON_WORD_SPACES_PATTERN = re.compile(r"[^\w\s]")
+_DATE_ISO_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_DATE_YEAR_PATTERN = re.compile(r"(\d{4})")
+
+
+@lru_cache(maxsize=8192)
 def normalize_str(text: str | None) -> str:
     """
     Converts to lowercase, fixes mojibake via ftfy, normalizes NFD diacritics,
@@ -562,19 +572,20 @@ def normalize_str(text: str | None) -> str:
         for char in unicodedata.normalize("NFD", cleaned_text.lower())
         if unicodedata.category(char) != "Mn"
     )
-    cleaned_text = re.sub(r"[^\w\s]", " ", cleaned_text)
-    return re.sub(r"\s+", " ", cleaned_text).strip()
+    cleaned_text = _NON_WORD_SPACES_PATTERN.sub(" ", cleaned_text)
+    return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned_text).strip()
 
 
+@lru_cache(maxsize=8192)
 def normalize_date(date_value: str | None) -> str | None:
     """Ensure date is in YYYY-MM-DD format."""
     if not date_value:
         return None
     date_str = str(date_value).strip()
-    match = re.search(r"(\d{4}-\d{2}-\d{2})", date_str)
+    match = _DATE_ISO_PATTERN.search(date_str)
     if match:
         return match.group(1)
-    match = re.search(r"(\d{4})", date_str)
+    match = _DATE_YEAR_PATTERN.search(date_str)
     if match:
         return match.group(1)
     return date_str if date_str else None
@@ -620,6 +631,7 @@ _NOISE_GENRES: frozenset[str] = frozenset(
 )
 
 
+@lru_cache(maxsize=8192)
 def normalize_genre(genre_value: str | None) -> str | None:
     """Clean and standardize genre strings with noise filtering and canonical mapping."""
     if not genre_value or not str(genre_value).strip():

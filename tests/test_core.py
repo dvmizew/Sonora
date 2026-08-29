@@ -136,6 +136,10 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(clean_disambiguation("Jony (10)"), "Jony")
         self.assertEqual(clean_disambiguation("Artist (USA)"), "Artist")
         self.assertEqual(clean_disambiguation("Band (UK)"), "Band")
+        self.assertEqual(
+            clean_disambiguation("Rafoo, BITTNER, Armin (ROU), ASSAF (ROU), RAVi"),
+            "Rafoo, BITTNER, Armin, ASSAF, RAVi",
+        )
         self.assertEqual(clean_disambiguation("Normal Artist"), "Normal Artist")
         self.assertEqual(clean_disambiguation(""), "")
         self.assertEqual(clean_disambiguation(None), "")
