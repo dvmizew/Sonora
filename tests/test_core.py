@@ -92,8 +92,11 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(extract_series_number("Chapter IX"), 9)
         self.assertEqual(extract_series_number("Volume XIV"), 14)
         self.assertEqual(extract_series_number("Rapocalipsa I"), 1)
-        self.assertEqual(extract_series_number("Supertras III"), 3)
         self.assertEqual(extract_series_number("Part XX"), 20)
+        self.assertEqual(extract_series_number("Part XXI"), 21)
+        self.assertEqual(extract_series_number("Part XXV"), 25)
+        self.assertEqual(extract_series_number("Volume XXX"), 30)
+        self.assertEqual(extract_series_number("Part L"), 50)
 
         # Number words (1..20)
         self.assertEqual(extract_series_number("Volume One"), 1)

@@ -72,6 +72,18 @@ _ROMAN_MAP: dict[str, int] = {
     "xviii": 18,
     "xix": 19,
     "xx": 20,
+    "xxi": 21,
+    "xxii": 22,
+    "xxiii": 23,
+    "xxiv": 24,
+    "xxv": 25,
+    "xxvi": 26,
+    "xxvii": 27,
+    "xxviii": 28,
+    "xxix": 29,
+    "xxx": 30,
+    "xl": 40,
+    "l": 50,
 }
 
 _WORD_NUMBER_MAP: dict[str, int] = {
