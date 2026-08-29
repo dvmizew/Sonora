@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import acoustid
+import ftfy
 import httpx
 from musicbrainzngs import MusicBrainzError
 
@@ -22,6 +23,9 @@ from sonora.core.logger import (
 from sonora.core.models import TrackInfo
 from sonora.core.state import get_library_state
 from sonora.core.utils import (
+    clean_disambiguation,
+    clean_title,
+    deduplicate_title_features,
     find_audio_files,
     group_files_by_parent,
     is_valid_uuid,
@@ -936,6 +940,149 @@ def tag_album_folder(
             except KeyboardInterrupt:
                 executor.shutdown(wait=False, cancel_futures=True)
                 results.extend(current_album_results)
+                raise
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+    return results
+
+
+LAST_NORMALIZED_COUNT: int = 0
+
+
+def get_last_normalized_count() -> int:
+    return LAST_NORMALIZED_COUNT
+
+
+def normalize_single_track(
+    file_path: Path,
+    fetch_bpm: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+) -> TrackInfo | None:
+    """
+    Locally cleans and normalizes metadata for a single audio file without any API requests.
+    - Repairs mojibake/UTF-8 encoding via ftfy
+    - Strips bracket junk: (Official Video), [FLAC], [320kbps], (2011 Remaster), [Explicit]
+    - Cleans disambiguation suffixes: 'Armin (ROU)' -> 'Armin'
+    - Canonicalizes genres via normalize_genre
+    - Standardizes dates via normalize_date
+    - Optionally calculates audio BPM locally
+    """
+    if not file_path.exists():
+        return None
+
+    try:
+        current_info = read_track_metadata(file_path)
+    except (OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"Failed to read metadata for {file_path}: {error}")
+        return None
+
+    cleaned_artist = clean_disambiguation(ftfy.fix_text(current_info.artist or ""))
+    cleaned_title_raw = clean_title(ftfy.fix_text(current_info.title or ""))
+    cleaned_title = deduplicate_title_features(cleaned_title_raw)
+    cleaned_album = ftfy.fix_text(current_info.album or "")
+    if current_info.album_artist:
+        cleaned_album_artist = clean_disambiguation(
+            ftfy.fix_text(current_info.album_artist)
+        )
+    else:
+        cleaned_album_artist = None
+
+    cleaned_genre = normalize_genre(current_info.genre)
+    cleaned_date = normalize_date(current_info.date)
+
+    updated_bpm = current_info.bpm
+    if fetch_bpm and (force or current_info.bpm is None):
+        try:
+            calculated = calculate_bpm(file_path)
+            if calculated is not None:
+                updated_bpm = calculated
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"BPM calculation failed for {file_path}: {error}")
+
+    updated_info = dataclasses.replace(
+        current_info,
+        artist=cleaned_artist or current_info.artist,
+        title=cleaned_title or current_info.title,
+        album=cleaned_album or current_info.album,
+        album_artist=cleaned_album_artist,
+        genre=cleaned_genre or current_info.genre,
+        date=cleaned_date or current_info.date,
+        bpm=updated_bpm,
+    )
+
+    if not dry_run:
+        try:
+            write_track_metadata(updated_info)
+            get_library_state().record_track_state(file_path, "TAGGED_OK")
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.warning(f"Failed to save normalized tags for {file_path.name}: {error}")
+            return None
+
+    return updated_info
+
+
+def normalize_library(
+    directory: Path,
+    fetch_bpm: bool = False,
+    fetch_replaygain: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+    max_threads: int = 4,
+) -> list[TrackInfo]:
+    global LAST_NORMALIZED_COUNT
+    LAST_NORMALIZED_COUNT = 0
+
+    if not directory.exists() or not directory.is_dir():
+        raise ValueError(f"Directory not found: {directory}")
+
+    LOG.info(f"Scanning for audio files in {directory}...")
+    audio_files = find_audio_files(directory, recursive=True)
+    if not audio_files:
+        LOG.warning("No audio files found to normalize.")
+        return []
+
+    album_groups = group_files_by_parent(audio_files)
+    results: list[TrackInfo] = []
+
+    with create_progress() as progress:
+        task = progress.add_task(
+            "[cyan]Normalizing tracks (offline)...", total=len(audio_files)
+        )
+        with interactive_pause_listener(progress, task):
+            executor = ThreadPoolExecutor(max_workers=max_threads)
+            try:
+                for files in album_groups.values():
+                    wait_if_paused()
+                    futures = {
+                        executor.submit(
+                            normalize_single_track,
+                            file_path=f,
+                            fetch_bpm=fetch_bpm,
+                            force=force,
+                            dry_run=dry_run,
+                        ): f
+                        for f in files
+                    }
+                    for future in as_completed(futures):
+                        wait_if_paused()
+                        res = future.result()
+                        if res is not None:
+                            results.append(res)
+                            LAST_NORMALIZED_COUNT += 1
+                        progress.advance(task)
+
+                    if fetch_replaygain:
+                        wait_if_paused()
+                        calculate_album_replaygain(
+                            files,
+                            force=force,
+                            dry_run=dry_run,
+                            max_threads=max_threads,
+                        )
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
                 raise
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)

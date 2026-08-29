@@ -33,6 +33,8 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
+    normalize_library,
+    normalize_single_track,
     process_single_track,
     tag_album_folder,
 )
@@ -360,6 +362,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue(f2_track1.exists())
         self.assertTrue(f2_track2.exists())
         self.assertTrue(f2_track3.exists())
+        self.assertTrue(mock_primary.called)
 
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library(self, mock_read):
@@ -916,6 +919,43 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue(is_valid_uuid(f"{uuid1} / {uuid2}", allow_multivalue=True))
         self.assertTrue(is_valid_uuid(f"{uuid1}, {uuid2}", allow_multivalue=True))
         self.assertFalse(is_valid_uuid(f"{uuid1}; invalid", allow_multivalue=True))
+
+    def test_normalize_single_track_and_library(self):
+        audio_file = self.tmp_path / "song.wav"
+        create_dummy_wav(audio_file)
+
+        with (
+            patch("sonora.modules.tagger.read_track_metadata") as mock_read,
+            patch("sonora.modules.tagger.write_track_metadata") as mock_write,
+        ):
+            mock_read.return_value = TrackInfo(
+                file_path=audio_file,
+                artist="Armin (ROU)",
+                title="Melodie [Official Video] (feat. Nane)",
+                album="Album [Deluxe Edition]",
+                genre="hip hop",
+                date="2022-05-10",
+                bpm=None,
+            )
+
+            result = normalize_single_track(audio_file, fetch_bpm=False, dry_run=False)
+            self.assertIsNotNone(result)
+            self.assertEqual(result.artist, "Armin")
+            self.assertEqual(result.title, "Melodie")
+            self.assertEqual(result.genre, "Hip-Hop/Rap")
+            mock_write.assert_called_once()
+
+            # Test normalize_library
+            mock_read.return_value = TrackInfo(
+                file_path=audio_file,
+                artist="Artist (USA)",
+                title="Clean Song",
+            )
+            library_results = normalize_library(
+                self.tmp_path, fetch_bpm=False, fetch_replaygain=False
+            )
+            self.assertEqual(len(library_results), 1)
+            self.assertEqual(library_results[0].artist, "Artist")
 
 
 if __name__ == "__main__":

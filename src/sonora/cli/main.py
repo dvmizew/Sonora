@@ -1,10 +1,12 @@
 import contextlib
+import dataclasses
 import datetime
 import os
 import signal
 import socket
 import sys
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Annotated
 
@@ -13,9 +15,18 @@ from cyclopts import App, Parameter
 from dotenv import load_dotenv
 
 from sonora import __version__
+from sonora.audio.bpm import calculate_bpm
+from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.cache import set_ignore_cache
-from sonora.core.logger import LOG
+from sonora.core.logger import (
+    LOG,
+    create_progress,
+    interactive_pause_listener,
+    wait_if_paused,
+)
 from sonora.core.models import CheckReport, TrackInfo
+from sonora.core.utils import find_audio_files, group_files_by_parent
 from sonora.modules.backup import (
     backup_library_tags,
     get_last_restored_count,
@@ -32,11 +43,13 @@ from sonora.modules.organizer import (
 )
 from sonora.modules.renamer import get_last_rename_report, rename_directory_files
 from sonora.modules.tagger import (
+    get_last_normalized_count,
     get_last_tagged_tracks,
     get_last_tagging_failures,
+    normalize_library,
     tag_album_folder,
 )
-from sonora.services.lyrics import init_musixmatch_token
+from sonora.services.lyrics import init_musixmatch_token, process_track_lyrics
 from sonora.services.musicbrainz import init_musicbrainz
 
 load_dotenv()
@@ -819,6 +832,379 @@ def restore(
         )
         LOG.info(f"Saved restoration JSON report to [bold]{json_report}[/bold]")
 
+    if interrupted:
+        return 130
+    return 0
+
+
+@app.command
+def normalize(
+    path: Annotated[
+        Path,
+        Parameter(help="Directory containing audio files to normalize"),
+    ],
+    fetch_bpm: Annotated[
+        bool,
+        Parameter(
+            name=["--bpm"],
+            help="Calculate audio tempo (BPM) locally",
+        ),
+    ] = True,
+    fetch_replaygain: Annotated[
+        bool,
+        Parameter(
+            name=["--replaygain"],
+            help="Calculate ReplayGain loudness normalization locally",
+        ),
+    ] = True,
+    force: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Force re-normalization and recalculation of all files",
+        ),
+    ] = False,
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
+        ),
+    ] = 4,
+    dry_run: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Simulate actions without modifying files on disk",
+        ),
+    ] = False,
+) -> int:
+    """
+    Locally clean tags, remove bracket noise, and calculate BPM/ReplayGain (100% offline).
+    """
+    LOG.info(f"Normalizing audio tags in [bold]{path}[/bold] (offline mode)...")
+    interrupted = False
+    try:
+        results = normalize_library(
+            path,
+            fetch_bpm=fetch_bpm,
+            fetch_replaygain=fetch_replaygain,
+            force=force,
+            dry_run=dry_run,
+            max_threads=threads,
+        )
+        count = len(results)
+    except KeyboardInterrupt:
+        interrupted = True
+        count = get_last_normalized_count()
+        LOG.warning(
+            "\n⏹️  [bold yellow]INTERRUPTED[/] - Normalization stopped by user (Ctrl+C)."
+        )
+
+    if not interrupted:
+        LOG.success(f"Normalization completed for {count} files.")
+    else:
+        LOG.warning(f"Partially normalized {count} files before interruption.")
+
+    summary_rows = [
+        ("Target Directory", str(path.resolve()), None),
+        ("Tracks Normalized", str(count), "green" if count else "white"),
+        ("BPM Included", "Yes" if fetch_bpm else "No", None),
+        ("ReplayGain Included", "Yes" if fetch_replaygain else "No", None),
+    ]
+    LOG.summary_table("Normalization Summary", summary_rows)
+    if interrupted:
+        return 130
+    return 0
+
+
+@app.command
+def bpm(
+    path: Annotated[
+        Path,
+        Parameter(help="Directory containing audio files to calculate BPM for"),
+    ],
+    force: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Force recalculation even if BPM tag exists",
+        ),
+    ] = False,
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
+        ),
+    ] = 4,
+    dry_run: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Simulate actions without modifying files on disk",
+        ),
+    ] = False,
+) -> int:
+    """
+    Calculate and embed audio tempo (BPM) tags locally.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+
+    audio_files = find_audio_files(path, recursive=True)
+    if not audio_files:
+        LOG.warning("No audio files found.")
+        return 0
+
+    LOG.info(f"Calculating BPM for {len(audio_files)} files in [bold]{path}[/bold]...")
+    computed = 0
+    skipped = 0
+    interrupted = False
+
+    def _process_bpm(audio_path: Path) -> tuple[Path, float | None, bool]:
+        wait_if_paused()
+        try:
+            info = read_track_metadata(audio_path)
+            if not force and info.bpm is not None:
+                return audio_path, info.bpm, False
+            val = calculate_bpm(audio_path)
+            if val is not None and not dry_run:
+                updated = dataclasses.replace(info, bpm=val)
+                write_track_metadata(updated)
+            return audio_path, val, True
+        except (OSError, ValueError, RuntimeError) as err:
+            LOG.debug(f"BPM error for {audio_path}: {err}")
+            return audio_path, None, False
+
+    with create_progress() as progress:
+        task = progress.add_task("[cyan]Calculating BPM...", total=len(audio_files))
+        with interactive_pause_listener(progress, task):
+            executor = ThreadPoolExecutor(max_workers=threads)
+            try:
+                futures = [executor.submit(_process_bpm, f) for f in audio_files]
+                for future in as_completed(futures):
+                    wait_if_paused()
+                    _, bpm_val, modified = future.result()
+                    if modified and bpm_val is not None:
+                        computed += 1
+                    else:
+                        skipped += 1
+                    progress.advance(task)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                interrupted = True
+                LOG.warning(
+                    "\n⏹️  [bold yellow]INTERRUPTED[/] - BPM calculation stopped by user (Ctrl+C)."
+                )
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+    summary_rows = [
+        ("Total Files Scanned", str(len(audio_files)), None),
+        ("BPM Calculated & Tagged", str(computed), "green" if computed else "white"),
+        ("Already Tagged / Skipped", str(skipped), None),
+    ]
+    LOG.summary_table("BPM Summary", summary_rows)
+    if interrupted:
+        return 130
+    return 0
+
+
+@app.command
+def replaygain(
+    path: Annotated[
+        Path,
+        Parameter(help="Directory containing audio files to calculate ReplayGain for"),
+    ],
+    force: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Force recalculation even if ReplayGain tags exist",
+        ),
+    ] = False,
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
+        ),
+    ] = 4,
+    dry_run: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Simulate actions without modifying files on disk",
+        ),
+    ] = False,
+) -> int:
+    """
+    Calculate and embed ReplayGain loudness normalization tags (Track & Album mode).
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+
+    audio_files = find_audio_files(path, recursive=True)
+    if not audio_files:
+        LOG.warning("No audio files found.")
+        return 0
+
+    album_groups = group_files_by_parent(audio_files)
+    LOG.info(
+        f"Calculating ReplayGain for {len(audio_files)} files across {len(album_groups)} folders..."
+    )
+    albums_processed = 0
+    interrupted = False
+
+    with create_progress() as progress:
+        task = progress.add_task(
+            "[cyan]Calculating ReplayGain...", total=len(album_groups)
+        )
+        with interactive_pause_listener(progress, task):
+            try:
+                for files in album_groups.values():
+                    wait_if_paused()
+                    success = calculate_album_replaygain(
+                        files,
+                        force=force,
+                        dry_run=dry_run,
+                        max_threads=threads,
+                    )
+                    if success:
+                        albums_processed += 1
+                    progress.advance(task)
+            except KeyboardInterrupt:
+                interrupted = True
+                LOG.warning(
+                    "\n⏹️  [bold yellow]INTERRUPTED[/] - ReplayGain stopped by user (Ctrl+C)."
+                )
+
+    summary_rows = [
+        ("Total Folders Scanned", str(len(album_groups)), None),
+        ("Total Files Scanned", str(len(audio_files)), None),
+        (
+            "Albums Tagged with ReplayGain",
+            str(albums_processed),
+            "green" if albums_processed else "white",
+        ),
+    ]
+    LOG.summary_table("ReplayGain Summary", summary_rows)
+    if interrupted:
+        return 130
+    return 0
+
+
+@app.command
+def lyrics(
+    path: Annotated[
+        Path,
+        Parameter(help="Directory containing audio files to fetch lyrics for"),
+    ],
+    force: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Force re-fetching even if lyrics exist",
+        ),
+    ] = False,
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
+        ),
+    ] = 4,
+    dry_run: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Simulate actions without modifying files on disk",
+        ),
+    ] = False,
+) -> int:
+    """
+    Fetch and save synchronized lyrics (.lrc) files and embedded lyrics.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+
+    init_musixmatch_token()
+    audio_files = find_audio_files(path, recursive=True)
+    if not audio_files:
+        LOG.warning("No audio files found.")
+        return 0
+
+    LOG.info(
+        f"Fetching synchronized lyrics for {len(audio_files)} files in [bold]{path}[/bold]..."
+    )
+    saved_count = 0
+    skipped_count = 0
+    missing_count = 0
+    interrupted = False
+
+    def _process_lyrics(audio_path: Path) -> tuple[Path, str | None, str | None]:
+        wait_if_paused()
+        try:
+            info = read_track_metadata(audio_path)
+            lrc_path = audio_path.with_suffix(".lrc")
+            if not force and lrc_path.exists() and lrc_path.stat().st_size > 0:
+                return audio_path, "existing", "existing"
+            lyrics_text, tag_type = process_track_lyrics(
+                audio_path,
+                info.artist,
+                info.title,
+                force=force,
+                dry_run=dry_run,
+                isrc=info.isrc,
+            )
+            if lyrics_text and not dry_run:
+                try:
+                    updated = dataclasses.replace(info, lyrics=lyrics_text)
+                    write_track_metadata(updated)
+                except (OSError, ValueError, RuntimeError):
+                    pass
+            return audio_path, lyrics_text, tag_type
+        except (OSError, ValueError, RuntimeError) as err:
+            LOG.debug(f"Lyrics error for {audio_path}: {err}")
+            return audio_path, None, None
+
+    with create_progress() as progress:
+        task = progress.add_task("[cyan]Fetching lyrics...", total=len(audio_files))
+        with interactive_pause_listener(progress, task):
+            executor = ThreadPoolExecutor(max_workers=threads)
+            try:
+                futures = [executor.submit(_process_lyrics, f) for f in audio_files]
+                for future in as_completed(futures):
+                    wait_if_paused()
+                    _, lyr_content, lyr_type = future.result()
+                    if lyr_type == "existing":
+                        skipped_count += 1
+                    elif lyr_content:
+                        saved_count += 1
+                    else:
+                        missing_count += 1
+                    progress.advance(task)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                interrupted = True
+                LOG.warning(
+                    "\n⏹️  [bold yellow]INTERRUPTED[/] - Lyrics fetch stopped by user (Ctrl+C)."
+                )
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+    summary_rows = [
+        ("Total Files Scanned", str(len(audio_files)), None),
+        (
+            "Lyrics Saved / Updated",
+            str(saved_count),
+            "green" if saved_count else "white",
+        ),
+        ("Already Had Lyrics", str(skipped_count), None),
+        ("Lyrics Unavailable", str(missing_count), "yellow" if missing_count else None),
+    ]
+    LOG.summary_table("Lyrics Summary", summary_rows)
     if interrupted:
         return 130
     return 0
