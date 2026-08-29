@@ -149,7 +149,10 @@ def extract_series_number(text: str | None) -> int | None:
     return None
 
 
-_DISAMBIGUATION_PATTERN = re.compile(r"\s*\((?:[A-Za-z]{2,4}|\d+)\)(?=\s*(?:[,;/]|$))")
+_DISAMBIGUATION_PATTERN = re.compile(
+    r"\s*\((?:[A-Za-z]{2,4}|\d+)\)(?=\s*(?:[,;/&+-\\]|\b(?:feat\.?|ft\.?|featuring|with|and|vs\.?|cu|și|si)\b|$))",
+    re.IGNORECASE,
+)
 _COLLAPSE_SPACES_PATTERN = re.compile(r"\s+")
 
 
