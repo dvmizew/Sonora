@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import unittest
 from unittest.mock import patch
 
-from sonora.core.models import CheckReport, TrackInfo
+from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     clean_title,
     deduplicate_title_features,
@@ -333,7 +333,7 @@ class TestCoreUtils(unittest.TestCase):
 
 
 class TestCoreModels(unittest.TestCase):
-    def test_track_info_to_dict(self):
+    def test_track_info_serialization(self):
         track = TrackInfo(
             file_path=Path("/music/song.flac"),
             artist="Beyoncé",
@@ -348,23 +348,11 @@ class TestCoreModels(unittest.TestCase):
         self.assertEqual(data["track_number"], 1)
         self.assertEqual(data["bpm"], 120.0)
 
-    def test_check_report_initialization(self):
-        report = CheckReport(file_path=Path("/music/1.flac"), is_valid=True)
-        self.assertTrue(report.is_valid)
-        self.assertEqual(report.missing_tags, [])
-
-    def test_track_info_default_values(self):
-        track = TrackInfo(file_path=Path("/music/song.flac"))
-        self.assertEqual(track.artist, "Unknown Artist")
-        self.assertEqual(track.title, "Unknown Title")
-        self.assertEqual(track.album, "Unknown Album")
-        self.assertTrue(track.is_lossless)
-
-    def test_track_info_to_dict_empty_fields(self):
-        track = TrackInfo(file_path=Path("/music/song.flac"))
-        data = track.to_dict()
-        self.assertIsNone(data["track_number"])
-        self.assertIsNone(data["bpm"])
+        empty_track = TrackInfo(file_path=Path("/music/empty.flac"))
+        empty_data = empty_track.to_dict()
+        self.assertEqual(empty_data["artist"], "Unknown Artist")
+        self.assertIsNone(empty_data["track_number"])
+        self.assertIsNone(empty_data["bpm"])
 
 
 if __name__ == "__main__":

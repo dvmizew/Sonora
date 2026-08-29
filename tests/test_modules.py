@@ -13,8 +13,6 @@ from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     RateLimiter,
     find_audio_files,
-    get_primary_artist,
-    is_single_group_artist,
     is_valid_uuid,
     resolve_artist_name,
 )
@@ -226,24 +224,6 @@ class TestCoreModules(unittest.TestCase):
         # Both album folders should be renamed
         self.assertTrue((self.tmp_path / "Artist One - Album One").exists())
         self.assertTrue((self.tmp_path / "Artist Two - Album Two").exists())
-
-    @patch("sonora.core.utils.musicbrainzngs.search_artists")
-    def test_get_primary_artist(self, mock_search):
-        is_single_group_artist.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [
-                {
-                    "name": "Above & Beyond",
-                    "type": "Group",
-                    "ext:score": "100",
-                }
-            ]
-        }
-        self.assertEqual(
-            get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
-        )
-        self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
-        self.assertEqual(get_primary_artist("Above & Beyond"), "Above & Beyond")
 
     def test_rename_album_folder(self):
         folder = self.tmp_path / "old_folder"

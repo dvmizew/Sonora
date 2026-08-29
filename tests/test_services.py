@@ -76,20 +76,18 @@ class TestServicesEngine(unittest.TestCase):
         )
 
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_basic(self, mock_syncedlyrics):
+    def test_fetch_synced_lyrics(self, mock_syncedlyrics):
+        # 1. Basic search
         mock_syncedlyrics.search.return_value = "[00:12.34] Test lyric line"
-
         lyrics = fetch_synced_lyrics("Artist", "Title")
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
-        mock_syncedlyrics.search.assert_called_once_with(
+        mock_syncedlyrics.search.assert_called_with(
             "artist - title", plain_only=False, synced_only=False, enhanced=False
         )
 
-    @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics_with_options(self, mock_syncedlyrics):
+        # 2. Options search
         mock_syncedlyrics.search.return_value = "<00:12.34> Enhanced lyric line"
-
-        lyrics = fetch_synced_lyrics(
+        lyrics_enhanced = fetch_synced_lyrics(
             "Artist",
             "Title",
             synced_only=True,
@@ -97,8 +95,8 @@ class TestServicesEngine(unittest.TestCase):
             providers=["Lrclib"],
             lang="en",
         )
-        self.assertEqual(lyrics, "<00:12.34> Enhanced lyric line")
-        mock_syncedlyrics.search.assert_called_once_with(
+        self.assertEqual(lyrics_enhanced, "<00:12.34> Enhanced lyric line")
+        mock_syncedlyrics.search.assert_called_with(
             "artist - title",
             plain_only=False,
             synced_only=True,
@@ -353,18 +351,12 @@ class TestServicesEngine(unittest.TestCase):
             "https://genius.com/some-url\n"
             "14Embed"
         )
-        cleaned = clean_lyrics_text(dirty)
         self.assertEqual(
-            cleaned, "[00:12.34] Valid lyric line\n[00:15.00] Second valid line"
+            clean_lyrics_text(dirty),
+            "[00:12.34] Valid lyric line\n[00:15.00] Second valid line",
         )
-
-    def test_clean_lyrics_none(self):
         self.assertIsNone(clean_lyrics_text(None))
-
-    def test_clean_lyrics_empty(self):
         self.assertEqual(clean_lyrics_text(""), "")
-
-    def test_clean_lyrics_only_junk(self):
         self.assertEqual(
             clean_lyrics_text("12 Contributors\nYou might also like\n14Embed"), ""
         )

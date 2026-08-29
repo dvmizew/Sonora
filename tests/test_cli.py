@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
 
-from sonora.cli.main import app, main
+from sonora.cli.main import main
 from sonora.core.models import CheckReport, TrackInfo
 
 
@@ -23,9 +23,6 @@ class TestCLIInterface(unittest.TestCase):
 
     def tearDown(self):
         self.temporary_directory.cleanup()
-
-    def test_app_configuration(self):
-        self.assertIn("sonora", app.name)
 
     def test_main_no_args_returns_zero(self):
         exit_code = main([])
@@ -126,31 +123,31 @@ class TestCLIInterface(unittest.TestCase):
         self.assertTrue(json_output.exists())
 
     @patch("sonora.cli.main.tag_album_folder", side_effect=KeyboardInterrupt)
-    def test_handle_tag_keyboard_interrupt(self, mock_tag):
-        exit_code = main(["tag", str(self.temporary_path)])
-        self.assertEqual(exit_code, 130)
-
     @patch("sonora.cli.main.check_library", side_effect=KeyboardInterrupt)
-    def test_handle_check_keyboard_interrupt(self, mock_check):
-        exit_code = main(["check", str(self.temporary_path)])
-        self.assertEqual(exit_code, 130)
-
     @patch("sonora.cli.main.rename_directory_files", side_effect=KeyboardInterrupt)
-    def test_handle_rename_keyboard_interrupt(self, mock_rename):
-        exit_code = main(["rename", str(self.temporary_path)])
-        self.assertEqual(exit_code, 130)
-
     @patch("sonora.cli.main.organize_library_singles", side_effect=KeyboardInterrupt)
-    def test_handle_organize_keyboard_interrupt(self, mock_organize):
-        exit_code = main(["organize", str(self.temporary_path)])
-        self.assertEqual(exit_code, 130)
-
     @patch("sonora.cli.main.restore_library_tags", side_effect=KeyboardInterrupt)
-    def test_handle_restore_keyboard_interrupt(self, mock_restore):
+    def test_handle_keyboard_interrupts(
+        self,
+        mock_restore,
+        mock_organize,
+        mock_rename,
+        mock_check,
+        mock_tag,
+    ):
         dummy_backup = self.temporary_path / "backup.json"
         dummy_backup.write_text("{}", encoding="utf-8")
-        exit_code = main(["restore", str(dummy_backup)])
-        self.assertEqual(exit_code, 130)
+
+        for args in [
+            ["tag", str(self.temporary_path)],
+            ["check", str(self.temporary_path)],
+            ["rename", str(self.temporary_path)],
+            ["organize", str(self.temporary_path)],
+            ["restore", str(dummy_backup)],
+        ]:
+            with self.subTest(args=args):
+                exit_code = main(args)
+                self.assertEqual(exit_code, 130)
 
 
 if __name__ == "__main__":

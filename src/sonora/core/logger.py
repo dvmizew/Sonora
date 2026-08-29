@@ -161,7 +161,7 @@ def interactive_pause_listener(
             progress.refresh()
 
     def _default_resume() -> None:
-        nonlocal pause_start_time, original_description
+        nonlocal pause_start_time
         if progress is not None and task_id is not None:
             if pause_start_time is not None:
                 pause_duration = progress.get_time() - pause_start_time
