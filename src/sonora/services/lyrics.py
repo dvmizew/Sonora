@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -7,11 +8,13 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+import ftfy
 import httpx
 import syncedlyrics
 
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.constants import RATE_LIMIT_LYRICS
+from sonora.core.constants import RATE_LIMIT_LRCLIB, RATE_LIMIT_LYRICS
+from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import (
     RateLimiter,
@@ -24,6 +27,7 @@ logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
 for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
     logging.getLogger(_provider).setLevel(logging.CRITICAL)
 
+_LRCLIB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LRCLIB)
 _LYRICS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LYRICS)
 
 
@@ -79,33 +83,49 @@ def init_musixmatch_token(token_str: str | None = None) -> bool:
     return False
 
 
+_LYRICS_TIMESTAMP_REGEX = re.compile(
+    r"^(?:\[\d{1,2}:\d{2}[\.:]\d{2,3}\]|<\d{1,2}:\d{2}[\.:]\d{2,3}>)\s*(.*)$"
+)
+_LYRICS_JUNK_PATTERNS = [
+    re.compile(r"^\d+\s*(?:Contributor|Translation|Embed)s?$", re.IGNORECASE),
+    re.compile(r"^You might also like$", re.IGNORECASE),
+    re.compile(r"^Read More$", re.IGNORECASE),
+    re.compile(r"^See .* Live(?:Get tickets.*)?$", re.IGNORECASE),
+    re.compile(
+        r"^\[?(?:Produced|Written|Arranged|Composed|Mastered|Mixed|Recorded|Engineered)\b.*\]?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\[?(?:Producer|Writer|Composer|Arranger|Engineer|Mixer|Release Date|Recording Date|Studio|Label)s?\s*:.*\]?$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^Lyrics (?:powered|licensed|provided) by.*$", re.IGNORECASE),
+    re.compile(r"^Paroles de la chanson .* par .*$", re.IGNORECASE),
+    re.compile(r"^Commercial use is strictly forbidden.*$", re.IGNORECASE),
+    re.compile(r"^https?://\S+$", re.IGNORECASE),
+    re.compile(r"^www\.\S+$", re.IGNORECASE),
+    re.compile(
+        r"^(?:Synced|Created|Uploaded|Encoded|Downloaded|LRC)\s*(?:by|from|using|with)?\s+.*$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"<!--.*?-->", re.IGNORECASE),
+]
+_LYRICS_EMBED_END_REGEX = re.compile(r"\d*\s*Embed\s*$", re.IGNORECASE)
+
+
 def clean_lyrics_text(text: str | None) -> str | None:
     """
-    Strips web scraping artifacts (Genius, Musixmatch, AZLyrics, Lrclib junk)
-    while preserving timestamped LRC lines ([mm:ss.xx] and <mm:ss.xx>).
+    Strips web scraping artifacts (Genius, Musixmatch, AZLyrics, LRCLIB, Megalobiz junk)
+    and unescapes HTML entities while preserving timestamped LRC lines ([mm:ss.xx] and <mm:ss.xx>).
     """
     if text is None:
         return None
     if not text.strip():
         return ""
 
-    lines = text.splitlines()
+    decoded = html.unescape(ftfy.fix_text(str(text)))
+    lines = decoded.splitlines()
     cleaned: list[str] = []
-
-    junk_patterns = [
-        r"^\d+\s*(?:Contributor|Translation|Embed)s?$",
-        r"^You might also like$",
-        r"^Read More$",
-        r"^See .* Live(?:Get tickets.*)?$",
-        r"^\[?(?:Produced|Written|Arranged|Composed|Mastered|Mixed|Recorded|Engineered)\b.*\]?$",
-        r"^\[?(?:Producer|Writer|Composer|Arranger|Engineer|Mixer|Release Date|Recording Date|Studio|Label)s?\s*:.*\]?$",
-        r"^https?://\S+$",
-        r"^www\.\S+$",
-        r"^Synced by \S+$",
-    ]
-
-    def is_timestamped(line_str: str) -> bool:
-        return bool(re.match(r"^(?:\[|<\d{1,2}:\d{2})", line_str))
 
     for line in lines:
         stripped_line = line.strip()
@@ -114,24 +134,21 @@ def clean_lyrics_text(text: str | None) -> str | None:
                 cleaned.append("")
             continue
 
-        if is_timestamped(stripped_line):
-            cleaned.append(line)
+        ts_match = _LYRICS_TIMESTAMP_REGEX.match(stripped_line)
+        content_to_check = ts_match.group(1).strip() if ts_match else stripped_line
+
+        if any(pat.search(content_to_check) for pat in _LYRICS_JUNK_PATTERNS):
             continue
 
-        if any(re.search(pat, stripped_line, re.IGNORECASE) for pat in junk_patterns):
-            continue
-
-        cleaned.append(line)
+        cleaned.append(stripped_line)
 
     while cleaned and (
-        re.search(r"\bEmbed\b\s*$", cleaned[-1], re.IGNORECASE) or cleaned[-1] == ""
+        _LYRICS_EMBED_END_REGEX.search(cleaned[-1]) or cleaned[-1] == ""
     ):
         if cleaned[-1] == "":
             cleaned.pop()
             continue
-        cleaned[-1] = re.sub(
-            r"\d*\s*Embed\s*$", "", cleaned[-1], flags=re.IGNORECASE
-        ).strip()
+        cleaned[-1] = _LYRICS_EMBED_END_REGEX.sub("", cleaned[-1]).strip()
         if not cleaned[-1]:
             cleaned.pop()
 
@@ -170,6 +187,71 @@ def detect_lrc_quality(audio_path: Path) -> int:
         return 0
 
 
+def _query_lrclib(
+    query_str: str,
+    plain_only: bool = False,
+    synced_only: bool = False,
+) -> str | None:
+    try:
+        _LRCLIB_LIMITER.wait()
+        if " - " in query_str:
+            parts = query_str.split(" - ", 1)
+            url = "https://lrclib.net/api/get"
+            params = {
+                "artist_name": parts[0].strip(),
+                "track_name": parts[1].strip(),
+            }
+            response = SESSION.get(url, params=params, timeout=5.0)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict):
+                    synced = data.get("syncedLyrics")
+                    plain = data.get("plainLyrics")
+                    if (
+                        synced
+                        and not plain_only
+                        and isinstance(synced, str)
+                        and synced.strip()
+                    ):
+                        return clean_lyrics_text(synced.strip())
+                    if (
+                        plain
+                        and not synced_only
+                        and isinstance(plain, str)
+                        and plain.strip()
+                    ):
+                        return clean_lyrics_text(plain.strip())
+            return None
+
+        # Fallback to /api/search for non-standard or single-token queries
+        search_url = "https://lrclib.net/api/search"
+        response = SESSION.get(search_url, params={"q": query_str}, timeout=5.0)
+        if response.status_code == 200:
+            results = response.json()
+            if isinstance(results, list) and results:
+                first = results[0]
+                if isinstance(first, dict):
+                    synced = first.get("syncedLyrics")
+                    plain = first.get("plainLyrics")
+                    if (
+                        synced
+                        and not plain_only
+                        and isinstance(synced, str)
+                        and synced.strip()
+                    ):
+                        return clean_lyrics_text(synced.strip())
+                    if (
+                        plain
+                        and not synced_only
+                        and isinstance(plain, str)
+                        and plain.strip()
+                    ):
+                        return clean_lyrics_text(plain.strip())
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError):
+        pass
+    return None
+
+
 def _query_syncedlyrics(
     query_str: str,
     plain_only: bool,
@@ -178,15 +260,26 @@ def _query_syncedlyrics(
     providers: list[str] | None,
     lang: str | None,
 ) -> str | None:
+    # 1. High-speed direct HTTP/2 LRCLIB fast-path when not restricted to other providers
+    if not enhanced and (not providers or "Lrclib" in providers) and not lang:
+        lrclib_result = _query_lrclib(
+            query_str, plain_only=plain_only, synced_only=synced_only
+        )
+        if lrclib_result:
+            return lrclib_result
+
+    # 2. Multi-provider fallback via syncedlyrics
     kwargs: dict[str, Any] = {
         "plain_only": plain_only,
         "synced_only": synced_only,
         "enhanced": enhanced,
     }
-    if providers:
+    if providers is not None:
         kwargs["providers"] = providers
     if lang:
         kwargs["lang"] = lang
+
+    _LYRICS_LIMITER.wait()
     result = syncedlyrics.search(query_str, **kwargs)
     if isinstance(result, str) and result.strip():
         return clean_lyrics_text(result.strip())
@@ -215,8 +308,6 @@ def fetch_synced_lyrics(
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
         return cached
-
-    _LYRICS_LIMITER.wait()
 
     search_args = (plain_only, synced_only, enhanced, providers, lang)
 

@@ -47,6 +47,7 @@ RATE_LIMIT_DISCOGS_UNAUTHENTICATED: float = (
 )
 RATE_LIMIT_THEAUDIODB: float = 1.0  # TheAudioDB API
 RATE_LIMIT_LYRICS: float = 1.0  # SyncedLyrics upstream provider pool
+RATE_LIMIT_LRCLIB: float = 0.25  # LRCLIB REST API policy (~4 req/s max)
 RATE_LIMIT_ITUNES: float = 3.0  # Apple iTunes Search API (approx 20 req/min)
 RATE_LIMIT_GENIUS: float = 0.5  # Genius API
 RATE_LIMIT_ACOUSTID: float = 0.4  # AcoustID API (max 3 req/s)
