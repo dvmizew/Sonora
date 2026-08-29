@@ -101,3 +101,14 @@ class CheckReport:
     errors: list[str] = field(default_factory=list)
     is_fake_lossless: bool = False
     md5_verified: bool = False
+
+
+@dataclass
+class RenameReport:
+    """Represents the results of a file and directory renaming run."""
+
+    total_files: int = 0
+    files_renamed: int = 0
+    folders_renamed: int = 0
+    lrc_synced: int = 0
+    unchanged_files: int = 0

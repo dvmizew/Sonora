@@ -15,14 +15,17 @@ from mutagen.flac import FLAC, FLACNoHeaderError
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
 from sonora.audio.spectral import detect_fake_lossless
-from sonora.core.constants import (
-    FEAT_KEYWORDS,
-    SUPPORTED_EXTS,
+from sonora.core.constants import FEAT_KEYWORDS, SUPPORTED_EXTS
+from sonora.core.logger import (
+    LOG,
+    create_progress,
+    interactive_pause_listener,
+    wait_if_paused,
 )
-from sonora.core.logger import LOG, create_progress
 from sonora.core.models import CheckReport
 from sonora.core.utils import (
     find_audio_files,
+    find_companion_lyrics,
     is_single_group_artist,
     is_valid_uuid,
     is_version_or_remix,
@@ -66,7 +69,7 @@ def is_valid_track_filename(filename: str) -> bool:
 
 
 def _is_corrupt_bracket(full_bracket: str, tokens: set[str]) -> bool:
-    if is_version_or_remix(full_bracket):
+    if is_version_or_remix(full_bracket) or FEAT_PATTERN.search(full_bracket):
         return False
 
     dummy_title = f"Track {full_bracket}"
@@ -99,6 +102,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
     if file_path.suffix.lower() not in SUPPORTED_EXTS:
         return []
+
     if file_path.suffix.lower() == ".flac":
         try:
             if not verify_flac_checksum(file_path):
@@ -124,16 +128,18 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             MutagenError,
         ) as error:
             LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
-        if check_spectral:
-            try:
-                is_fake, _, description = detect_fake_lossless(file_path)
-                if is_fake:
-                    issues.append(
-                        description
-                        or "Possible fake lossless (spectral cutoff below 16kHz)."
-                    )
-            except (OSError, ValueError, RuntimeError) as error:
-                LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
+
+    if check_spectral:
+        try:
+            is_fake, _, description = detect_fake_lossless(file_path)
+            if is_fake:
+                issues.append(
+                    description
+                    or "Possible fake lossless (spectral cutoff below 16kHz)."
+                )
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
+
     try:
         track = read_track_metadata(file_path)
         issues.extend(check_brackets_corruption(track.artist))
@@ -219,12 +225,12 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             )
 
         # Check for unsplit artists (e.g. Artist A & Artist B)
-        delimiters = [r"\s&\s", r"\s\u00d7\s", r"\sfeat\.?\s", r"\sft\.?\s"]
+        delimiters = [(" & ", "&"), (" × ", "×"), (" / ", "/"), (" + ", "+")]
         if not is_single_group_artist(track.artist):
-            for delimiter in delimiters:
-                if re.search(delimiter, track.artist, re.IGNORECASE):
+            for delimiter_pattern, delimiter_name in delimiters:
+                if delimiter_pattern in f" {track.artist} ":
                     issues.append(
-                        f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{delimiter.strip()}')"
+                        f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{delimiter_name}')"
                     )
 
         # Check Title feature duplicate markers
@@ -249,16 +255,17 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
     except (OSError, ValueError, RuntimeError) as error:
         issues.append(f"Metadata read error: {error}")
-    lrc_path = file_path.with_suffix(".lrc")
-    if not lrc_path.exists():
+
+    if not find_companion_lyrics(file_path):
         issues.append("Missing synchronized lyrics (.lrc) file.")
 
     return issues
 
 
 def _check_single_file(
-    path: Path, check_spectral: bool
+    path: Path, check_spectral: bool = False
 ) -> tuple[Path, list[str], str | None, str | None, int | None, int | None]:
+    wait_if_paused()
     file_issues = check_file(path, check_spectral=check_spectral)
     album = None
     album_artist = None
@@ -283,6 +290,51 @@ LAST_CHECK_REPORT: CheckReport | None = None
 def get_last_check_report() -> CheckReport | None:
     """Return the most recent or partially completed check report."""
     return LAST_CHECK_REPORT
+
+
+def write_check_report_json(
+    report: CheckReport,
+    folder_path: Path,
+    output_json: Path,
+    aborted_by_user: bool = False,
+) -> None:
+    """Write check report results to JSON file."""
+    total = report.total_files
+    corrupt = report.corrupt_files
+    missing_meta = report.missing_metadata
+    missing_lrc = report.missing_lrc
+    issue_count = len(report.issues)
+
+    status_prefix = "PARTIAL Check (aborted)" if aborted_by_user else "Check completed"
+    summary_text = (
+        f"Sonora {status_prefix}: {total} files scanned in '{folder_path}'. "
+        f"Check status: {corrupt} corrupted files, {missing_meta} missing metadata, "
+        f"{missing_lrc} missing LRCs. Total files with issues: {issue_count}."
+    )
+
+    data = {
+        "schema": "check_report_v1",
+        "generator": "Sonora",
+        "summary_text": summary_text,
+        "aborted_by_user": aborted_by_user,
+        "target_path": str(folder_path.resolve()),
+        "summary": {
+            "total_files": total,
+            "corrupt_files": corrupt,
+            "missing_metadata": missing_meta,
+            "missing_lrc": missing_lrc,
+            "files_with_issues": issue_count,
+        },
+        "issues": report.issues,
+    }
+    output_json.write_bytes(
+        orjson.dumps(
+            data,
+            option=orjson.OPT_INDENT_2
+            | orjson.OPT_NON_STR_KEYS
+            | orjson.OPT_SERIALIZE_NUMPY,
+        )
+    )
 
 
 def check_library(
@@ -320,52 +372,60 @@ def check_library(
             task = progress.add_task(
                 "[cyan]Checking library...", total=len(files_to_process)
             )
+            with interactive_pause_listener(progress, task):
+                for future in as_completed(future_to_path):
+                    (
+                        path,
+                        file_issues,
+                        album,
+                        album_artist,
+                        disc_number,
+                        track_number,
+                    ) = future.result()
+                    report.total_files += 1
+                    folder = path.parent
 
-            for future in as_completed(future_to_path):
-                (
-                    path,
-                    file_issues,
-                    album,
-                    album_artist,
-                    disc_number,
-                    track_number,
-                ) = future.result()
-                report.total_files += 1
-                folder = path.parent
+                    if album:
+                        folder_albums[folder].add(album)
+                    if album_artist:
+                        folder_album_artists[folder].add(album_artist)
+                    if track_number is not None:
+                        disc = disc_number or 1
+                        folder_tracks_found[folder][(disc, track_number)].append(
+                            path.name
+                        )
 
-                if album:
-                    folder_albums[folder].add(album)
-                if album_artist:
-                    folder_album_artists[folder].add(album_artist)
-                if track_number is not None:
-                    disc = disc_number or 1
-                    folder_tracks_found[folder][(disc, track_number)].append(path.name)
+                    if file_issues:
+                        report.issues[str(path)] = file_issues
+                        try:
+                            display_name = str(path.relative_to(folder_path))
+                        except ValueError:
+                            display_name = path.name
+                        LOG.warning(f"🔍 [bold]{display_name}[/bold]")
+                        for issue in file_issues:
+                            LOG.warning(f"   ∟ ⚠️  {issue}")
+                        if any(
+                            "corrupt" in normalize_str(issue)
+                            or "checksum" in normalize_str(issue)
+                            or "0-byte" in normalize_str(issue)
+                            or "fake lossless" in normalize_str(issue)
+                            for issue in file_issues
+                        ):
+                            report.corrupt_files += 1
+                        if any(
+                            "missing" in normalize_str(issue)
+                            and "lrc" not in normalize_str(issue)
+                            for issue in file_issues
+                        ):
+                            report.missing_metadata += 1
+                        if any(
+                            "missing" in normalize_str(issue)
+                            and "lrc" in normalize_str(issue)
+                            for issue in file_issues
+                        ):
+                            report.missing_lrc += 1
 
-                if file_issues:
-                    report.issues[str(path)] = file_issues
-                    LOG.warning(f"🔍 [bold]{path.name}[/bold]")
-                    for issue in file_issues:
-                        LOG.warning(f"   ∟ ⚠️  {issue}")
-                    if any(
-                        "corrupt" in normalize_str(issue)
-                        or "checksum" in normalize_str(issue)
-                        for issue in file_issues
-                    ):
-                        report.corrupt_files += 1
-                    if any(
-                        "missing" in normalize_str(issue)
-                        and "tag" in normalize_str(issue)
-                        for issue in file_issues
-                    ):
-                        report.missing_metadata += 1
-                    if any(
-                        "missing" in normalize_str(issue)
-                        and "lrc" in normalize_str(issue)
-                        for issue in file_issues
-                    ):
-                        report.missing_lrc += 1
-
-                progress.advance(task)
+                    progress.advance(task)
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         raise
@@ -411,44 +471,15 @@ def check_library(
 
         if folder_issues:
             report.issues[str(folder)] = folder_issues
-            LOG.warning(f"📁 [bold]{folder.name}[/bold]")
+            try:
+                display_folder = str(folder.relative_to(folder_path))
+            except ValueError:
+                display_folder = folder.name
+            LOG.warning(f"📁 [bold]{display_folder}[/bold]")
             for issue in folder_issues:
                 LOG.warning(f"   ∟ ⚠️  {issue}")
 
     if output_json:
-        total = report.total_files
-        corrupt = report.corrupt_files
-        missing_meta = report.missing_metadata
-        missing_lrc = report.missing_lrc
-        issue_count = len(report.issues)
-
-        summary_text = (
-            f"Sonora checked {total} files in '{folder_path}'. "
-            f"Check status: {corrupt} corrupted files, {missing_meta} missing metadata, "
-            f"{missing_lrc} missing LRCs. Total files with issues: {issue_count}."
-        )
-
-        data = {
-            "schema": "check_report_v1",
-            "generator": "Sonora",
-            "summary_text": summary_text,
-            "target_path": str(folder_path.resolve()),
-            "summary": {
-                "total_files": total,
-                "corrupt_files": corrupt,
-                "missing_metadata": missing_meta,
-                "missing_lrc": missing_lrc,
-                "files_with_issues": issue_count,
-            },
-            "issues": report.issues,
-        }
-        output_json.write_bytes(
-            orjson.dumps(
-                data,
-                option=orjson.OPT_INDENT_2
-                | orjson.OPT_NON_STR_KEYS
-                | orjson.OPT_SERIALIZE_DATACLASS,
-            )
-        )
+        write_check_report_json(report, folder_path, output_json, aborted_by_user=False)
 
     return report

@@ -21,9 +21,16 @@ from sonora.modules.backup import (
     get_last_restored_count,
     restore_library_tags,
 )
-from sonora.modules.checker import check_library, get_last_check_report
-from sonora.modules.organizer import organize_library_singles
-from sonora.modules.renamer import rename_directory_files
+from sonora.modules.checker import (
+    check_library,
+    get_last_check_report,
+    write_check_report_json,
+)
+from sonora.modules.organizer import (
+    get_last_organized_count,
+    organize_library_singles,
+)
+from sonora.modules.renamer import get_last_rename_report, rename_directory_files
 from sonora.modules.tagger import (
     get_last_tagged_tracks,
     get_last_tagging_failures,
@@ -43,7 +50,7 @@ if hasattr(signal, "SIGCONT"):
         )
 
 app = App(
-    name="sonora",
+    "sonora",
     version=__version__,
     version_flags=["--version", "-v"],
     help_flags=["--help", "-h"],
@@ -479,30 +486,55 @@ def check(
             f"Partially scanned {check_report.total_files} files before interruption."
         )
 
+    total = check_report.total_files
+    issue_count = len(check_report.issues)
+    perfect_files = max(0, total - issue_count)
+    perfect_pct = (perfect_files / total * 100) if total > 0 else 0.0
+    issues_pct = (issue_count / total * 100) if total > 0 else 0.0
+    corrupt_pct = (check_report.corrupt_files / total * 100) if total > 0 else 0.0
+    missing_meta_pct = (
+        (check_report.missing_metadata / total * 100) if total > 0 else 0.0
+    )
+    missing_lrc_pct = (check_report.missing_lrc / total * 100) if total > 0 else 0.0
+
     validation_summary_rows = [
-        ("Total Files Scanned", str(check_report.total_files), None),
+        ("Total Files Scanned", str(total), None),
         (
-            "Corrupt Files",
-            str(check_report.corrupt_files),
-            "red" if check_report.corrupt_files else "green",
+            "✅ Perfect Audio Files",
+            f"{perfect_files}/{total} ({perfect_pct:.1f}%)",
+            "green" if perfect_files == total else None,
         ),
         (
-            "Missing Metadata",
-            str(check_report.missing_metadata),
-            "yellow" if check_report.missing_metadata else "green",
+            "⚠️ Files with Issues",
+            f"{issue_count}/{total} ({issues_pct:.1f}%)",
+            "red" if issue_count > 0 else "green",
         ),
         (
-            "Missing LRC Lyrics",
-            str(check_report.missing_lrc),
-            "yellow" if check_report.missing_lrc else "green",
+            "Missing Metadata Tags",
+            f"{check_report.missing_metadata} files ({missing_meta_pct:.1f}%)",
+            "yellow" if check_report.missing_metadata > 0 else "green",
         ),
         (
-            "Files with Issues",
-            str(len(check_report.issues)),
-            "red" if check_report.issues else "green",
+            "Missing Synced Lyrics (.lrc)",
+            f"{check_report.missing_lrc} files ({missing_lrc_pct:.1f}%)",
+            "yellow" if check_report.missing_lrc > 0 else "green",
+        ),
+        (
+            "Corrupted / Damaged Audio",
+            f"{check_report.corrupt_files} files ({corrupt_pct:.1f}%)",
+            "red" if check_report.corrupt_files > 0 else "green",
         ),
     ]
     LOG.summary_table("Validation Summary", validation_summary_rows)
+
+    if json_report:
+        write_check_report_json(
+            check_report, path, json_report, aborted_by_user=interrupted
+        )
+        LOG.info(
+            f"Saved validation JSON report with all {issue_count} issue(s) to [bold]{json_report}[/bold]"
+        )
+
     if interrupted:
         return 130
     return 0
@@ -521,25 +553,78 @@ def rename(
             help="Simulate actions without modifying files on disk",
         ),
     ] = False,
+    json_report: Annotated[
+        Path | None,
+        Parameter(
+            name=["-j", "--json"],
+            help="Save renaming report to JSON file",
+        ),
+    ] = None,
 ) -> int:
     """
     Rename audio files and sync .lrc metadata headers.
     """
     LOG.info(f"Renaming files in directory: [bold]{path}[/bold]")
-    renamed_files = rename_directory_files(path, dry_run=dry_run)
-    LOG.success(
-        f"Renamed {len(renamed_files)} audio files and synchronized .lrc headers."
-    )
+    interrupted = False
+    try:
+        rename_directory_files(path, dry_run=dry_run)
+        report = get_last_rename_report()
+    except KeyboardInterrupt:
+        interrupted = True
+        report = get_last_rename_report()
+        LOG.warning(
+            "\n⏹️  [bold yellow]INTERRUPTED[/] - Renaming stopped by user (Ctrl+C). Generating summary..."
+        )
+
+    if not interrupted:
+        LOG.success(
+            f"Renaming completed: {report.files_renamed}/{report.total_files} files renamed on disk."
+        )
+    else:
+        LOG.warning(
+            f"Partially renamed {report.files_renamed}/{report.total_files} files before interruption."
+        )
 
     renaming_summary_rows = [
-        ("Audio Files Processed", str(len(renamed_files)), None),
+        ("Total Files Scanned", str(report.total_files), None),
         (
-            "Files Renamed & LRC Synced",
-            str(len(renamed_files)),
-            "green" if renamed_files else "white",
+            "Files Renamed on Disk",
+            str(report.files_renamed),
+            "green" if report.files_renamed > 0 else None,
+        ),
+        (
+            "Album Folders Renamed",
+            str(report.folders_renamed),
+            "green" if report.folders_renamed > 0 else None,
+        ),
+        (
+            "Already Compliant Files",
+            str(report.unchanged_files),
+            "green" if report.unchanged_files > 0 else None,
         ),
     ]
     LOG.summary_table("Renaming Summary", renaming_summary_rows)
+
+    if json_report:
+        rename_json_data = {
+            "schema": "rename_report_v1",
+            "generator": "Sonora",
+            "aborted_by_user": interrupted,
+            "target_path": str(path.resolve()),
+            "summary": {
+                "total_scanned": report.total_files,
+                "files_renamed": report.files_renamed,
+                "folders_renamed": report.folders_renamed,
+                "lrc_synced": report.lrc_synced,
+                "unchanged_files": report.unchanged_files,
+            },
+        }
+        json_report.write_bytes(
+            orjson.dumps(rename_json_data, option=orjson.OPT_INDENT_2)
+        )
+        LOG.info(f"Saved renaming JSON report to [bold]{json_report}[/bold]")
+    if interrupted:
+        return 130
     return 0
 
 
@@ -563,18 +648,41 @@ def organize(
             help="Simulate actions without modifying files on disk",
         ),
     ] = False,
+    json_report: Annotated[
+        Path | None,
+        Parameter(
+            name=["-j", "--json"],
+            help="Save organization report to JSON file",
+        ),
+    ] = None,
 ) -> int:
     """
     Organize single tracks into a Singles directory structure.
     """
     destination_directory = target_singles or (path / "Singles")
     LOG.info(f"Organizing single tracks from {path} to {destination_directory}")
-    organized_count = organize_library_singles(
-        path, destination_directory, dry_run=dry_run
-    )
-    LOG.success(f"Organized and moved {organized_count} single tracks.")
+    interrupted = False
+    try:
+        organized_count = organize_library_singles(
+            path, destination_directory, dry_run=dry_run
+        )
+    except KeyboardInterrupt:
+        interrupted = True
+        organized_count = get_last_organized_count()
+        LOG.warning(
+            "\n⏹️  [bold yellow]INTERRUPTED[/] - Organization stopped by user (Ctrl+C). Generating summary..."
+        )
+
+    if not interrupted:
+        LOG.success(f"Organized and moved {organized_count} single tracks.")
+    else:
+        LOG.warning(
+            f"Partially organized {organized_count} single tracks before interruption."
+        )
 
     organization_summary_rows = [
+        ("Source Directory", str(path.resolve()), None),
+        ("Target Directory", str(destination_directory.resolve()), None),
         (
             "Single Tracks Organized",
             str(organized_count),
@@ -582,6 +690,25 @@ def organize(
         ),
     ]
     LOG.summary_table("Organization Summary", organization_summary_rows)
+
+    if json_report:
+        organize_json_data = {
+            "schema": "organize_report_v1",
+            "generator": "Sonora",
+            "aborted_by_user": interrupted,
+            "source_path": str(path.resolve()),
+            "target_singles_path": str(destination_directory.resolve()),
+            "summary": {
+                "single_tracks_organized": organized_count,
+            },
+        }
+        json_report.write_bytes(
+            orjson.dumps(organize_json_data, option=orjson.OPT_INDENT_2)
+        )
+        LOG.info(f"Saved organization JSON report to [bold]{json_report}[/bold]")
+
+    if interrupted:
+        return 130
     return 0
 
 
@@ -594,7 +721,7 @@ def backup(
     output_file: Annotated[
         Path | None,
         Parameter(
-            name=["--out"],
+            name=["--out", "-j", "--json"],
             help="Output JSON backup file path",
         ),
     ] = None,
@@ -609,9 +736,16 @@ def backup(
     """
     Create JSON backup of audio tags.
     """
-    backup_path = backup_library_tags(
-        path, output_file=output_file, max_threads=threads
-    )
+    try:
+        backup_path = backup_library_tags(
+            path, output_file=output_file, max_threads=threads
+        )
+    except KeyboardInterrupt:
+        LOG.warning(
+            "\n⏹️  [bold yellow]INTERRUPTED[/] - Backup stopped by user (Ctrl+C)."
+        )
+        return 130
+
     LOG.success(f"Backup created at: [bold]{backup_path}[/bold]")
     backup_summary_rows = [
         ("Source Directory", str(path.resolve()), None),
@@ -634,6 +768,13 @@ def restore(
             help="Number of parallel threads",
         ),
     ] = 4,
+    json_report: Annotated[
+        Path | None,
+        Parameter(
+            name=["-j", "--json"],
+            help="Save restoration report to JSON file",
+        ),
+    ] = None,
 ) -> int:
     """
     Restore audio tags from JSON backup file.
@@ -662,6 +803,22 @@ def restore(
         ),
     ]
     LOG.summary_table("Restoration Summary", restore_summary_rows)
+
+    if json_report:
+        restore_json_data = {
+            "schema": "restore_report_v1",
+            "generator": "Sonora",
+            "aborted_by_user": interrupted,
+            "backup_file": str(backup_file.resolve()),
+            "summary": {
+                "tracks_restored": restored_count,
+            },
+        }
+        json_report.write_bytes(
+            orjson.dumps(restore_json_data, option=orjson.OPT_INDENT_2)
+        )
+        LOG.info(f"Saved restoration JSON report to [bold]{json_report}[/bold]")
+
     if interrupted:
         return 130
     return 0

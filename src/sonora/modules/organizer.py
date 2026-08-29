@@ -2,7 +2,12 @@ import shutil
 from pathlib import Path
 
 from sonora.audio.metadata import read_track_metadata
-from sonora.core.logger import LOG, create_progress
+from sonora.core.logger import (
+    LOG,
+    create_progress,
+    interactive_pause_listener,
+    wait_if_paused,
+)
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     find_audio_files,
@@ -33,12 +38,20 @@ def is_single_folder(folder_path: Path) -> bool:
     for audio_file in audio_files:
         try:
             track_info = read_track_metadata(audio_file)
-            albums.add(normalize_str(track_info.album))
+            if track_info.album and track_info.album != "Unknown Album":
+                albums.add(normalize_str(track_info.album))
         except (OSError, ValueError, RuntimeError) as error:
             LOG.debug(
                 f"Failed to read metadata for singles detection on {audio_file}: {error}"
             )
     return len(albums) > 1
+
+
+LAST_ORGANIZED_COUNT: int = 0
+
+
+def get_last_organized_count() -> int:
+    return LAST_ORGANIZED_COUNT
 
 
 def organize_library_singles(
@@ -49,6 +62,9 @@ def organize_library_singles(
     organized as target_singles_dir / Primary Artist / Artist - Title.ext.
     Returns the count of moved tracks.
     """
+    global LAST_ORGANIZED_COUNT
+    LAST_ORGANIZED_COUNT = 0
+
     if not source_dir.exists():
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
 
@@ -73,43 +89,49 @@ def organize_library_singles(
         task = progress.add_task(
             "[cyan]Organizing single tracks...", total=len(all_audio_files)
         )
-
-        for folder, files in folder_files.items():
-            # Skip target singles directory itself during folder classification
-            try:
-                if folder == target_singles_dir or target_singles_dir in folder.parents:
-                    progress.advance(task, advance=len(files))
-                    continue
-            except (ValueError, OSError):
-                pass
-
-            # Determine if folder is a single folder (<= 2 tracks or multiple album tags)
-            is_single = len(files) <= 2
-            folder_track_infos: list[tuple[Path, TrackInfo]] = []
-            albums_in_folder: set[str] = set()
-
-            for path in files:
+        with interactive_pause_listener(progress, task):
+            for folder, files in folder_files.items():
+                wait_if_paused()
+                # Skip target singles directory itself during folder classification
                 try:
-                    info = read_track_metadata(path)
-                    folder_track_infos.append((path, info))
-                    albums_in_folder.add(normalize_str(info.album))
-                except (OSError, ValueError, RuntimeError) as error:
-                    LOG.warning(f"Failed to read metadata for {path}: {error}")
+                    if (
+                        folder == target_singles_dir
+                        or target_singles_dir in folder.parents
+                    ):
+                        progress.advance(task, advance=len(files))
+                        continue
+                except (ValueError, OSError):
+                    pass
 
-            if not is_single and len(albums_in_folder) > 1:
-                is_single = True
+                # Determine if folder is a single folder (<= 2 tracks or multiple album tags)
+                is_single = len(files) <= 2
+                folder_track_infos: list[tuple[Path, TrackInfo]] = []
+                albums_in_folder: set[str] = set()
 
-            if is_single:
-                for path, info in folder_track_infos:
-                    singles_to_process.append((path, info))
-            else:
-                for _path, info in folder_track_infos:
-                    primary_artist_key = get_primary_artist(info.artist).lower()
-                    track_identity_key = f"{primary_artist_key} - {info.title.lower()}"
-                    album_fingerprints.add(track_identity_key)
+                for path in files:
+                    wait_if_paused()
+                    try:
+                        info = read_track_metadata(path)
+                        folder_track_infos.append((path, info))
+                        if info.album and info.album != "Unknown Album":
+                            albums_in_folder.add(normalize_str(info.album))
+                    except (OSError, ValueError, RuntimeError) as error:
+                        LOG.warning(f"Failed to read metadata for {path}: {error}")
+                    progress.advance(task)
 
-            for _ in files:
-                progress.advance(task)
+                if not is_single and len(albums_in_folder) > 1:
+                    is_single = True
+
+                if is_single:
+                    for path, info in folder_track_infos:
+                        singles_to_process.append((path, info))
+                else:
+                    for _path, info in folder_track_infos:
+                        primary_artist_key = get_primary_artist(info.artist).lower()
+                        track_identity_key = (
+                            f"{primary_artist_key} - {info.title.lower()}"
+                        )
+                        album_fingerprints.add(track_identity_key)
 
     # Process and move collected singles (with deduplication against album tracks)
     for path, track_info in singles_to_process:
@@ -143,7 +165,28 @@ def organize_library_singles(
             / f"{sanitize_name(track_info.artist)} - {sanitize_name(track_info.title)}{path.suffix}"
         )
 
-        if path != target_file and not target_file.exists():
+        # Handle destination collisions cleanly
+        if path.resolve() != target_file.resolve():
+            if target_file.exists():
+                try:
+                    if target_file.stat().st_size == path.stat().st_size:
+                        if not dry_run:
+                            path.unlink(missing_ok=True)
+                            for companion in find_companion_lyrics(path):
+                                companion.unlink(missing_ok=True)
+                        removed_dupes += 1
+                        continue
+                    else:
+                        counter = 2
+                        base_stem = f"{sanitize_name(track_info.artist)} - {sanitize_name(track_info.title)}"
+                        while target_file.exists():
+                            target_file = (
+                                artist_dir / f"{base_stem} ({counter}){path.suffix}"
+                            )
+                            counter += 1
+                except OSError:
+                    pass
+
             if not dry_run:
                 shutil.move(str(path), str(target_file))
             else:
@@ -161,6 +204,7 @@ def organize_library_singles(
                         )
 
             moved_count += 1
+            LAST_ORGANIZED_COUNT = moved_count
 
     if removed_dupes > 0:
         LOG.info(f"🗑️ Removed {removed_dupes} duplicate single(s).")

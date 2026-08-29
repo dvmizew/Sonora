@@ -185,13 +185,28 @@ def resolve_artist_name(raw_name: str | None) -> str:
         res = musicbrainzngs.search_artists(
             query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
         )
-        for artist in res.get("artist-list", []):
+        artists = res.get("artist-list", [])
+        # Pass 1: Prioritize exact artist name matches across all results
+        clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
+        for artist in artists:
             art_name = str(artist.get("name", "")).strip()
             if not art_name:
                 continue
-            if normalize_str(art_name) == normalized:
+            if art_name.lower() == clean_name.lower():
                 set_cached_api(cache_key, art_name)
                 return art_name
+            if normalize_str(art_name) == normalized:
+                cand_has_punct = bool(re.search(r"[^\w\s]", art_name))
+                if not clean_has_punct and cand_has_punct:
+                    continue
+                set_cached_api(cache_key, art_name)
+                return art_name
+
+        # Pass 2: Check alias-list only if no direct artist name matched
+        for artist in artists:
+            art_name = str(artist.get("name", "")).strip()
+            if not art_name:
+                continue
             for alias_item in artist.get("alias-list", []):
                 alias_name = (
                     alias_item.get("alias")
@@ -199,6 +214,9 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     else str(alias_item)
                 )
                 if alias_name and normalize_str(alias_name) == normalized:
+                    cand_has_punct = bool(re.search(r"[^\w\s]", art_name))
+                    if not clean_has_punct and cand_has_punct:
+                        continue
                     set_cached_api(cache_key, art_name)
                     return art_name
             # Fallback for MusicBrainz WS/2 search summaries that omit alias-list
@@ -451,9 +469,18 @@ def match_score(
     title_score = max(0.0, min(100.0, title_score))
 
     if query_artist_clean and candidate_artist_clean:
-        artist_w = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
-        artist_token = fuzz.token_set_ratio(query_artist_clean, candidate_artist_clean)
-        artist_score = max(artist_w, artist_token)
+        if query_artist_clean == candidate_artist_clean:
+            artist_score = 100.0
+        else:
+            artist_w = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
+            artist_token = fuzz.token_set_ratio(
+                query_artist_clean, candidate_artist_clean
+            )
+            artist_score = max(artist_w, artist_token)
+
+        if title_score < 70.0 or artist_score < 70.0:
+            return 0.0
+
         return (title_score * 0.6) + (artist_score * 0.4)
 
     return float(title_score)

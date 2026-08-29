@@ -191,6 +191,42 @@ class TestCoreModules(unittest.TestCase):
         renamed = rename_directory_files(self.tmp_path)
         self.assertEqual(len(renamed), 2)
 
+    @patch("sonora.modules.renamer.read_track_metadata")
+    def test_rename_multiple_album_directories(self, mock_read):
+        album1 = self.tmp_path / "folder_one"
+        album2 = self.tmp_path / "folder_two"
+        album1.mkdir()
+        album2.mkdir()
+
+        t1 = album1 / "track1.wav"
+        t2 = album2 / "track2.wav"
+        create_dummy_wav(t1)
+        create_dummy_wav(t2)
+
+        def mock_meta(path: Path) -> TrackInfo:
+            if path == t1:
+                return TrackInfo(
+                    file_path=t1,
+                    artist="Artist One",
+                    album="Album One",
+                    title="Song 1",
+                    track_number=1,
+                )
+            return TrackInfo(
+                file_path=t2,
+                artist="Artist Two",
+                album="Album Two",
+                title="Song 2",
+                track_number=1,
+            )
+
+        mock_read.side_effect = mock_meta
+        renamed = rename_directory_files(self.tmp_path)
+        self.assertEqual(len(renamed), 2)
+        # Both album folders should be renamed
+        self.assertTrue((self.tmp_path / "Artist One - Album One").exists())
+        self.assertTrue((self.tmp_path / "Artist Two - Album Two").exists())
+
     @patch("sonora.core.utils.musicbrainzngs.search_artists")
     def test_get_primary_artist(self, mock_search):
         is_single_group_artist.cache_clear()
@@ -274,6 +310,77 @@ class TestCoreModules(unittest.TestCase):
             (target_dir / "Single Artist" / "Single Artist - Single Song.lrc").exists()
         )
 
+    @patch("sonora.modules.organizer.get_primary_artist", side_effect=lambda a: a)
+    @patch("sonora.modules.organizer.read_track_metadata")
+    def test_organize_multiple_folders_and_albums(self, mock_read, mock_primary):
+        src_dir = self.tmp_path / "multi_source"
+        folder1 = src_dir / "folder1"
+        folder2 = src_dir / "album_folder"
+        folder3 = src_dir / "folder3"
+
+        f1_track = folder1 / "f1.wav"
+        f2_track1 = folder2 / "f2_1.wav"
+        f2_track2 = folder2 / "f2_2.wav"
+        f2_track3 = folder2 / "f2_3.wav"
+        f3_track = folder3 / "f3.wav"
+
+        for f in [f1_track, f2_track1, f2_track2, f2_track3, f3_track]:
+            create_dummy_wav(f)
+
+        def mock_read_metadata(path: Path) -> TrackInfo:
+            if path == f1_track:
+                return TrackInfo(
+                    file_path=f1_track,
+                    artist="Artist One",
+                    title="Track One",
+                    album="Single",
+                )
+            if path == f2_track1:
+                return TrackInfo(
+                    file_path=f2_track1,
+                    artist="Album Artist",
+                    title="Song A",
+                    album="Full Album",
+                )
+            if path == f2_track2:
+                return TrackInfo(
+                    file_path=f2_track2,
+                    artist="Album Artist",
+                    title="Song B",
+                    album="Full Album",
+                )
+            if path == f2_track3:
+                return TrackInfo(
+                    file_path=f2_track3,
+                    artist="Album Artist",
+                    title="Song C",
+                    album="Full Album",
+                )
+            if path == f3_track:
+                return TrackInfo(
+                    file_path=f3_track,
+                    artist="Artist Three",
+                    title="Track Three",
+                    album="Single",
+                )
+            return TrackInfo(file_path=path)
+
+        mock_read.side_effect = mock_read_metadata
+        target_dir = self.tmp_path / "Singles"
+
+        moved = organize_library_singles(src_dir, target_dir)
+        self.assertEqual(moved, 2)
+        self.assertTrue(
+            (target_dir / "Artist One" / "Artist One - Track One.wav").exists()
+        )
+        self.assertTrue(
+            (target_dir / "Artist Three" / "Artist Three - Track Three.wav").exists()
+        )
+        # Album folder should remain intact
+        self.assertTrue(f2_track1.exists())
+        self.assertTrue(f2_track2.exists())
+        self.assertTrue(f2_track3.exists())
+
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library(self, mock_read):
         audio_file_1 = self.tmp_path / "song.wav"
@@ -286,6 +393,47 @@ class TestCoreModules(unittest.TestCase):
         report = check_library(self.tmp_path, output_json=self.tmp_path / "report.json")
         self.assertEqual(report.total_files, 1)
         self.assertTrue((self.tmp_path / "report.json").exists())
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_multi_file_and_folder_issues(self, mock_read):
+        album_dir = self.tmp_path / "AlbumFolder"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Song 1.wav"
+        file2 = album_dir / "02 - Song 2.wav"
+        create_dummy_wav(file1)
+        create_dummy_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "01 - Song 1.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    title="Song 1",
+                    album="Album A",
+                    album_artist="Artist",
+                    track_number=1,
+                    disc_number=1,
+                )
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title="Song 2",
+                album="Album B",
+                album_artist="Artist",
+                track_number=1,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+
+        report = check_library(album_dir)
+        self.assertEqual(report.total_files, 2)
+        # Should detect inconsistent album name and duplicate track number 1 on Disc 1
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(any("Inconsistent ALBUM" in issue for issue in folder_issues))
+        self.assertTrue(
+            any("Duplicate track number" in issue for issue in folder_issues)
+        )
 
     @patch("sonora.modules.tagger.write_track_metadata")
     @patch("sonora.services.lyrics.fetch_synced_lyrics")

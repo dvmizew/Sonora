@@ -10,7 +10,7 @@ from sonora.core.constants import (
 )
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, normalize_str
+from sonora.core.utils import RateLimiter, match_score, normalize_str
 
 _DISCOGS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_DISCOGS_AUTHENTICATED)
 
@@ -248,10 +248,28 @@ def search_discogs_release(
             return None
         data = response.json()
         results = data.get("results", []) if isinstance(data, dict) else []
-        if not results or not isinstance(results[0], dict):
+        if not results:
             return None
 
-        first = results[0]
+        best_score = 0.0
+        best_candidate: dict[str, Any] | None = None
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            item_title = str(item.get("title", ""))
+            if " - " in item_title:
+                cand_artist, cand_album = item_title.split(" - ", 1)
+            else:
+                cand_artist, cand_album = artist, item_title
+            score = match_score(artist, album, cand_artist, cand_album)
+            if score > best_score and score >= 80.0:
+                best_score = score
+                best_candidate = item
+
+        if not best_candidate:
+            return None
+
+        first = best_candidate
         release_id = first.get("id")
         if not release_id:
             return None

@@ -112,6 +112,44 @@ def fetch_deezer_album_details(
             if isinstance(genre_item, dict) and "name" in genre_item
         ]
 
+        tracks_by_position: dict[int, dict[str, object]] = {}
+        tracks_by_title: dict[str, dict[str, object]] = {}
+        tracks_data = (
+            album_data.get("tracks", {}).get("data", [])
+            if isinstance(album_data.get("tracks"), dict)
+            else []
+        )
+
+        for item in tracks_data:
+            if not isinstance(item, dict):
+                continue
+            pos = item.get("track_position")
+            t_name = str(item.get("title", ""))
+            artist_name = (
+                item.get("artist", {}).get("name")
+                if isinstance(item.get("artist"), dict)
+                else None
+            )
+            explicit = bool(item.get("explicit_lyrics"))
+
+            track_dict: dict[str, object] = {
+                "id": item.get("id"),
+                "title": t_name,
+                "artist": artist_name,
+                "track_position": pos,
+                "disk_number": item.get("disk_number"),
+                "isrc": item.get("isrc"),
+                "bpm": item.get("bpm"),
+                "gain": item.get("gain"),
+                "explicit_lyrics": explicit,
+                "release_date": album_data.get("release_date"),
+                "genre": genres[0] if genres else None,
+            }
+            if isinstance(pos, int):
+                tracks_by_position[pos] = track_dict
+            if t_name:
+                tracks_by_title[normalize_str(t_name)] = track_dict
+
         result = {
             "label": album_data.get("label"),
             "barcode": album_data.get("upc"),
@@ -119,6 +157,8 @@ def fetch_deezer_album_details(
             "explicit_lyrics": album_data.get("explicit_lyrics"),
             "cover_url": album_data.get("cover_xl") or album_data.get("cover_big"),
             "genre": genres[0] if genres else None,
+            "tracks_by_position": tracks_by_position,
+            "tracks_by_title": tracks_by_title,
         }
         set_cached_api(cache_key, result)
         return result

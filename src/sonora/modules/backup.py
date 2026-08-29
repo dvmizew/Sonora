@@ -7,7 +7,12 @@ from typing import Any
 import orjson
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
-from sonora.core.logger import LOG, create_progress
+from sonora.core.logger import (
+    LOG,
+    create_progress,
+    interactive_pause_listener,
+    wait_if_paused,
+)
 from sonora.core.models import TrackInfo
 from sonora.core.utils import find_audio_files
 
@@ -15,6 +20,7 @@ _GZIP_MAGIC_HEADER = b"\x1f\x8b"
 
 
 def _read_track_for_backup(audio_file: Path) -> tuple[str, dict[str, Any] | None]:
+    wait_if_paused()
     try:
         track_info = read_track_metadata(audio_file)
         return str(audio_file), track_info.to_dict()
@@ -26,6 +32,7 @@ def _read_track_for_backup(audio_file: Path) -> tuple[str, dict[str, Any] | None
 def _restore_single_track(
     file_path_str: str, tags_dict: Any, base_dir: Path | None = None
 ) -> tuple[bool, bool]:
+    wait_if_paused()
     target_path = Path(file_path_str)
 
     # Portable path resolution fallback if original absolute path was moved or mounted elsewhere
@@ -84,24 +91,25 @@ def backup_library_tags(
         task = progress.add_task(
             "[cyan]Backing up audio tags...", total=len(audio_files)
         )
-        executor = ThreadPoolExecutor(max_workers=max_threads)
-        try:
-            futures = [
-                executor.submit(_read_track_for_backup, file_path)
-                for file_path in audio_files
-            ]
-            for future in as_completed(futures):
-                path_str, data = future.result()
-                if data is not None:
-                    backup_data[path_str] = data
-                else:
-                    failed += 1
-                progress.advance(task)
-        except KeyboardInterrupt:
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        with interactive_pause_listener(progress, task):
+            executor = ThreadPoolExecutor(max_workers=max_threads)
+            try:
+                futures = [
+                    executor.submit(_read_track_for_backup, file_path)
+                    for file_path in audio_files
+                ]
+                for future in as_completed(futures):
+                    path_str, data = future.result()
+                    if data is not None:
+                        backup_data[path_str] = data
+                    else:
+                        failed += 1
+                    progress.advance(task)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
     try:
         raw_json_bytes = orjson.dumps(backup_data, option=orjson.OPT_INDENT_2)
@@ -173,27 +181,30 @@ def restore_library_tags(
         task = progress.add_task(
             "[cyan]Restoring audio tags...", total=len(backup_dict)
         )
-        executor = ThreadPoolExecutor(max_workers=max_threads)
-        try:
-            futures = [
-                executor.submit(_restore_single_track, file_str, tags, search_base_dir)
-                for file_str, tags in backup_dict.items()
-            ]
-            for future in as_completed(futures):
-                success, is_missing = future.result()
-                if success:
-                    count += 1
-                    LAST_RESTORED_COUNT = count
-                elif is_missing:
-                    missing += 1
-                else:
-                    failed += 1
-                progress.advance(task)
-        except KeyboardInterrupt:
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        with interactive_pause_listener(progress, task):
+            executor = ThreadPoolExecutor(max_workers=max_threads)
+            try:
+                futures = [
+                    executor.submit(
+                        _restore_single_track, file_str, tags, search_base_dir
+                    )
+                    for file_str, tags in backup_dict.items()
+                ]
+                for future in as_completed(futures):
+                    success, is_missing = future.result()
+                    if success:
+                        count += 1
+                        LAST_RESTORED_COUNT = count
+                    elif is_missing:
+                        missing += 1
+                    else:
+                        failed += 1
+                    progress.advance(task)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
     LOG.info(f"✅ Successfully restored {count} files")
     if missing > 0:

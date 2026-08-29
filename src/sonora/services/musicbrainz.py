@@ -94,7 +94,25 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
         releases: list[dict[str, object]] = [
             release for release in raw_releases if isinstance(release, dict)
         ]
-        target_release: dict[str, object] | None = releases[0] if releases else None
+        target_release: dict[str, object] | None = None
+        best_score = 0.0
+        for release in releases:
+            rel_title = str(release.get("title", ""))
+            rel_artist = ""
+            artist_credit = release.get("artist-credit", [])
+            if (
+                isinstance(artist_credit, list)
+                and artist_credit
+                and isinstance(artist_credit[0], dict)
+            ):
+                art_dict = artist_credit[0].get("artist", {})
+                if isinstance(art_dict, dict):
+                    rel_artist = str(art_dict.get("name", ""))
+            score = match_score(artist, album, rel_artist, rel_title)
+            if score > best_score and score >= 80.0:
+                best_score = score
+                target_release = release
+
         set_cached_api(cache_key, target_release)
         return target_release
     except (
@@ -348,6 +366,10 @@ def fetch_musicbrainz_release_details(
                 "release-groups",
                 "labels",
                 "isrcs",
+                "artist-rels",
+                "recording-level-rels",
+                "work-rels",
+                "work-level-rels",
                 "tags",
             ],
         )
@@ -375,12 +397,82 @@ def fetch_musicbrainz_release_details(
         media_format = None
         total_tracks = 0
         total_discs = len(mediums) if mediums else None
+        tracks_by_position: dict[int, dict[str, object]] = {}
+        tracks_by_mbid: dict[str, dict[str, object]] = {}
+
         if mediums and isinstance(mediums, list):
             media_format = mediums[0].get("format")
             for medium in mediums:
                 track_count_value = medium.get("track-count")
                 if track_count_value and str(track_count_value).isdigit():
                     total_tracks += int(track_count_value)
+                for track_item in medium.get("track-list", []):
+                    if not isinstance(track_item, dict):
+                        continue
+                    pos = track_item.get("position")
+                    rec = track_item.get("recording", {})
+                    if not isinstance(rec, dict):
+                        continue
+                    rec_id = str(rec.get("id", "")).strip()
+                    isrc_list = rec.get("isrc-list", [])
+                    rec_isrc = str(isrc_list[0]) if isrc_list else None
+
+                    rec_composers: list[str] = []
+                    rec_lyricists: list[str] = []
+                    rec_producers: list[str] = []
+                    rec_remixers: list[str] = []
+
+                    for rel in rec.get("artist-relation-list", []):
+                        if not isinstance(rel, dict):
+                            continue
+                        r_type = str(rel.get("type", "")).lower()
+                        a_name = rel.get("artist", {}).get("name")
+                        if not a_name:
+                            continue
+                        if r_type in ("composer", "writer"):
+                            rec_composers.append(a_name)
+                        if r_type in ("lyricist", "writer"):
+                            rec_lyricists.append(a_name)
+                        if "producer" in r_type:
+                            rec_producers.append(a_name)
+                        if r_type == "remixer":
+                            rec_remixers.append(a_name)
+
+                    work_rels = rec.get("work-relation-list", [])
+                    rec_work_id = None
+                    if (
+                        work_rels
+                        and isinstance(work_rels, list)
+                        and isinstance(work_rels[0], dict)
+                    ):
+                        w_id = work_rels[0].get("work", {}).get("id")
+                        if is_valid_uuid(w_id):
+                            rec_work_id = str(w_id)
+
+                    rec_details: dict[str, object] = {
+                        "recording_mbid": rec_id if is_valid_uuid(rec_id) else None,
+                        "isrc": rec_isrc,
+                        "disambiguation": rec.get("disambiguation"),
+                        "composer": ", ".join(dict.fromkeys(rec_composers))
+                        if rec_composers
+                        else None,
+                        "lyricist": ", ".join(dict.fromkeys(rec_lyricists))
+                        if rec_lyricists
+                        else None,
+                        "producers": ", ".join(dict.fromkeys(rec_producers))
+                        if rec_producers
+                        else None,
+                        "remixer": ", ".join(dict.fromkeys(rec_remixers))
+                        if rec_remixers
+                        else None,
+                        "musicbrainz_workid": rec_work_id,
+                    }
+                    if isinstance(pos, int):
+                        tracks_by_position[pos] = rec_details
+                    elif pos and str(pos).isdigit():
+                        tracks_by_position[int(pos)] = rec_details
+                    if is_valid_uuid(rec_id):
+                        tracks_by_mbid[rec_id] = rec_details
 
         text_representation = release_dict.get("text-representation", {})
         language = text_representation.get("language")
@@ -411,6 +503,8 @@ def fetch_musicbrainz_release_details(
             "language": language,
             "script": script,
             "artist_sort": artist_sort,
+            "tracks_by_position": tracks_by_position,
+            "tracks_by_mbid": tracks_by_mbid,
         }
         set_cached_api(cache_key, details)
         return details

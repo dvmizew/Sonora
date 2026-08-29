@@ -1,6 +1,9 @@
+import contextlib
 import logging
+import select
+import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Generator, Sequence
 
 from rich.console import Console
 from rich.progress import (
@@ -8,6 +11,7 @@ from rich.progress import (
     MofNCompleteColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
@@ -110,3 +114,120 @@ def create_progress() -> Progress:
         TimeRemainingColumn(),
         console=CONSOLE,
     )
+
+
+_PAUSE_EVENT = threading.Event()
+_PAUSE_EVENT.set()
+
+
+def wait_if_paused(poll_interval: float = 0.2) -> None:
+    """Block calling thread safely until resumed."""
+    while not _PAUSE_EVENT.wait(timeout=poll_interval):
+        pass
+
+
+@contextlib.contextmanager
+def interactive_pause_listener(
+    progress: Progress | None = None,
+    task_id: TaskID | None = None,
+    on_pause: Callable[[], None] | None = None,
+    on_resume: Callable[[], None] | None = None,
+) -> Generator[None, None, None]:
+    """
+    Listen for Space or 'p' / 'P' in background cbreak mode to pause/resume.
+    Safely adjusts Rich Progress timers and displays pause state.
+    """
+    if not sys.stdin.isatty():
+        yield
+        return
+
+    _PAUSE_EVENT.set()
+    stop_event = threading.Event()
+    pause_start_time: float | None = None
+    original_description: str | None = None
+
+    def _default_pause() -> None:
+        nonlocal pause_start_time, original_description
+        if progress is not None and task_id is not None:
+            pause_start_time = progress.get_time()
+            task_obj = progress._tasks.get(task_id)
+            if task_obj:
+                original_description = task_obj.description
+            progress.stop_task(task_id)
+            progress.update(
+                task_id,
+                description="[bold yellow]⏸️  PAUSED (Press [Space] or 'p' to resume)[/]",
+            )
+            progress.refresh()
+
+    def _default_resume() -> None:
+        nonlocal pause_start_time, original_description
+        if progress is not None and task_id is not None:
+            if pause_start_time is not None:
+                pause_duration = progress.get_time() - pause_start_time
+                task_obj = progress._tasks.get(task_id)
+                if task_obj and task_obj.start_time is not None:
+                    task_obj.start_time += pause_duration
+                if task_obj:
+                    task_obj.stop_time = None
+                pause_start_time = None
+            desc = original_description or "[cyan]Processing..."
+            progress.update(task_id, description=desc)
+            progress.refresh()
+
+    def _listener_loop() -> None:
+        try:
+            import termios
+            import tty
+
+            orig_term = termios.tcgetattr(sys.stdin.fileno())
+            tty.setcbreak(sys.stdin.fileno())
+        except (ImportError, OSError, ValueError):
+            return
+
+        try:
+            while not stop_event.is_set():
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if rlist and not stop_event.is_set():
+                    char = sys.stdin.read(1)
+                    if char in (" ", "p", "P"):
+                        if _PAUSE_EVENT.is_set():
+                            _PAUSE_EVENT.clear()
+                            if on_pause:
+                                with contextlib.suppress(Exception):
+                                    on_pause()
+                            else:
+                                _default_pause()
+                            LOG.warning(
+                                "⏸️  [bold yellow]PAUSED[/] - In-flight tracks finishing cleanly. Press [bold cyan][Space][/] or [bold cyan]'p'[/] to resume..."
+                            )
+                        else:
+                            _PAUSE_EVENT.set()
+                            if on_resume:
+                                with contextlib.suppress(Exception):
+                                    on_resume()
+                            else:
+                                _default_resume()
+                            LOG.info(
+                                "▶️  [bold green]RESUMED[/] - Continuing execution..."
+                            )
+                        while True:
+                            drain_list, _, _ = select.select([sys.stdin], [], [], 0.05)
+                            if drain_list:
+                                sys.stdin.read(1)
+                            else:
+                                break
+        finally:
+            with contextlib.suppress(Exception):
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, orig_term)
+
+    listener = threading.Thread(
+        target=_listener_loop, name="SonoraPauseListener", daemon=True
+    )
+    listener.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        _PAUSE_EVENT.set()
+        listener.join(timeout=0.5)

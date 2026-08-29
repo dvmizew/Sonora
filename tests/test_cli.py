@@ -91,25 +91,66 @@ class TestCLIInterface(unittest.TestCase):
     @patch("sonora.cli.main.backup_library_tags")
     def test_handle_backup_subcommand(self, mock_backup):
         mock_backup.return_value = self.temporary_path / "backup.json"
-        exit_code = main(
-            [
-                "backup",
-                str(self.temporary_path),
-                "--out",
-                str(self.temporary_path / "backup.json"),
-            ]
-        )
+        exit_code = main(["backup", str(self.temporary_path)])
         self.assertEqual(exit_code, 0)
         mock_backup.assert_called_once()
 
+    @patch("sonora.cli.main.rename_directory_files")
+    def test_handle_rename_subcommand_with_json(self, mock_rename):
+        mock_rename.return_value = [Path("01 - Artist - Title.flac")]
+        json_output = self.temporary_path / "rename_report.json"
+        exit_code = main(
+            ["rename", str(self.temporary_path), "--json", str(json_output)]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(json_output.exists())
+
+    @patch("sonora.cli.main.organize_library_singles")
+    def test_handle_organize_subcommand_with_json(self, mock_organize):
+        mock_organize.return_value = 3
+        json_output = self.temporary_path / "organize_report.json"
+        exit_code = main(
+            ["organize", str(self.temporary_path), "--json", str(json_output)]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(json_output.exists())
+
     @patch("sonora.cli.main.restore_library_tags")
-    def test_handle_restore_subcommand(self, mock_restore):
-        mock_restore.return_value = 10
+    def test_handle_restore_subcommand_with_json(self, mock_restore):
+        mock_restore.return_value = 5
+        dummy_backup = self.temporary_path / "backup.json"
+        dummy_backup.write_text("{}", encoding="utf-8")
+        json_output = self.temporary_path / "restore_report.json"
+        exit_code = main(["restore", str(dummy_backup), "--json", str(json_output)])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(json_output.exists())
+
+    @patch("sonora.cli.main.tag_album_folder", side_effect=KeyboardInterrupt)
+    def test_handle_tag_keyboard_interrupt(self, mock_tag):
+        exit_code = main(["tag", str(self.temporary_path)])
+        self.assertEqual(exit_code, 130)
+
+    @patch("sonora.cli.main.check_library", side_effect=KeyboardInterrupt)
+    def test_handle_check_keyboard_interrupt(self, mock_check):
+        exit_code = main(["check", str(self.temporary_path)])
+        self.assertEqual(exit_code, 130)
+
+    @patch("sonora.cli.main.rename_directory_files", side_effect=KeyboardInterrupt)
+    def test_handle_rename_keyboard_interrupt(self, mock_rename):
+        exit_code = main(["rename", str(self.temporary_path)])
+        self.assertEqual(exit_code, 130)
+
+    @patch("sonora.cli.main.organize_library_singles", side_effect=KeyboardInterrupt)
+    def test_handle_organize_keyboard_interrupt(self, mock_organize):
+        exit_code = main(["organize", str(self.temporary_path)])
+        self.assertEqual(exit_code, 130)
+
+    @patch("sonora.cli.main.restore_library_tags", side_effect=KeyboardInterrupt)
+    def test_handle_restore_keyboard_interrupt(self, mock_restore):
         dummy_backup = self.temporary_path / "backup.json"
         dummy_backup.write_text("{}", encoding="utf-8")
         exit_code = main(["restore", str(dummy_backup)])
-        self.assertEqual(exit_code, 0)
-        mock_restore.assert_called_once()
+        self.assertEqual(exit_code, 130)
 
 
 if __name__ == "__main__":

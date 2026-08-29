@@ -154,3 +154,108 @@ def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | 
         "total_discs": best_result.get("discCount"),
         "date": release_date_str,
     }
+
+
+def fetch_itunes_album_details(artist: str, album: str) -> dict[str, object] | None:
+    """
+    Fetch album metadata and all track details in ONE single lookup from iTunes Search API.
+    Returns mapping of album details and track items indexed by track number and title.
+    """
+    results = search_itunes(artist=artist, term=album, entity="album")
+    if not results:
+        return None
+
+    normalized_target = normalize_str(album)
+    best_album: dict[str, object] | None = None
+
+    for result in results:
+        collection_name = str(result.get("collectionName", ""))
+        normalized_name = normalize_str(collection_name)
+        if (
+            normalized_name == normalized_target
+            or fuzz.token_set_ratio(normalized_target, normalized_name) >= 80.0
+        ):
+            best_album = result
+            break
+
+    if best_album is None:
+        return None
+
+    collection_id = best_album.get("collectionId")
+    if not collection_id:
+        return None
+
+    cache_key = f"itunes_album_lookup:{collection_id}"
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    _ITUNES_LIMITER.wait()
+    try:
+        url = "https://itunes.apple.com/lookup"
+        params: dict[str, str | int] = {
+            "id": str(collection_id),
+            "entity": "song",
+            "limit": 200,
+        }
+        response = SESSION.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        raw_items = data.get("results", []) if isinstance(data, dict) else []
+
+        tracks_by_number: dict[int, dict[str, object]] = {}
+        tracks_by_title: dict[str, dict[str, object]] = {}
+        album_meta: dict[str, object] = {
+            "itunes_collectionid": str(collection_id),
+            "itunes_artistid": str(best_album.get("artistId"))
+            if best_album.get("artistId")
+            else None,
+            "genre": best_album.get("primaryGenreName"),
+            "copyright": best_album.get("copyright"),
+            "release_country": best_album.get("country"),
+            "total_tracks": best_album.get("trackCount"),
+            "tracks_by_number": tracks_by_number,
+            "tracks_by_title": tracks_by_title,
+        }
+
+        for item in raw_items:
+            if not isinstance(item, dict) or item.get("wrapperType") != "track":
+                continue
+            t_num = item.get("trackNumber")
+            t_name = str(item.get("trackName", ""))
+            explicitness = str(item.get("trackExplicitness", "")).lower()
+            advisory = (
+                "Explicit"
+                if explicitness == "explicit"
+                else "Clean"
+                if explicitness == "cleaned"
+                else None
+            )
+            r_date = (
+                str(item.get("releaseDate"))[:10] if item.get("releaseDate") else None
+            )
+
+            t_info: dict[str, object] = {
+                "genre": item.get("primaryGenreName"),
+                "advisory": advisory,
+                "itunes_trackid": str(item["trackId"]) if item.get("trackId") else None,
+                "itunes_collectionid": str(collection_id),
+                "itunes_artistid": str(item.get("artistId"))
+                if item.get("artistId")
+                else None,
+                "release_country": item.get("country"),
+                "track_number": t_num,
+                "total_tracks": item.get("trackCount"),
+                "disc_number": item.get("discNumber"),
+                "date": r_date,
+            }
+            if isinstance(t_num, int):
+                tracks_by_number[t_num] = t_info
+            if t_name:
+                tracks_by_title[normalize_str(t_name)] = t_info
+
+        set_cached_api(cache_key, album_meta)
+        return album_meta
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+        LOG.debug(f"iTunes album lookup failed for ID {collection_id}: {error}")
+        return None

@@ -1,9 +1,5 @@
 import contextlib
 import dataclasses
-import select
-import sys
-import threading
-from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -17,13 +13,20 @@ from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.logger import LOG, create_progress
+from sonora.core.logger import (
+    LOG,
+    create_progress,
+    interactive_pause_listener,
+    wait_if_paused,
+)
 from sonora.core.models import TrackInfo
+from sonora.core.state import get_library_state
 from sonora.core.utils import (
     find_audio_files,
     is_valid_uuid,
     normalize_date,
     normalize_genre,
+    normalize_str,
     resolve_artist_name,
 )
 from sonora.services.acoustid import lookup_acoustid
@@ -33,7 +36,10 @@ from sonora.services.deezer import (
 )
 from sonora.services.discogs import search_discogs_release
 from sonora.services.genius import fetch_genius_song_details
-from sonora.services.itunes import fetch_itunes_track_metadata
+from sonora.services.itunes import (
+    fetch_itunes_album_details,
+    fetch_itunes_track_metadata,
+)
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import process_track_lyrics
 from sonora.services.musicbrainz import (
@@ -62,77 +68,6 @@ _NETWORK_EXCEPTIONS = (
     AttributeError,
     TimeoutError,
 )
-_PAUSE_EVENT = threading.Event()
-_PAUSE_EVENT.set()
-
-
-def _wait_if_paused(poll_interval: float = 0.2) -> None:
-    while not _PAUSE_EVENT.wait(timeout=poll_interval):
-        pass
-
-
-@contextlib.contextmanager
-def _interactive_pause_listener(
-    on_pause: Callable[[], None] | None = None,
-    on_resume: Callable[[], None] | None = None,
-) -> Generator[None, None, None]:
-    if not sys.stdin.isatty():
-        yield
-        return
-
-    _PAUSE_EVENT.set()
-    stop_event = threading.Event()
-
-    def _loop() -> None:
-        try:
-            import termios
-            import tty
-
-            orig_term = termios.tcgetattr(sys.stdin.fileno())
-            tty.setcbreak(sys.stdin.fileno())
-        except (ImportError, OSError, ValueError):
-            return
-
-        try:
-            while not stop_event.is_set():
-                rlist, _, _ = select.select([sys.stdin], [], [], 0.2)
-                if rlist and not stop_event.is_set():
-                    char = sys.stdin.read(1)
-                    if char in (" ", "p", "P"):
-                        if _PAUSE_EVENT.is_set():
-                            _PAUSE_EVENT.clear()
-                            if on_pause:
-                                with contextlib.suppress(Exception):
-                                    on_pause()
-                            LOG.warning(
-                                "⏸️  [bold yellow]PAUSED[/] - Press [bold cyan][Space][/] or [bold cyan]'p'[/] to resume..."
-                            )
-                        else:
-                            _PAUSE_EVENT.set()
-                            if on_resume:
-                                with contextlib.suppress(Exception):
-                                    on_resume()
-                            LOG.info(
-                                "▶️  [bold green]RESUMED[/] - Continuing execution..."
-                            )
-                        while True:
-                            dlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-                            if dlist:
-                                sys.stdin.read(1)
-                            else:
-                                break
-        finally:
-            with contextlib.suppress(Exception):
-                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, orig_term)
-
-    listener = threading.Thread(target=_loop, name="SonoraPauseListener", daemon=True)
-    listener.start()
-    try:
-        yield
-    finally:
-        stop_event.set()
-        _PAUSE_EVENT.set()
-        listener.join(timeout=0.5)
 
 
 _SKIP_DIFF_FIELDS: frozenset[str] = frozenset(
@@ -250,22 +185,39 @@ def _enrich_musicbrainz(
                         if isinstance(date_str, str) and len(date_str) >= 4:
                             track_info.date = normalize_date(date_str)
 
-        if is_valid_uuid(track_info.musicbrainz_trackid):
+        # Batch lookup from pre-fetched album release details (zero network calls)
+        mb_rec = None
+        if album_mb_release_details:
+            tracks_by_pos = album_mb_release_details.get("tracks_by_position", {})
+            tracks_by_id = album_mb_release_details.get("tracks_by_mbid", {})
+            if (
+                isinstance(tracks_by_id, dict)
+                and track_info.musicbrainz_trackid in tracks_by_id
+            ):
+                mb_rec = tracks_by_id[track_info.musicbrainz_trackid]
+            elif (
+                isinstance(tracks_by_pos, dict)
+                and track_info.track_number in tracks_by_pos
+            ):
+                mb_rec = tracks_by_pos[track_info.track_number]
+
+        if not mb_rec and is_valid_uuid(track_info.musicbrainz_trackid):
             mb_rec = fetch_musicbrainz_recording_details(track_info.musicbrainz_trackid)
-            if mb_rec:
-                _apply_mapping(
-                    track_info,
-                    mb_rec,
-                    {
-                        "isrc": "isrc",
-                        "disambiguation": "disambiguation",
-                        "composer": "composer",
-                        "lyricist": "lyricist",
-                        "producers": "producers",
-                        "remixer": "remixer",
-                        "musicbrainz_workid": "musicbrainz_workid",
-                    },
-                )
+
+        if mb_rec and isinstance(mb_rec, dict):
+            _apply_mapping(
+                track_info,
+                mb_rec,
+                {
+                    "isrc": "isrc",
+                    "disambiguation": "disambiguation",
+                    "composer": "composer",
+                    "lyricist": "lyricist",
+                    "producers": "producers",
+                    "remixer": "remixer",
+                    "musicbrainz_workid": "musicbrainz_workid",
+                },
+            )
 
         if is_valid_uuid(track_info.musicbrainz_albumid):
             mb_rel = (
@@ -303,10 +255,27 @@ def _enrich_musicbrainz(
         LOG.debug(f"MusicBrainz enrichment failed for {track_info.title}: {error}")
 
 
-def _enrich_itunes(track_info: TrackInfo) -> None:
+def _enrich_itunes(
+    track_info: TrackInfo,
+    album_itunes_details: dict[str, Any] | None = None,
+) -> None:
     try:
-        data = fetch_itunes_track_metadata(track_info.artist, track_info.title)
-        if data:
+        data = None
+        if album_itunes_details:
+            t_by_num = album_itunes_details.get("tracks_by_number", {})
+            t_by_title = album_itunes_details.get("tracks_by_title", {})
+            if isinstance(t_by_num, dict) and track_info.track_number in t_by_num:
+                data = t_by_num[track_info.track_number]
+            elif (
+                isinstance(t_by_title, dict)
+                and normalize_str(track_info.title) in t_by_title
+            ):
+                data = t_by_title[normalize_str(track_info.title)]
+
+        if not data and (not track_info.genre or not track_info.advisory):
+            data = fetch_itunes_track_metadata(track_info.artist, track_info.title)
+
+        if data and isinstance(data, dict):
             _apply_mapping(
                 track_info,
                 data,
@@ -326,7 +295,7 @@ def _enrich_itunes(track_info: TrackInfo) -> None:
 
 
 def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
-    if not lastfm_api_key:
+    if not lastfm_api_key or track_info.genre:
         return
     try:
         tags = fetch_lastfm_tags(
@@ -453,7 +422,7 @@ def _enrich_deezer(
         album = album_deezer_details or fetch_deezer_album_details(
             track_info.artist, track_info.album
         )
-        if album:
+        if album and isinstance(album, dict):
             _apply_mapping(
                 track_info,
                 album,
@@ -465,9 +434,32 @@ def _enrich_deezer(
                 },
             )
 
-        track = fetch_deezer_track_details(track_info.artist, track_info.title)
-        if not track:
+        track: dict[str, Any] | None = None
+        if album and isinstance(album, dict):
+            t_by_pos: dict[Any, Any] = (
+                album.get("tracks_by_position", {})  # type: ignore[assignment]
+                if isinstance(album.get("tracks_by_position"), dict)
+                else {}
+            )
+            t_by_title: dict[Any, Any] = (
+                album.get("tracks_by_title", {})  # type: ignore[assignment]
+                if isinstance(album.get("tracks_by_title"), dict)
+                else {}
+            )
+            if isinstance(t_by_pos, dict) and track_info.track_number in t_by_pos:
+                track = t_by_pos[track_info.track_number]
+            elif (
+                isinstance(t_by_title, dict)
+                and normalize_str(track_info.title) in t_by_title
+            ):
+                track = t_by_title[normalize_str(track_info.title)]
+
+        if not track and (not track_info.isrc or not track_info.producers or force):
+            track = fetch_deezer_track_details(track_info.artist, track_info.title)
+
+        if not track or not isinstance(track, dict):
             return
+
         if track.get("featured_artists") and (not track_info.featured_artists or force):
             track_info.featured_artists = str(track["featured_artists"])
         if track.get("producers") and (not track_info.producers or force):
@@ -499,6 +491,9 @@ def _enrich_genius(
 ) -> None:
     if not genius_api_token:
         return
+    # Short-circuit if composer and producers are already populated (unless force)
+    if track_info.composer and track_info.producers and not force:
+        return
     try:
         genius_details = fetch_genius_song_details(
             track_info.artist, track_info.title, api_token=genius_api_token
@@ -524,7 +519,7 @@ def _enrich_genius(
         )
         if genius_details.get("writers") and not track_info.lyricist:
             track_info.lyricist = str(genius_details["writers"])
-        LOG.info("   ∟ 📝 [Genius] Fetched song details & credits")
+        LOG.debug("   ∟ 📝 [Genius] Fetched song details & credits")
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Genius enrichment failed for {track_info.title}: {error}")
 
@@ -692,8 +687,9 @@ def process_single_track(
     album_mb_release_details: dict[str, object] | None = None,
     album_discogs_release: dict[str, object] | None = None,
     album_deezer_details: dict[str, Any] | None = None,
+    album_itunes_details: dict[str, Any] | None = None,
 ) -> TrackInfo:
-    _wait_if_paused()
+    wait_if_paused()
     LOG.start_buffering()
     try:
         if not file_path.exists():
@@ -714,7 +710,7 @@ def process_single_track(
             album_mb_release_details,
             force=force,
         )
-        _enrich_itunes(track_info)
+        _enrich_itunes(track_info, album_itunes_details=album_itunes_details)
         _enrich_lastfm(track_info, lastfm_api_key)
         _enrich_discogs(track_info, discogs_user_token, album_discogs_release)
         _enrich_deezer(track_info, album_deezer_details, force=force)
@@ -744,12 +740,14 @@ def process_single_track(
         if diff_lines or force:
             if not dry_run:
                 write_track_metadata(track_info, cover_art_path=cover_image)
+                get_library_state().record_track_state(file_path, status="TAGGED_OK")
                 LOG.info(
                     f"   ∟ [green]✓[/] {file_path.name}: {len(diff_lines)} tag(s) updated.{''.join(diff_lines)}"
                 )
             else:
                 LOG.info(f"   ∟ [DRY-RUN] {file_path.name}{''.join(diff_lines)}")
         else:
+            get_library_state().record_track_state(file_path, status="TAGGED_OK")
             LOG.info(
                 f"   ∟ [bold dim]✨ SKIPPED:[/] [dim]{file_path.name}[/] [dim]is already perfect.[/]"
             )
@@ -784,6 +782,16 @@ def tag_album_folder(
     if not all_audio_files:
         return []
 
+    # Incremental state index check
+    state_mgr = get_library_state()
+    if not force:
+        outdated_files = set(state_mgr.filter_outdated_tracks(all_audio_files))
+        if not outdated_files:
+            LOG.info(
+                f"✨ All {len(all_audio_files)} tracks are already up to date in library state index."
+            )
+            return [read_track_metadata(f) for f in all_audio_files]
+
     # Group tracks by album folder (parent directory)
     album_groups: dict[Path, list[Path]] = {}
     for audio_file in all_audio_files:
@@ -794,36 +802,12 @@ def tag_album_folder(
 
     with create_progress() as progress:
         task = progress.add_task("[cyan]Tagging tracks...", total=len(all_audio_files))
-        pause_start_time: float | None = None
 
-        def _on_pause() -> None:
-            nonlocal pause_start_time
-            pause_start_time = progress.get_time()
-            progress.stop_task(task)
-            progress.update(
-                task,
-                description="[bold yellow]⏸️  PAUSED (Press [Space] or 'p' to resume)[/]",
-            )
-            progress.refresh()
-
-        def _on_resume() -> None:
-            nonlocal pause_start_time
-            if pause_start_time is not None:
-                pause_duration = progress.get_time() - pause_start_time
-                task_obj = progress._tasks.get(task)
-                if task_obj and task_obj.start_time is not None:
-                    task_obj.start_time += pause_duration
-                if task_obj:
-                    task_obj.stop_time = None
-                pause_start_time = None
-            progress.update(task, description="[cyan]Tagging tracks...")
-            progress.refresh()
-
-        with _interactive_pause_listener(on_pause=_on_pause, on_resume=_on_resume):
+        with interactive_pause_listener(progress, task):
             executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
                 for album_dir, audio_files in album_groups.items():
-                    _wait_if_paused()
+                    wait_if_paused()
                     folder_name = album_dir.name
                     LOG.force_info(
                         f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]"
@@ -835,12 +819,13 @@ def tag_album_folder(
                         read_cuesheet_content(cue_files[0]) if cue_files else None
                     )
 
-                    # Batch Optimization: Fetch entire album track MBIDs, release details, Deezer, and Discogs once per album
+                    # Batch Optimization: Fetch entire album track MBIDs, release details, Deezer, iTunes, and Discogs once per album
                     album_musicbrainz_id: str | None = None
                     album_track_mbids: dict[int, str] | None = None
                     album_mb_release_details: dict[str, object] | None = None
                     album_discogs_release: dict[str, object] | None = None
                     album_deezer_details: dict[str, Any] | None = None
+                    album_itunes_details: dict[str, Any] | None = None
 
                     try:
                         sample_meta = read_track_metadata(audio_files[0])
@@ -865,6 +850,11 @@ def tag_album_folder(
                             )
                             if deezer_info:
                                 album_deezer_details = deezer_info
+                            itunes_info = fetch_itunes_album_details(
+                                sample_artist, sample_album
+                            )
+                            if itunes_info:
+                                album_itunes_details = itunes_info
                             if discogs_user_token:
                                 discogs_info = search_discogs_release(
                                     sample_artist,
@@ -896,12 +886,13 @@ def tag_album_folder(
                             album_mb_release_details=album_mb_release_details,
                             album_discogs_release=album_discogs_release,
                             album_deezer_details=album_deezer_details,
+                            album_itunes_details=album_itunes_details,
                         ): audio_file
                         for audio_file in audio_files
                     }
 
                     for future in as_completed(future_to_file):
-                        _wait_if_paused()
+                        wait_if_paused()
                         audio_file = future_to_file[future]
                         try:
                             track_info = future.result()
@@ -920,7 +911,7 @@ def tag_album_folder(
                         progress.advance(task)
 
                     if fetch_replaygain:
-                        _wait_if_paused()
+                        wait_if_paused()
                         calculate_album_replaygain(
                             audio_files,
                             force=force,
@@ -929,7 +920,7 @@ def tag_album_folder(
                         )
 
                     if current_album_results:
-                        _wait_if_paused()
+                        wait_if_paused()
                         primary_artist = (
                             current_album_results[0].album_artist
                             or current_album_results[0].artist
