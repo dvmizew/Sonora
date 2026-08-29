@@ -14,7 +14,10 @@ from sonora.core.utils import (
     deduplicate_title_features,
     find_audio_files,
     find_companion_lyrics,
+    group_files_by_parent,
     normalize_str,
+    relocate_companion_lyrics,
+    safe_case_rename,
     sanitize_name,
 )
 
@@ -180,37 +183,9 @@ def rename_track_file(
 
         if not dry_run:
             try:
-                # Handle case-only rename safely across all filesystems
-                if (
-                    file_path.parent == new_path.parent
-                    and file_path.name.lower() == new_path.name.lower()
-                    and file_path.name != new_path.name
-                ):
-                    temporary_path = folder / f".tmp_{file_path.name}"
-                    file_path.rename(temporary_path)
-                    temporary_path.rename(new_path)
-                else:
-                    file_path.rename(new_path)
-
+                safe_case_rename(file_path, new_path)
                 LOG.info(f"   ∟ 🎵 [dim]{file_path.name}[/] -> [white]{new_name}[/]")
-
-                # Rename companion lyric files (.lrc)
-                for companion in companion_lyrics:
-                    if companion.exists():
-                        suffix = companion.name[len(file_path.stem) :]
-                        new_companion = folder / f"{new_path.stem}{suffix}"
-                        if not new_companion.exists():
-                            if (
-                                companion.name.lower() == new_companion.name.lower()
-                                and companion.name != new_companion.name
-                            ):
-                                tmp_lrc = folder / f".tmp_{companion.name}"
-                                companion.rename(tmp_lrc)
-                                tmp_lrc.rename(new_companion)
-                            else:
-                                companion.rename(new_companion)
-                        else:
-                            companion.unlink(missing_ok=True)
+                relocate_companion_lyrics(file_path, new_path, dry_run=False)
             except (OSError, ValueError, RuntimeError) as error:
                 LOG.warning(f"Failed to rename file {file_path.name}: {error}")
         else:
@@ -248,16 +223,7 @@ def rename_album_folder(
 
         if not dry_run:
             try:
-                # Safe case-only directory rename
-                if (
-                    folder_path.name.lower() == new_folder.name.lower()
-                    and folder_path.name != new_folder.name
-                ):
-                    tmp_folder = folder_path.with_name(f".tmp_{folder_path.name}")
-                    folder_path.rename(tmp_folder)
-                    tmp_folder.rename(new_folder)
-                else:
-                    folder_path.rename(new_folder)
+                safe_case_rename(folder_path, new_folder)
                 LOG.info(
                     f"   ∟ 📂 Album folder renamed: [dim]{folder_now}[/] -> [cyan]{expected_name}[/]"
                 )
@@ -288,11 +254,9 @@ def rename_directory_files(dir_path: Path, dry_run: bool = False) -> list[Path]:
         raise FileNotFoundError(f"Directory not found: {dir_path}")
 
     renamed: list[Path] = []
-    folder_files: dict[Path, list[Path]] = {}
-    total_files_count = 0
-    for path in find_audio_files(dir_path, recursive=True):
-        folder_files.setdefault(path.parent, []).append(path)
-        total_files_count += 1
+    all_audio_files = find_audio_files(dir_path, recursive=True)
+    total_files_count = len(all_audio_files)
+    folder_files = group_files_by_parent(all_audio_files)
 
     global LAST_RENAME_REPORT
     report = RenameReport(total_files=total_files_count)

@@ -13,7 +13,9 @@ from sonora.core.utils import (
     find_audio_files,
     find_companion_lyrics,
     get_primary_artist,
+    group_files_by_parent,
     normalize_str,
+    relocate_companion_lyrics,
     sanitize_name,
 )
 
@@ -77,11 +79,7 @@ def organize_library_singles(
     if not all_audio_files:
         return 0
 
-    # Group tracks by directory to evaluate folder types in a single pass
-    folder_files: dict[Path, list[Path]] = {}
-    for path in all_audio_files:
-        folder_files.setdefault(path.parent, []).append(path)
-
+    folder_files = group_files_by_parent(all_audio_files)
     album_fingerprints: set[str] = set()
     singles_to_process: list[tuple[Path, TrackInfo]] = []
 
@@ -192,16 +190,7 @@ def organize_library_singles(
             else:
                 LOG.info(f"[DRY-RUN] Would move {path.name} -> {target_file}")
 
-            for companion in find_companion_lyrics(path):
-                suffix = companion.name[len(path.stem) :]
-                target_companion = target_file.parent / f"{target_file.stem}{suffix}"
-                if not target_companion.exists():
-                    if not dry_run:
-                        shutil.move(str(companion), str(target_companion))
-                    else:
-                        LOG.info(
-                            f"[DRY-RUN] Would move lyrics {companion.name} -> {target_companion}"
-                        )
+            relocate_companion_lyrics(path, target_file, dry_run=dry_run)
 
             moved_count += 1
             LAST_ORGANIZED_COUNT = moved_count

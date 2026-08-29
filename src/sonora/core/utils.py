@@ -4,6 +4,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import TypeGuard
@@ -155,6 +156,17 @@ def _load_user_overrides() -> dict[str, str]:
     return overrides
 
 
+def _ensure_musicbrainz_init() -> None:
+    try:
+        from sonora import __version__
+
+        musicbrainzngs.set_useragent(
+            "Sonora", __version__, "https://github.com/dvmizew/Sonora"
+        )
+    except (OSError, ValueError, RuntimeError, musicbrainzngs.MusicBrainzError):
+        pass
+
+
 @lru_cache(maxsize=4096)
 def resolve_artist_name(raw_name: str | None) -> str:
     """
@@ -180,13 +192,14 @@ def resolve_artist_name(raw_name: str | None) -> str:
     if isinstance(cached, str):
         return cached
 
+    _ensure_musicbrainz_init()
+
     # Tier 3: MusicBrainz Alias / Legal Name lookup
     try:
         res = musicbrainzngs.search_artists(
             query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
         )
         artists = res.get("artist-list", [])
-        # Pass 1: Prioritize exact artist name matches across all results
         clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
         for artist in artists:
             art_name = str(artist.get("name", "")).strip()
@@ -202,7 +215,6 @@ def resolve_artist_name(raw_name: str | None) -> str:
                 set_cached_api(cache_key, art_name)
                 return art_name
 
-        # Pass 2: Check alias-list only if no direct artist name matched
         for artist in artists:
             art_name = str(artist.get("name", "")).strip()
             if not art_name:
@@ -214,12 +226,8 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     else str(alias_item)
                 )
                 if alias_name and normalize_str(alias_name) == normalized:
-                    cand_has_punct = bool(re.search(r"[^\w\s]", art_name))
-                    if not clean_has_punct and cand_has_punct:
-                        continue
                     set_cached_api(cache_key, art_name)
                     return art_name
-            # Fallback for MusicBrainz WS/2 search summaries that omit alias-list
             score = int(artist.get("ext:score", 0))
             artist_id = str(artist.get("id", "")).strip()
             if score >= 95 and is_valid_uuid(artist_id):
@@ -266,6 +274,13 @@ def resolve_artist_name(raw_name: str | None) -> str:
             if data and isinstance(data, list):
                 deezer_name = str(data[0].get("name", "")).strip()
                 if deezer_name and normalize_str(deezer_name) == normalized:
+                    # Do not override all-caps acronyms (e.g. M.G.L) with lowercased titles
+                    if (
+                        clean_name.isupper()
+                        and not deezer_name.isupper()
+                        and len(clean_name.replace(".", "")) <= 5
+                    ):
+                        deezer_name = clean_name
                     set_cached_api(cache_key, deezer_name)
                     return deezer_name
     except (httpx.HTTPError, OSError, ValueError, RuntimeError):
@@ -305,16 +320,23 @@ def is_single_group_artist(raw_name: str | None) -> bool:
     if isinstance(cached, bool):
         return cached
 
+    _ensure_musicbrainz_init()
+
+    # Format query ensuring spacing around delimiters like '&'
+    query_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", clean_name).strip()
+
     try:
-        res = musicbrainzngs.search_artists(query=f'artist:"{clean_name}"', limit=3)
+        res = musicbrainzngs.search_artists(query=f'artist:"{query_name}"', limit=5)
         artist_list = res.get("artist-list", [])
         for artist in artist_list:
             name_match = normalize_str(artist.get("name")) == normalized
             score = int(artist.get("ext:score", 0))
             artist_type = artist.get("type")
-            if name_match and (score >= 95 or artist_type == "Group"):
+            if name_match and (score >= 90 or artist_type == "Group"):
                 set_cached_api(cache_key, True)
                 return True
+        set_cached_api(cache_key, False)
+        return False
     except (
         httpx.HTTPError,
         OSError,
@@ -322,10 +344,7 @@ def is_single_group_artist(raw_name: str | None) -> bool:
         RuntimeError,
         musicbrainzngs.MusicBrainzError,
     ):
-        pass
-
-    set_cached_api(cache_key, False)
-    return False
+        return False
 
 
 def get_primary_artist(artist_name: str | None) -> str:
@@ -441,7 +460,7 @@ def match_score(
 ) -> float:
     """
     Calculate a combined 0-100 similarity score between query (artist, title)
-    and candidate (artist, title) using RapidFuzz WRatio and ratio with version penalties.
+    and candidate (artist, title) using RapidFuzz WRatio and ratio with version and series penalties.
     """
     if not query_title or not candidate_title:
         return 0.0
@@ -450,6 +469,16 @@ def match_score(
     candidate_artist_clean = clean_title(candidate_artist).lower()
     query_title_clean = clean_title(query_title).lower()
     candidate_title_clean = clean_title(candidate_title).lower()
+
+    # Reject series mismatches (e.g. Vol. 1 vs Vol. 2 or Part 1 vs Part 3)
+    q_series = extract_series_number(query_title)
+    c_series = extract_series_number(candidate_title)
+    if q_series is not None and c_series is not None and q_series != c_series:
+        return 0.0
+    if (q_series is not None) != (c_series is not None) and max(
+        q_series or 0, c_series or 0
+    ) > 1:
+        return 0.0
 
     if query_title_clean == candidate_title_clean:
         title_score = 100.0
@@ -461,10 +490,17 @@ def match_score(
         else:
             title_score = max(title_wratio, title_ratio)
 
-    if not is_version_or_remix(query_title_clean) and is_version_or_remix(
+    q_ver = is_version_or_remix(query_title) or is_version_or_remix(query_title_clean)
+    c_ver = is_version_or_remix(candidate_title) or is_version_or_remix(
         candidate_title_clean
-    ):
+    )
+    if q_ver != c_ver:
         title_score -= 35.0
+    elif q_ver and c_ver:
+        for kw in _VERSION_OR_REMIX_KEYWORDS:
+            if (kw in query_title_clean) != (kw in candidate_title_clean):
+                title_score -= 35.0
+                break
 
     title_score = max(0.0, min(100.0, title_score))
 
@@ -691,3 +727,54 @@ def find_companion_lyrics(audio_file: Path) -> list[Path]:
         if candidate.exists() and candidate.is_file():
             results.append(candidate)
     return results
+
+
+def group_files_by_parent(files: Sequence[Path]) -> dict[Path, list[Path]]:
+    grouped: dict[Path, list[Path]] = {}
+    for file_path in files:
+        grouped.setdefault(file_path.parent, []).append(file_path)
+    return grouped
+
+
+def safe_case_rename(src: Path, dst: Path) -> Path:
+    """
+    Safely rename a file or directory across all platforms, including case-only renames
+    on case-insensitive filesystems (NTFS, FAT32, exFAT, APFS).
+    """
+    if src.resolve() == dst.resolve() and src.name == dst.name:
+        return src
+
+    if (
+        src.parent == dst.parent
+        and src.name.lower() == dst.name.lower()
+        and src.name != dst.name
+    ):
+        tmp_name = src.parent / f".tmp_{src.name}"
+        src.rename(tmp_name)
+        tmp_name.rename(dst)
+    else:
+        src.rename(dst)
+    return dst
+
+
+def relocate_companion_lyrics(
+    src_audio: Path, dst_audio: Path, dry_run: bool = False
+) -> list[Path]:
+    """
+    Move or rename all companion lyric files (.lrc) alongside an audio file to match the new audio location/stem.
+    """
+    moved_lyrics: list[Path] = []
+    for companion in find_companion_lyrics(src_audio):
+        if not companion.exists():
+            continue
+        suffix = companion.name[len(src_audio.stem) :]
+        target_companion = dst_audio.parent / f"{dst_audio.stem}{suffix}"
+        if target_companion.exists() and target_companion != companion:
+            if not dry_run:
+                companion.unlink(missing_ok=True)
+            continue
+
+        if not dry_run:
+            safe_case_rename(companion, target_companion)
+        moved_lyrics.append(target_companion)
+    return moved_lyrics

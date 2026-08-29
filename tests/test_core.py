@@ -11,10 +11,13 @@ from sonora.core.utils import (
     clean_title,
     deduplicate_title_features,
     get_primary_artist,
+    group_files_by_parent,
     is_single_group_artist,
     is_valid_uuid,
     normalize_genre,
     normalize_str,
+    relocate_companion_lyrics,
+    safe_case_rename,
     sanitize_name,
 )
 
@@ -43,11 +46,23 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(normalize_str("   "), "")
         self.assertEqual(normalize_str("A$AP Rocky!"), "asap rocky")
         self.assertEqual(normalize_str("Beyoncé - Nöél"), "beyonce noel")
+        self.assertEqual(normalize_str("Nimeni Altu'"), "nimeni altu")
+        self.assertEqual(normalize_str("Satra B.E.N.Z."), "satra b e n z")
+        self.assertEqual(normalize_str("O.$.O.D. IV"), "o s o d iv")
+        self.assertEqual(normalize_str("M.G.L."), "m g l")
+        self.assertEqual(normalize_str("DEBANDADĂ FAC"), "debandada fac")
+        self.assertEqual(normalize_str("Nopți prea lungi"), "nopti prea lungi")
 
     def test_sanitize_name_complex_edge_cases(self):
         self.assertEqual(sanitize_name("Artist / Title <HQ>:"), "Artist _ Title HQ")
         self.assertEqual(sanitize_name("CON"), "CON_")
         self.assertEqual(sanitize_name("NUL"), "NUL_")
+        self.assertEqual(sanitize_name("Nimeni Altu'"), "Nimeni Altu'")
+        self.assertEqual(sanitize_name("M.G.L."), "M.G.L")
+        self.assertEqual(
+            sanitize_name("Satra B.E.N.Z. - O.$.O.D. IV"),
+            "Satra B.E.N.Z. - O.$.O.D. IV",
+        )
 
     def test_is_valid_uuid(self):
         self.assertTrue(is_valid_uuid("c8b03190-306c-4125-9b32-3f9d86d60a12"))
@@ -68,12 +83,16 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(extract_series_number("Savage Mode 2"), 2)
         self.assertEqual(extract_series_number("Part 3"), 3)
         self.assertEqual(extract_series_number("Vol. 4"), 4)
+        self.assertEqual(extract_series_number("O.$.O.D. 2"), 2)
 
         # Roman numerals
         self.assertEqual(extract_series_number("Savage Mode II"), 2)
         self.assertEqual(extract_series_number("Act IV"), 4)
+        self.assertEqual(extract_series_number("O.$.O.D. IV"), 4)
         self.assertEqual(extract_series_number("Chapter IX"), 9)
         self.assertEqual(extract_series_number("Volume XIV"), 14)
+        self.assertEqual(extract_series_number("Rapocalipsa I"), 1)
+        self.assertEqual(extract_series_number("Supertras III"), 3)
         self.assertEqual(extract_series_number("Part XX"), 20)
 
         # Number words (1..20)
@@ -145,6 +164,59 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(normalize_genre(""))
         self.assertIsNone(normalize_genre(None))
 
+    def test_match_score_series_and_version_disambiguation(self):
+        from sonora.core.utils import match_score
+
+        # Series volumes must never match each other
+        self.assertEqual(
+            match_score(
+                "B.U.G. Mafia",
+                "Viața noastră vol. 1",
+                "B.U.G. Mafia",
+                "Viața noastră vol. 2",
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            match_score("Chase Atlantic", "Part One", "Chase Atlantic", "Part Two"),
+            0.0,
+        )
+
+        # Versions vs originals
+        self.assertEqual(
+            match_score(
+                "Deliric",
+                "Deliric X Silent Strike (Instrumentals)",
+                "Deliric",
+                "Deliric X Silent Strike",
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            match_score(
+                "Dennis Lloyd",
+                "Alien (Acoustic)",
+                "Dennis Lloyd",
+                "Alien (Topic Remix)",
+            ),
+            0.0,
+        )
+        self.assertGreaterEqual(
+            match_score(
+                "Dennis Lloyd", "Alien (Acoustic)", "Dennis Lloyd", "Alien Acoustic"
+            ),
+            90.0,
+        )
+        self.assertGreaterEqual(
+            match_score(
+                "B.U.G. Mafia",
+                "Viața noastră vol. 1",
+                "B.U.G. Mafia",
+                "Viața Noastră, Vol. 1",
+            ),
+            90.0,
+        )
+
     @patch("sonora.core.utils.musicbrainzngs.search_artists")
     def test_is_single_group_artist(self, mock_search):
         is_single_group_artist.cache_clear()
@@ -183,13 +255,81 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(get_primary_artist("Above & Beyond"), "Above & Beyond")
 
         is_single_group_artist.cache_clear()
+        mock_search.return_value = {
+            "artist-list": [
+                {
+                    "name": "Alan & Kepa",
+                    "type": "Group",
+                    "ext:score": "100",
+                }
+            ]
+        }
+        self.assertEqual(get_primary_artist("Alan & Kepa"), "Alan & Kepa")
+
+        is_single_group_artist.cache_clear()
+        mock_search.return_value = {
+            "artist-list": [
+                {
+                    "name": "Play & Win",
+                    "type": "Group",
+                    "ext:score": "100",
+                }
+            ]
+        }
+        self.assertEqual(get_primary_artist("Play & Win"), "Play & Win")
+        self.assertEqual(get_primary_artist("Play&Win"), "Play & Win")
+
+        is_single_group_artist.cache_clear()
+        mock_search.return_value = {
+            "artist-list": [
+                {
+                    "name": "Simon & Garfunkel",
+                    "type": "Group",
+                    "ext:score": "100",
+                }
+            ]
+        }
+        self.assertEqual(get_primary_artist("Simon & Garfunkel"), "Simon & Garfunkel")
+
+        is_single_group_artist.cache_clear()
         mock_search.return_value = {"artist-list": []}
         self.assertEqual(
             get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
         )
         self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
+        self.assertEqual(get_primary_artist("Samurai & El Nino"), "Samurai")
         self.assertEqual(get_primary_artist(""), "Unknown")
         self.assertEqual(get_primary_artist(None), "Unknown")
+
+    def test_group_files_by_parent(self):
+        f1 = Path("/tmp/album1/01.flac")
+        f2 = Path("/tmp/album1/02.flac")
+        f3 = Path("/tmp/album2/01.flac")
+        grouped = group_files_by_parent([f1, f2, f3])
+        self.assertEqual(len(grouped), 2)
+        self.assertEqual(grouped[Path("/tmp/album1")], [f1, f2])
+        self.assertEqual(grouped[Path("/tmp/album2")], [f3])
+
+    def test_safe_case_rename_and_relocate_companion_lyrics(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            audio = tmp_path / "Song.flac"
+            audio.write_bytes(b"audio")
+            lrc = tmp_path / "Song.lrc"
+            lrc.write_text("[00:01.00] test", encoding="utf-8")
+
+            target_audio = tmp_path / "01 - Song.flac"
+            safe_case_rename(audio, target_audio)
+            self.assertTrue(target_audio.exists())
+            self.assertFalse(audio.exists())
+
+            moved_lyrics = relocate_companion_lyrics(audio, target_audio)
+            self.assertEqual(len(moved_lyrics), 1)
+            target_lrc = tmp_path / "01 - Song.lrc"
+            self.assertTrue(target_lrc.exists())
+            self.assertFalse(lrc.exists())
 
 
 class TestCoreModels(unittest.TestCase):

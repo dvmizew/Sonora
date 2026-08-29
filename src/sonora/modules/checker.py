@@ -165,47 +165,25 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             issues.append("Missing REPLAYGAIN_TRACK_GAIN tag.")
         if track.replaygain_track_peak is None:
             issues.append("Missing REPLAYGAIN_TRACK_PEAK tag.")
-        if not track.musicbrainz_trackid:
-            issues.append("Missing MUSICBRAINZ_TRACKID tag.")
-        elif not is_valid_uuid(track.musicbrainz_trackid, allow_multivalue=True):
-            issues.append(
-                f"Invalid UUID format in MUSICBRAINZ_TRACKID: '{track.musicbrainz_trackid}'"
-            )
+        for field_name, tag_label in [
+            ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID"),
+            ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID"),
+        ]:
+            val = getattr(track, field_name)
+            if not val:
+                issues.append(f"Missing {tag_label} tag.")
+            elif not is_valid_uuid(val, allow_multivalue=True):
+                issues.append(f"Invalid UUID format in {tag_label}: '{val}'")
 
-        if not track.musicbrainz_albumid:
-            issues.append("Missing MUSICBRAINZ_ALBUMID tag.")
-        elif not is_valid_uuid(track.musicbrainz_albumid, allow_multivalue=True):
-            issues.append(
-                f"Invalid UUID format in MUSICBRAINZ_ALBUMID: '{track.musicbrainz_albumid}'"
-            )
-
-        if track.musicbrainz_artistid and not is_valid_uuid(
-            track.musicbrainz_artistid, allow_multivalue=True
-        ):
-            issues.append(
-                f"Invalid UUID format in MUSICBRAINZ_ARTISTID: '{track.musicbrainz_artistid}'"
-            )
-
-        if track.musicbrainz_albumartistid and not is_valid_uuid(
-            track.musicbrainz_albumartistid, allow_multivalue=True
-        ):
-            issues.append(
-                f"Invalid UUID format in MUSICBRAINZ_ALBUMARTISTID: '{track.musicbrainz_albumartistid}'"
-            )
-
-        if track.musicbrainz_releasegroupid and not is_valid_uuid(
-            track.musicbrainz_releasegroupid, allow_multivalue=True
-        ):
-            issues.append(
-                f"Invalid UUID format in MUSICBRAINZ_RELEASEGROUPID: '{track.musicbrainz_releasegroupid}'"
-            )
-
-        if track.musicbrainz_workid and not is_valid_uuid(
-            track.musicbrainz_workid, allow_multivalue=True
-        ):
-            issues.append(
-                f"Invalid UUID format in MUSICBRAINZ_WORKID: '{track.musicbrainz_workid}'"
-            )
+        for field_name, tag_label in [
+            ("musicbrainz_artistid", "MUSICBRAINZ_ARTISTID"),
+            ("musicbrainz_albumartistid", "MUSICBRAINZ_ALBUMARTISTID"),
+            ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID"),
+            ("musicbrainz_workid", "MUSICBRAINZ_WORKID"),
+        ]:
+            val = getattr(track, field_name)
+            if val and not is_valid_uuid(val, allow_multivalue=True):
+                issues.append(f"Invalid UUID format in {tag_label}: '{val}'")
 
         if track.art_width and (
             track.art_width < 500 or (track.art_height and track.art_height < 500)

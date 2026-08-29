@@ -23,6 +23,7 @@ from sonora.core.models import TrackInfo
 from sonora.core.state import get_library_state
 from sonora.core.utils import (
     find_audio_files,
+    group_files_by_parent,
     is_valid_uuid,
     normalize_date,
     normalize_genre,
@@ -793,9 +794,7 @@ def tag_album_folder(
             return [read_track_metadata(f) for f in all_audio_files]
 
     # Group tracks by album folder (parent directory)
-    album_groups: dict[Path, list[Path]] = {}
-    for audio_file in all_audio_files:
-        album_groups.setdefault(audio_file.parent, []).append(audio_file)
+    album_groups = group_files_by_parent(all_audio_files)
 
     results: list[TrackInfo] = []
     current_album_results: list[TrackInfo] = []
