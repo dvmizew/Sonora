@@ -26,6 +26,7 @@ class LibraryStateManager:
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA temp_store=MEMORY;")
             with conn:
                 yield conn
         finally:
@@ -100,20 +101,21 @@ class LibraryStateManager:
 
         try:
             with _STATE_LOCK, self._connection() as conn:
-                # Query in batches of 900 to stay well under SQLite parameter limits
-                chunk_size = 900
-                resolved_keys = list(path_to_stat.keys())
+                resolved_keys = [(k,) for k in path_to_stat]
                 state_map: dict[str, tuple[int, int, str]] = {}
 
-                for i in range(0, len(resolved_keys), chunk_size):
-                    chunk = resolved_keys[i : i + chunk_size]
-                    placeholders = ",".join("?" for _ in chunk)
-                    cursor = conn.execute(
-                        f"SELECT file_path, mtime_ns, file_size, status FROM track_state WHERE file_path IN ({placeholders});",
-                        chunk,
-                    )
-                    for row in cursor.fetchall():
-                        state_map[row[0]] = (row[1], row[2], row[3])
+                conn.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _batch_paths (path TEXT PRIMARY KEY);"
+                )
+                conn.execute("DELETE FROM _batch_paths;")
+                conn.executemany(
+                    "INSERT INTO _batch_paths (path) VALUES (?);", resolved_keys
+                )
+                cursor = conn.execute(
+                    "SELECT t.file_path, t.mtime_ns, t.file_size, t.status FROM track_state t INNER JOIN _batch_paths b ON t.file_path = b.path;"
+                )
+                for row in cursor.fetchall():
+                    state_map[row[0]] = (row[1], row[2], row[3])
 
                 for path_str, (
                     orig_path,
