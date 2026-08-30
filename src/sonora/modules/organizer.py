@@ -1,4 +1,5 @@
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from sonora.audio.metadata import read_track_metadata
@@ -57,7 +58,10 @@ def get_last_organized_count() -> int:
 
 
 def organize_library_singles(
-    source_dir: Path, target_singles_dir: Path, dry_run: bool = False
+    source_dir: Path,
+    target_singles_dir: Path,
+    dry_run: bool = False,
+    max_threads: int = 4,
 ) -> int:
     """
     Scan source_dir, detect single tracks, and move them to target_singles_dir
@@ -83,47 +87,71 @@ def organize_library_singles(
     album_fingerprints: set[str] = set()
     singles_to_process: list[tuple[Path, TrackInfo]] = []
 
+    def _read_file_info(f_path: Path) -> tuple[Path, TrackInfo | None]:
+        try:
+            return f_path, read_track_metadata(f_path)
+        except (OSError, ValueError, RuntimeError) as err:
+            LOG.warning(f"Failed to read metadata for {f_path}: {err}")
+            return f_path, None
+
     with create_progress() as progress:
         task = progress.add_task(
             "[cyan]Organizing single tracks...", total=len(all_audio_files)
         )
         with interactive_pause_listener(progress, task):
-            for folder, files in folder_files.items():
-                wait_if_paused()
-                is_single = len(files) <= 2 or "singles" in (
-                    p.lower() for p in folder.parts
-                )
-                folder_track_infos: list[tuple[Path, TrackInfo]] = []
-                albums_in_folder: set[str] = set()
-
-                for path in files:
+            executor = ThreadPoolExecutor(max_workers=max_threads)
+            try:
+                for folder, files in folder_files.items():
                     wait_if_paused()
-                    try:
-                        info = read_track_metadata(path)
-                        folder_track_infos.append((path, info))
-                        if info.album and info.album.lower() not in [
-                            "singles",
-                            "unknown album",
-                            "unknown",
-                        ]:
-                            albums_in_folder.add(normalize_str(info.album))
-                    except (OSError, ValueError, RuntimeError) as error:
-                        LOG.warning(f"Failed to read metadata for {path}: {error}")
-                    progress.advance(task)
+                    is_single = len(files) <= 2 or "singles" in (
+                        p.lower() for p in folder.parts
+                    )
+                    folder_track_infos: list[tuple[Path, TrackInfo]] = []
+                    albums_in_folder: set[str] = set()
 
-                if not is_single and len(albums_in_folder) > 1:
-                    is_single = True
+                    if max_threads > 1 and len(files) > 1:
+                        futures = [executor.submit(_read_file_info, p) for p in files]
+                        for fut in as_completed(futures):
+                            wait_if_paused()
+                            p, info = fut.result()
+                            if info is not None:
+                                folder_track_infos.append((p, info))
+                                if info.album and info.album.lower() not in [
+                                    "singles",
+                                    "unknown album",
+                                    "unknown",
+                                ]:
+                                    albums_in_folder.add(normalize_str(info.album))
+                            progress.advance(task)
+                    else:
+                        for path in files:
+                            wait_if_paused()
+                            p, info = _read_file_info(path)
+                            if info is not None:
+                                folder_track_infos.append((p, info))
+                                if info.album and info.album.lower() not in [
+                                    "singles",
+                                    "unknown album",
+                                    "unknown",
+                                ]:
+                                    albums_in_folder.add(normalize_str(info.album))
+                            progress.advance(task)
 
-                if is_single:
-                    for path, info in folder_track_infos:
-                        singles_to_process.append((path, info))
-                else:
-                    for _path, info in folder_track_infos:
-                        primary_artist_key = get_primary_artist(info.artist).lower()
-                        track_identity_key = (
-                            f"{primary_artist_key} - {info.title.lower()}"
-                        )
-                        album_fingerprints.add(track_identity_key)
+                    if not is_single and len(albums_in_folder) > 1:
+                        is_single = True
+
+                    if is_single:
+                        for path, info in folder_track_infos:
+                            singles_to_process.append((path, info))
+                    else:
+                        for _path, info in folder_track_infos:
+                            primary_artist_key = get_primary_artist(info.artist).lower()
+                            track_identity_key = (
+                                f"{primary_artist_key} - {info.title.lower()}"
+                            )
+                            album_fingerprints.add(track_identity_key)
+            finally:
+                executor.shutdown(wait=False)
 
     # Process and move collected singles (with deduplication against album tracks)
     for path, track_info in singles_to_process:

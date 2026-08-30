@@ -661,6 +661,13 @@ def organize(
             help="Simulate actions without modifying files on disk",
         ),
     ] = False,
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of worker threads (default: 4)",
+        ),
+    ] = 4,
     json_report: Annotated[
         Path | None,
         Parameter(
@@ -677,7 +684,7 @@ def organize(
     interrupted = False
     try:
         organized_count = organize_library_singles(
-            path, destination_directory, dry_run=dry_run
+            path, destination_directory, dry_run=dry_run, max_threads=threads
         )
     except KeyboardInterrupt:
         interrupted = True

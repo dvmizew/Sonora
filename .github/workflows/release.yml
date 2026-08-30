@@ -48,6 +48,7 @@ jobs:
             --collect-all taglib \
             --collect-all scipy \
             --collect-all rich \
+            --collect-all anyascii \
             src/sonora/cli/main.py
 
       - name: Upload build artifact

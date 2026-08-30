@@ -623,7 +623,22 @@ def normalize_str(text: str | None) -> str:
     if not text:
         return ""
     fixed_text = ftfy.fix_text(str(text)).replace("$", "s").replace("_", " ")
-    ascii_text = anyascii.anyascii(fixed_text)
+    try:
+        ascii_text = anyascii.anyascii(fixed_text)
+    except (
+        ImportError,
+        ModuleNotFoundError,
+        KeyError,
+        AttributeError,
+        TypeError,
+        ValueError,
+        OSError,
+    ):
+        ascii_text = (
+            unicodedata.normalize("NFKD", fixed_text)
+            .encode("ASCII", "ignore")
+            .decode("ASCII")
+        )
     cleaned_text = "".join(
         char
         for char in unicodedata.normalize("NFD", ascii_text.lower())
