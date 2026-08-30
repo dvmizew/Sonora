@@ -559,6 +559,13 @@ def rename(
         Path,
         Parameter(help="Directory containing audio files to rename"),
     ],
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of threads for parallel processing",
+        ),
+    ] = 4,
     dry_run: Annotated[
         bool,
         Parameter(
@@ -580,7 +587,7 @@ def rename(
     LOG.info(f"Renaming files in directory: [bold]{path}[/bold]")
     interrupted = False
     try:
-        rename_directory_files(path, dry_run=dry_run)
+        rename_directory_files(path, dry_run=dry_run, max_threads=threads)
         report = get_last_rename_report()
     except KeyboardInterrupt:
         interrupted = True

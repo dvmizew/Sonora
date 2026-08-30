@@ -2,6 +2,8 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from rich.markup import escape
+
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.logger import (
     LOG,
@@ -11,6 +13,7 @@ from sonora.core.logger import (
 )
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    deduplicate_title_features,
     find_audio_files,
     find_companion_lyrics,
     get_primary_artist,
@@ -24,11 +27,14 @@ from sonora.core.utils import (
 def is_single_folder(folder_path: Path) -> bool:
     """
     Determine if a folder contains standalone single tracks vs a full album.
-    A folder is treated as a Single folder if it has <= 2 audio files or
-    if audio files come from different albums.
+    A folder is treated as a Single folder if it is in Singles, has <= 2 audio files,
+    or if audio files come from different albums.
     """
     if not folder_path.exists() or not folder_path.is_dir():
         return False
+
+    if "singles" in (p.lower() for p in folder_path.parts):
+        return True
 
     audio_files = find_audio_files(folder_path, recursive=False)
     if not audio_files:
@@ -153,28 +159,38 @@ def organize_library_singles(
             finally:
                 executor.shutdown(wait=False)
 
-    # Process and move collected singles (with deduplication against album tracks)
+    seen_single_fingerprints: set[str] = set()
+
+    # Process and move collected singles (with deduplication against album tracks and duplicate singles)
     for path, track_info in singles_to_process:
         primary_artist = get_primary_artist(track_info.artist)
-        primary_artist_key = primary_artist.lower()
-        track_identity_key = f"{primary_artist_key} - {track_info.title.lower()}"
+        clean_title = deduplicate_title_features(track_info.title)
+        primary_artist_key = normalize_str(primary_artist)
+        track_identity_key = f"{primary_artist_key} - {normalize_str(clean_title)}"
 
-        # Deduplicate: if an identical track exists inside a full album, remove the single
-        if track_identity_key in album_fingerprints:
+        # Deduplicate: if an identical track exists inside a full album or another single, remove the duplicate
+        if (
+            track_identity_key in album_fingerprints
+            or track_identity_key in seen_single_fingerprints
+        ):
             if not dry_run:
                 try:
                     path.unlink(missing_ok=True)
                     for companion in find_companion_lyrics(path):
                         companion.unlink(missing_ok=True)
-                    LOG.info(f"   ∟ 🗑️ Removed duplicate single: {track_identity_key}")
+                    LOG.info(
+                        f"   ∟ 🗑️ Removed duplicate single: {escape(track_identity_key)}"
+                    )
                 except OSError as error:
                     LOG.debug(f"Failed to remove duplicate single {path}: {error}")
             else:
                 LOG.info(
-                    f"[DRY-RUN] Would remove duplicate single: {track_identity_key}"
+                    f"[DRY-RUN] Would remove duplicate single: {escape(track_identity_key)}"
                 )
             removed_dupes += 1
             continue
+
+        seen_single_fingerprints.add(track_identity_key)
 
         single_folder_name = sanitize_name(f"{primary_artist} - {track_info.title}")
         primary_artist_clean = sanitize_name(primary_artist)
@@ -182,7 +198,7 @@ def organize_library_singles(
         if target_singles_dir and target_singles_dir != source_dir / "Singles":
             base_parent = target_singles_dir
         elif source_dir.name.lower() == primary_artist_clean.lower():
-            base_parent = source_dir
+            base_parent = source_dir / "Singles"
         else:
             try:
                 subdirs = [
@@ -191,11 +207,11 @@ def organize_library_singles(
                     if p.is_dir() and not p.name.startswith(".")
                 ]
                 if len(subdirs) > 5 and any(" - " not in p.name for p in subdirs):
-                    base_parent = source_dir / primary_artist_clean
+                    base_parent = source_dir / primary_artist_clean / "Singles"
                 else:
-                    base_parent = source_dir
+                    base_parent = source_dir / "Singles"
             except OSError:
-                base_parent = source_dir
+                base_parent = source_dir / "Singles"
 
         single_folder = base_parent / single_folder_name
         if not dry_run:
@@ -205,52 +221,51 @@ def organize_library_singles(
             single_folder / f"01 - {sanitize_name(track_info.title)}{path.suffix}"
         )
 
-        # Handle destination collisions cleanly
-        if path.resolve() != target_file.resolve():
-            if target_file.exists():
-                try:
-                    if target_file.stat().st_size == path.stat().st_size:
-                        if not dry_run:
-                            path.unlink(missing_ok=True)
-                            for companion in find_companion_lyrics(path):
-                                companion.unlink(missing_ok=True)
-                        removed_dupes += 1
-                        continue
-                    else:
-                        counter = 2
-                        base_stem = f"01 - {sanitize_name(track_info.title)}"
-                        while target_file.exists():
-                            target_file = (
-                                single_folder / f"{base_stem} ({counter}){path.suffix}"
-                            )
-                            counter += 1
-                except OSError:
-                    pass
-
+        # Handle destination collisions cleanly (remove redundant duplicate single if target already exists)
+        if path.resolve() != target_file.resolve() and target_file.exists():
             if not dry_run:
-                # Also move companion artwork from old single folder if changing folders
-                if path.parent != single_folder:
-                    for art_name in [
-                        "cover.jpg",
-                        "cover.png",
-                        "folder.jpg",
-                        "front.jpg",
-                    ]:
-                        old_art = path.parent / art_name
-                        new_art = single_folder / art_name
-                        if old_art.exists() and not new_art.exists():
-                            try:
-                                shutil.move(str(old_art), str(new_art))
-                            except OSError:
-                                pass
-                shutil.move(str(path), str(target_file))
+                try:
+                    path.unlink(missing_ok=True)
+                    for companion in find_companion_lyrics(path):
+                        companion.unlink(missing_ok=True)
+                    LOG.info(
+                        f"   ∟ 🗑️ Removed duplicate single: {escape(track_identity_key)}"
+                    )
+                except OSError as error:
+                    LOG.debug(f"Failed to remove duplicate single {path}: {error}")
             else:
-                LOG.info(f"[DRY-RUN] Would move {path.name} -> {target_file}")
+                LOG.info(
+                    f"[DRY-RUN] Would remove duplicate single: {escape(track_identity_key)}"
+                )
+            removed_dupes += 1
+            continue
 
-            relocate_companion_lyrics(path, target_file, dry_run=dry_run)
+        if not dry_run:
+            # Also move companion artwork from old single folder if changing folders
+            if path.parent != single_folder:
+                for art_name in [
+                    "cover.jpg",
+                    "cover.png",
+                    "folder.jpg",
+                    "front.jpg",
+                ]:
+                    old_art = path.parent / art_name
+                    new_art = single_folder / art_name
+                    if old_art.exists() and not new_art.exists():
+                        try:
+                            shutil.move(str(old_art), str(new_art))
+                        except OSError:
+                            pass
+            shutil.move(str(path), str(target_file))
+        else:
+            LOG.info(
+                f"[DRY-RUN] Would move {escape(path.name)} -> {escape(str(target_file))}"
+            )
 
-            moved_count += 1
-            LAST_ORGANIZED_COUNT = moved_count
+        relocate_companion_lyrics(path, target_file, dry_run=dry_run)
+
+        moved_count += 1
+        LAST_ORGANIZED_COUNT = moved_count
 
     if removed_dupes > 0:
         LOG.info(f"🗑️ Removed {removed_dupes} duplicate single(s).")
