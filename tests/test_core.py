@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
@@ -160,25 +160,25 @@ class TestCoreUtils(unittest.TestCase):
             "Dans cu Lupii (feat. Vlad Dobrescu)",
         )
         self.assertEqual(
-            deduplicate_title_features("În golul tău (feat. Enrico Rava)"),
+            deduplicate_title_features("În golul tău (feat. RAVA)"),
             "În golul tău (feat. RAVA)",
         )
         self.assertEqual(
             deduplicate_title_features(
-                "Capitanu' (feat. Amuly & Enrico Rava)", primary_artist="Tussin"
+                "Capitanu' (feat. Amuly & RAVA)", primary_artist="Tussin"
             ),
             "Capitanu' (feat. Amuly & RAVA)",
         )
         self.assertEqual(
             deduplicate_title_features(
-                "ZODIAC (feat. NOUA UNSPE & RAVA & BITTNER & Enrico Rava)",
+                "ZODIAC (feat. NOUA UNSPE & RAVA & BITTNER)",
                 primary_artist="NOUA UNSPE",
             ),
             "ZODIAC (feat. RAVA & BITTNER)",
         )
         self.assertEqual(
             deduplicate_title_features(
-                "MĂ AGITĂ (feat. Enrico Rava & Armin van Buuren & Ravisval & Super ED & Armin & RAVA)",
+                "MĂ AGITĂ (feat. RAVA & Armin & Ravisval & Super ED & Armin & RAVA)",
                 primary_artist="4 226",
             ),
             "MĂ AGITĂ (feat. RAVA, Armin, Ravisval & Super ED)",
@@ -186,15 +186,29 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(deduplicate_title_features(""), "")
         self.assertEqual(deduplicate_title_features(None), "")
 
+    def test_deduplicate_title_features_with_user_aliases(self):
+        with patch(
+            "sonora.core.utils._load_user_overrides",
+            return_value={"ravi": "Ravisval"},
+        ):
+            self.assertEqual(
+                deduplicate_title_features("SEMAKA (feat. RAVi & Armin)"),
+                "SEMAKA (feat. Ravisval & Armin)",
+            )
+
     def test_load_user_overrides_corrupt_json(self):
         from sonora.core.utils import _load_user_overrides
 
+        _load_user_overrides.cache_clear()
         with (
             patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.is_file", return_value=True),
+            patch("pathlib.Path.stat", return_value=MagicMock(st_size=100)),
             patch("pathlib.Path.read_text", return_value="INVALID JSON {{"),
         ):
             overrides = _load_user_overrides()
             self.assertEqual(overrides, {})
+        _load_user_overrides.cache_clear()
 
     def test_normalize_genre_mapping_and_filtering(self):
         self.assertEqual(normalize_genre("Hip Hop"), "Hip-Hop/Rap")

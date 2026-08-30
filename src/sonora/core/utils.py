@@ -469,14 +469,12 @@ def deduplicate_title_features(
             clean_tok = re.sub(r"[\(\)\[\]\{\}]", "", tok).strip()
             if not clean_tok:
                 continue
-            clean_tok_lower = clean_tok.lower()
-            if clean_tok_lower == "enrico rava":
-                clean_tok = "RAVA"
-            elif clean_tok_lower == "armin van buuren":
-                clean_tok = "Armin"
-            else:
-                clean_tok = clean_disambiguation(clean_tok)
+            clean_tok = clean_disambiguation(clean_tok)
+            user_overrides = _load_user_overrides()
             norm = normalize_str(clean_tok)
+            if norm in user_overrides:
+                clean_tok = user_overrides[norm]
+                norm = normalize_str(clean_tok)
             if not norm or norm in seen_normalized:
                 continue
             if primary_norm and (
