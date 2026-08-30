@@ -159,6 +159,30 @@ class TestCoreUtils(unittest.TestCase):
             deduplicate_title_features("Dans cu Lupii (feat. Vlad Dobrescu)"),
             "Dans cu Lupii (feat. Vlad Dobrescu)",
         )
+        self.assertEqual(
+            deduplicate_title_features("În golul tău (feat. Enrico Rava)"),
+            "În golul tău (feat. RAVA)",
+        )
+        self.assertEqual(
+            deduplicate_title_features(
+                "Capitanu' (feat. Amuly & Enrico Rava)", primary_artist="Tussin"
+            ),
+            "Capitanu' (feat. Amuly & RAVA)",
+        )
+        self.assertEqual(
+            deduplicate_title_features(
+                "ZODIAC (feat. NOUA UNSPE & RAVA & BITTNER & Enrico Rava)",
+                primary_artist="NOUA UNSPE",
+            ),
+            "ZODIAC (feat. RAVA & BITTNER)",
+        )
+        self.assertEqual(
+            deduplicate_title_features(
+                "MĂ AGITĂ (feat. Enrico Rava & Armin van Buuren & Ravisval & Super ED & Armin & RAVA)",
+                primary_artist="4 226",
+            ),
+            "MĂ AGITĂ (feat. RAVA, Armin, Ravisval & Super ED)",
+        )
         self.assertEqual(deduplicate_title_features(""), "")
         self.assertEqual(deduplicate_title_features(None), "")
 
@@ -175,13 +199,37 @@ class TestCoreUtils(unittest.TestCase):
     def test_normalize_genre_mapping_and_filtering(self):
         self.assertEqual(normalize_genre("Hip Hop"), "Hip-Hop/Rap")
         self.assertEqual(normalize_genre("Rap"), "Hip-Hop/Rap")
+        self.assertEqual(normalize_genre("Trap"), "Hip-Hop/Rap")
+        self.assertEqual(normalize_genre("Rap/Hip Hop"), "Hip-Hop/Rap")
+        self.assertEqual(normalize_genre("Pop Rap"), "Hip-Hop/Rap")
+        self.assertEqual(normalize_genre("Alternativă"), "Alternative")
         self.assertEqual(normalize_genre("Electronic"), "Electronic")
+        self.assertEqual(normalize_genre("Electronica"), "Electronic")
+        self.assertEqual(normalize_genre("Euro House"), "House")
+        self.assertEqual(normalize_genre("Contemporary R&B"), "R&B/Soul")
+        self.assertEqual(normalize_genre("French Pop"), "Pop")
         self.assertEqual(normalize_genre("Synthpop"), "Synth-pop")
         self.assertIsNone(normalize_genre("Billboard Top 40"))  # Blacklisted
         self.assertIsNone(normalize_genre("Unknown"))  # Blacklisted
+        self.assertIsNone(normalize_genre("Fitness & Workout"))  # Blacklisted
         self.assertIsNone(normalize_genre("12345"))  # Digits
         self.assertIsNone(normalize_genre(""))
         self.assertIsNone(normalize_genre(None))
+
+    def test_resolve_artist_name_exact_match(self):
+        from sonora.core.utils import resolve_artist_name
+
+        with patch("sonora.core.utils.musicbrainzngs.search_artists") as mock_mb:
+            # Simulate MusicBrainz returning Enrico Rava with score 100 and RAVA with score 90
+            mock_mb.return_value = {
+                "artist-list": [
+                    {"name": "Enrico Rava", "ext:score": "100", "id": "uuid-1"},
+                    {"name": "RAVA", "ext:score": "90", "id": "uuid-2"},
+                ]
+            }
+            # Must prioritize exact match RAVA over higher-scored Enrico Rava
+            self.assertEqual(resolve_artist_name("RAVA"), "RAVA")
+            self.assertEqual(resolve_artist_name("rava"), "RAVA")
 
     def test_match_score_series_and_version_disambiguation(self):
         from sonora.core.utils import match_score

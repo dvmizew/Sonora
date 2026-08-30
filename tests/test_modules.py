@@ -2,6 +2,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageDraw
@@ -81,18 +82,18 @@ class TestCoreModules(unittest.TestCase):
     def tearDownClass(cls) -> None:
         RateLimiter.set_disabled(False)
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp_dir.name)
         patcher = patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.tmp_dir.cleanup()
 
     @patch("sonora.core.utils.musicbrainzngs.search_artists")
-    def test_resolve_artist_name(self, mock_search):
+    def test_resolve_artist_name(self, mock_search: Any) -> None:
         resolve_artist_name.cache_clear()
         mock_search.return_value = {
             "artist-list": [
@@ -114,7 +115,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(resolve_artist_name("killa fonic"), "Killa Fonic")
         self.assertEqual(resolve_artist_name("nane"), "Nane")
 
-    def test_check_brackets_corruption(self):
+    def test_check_brackets_corruption(self) -> None:
         issues = check_brackets_corruption("Song Title [Official Video]")
         self.assertTrue(any("Corrupt bracket" in issue for issue in issues))
 
@@ -131,7 +132,7 @@ class TestCoreModules(unittest.TestCase):
             check_brackets_corruption("MODERN JAM (feat. Teezo Touchdown)"), []
         )
 
-    def test_sync_lrc_metadata(self):
+    def test_sync_lrc_metadata(self) -> None:
         lrc_file = self.tmp_path / "test.lrc"
         lrc_file.write_text("[00:10.00] Line 1\n", encoding="utf-8")
 
@@ -143,7 +144,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertIn("[ti:Track Title]", content)
         self.assertIn("[00:10.00] Line 1", content)
 
-    def test_sync_lrc_metadata_existing_headers(self):
+    def test_sync_lrc_metadata_existing_headers(self) -> None:
         lrc_file = self.tmp_path / "existing.lrc"
         lrc_file.write_text(
             "[ar:Old Artist]\n[ti:Old Title]\n[00:15.00] Line 2\n", encoding="utf-8"
@@ -160,7 +161,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertIn("[00:15.00] Line 2", content)
 
     @patch("sonora.modules.renamer.read_track_metadata")
-    def test_rename_track_file(self, mock_read):
+    def test_rename_track_file(self, mock_read: Any) -> None:
         wav_file = self.tmp_path / "old_name.wav"
         create_dummy_wav(wav_file)
 
@@ -173,7 +174,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(new_path.name, "01 - Halo.wav")
 
     @patch("sonora.modules.renamer.read_track_metadata")
-    def test_rename_directory_files(self, mock_read):
+    def test_rename_directory_files(self, mock_read: Any) -> None:
         audio_file_1 = self.tmp_path / "song1.wav"
         audio_file_2 = self.tmp_path / "song2.wav"
         create_dummy_wav(audio_file_1)
@@ -192,7 +193,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(len(renamed), 2)
 
     @patch("sonora.modules.renamer.read_track_metadata")
-    def test_rename_multiple_album_directories(self, mock_read):
+    def test_rename_multiple_album_directories(self, mock_read: Any) -> None:
         album1 = self.tmp_path / "folder_one"
         album2 = self.tmp_path / "folder_two"
         album1.mkdir()
@@ -227,14 +228,14 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue((self.tmp_path / "Artist One - Album One").exists())
         self.assertTrue((self.tmp_path / "Artist Two - Album Two").exists())
 
-    def test_rename_album_folder(self):
+    def test_rename_album_folder(self) -> None:
         folder = self.tmp_path / "old_folder"
         folder.mkdir()
         new_folder = rename_album_folder(folder, "21 Savage", "Issa Album")
         self.assertTrue(new_folder.exists())
         self.assertEqual(new_folder.name, "21 Savage - Issa Album")
 
-    def test_is_single_folder(self):
+    def test_is_single_folder(self) -> None:
         album_dir = self.tmp_path / "album"
         album_dir.mkdir()
 
@@ -254,7 +255,7 @@ class TestCoreModules(unittest.TestCase):
             self.assertFalse(is_single_folder(album_dir))
 
     @patch("sonora.modules.organizer.read_track_metadata")
-    def test_organize_library_singles(self, mock_read):
+    def test_organize_library_singles(self, mock_read: Any) -> None:
         src_dir = self.tmp_path / "source"
         target_dir = self.tmp_path / "Singles"
         audio_file_1 = src_dir / "single.wav"
@@ -273,7 +274,7 @@ class TestCoreModules(unittest.TestCase):
         )
 
     @patch("sonora.modules.organizer.read_track_metadata")
-    def test_organize_library_singles_with_lrc(self, mock_read):
+    def test_organize_library_singles_with_lrc(self, mock_read: Any) -> None:
         src_dir = self.tmp_path / "source_lrc"
         target_dir = self.tmp_path / "Singles"
         audio_file_1 = src_dir / "single.wav"
@@ -300,7 +301,9 @@ class TestCoreModules(unittest.TestCase):
 
     @patch("sonora.modules.organizer.get_primary_artist", side_effect=lambda a: a)
     @patch("sonora.modules.organizer.read_track_metadata")
-    def test_organize_multiple_folders_and_albums(self, mock_read, mock_primary):
+    def test_organize_multiple_folders_and_albums(
+        self, mock_read: Any, mock_primary: Any
+    ) -> None:
         src_dir = self.tmp_path / "multi_source"
         folder1 = src_dir / "folder1"
         folder2 = src_dir / "album_folder"
@@ -372,7 +375,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue(f2_track3.exists())
 
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library(self, mock_read):
+    def test_check_library(self, mock_read: Any) -> None:
         audio_file_1 = self.tmp_path / "song.wav"
         create_dummy_wav(audio_file_1)
 
@@ -385,7 +388,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue((self.tmp_path / "report.json").exists())
 
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library_multi_file_and_folder_issues(self, mock_read):
+    def test_check_library_multi_file_and_folder_issues(self, mock_read: Any) -> None:
         album_dir = self.tmp_path / "AlbumFolder"
         album_dir.mkdir(parents=True, exist_ok=True)
         file1 = album_dir / "01 - Song 1.wav"
@@ -431,11 +434,11 @@ class TestCoreModules(unittest.TestCase):
     @patch("sonora.modules.tagger.read_track_metadata")
     def test_process_single_track(
         self,
-        mock_read,
-        mock_mbid,
-        mock_lyrics,
-        mock_write,
-    ):
+        mock_read: Any,
+        mock_mbid: Any,
+        mock_lyrics: Any,
+        mock_write: Any,
+    ) -> None:
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
 
@@ -484,7 +487,7 @@ class TestCoreModules(unittest.TestCase):
         mock_write.assert_called_once()
 
     @patch("sonora.modules.tagger.process_single_track")
-    def test_tag_album_folder(self, mock_process):
+    def test_tag_album_folder(self, mock_process: Any) -> None:
         album_dir = self.tmp_path / "album"
         audio_file_1 = album_dir / "01.wav"
         audio_file_2 = album_dir / "02.wav"
@@ -507,7 +510,7 @@ class TestCoreModules(unittest.TestCase):
             results = tag_album_folder(album_dir, max_threads=2)
         self.assertEqual(len(results), 2)
 
-    def test_check_file_blacklisted_genre(self):
+    def test_check_file_blacklisted_genre(self) -> None:
         wav = self.tmp_path / "song.wav"
         create_dummy_wav(wav)
 
@@ -518,21 +521,21 @@ class TestCoreModules(unittest.TestCase):
             issues = check_file(wav)
             self.assertTrue(any("Blacklisted genre" in issue for issue in issues))
 
-    def test_is_single_folder_empty_dir(self):
+    def test_is_single_folder_empty_dir(self) -> None:
         empty_dir = self.tmp_path / "empty"
         empty_dir.mkdir()
         self.assertFalse(is_single_folder(empty_dir))
 
-    def test_check_library_nonexistent_directory(self):
+    def test_check_library_nonexistent_directory(self) -> None:
         with self.assertRaises(FileNotFoundError):
             check_library(self.tmp_path / "nonexistent_dir_999")
 
-    def test_tag_album_folder_nonexistent_directory(self):
+    def test_tag_album_folder_nonexistent_directory(self) -> None:
         with self.assertRaises(FileNotFoundError):
             tag_album_folder(self.tmp_path / "nonexistent_dir_999")
 
     @patch("sonora.modules.renamer.read_track_metadata")
-    def test_rename_track_file_collision_handling(self, mock_read):
+    def test_rename_track_file_collision_handling(self, mock_read: Any) -> None:
         audio_file_1 = self.tmp_path / "song1.wav"
         audio_file_2 = self.tmp_path / "song2.wav"
         audio_file_3 = self.tmp_path / "song3.wav"
@@ -560,7 +563,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(renamed_path_2.name, "01 - Title (2).wav")
         self.assertEqual(renamed_path_3.name, "01 - Title (3).wav")
 
-    def test_organize_library_singles_skips_album_folders(self):
+    def test_organize_library_singles_skips_album_folders(self) -> None:
         album_dir = self.tmp_path / "AlbumFolder"
         album_dir.mkdir()
         audio_file_1 = album_dir / "01.wav"
@@ -589,12 +592,12 @@ class TestCoreModules(unittest.TestCase):
     @patch("sonora.modules.tagger.read_track_metadata")
     def test_process_single_track_acoustid_discogs_fallback(
         self,
-        mock_read,
-        mock_mbid,
-        mock_acoustid,
-        mock_discogs,
-        mock_write,
-    ):
+        mock_read: Any,
+        mock_mbid: Any,
+        mock_acoustid: Any,
+        mock_discogs: Any,
+        mock_write: Any,
+    ) -> None:
         wav_file = self.tmp_path / "song.wav"
         create_dummy_wav(wav_file)
 
@@ -654,8 +657,8 @@ class TestCoreModules(unittest.TestCase):
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library_spectral_check_option(
-        self, mock_read, mock_checksum, mock_spectral
-    ):
+        self, mock_read: Any, mock_checksum: Any, mock_spectral: Any
+    ) -> None:
         flac_file = self.tmp_path / "song.flac"
         flac_file.write_bytes(b"FLAC dummy content")
 
@@ -679,7 +682,7 @@ class TestCoreModules(unittest.TestCase):
         )
         mock_spectral.assert_called_once()
 
-    def test_symfonium_extended_tags(self):
+    def test_symfonium_extended_tags(self) -> None:
         wav_path = self.tmp_path / "extended.wav"
         create_dummy_wav(wav_path)
 
@@ -706,7 +709,7 @@ class TestCoreModules(unittest.TestCase):
             reloaded.musicbrainz_albumid, "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d"
         )
 
-    def test_image_similarity(self):
+    def test_image_similarity(self) -> None:
         # Image 1: White background with black square in top-left
         image_1 = Image.new("RGB", (64, 64), color="white")
         draw_1 = ImageDraw.Draw(image_1)
@@ -740,7 +743,7 @@ class TestCoreModules(unittest.TestCase):
         )
         self.assertFalse(check_image_similarity(b"", image_bytes_2))
 
-    def test_cuesheet_parsing(self):
+    def test_cuesheet_parsing(self) -> None:
         cue_path = self.tmp_path / "test.cue"
         cue_path.write_text(
             'REM GENRE "Hip-Hop"\n'
@@ -777,7 +780,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertIsNotNone(content)
         self.assertIn('TITLE "Track One"', content or "")
 
-    def test_backup_and_restore(self):
+    def test_backup_and_restore(self) -> None:
         wav_path = self.tmp_path / "song.wav"
         create_dummy_wav(wav_path)
 
@@ -804,7 +807,7 @@ class TestCoreModules(unittest.TestCase):
         restored_info = read_track_metadata(wav_path)
         self.assertEqual(restored_info.artist, "Test Artist")
 
-    def test_backup_and_restore_gzipped(self):
+    def test_backup_and_restore_gzipped(self) -> None:
         wav_path = self.tmp_path / "song_gz.wav"
         create_dummy_wav(wav_path)
 
@@ -827,7 +830,7 @@ class TestCoreModules(unittest.TestCase):
         reloaded = read_track_metadata(wav_path)
         self.assertEqual(reloaded.artist, "Gzip Artist")
 
-    def test_backup_and_restore_portable_relocation(self):
+    def test_backup_and_restore_portable_relocation(self) -> None:
         old_dir = self.tmp_path / "old_location"
         old_dir.mkdir()
         wav_path = old_dir / "portable.wav"
@@ -859,7 +862,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(final_info.artist, "Original Artist")
 
     @patch("sonora.services.theaudiodb.SESSION.get")
-    def test_theaudiodb_service(self, mock_get):
+    def test_theaudiodb_service(self, mock_get: Any) -> None:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -893,7 +896,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue((self.tmp_path / "21 Savage" / "artist.jpg").exists())
         self.assertTrue((self.tmp_path / "21 Savage" / "banner.jpg").exists())
 
-    def test_find_audio_files_ignores_hidden_directories(self):
+    def test_find_audio_files_ignores_hidden_directories(self) -> None:
         normal_wav = self.tmp_path / "normal.wav"
         create_dummy_wav(normal_wav)
 
@@ -913,7 +916,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertIn(hidden_wav, all_files)
         self.assertIn(dot_wav, all_files)
 
-    def test_is_valid_uuid_multivalue(self):
+    def test_is_valid_uuid_multivalue(self) -> None:
         uuid1 = "1c59ae05-207b-4fbd-9ee9-569489af6121"
         uuid2 = "bd81ebc9-d1c4-4dc3-b48e-718bdc5fde50"
 
@@ -927,7 +930,7 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue(is_valid_uuid(f"{uuid1}, {uuid2}", allow_multivalue=True))
         self.assertFalse(is_valid_uuid(f"{uuid1}; invalid", allow_multivalue=True))
 
-    def test_normalize_single_track_and_library(self):
+    def test_normalize_single_track_and_library(self) -> None:
         audio_file = self.tmp_path / "song.wav"
         create_dummy_wav(audio_file)
 
@@ -938,7 +941,7 @@ class TestCoreModules(unittest.TestCase):
             mock_read.return_value = TrackInfo(
                 file_path=audio_file,
                 artist="Armin (ROU)",
-                title="Melodie [Official Video] (feat. Nane)",
+                title="Melodie (feat. Nane)",
                 album="Album [Deluxe Edition]",
                 genre="hip hop",
                 date="2022-05-10",
@@ -947,8 +950,9 @@ class TestCoreModules(unittest.TestCase):
 
             result = normalize_single_track(audio_file, fetch_bpm=False, dry_run=False)
             self.assertIsNotNone(result)
+            assert result is not None
             self.assertEqual(result.artist, "Armin")
-            self.assertEqual(result.title, "Melodie")
+            self.assertEqual(result.title, "Melodie (feat. Nane)")
             self.assertEqual(result.genre, "Hip-Hop/Rap")
             mock_write.assert_called_once()
 

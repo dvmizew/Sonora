@@ -24,6 +24,7 @@ from sonora.core.logger import (
 from sonora.core.models import TrackInfo
 from sonora.core.state import get_library_state
 from sonora.core.utils import (
+    _FEAT_ALL_BRACKETS_PATTERN,
     clean_disambiguation,
     clean_title,
     deduplicate_title_features,
@@ -105,6 +106,7 @@ def _apply_mapping(
     track_info: TrackInfo,
     data: dict[str, Any],
     field_map: dict[str, str],
+    force: bool = False,
 ) -> None:
     for src_key, target_attr in field_map.items():
         val = data.get(src_key)
@@ -118,8 +120,35 @@ def _apply_mapping(
             val_str = normalize_genre(val_str) or val_str
         elif target_attr == "date":
             val_str = normalize_date(val_str) or val_str
+        elif target_attr == "title":
+            old_title = getattr(track_info, "title", None)
+            base = clean_title(val_str or old_title or "")
+            old_matches = list(_FEAT_ALL_BRACKETS_PATTERN.finditer(old_title or ""))
+            if old_matches:
+                feat_part = " ".join(m.group(0) for m in old_matches)
+                val_str = (
+                    deduplicate_title_features(
+                        f"{base} {feat_part}", primary_artist=track_info.artist
+                    )
+                    or val_str
+                )
+            elif track_info.featured_artists or data.get("featured_artists"):
+                fa = str(track_info.featured_artists or data.get("featured_artists"))
+                val_str = (
+                    deduplicate_title_features(
+                        f"{base} (feat. {fa})", primary_artist=track_info.artist
+                    )
+                    or val_str
+                )
+            else:
+                val_str = (
+                    deduplicate_title_features(
+                        val_str, primary_artist=track_info.artist
+                    )
+                    or val_str
+                )
 
-        if not getattr(track_info, target_attr):
+        if not getattr(track_info, target_attr) or force:
             setattr(track_info, target_attr, val_str)
 
 
@@ -222,18 +251,22 @@ def _enrich_musicbrainz(
             mb_rec = fetch_musicbrainz_recording_details(track_info.musicbrainz_trackid)
 
         if mb_rec and isinstance(mb_rec, dict):
+            mb_map = {
+                "isrc": "isrc",
+                "disambiguation": "disambiguation",
+                "composer": "composer",
+                "lyricist": "lyricist",
+                "producers": "producers",
+                "remixer": "remixer",
+                "musicbrainz_workid": "musicbrainz_workid",
+            }
+            if force or not track_info.title or track_info.title == "Untitled":
+                mb_map["title"] = "title"
             _apply_mapping(
                 track_info,
                 mb_rec,
-                {
-                    "isrc": "isrc",
-                    "disambiguation": "disambiguation",
-                    "composer": "composer",
-                    "lyricist": "lyricist",
-                    "producers": "producers",
-                    "remixer": "remixer",
-                    "musicbrainz_workid": "musicbrainz_workid",
-                },
+                mb_map,
+                force=force,
             )
 
         if is_valid_uuid(track_info.musicbrainz_albumid):
@@ -263,6 +296,7 @@ def _enrich_musicbrainz(
                         "script": "script",
                         "artist_sort": "artist_sort",
                     },
+                    force=force,
                 )
                 if mb_rel.get("total_tracks") and not track_info.total_tracks:
                     track_info.total_tracks = int(str(mb_rel["total_tracks"]))
@@ -275,14 +309,18 @@ def _enrich_musicbrainz(
 def _enrich_itunes(
     track_info: TrackInfo,
     album_itunes_details: dict[str, Any] | None = None,
+    force: bool = False,
 ) -> None:
     try:
         data = None
         if album_itunes_details:
             t_by_num = album_itunes_details.get("tracks_by_number", {})
             t_by_title = album_itunes_details.get("tracks_by_title", {})
+            clean_track_key = normalize_str(clean_title(track_info.title))
             if isinstance(t_by_num, dict) and track_info.track_number in t_by_num:
                 data = t_by_num[track_info.track_number]
+            elif isinstance(t_by_title, dict) and clean_track_key in t_by_title:
+                data = t_by_title[clean_track_key]
             elif (
                 isinstance(t_by_title, dict)
                 and normalize_str(track_info.title) in t_by_title
@@ -293,19 +331,32 @@ def _enrich_itunes(
             data = fetch_itunes_track_metadata(track_info.artist, track_info.title)
 
         if data and isinstance(data, dict):
+            itunes_map = {
+                "genre": "genre",
+                "date": "date",
+                "advisory": "advisory",
+                "copyright": "copyright",
+                "itunes_trackid": "itunes_trackid",
+                "itunes_collectionid": "itunes_collectionid",
+                "itunes_artistid": "itunes_artistid",
+                "release_country": "release_country",
+            }
+            if (
+                force
+                or not track_info.title
+                or track_info.title == "Untitled"
+                or (
+                    data.get("trackName")
+                    and normalize_str(str(data.get("trackName")))
+                    == normalize_str(track_info.title)
+                )
+            ):
+                itunes_map["trackName"] = "title"
             _apply_mapping(
                 track_info,
                 data,
-                {
-                    "genre": "genre",
-                    "date": "date",
-                    "advisory": "advisory",
-                    "copyright": "copyright",
-                    "itunes_trackid": "itunes_trackid",
-                    "itunes_collectionid": "itunes_collectionid",
-                    "itunes_artistid": "itunes_artistid",
-                    "release_country": "release_country",
-                },
+                itunes_map,
+                force=force,
             )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"iTunes enrichment failed for {track_info.title}: {error}")
@@ -369,6 +420,7 @@ def _enrich_discogs(
     track_info: TrackInfo,
     discogs_user_token: str | None,
     album_discogs_release: dict[str, object] | None,
+    force: bool = False,
 ) -> None:
     if not discogs_user_token:
         return
@@ -404,6 +456,7 @@ def _enrich_discogs(
                 "producers": "producers",
                 "remixer": "remixer",
             },
+            force=force,
         )
 
         track_credits_dict = release.get("track_credits")
@@ -417,14 +470,27 @@ def _enrich_discogs(
             elif track_info.title and track_info.title.lower() in track_credits_dict:
                 specific = track_credits_dict[track_info.title.lower()]
             if isinstance(specific, dict):
+                discogs_track_map = {
+                    "producers": "producers",
+                    "remixer": "remixer",
+                    "composer": "composer",
+                }
+                if (
+                    force
+                    or not track_info.title
+                    or track_info.title == "Untitled"
+                    or (
+                        specific.get("title")
+                        and normalize_str(str(specific.get("title")))
+                        == normalize_str(track_info.title)
+                    )
+                ):
+                    discogs_track_map["title"] = "title"
                 _apply_mapping(
                     track_info,
                     specific,
-                    {
-                        "producers": "producers",
-                        "remixer": "remixer",
-                        "composer": "composer",
-                    },
+                    discogs_track_map,
+                    force=force,
                 )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Discogs enrichment failed for {track_info.title}: {error}")
@@ -459,8 +525,11 @@ def _enrich_deezer(
             t_by_title: dict[Any, Any] = (
                 raw_title if isinstance(raw_title, dict) else {}
             )
+            clean_track_key = normalize_str(clean_title(track_info.title))
             if isinstance(t_by_pos, dict) and track_info.track_number in t_by_pos:
                 track = t_by_pos[track_info.track_number]
+            elif isinstance(t_by_title, dict) and clean_track_key in t_by_title:
+                track = t_by_title[clean_track_key]
             elif (
                 isinstance(t_by_title, dict)
                 and normalize_str(track_info.title) in t_by_title
@@ -483,15 +552,28 @@ def _enrich_deezer(
             track_info.disc_number = int(str(track["disk_number"]))
         if track.get("explicit_lyrics") and not track_info.advisory:
             track_info.advisory = "Explicit"
+        deezer_track_map = {
+            "release_date": "date",
+            "isrc": "isrc",
+            "composer": "composer",
+            "lyricist": "lyricist",
+        }
+        if (
+            force
+            or not track_info.title
+            or track_info.title == "Untitled"
+            or (
+                track.get("title")
+                and normalize_str(str(track.get("title")))
+                == normalize_str(track_info.title)
+            )
+        ):
+            deezer_track_map["title"] = "title"
         _apply_mapping(
             track_info,
             track,
-            {
-                "release_date": "date",
-                "isrc": "isrc",
-                "composer": "composer",
-                "lyricist": "lyricist",
-            },
+            deezer_track_map,
+            force=force,
         )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Deezer enrichment failed for {track_info.title}: {error}")
@@ -730,9 +812,16 @@ def process_single_track(
             album_mb_release_details,
             force=force,
         )
-        _enrich_itunes(track_info, album_itunes_details=album_itunes_details)
+        _enrich_itunes(
+            track_info, album_itunes_details=album_itunes_details, force=force
+        )
         _enrich_lastfm(track_info, lastfm_api_key)
-        _enrich_discogs(track_info, discogs_user_token, album_discogs_release)
+        _enrich_discogs(
+            track_info,
+            discogs_user_token,
+            album_discogs_release,
+            force=force,
+        )
         _enrich_deezer(track_info, album_deezer_details, force=force)
         _enrich_genius(track_info, genius_api_token, force=force)
         _enrich_theaudiodb(track_info, force=force)
@@ -759,7 +848,13 @@ def process_single_track(
             dry_run=dry_run,
         )
 
-        # 3. Compute tag diffs and persist metadata
+        # 3. Deduplicate title features if present
+        if track_info.title:
+            track_info.title = deduplicate_title_features(
+                track_info.title, primary_artist=track_info.artist
+            )
+
+        # 4. Compute tag diffs and persist metadata
         diff_lines = _render_tag_diffs(orig_info, track_info)
         if diff_lines or force:
             if not dry_run:
@@ -1014,8 +1109,9 @@ def normalize_single_track(
         return None
 
     cleaned_artist = clean_disambiguation(ftfy.fix_text(current_info.artist or ""))
-    cleaned_title_raw = clean_title(ftfy.fix_text(current_info.title or ""))
-    cleaned_title = deduplicate_title_features(cleaned_title_raw)
+    cleaned_title = deduplicate_title_features(
+        ftfy.fix_text(current_info.title or ""), primary_artist=cleaned_artist
+    )
     cleaned_album = ftfy.fix_text(current_info.album or "")
     if current_info.album_artist:
         cleaned_album_artist = clean_disambiguation(

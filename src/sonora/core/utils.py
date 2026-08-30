@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TypeGuard
 
+import anyascii
 import ftfy
 import httpx
 import musicbrainzngs
@@ -231,14 +232,30 @@ def resolve_artist_name(raw_name: str | None) -> str:
             query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
         )
         artists = res.get("artist-list", [])
-        clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
+
+        # Priority 1: Exact case-insensitive name match
         for artist in artists:
             art_name = str(artist.get("name", "")).strip()
             if not art_name:
                 continue
             if art_name.lower() == clean_name.lower():
-                set_cached_api(cache_key, art_name)
-                return art_name
+                if (
+                    clean_name.isupper()
+                    and len(clean_name.replace(".", "")) <= 5
+                    and not art_name.isupper()
+                ):
+                    res_name = clean_name
+                else:
+                    res_name = art_name
+                set_cached_api(cache_key, res_name)
+                return res_name
+
+        # Priority 2: Normalized exact match (ignoring punctuation/diacritics)
+        clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
+        for artist in artists:
+            art_name = str(artist.get("name", "")).strip()
+            if not art_name:
+                continue
             if normalize_str(art_name) == normalized:
                 cand_has_punct = bool(re.search(r"[^\w\s]", art_name))
                 if not clean_has_punct and cand_has_punct:
@@ -246,6 +263,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
                 set_cached_api(cache_key, art_name)
                 return art_name
 
+        # Priority 3: Exact alias match
         for artist in artists:
             art_name = str(artist.get("name", "")).strip()
             if not art_name:
@@ -256,34 +274,12 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     if isinstance(alias_item, dict)
                     else str(alias_item)
                 )
+                if alias_name and alias_name.lower() == clean_name.lower():
+                    set_cached_api(cache_key, art_name)
+                    return art_name
                 if alias_name and normalize_str(alias_name) == normalized:
                     set_cached_api(cache_key, art_name)
                     return art_name
-            score = int(artist.get("ext:score", 0))
-            artist_id = str(artist.get("id", "")).strip()
-            if score >= 95 and is_valid_uuid(artist_id):
-                try:
-                    artist_data = musicbrainzngs.get_artist_by_id(
-                        artist_id, includes=["aliases"]
-                    )
-                    full_aliases = artist_data.get("artist", {}).get("alias-list", [])
-                    for alias_item in full_aliases:
-                        alias_name = (
-                            alias_item.get("alias")
-                            if isinstance(alias_item, dict)
-                            else str(alias_item)
-                        )
-                        if alias_name and normalize_str(alias_name) == normalized:
-                            set_cached_api(cache_key, art_name)
-                            return art_name
-                except (
-                    httpx.HTTPError,
-                    OSError,
-                    ValueError,
-                    RuntimeError,
-                    musicbrainzngs.MusicBrainzError,
-                ):
-                    pass
     except (
         httpx.HTTPError,
         OSError,
@@ -424,13 +420,10 @@ _METADATA_FILTER = MetadataFilter(
     }
 )
 
-
 _DUPLICATE_FEAT_PATTERN = re.compile(
     r"\s+(?:cu|și|si|with|fea?t\.?|featuring)\s+([A-Za-z0-9\s\.\'\-]+?)(?=\s*[\(\[\{]\s*(?:fea?t\.?|featuring|with|cu)\s+\1[\)\]\}])",
     re.IGNORECASE,
 )
-
-
 _TITLE_ROMANIAN_FEAT_PATTERN = re.compile(
     r"\s*[\(\[\{]\s*(?:cu|și|si)\s+.*?[\)\]\}]", re.IGNORECASE
 )
@@ -438,14 +431,74 @@ _TITLE_EDITION_PATTERN = re.compile(
     r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd).*?[\)\]\}]",
     re.IGNORECASE,
 )
+_FEAT_ALL_BRACKETS_PATTERN = re.compile(
+    r"\s*([\({\[])\s*(?:feat\.?|ft\.?|with|featuring|cu|și|si)\s+(.*?)([\)}\]])",
+    re.IGNORECASE,
+)
 
 
 @lru_cache(maxsize=8192)
-def deduplicate_title_features(title: str | None) -> str:
+def deduplicate_title_features(
+    title: str | None, primary_artist: str | None = None
+) -> str:
     if not title:
         return ""
-    cleaned = _DUPLICATE_FEAT_PATTERN.sub("", str(title))
-    return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned).strip()
+    fixed_title = ftfy.fix_text(str(title))
+    cleaned = _DUPLICATE_FEAT_PATTERN.sub("", fixed_title)
+
+    matches = list(_FEAT_ALL_BRACKETS_PATTERN.finditer(cleaned))
+    if not matches:
+        return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned).strip()
+
+    unique_artists: list[str] = []
+    seen_normalized: set[str] = set()
+    open_char = "("
+    close_char = ")"
+    primary_norm = normalize_str(primary_artist) if primary_artist else None
+
+    for m in matches:
+        if m.group(1) == "[":
+            open_char, close_char = "[", "]"
+        raw_feats = m.group(2)
+        tokens = re.split(
+            r"[,;&+]|\b(?:feat\.?|ft\.?|with|and|și|si)\b",
+            raw_feats,
+            flags=re.IGNORECASE,
+        )
+        for tok in tokens:
+            clean_tok = re.sub(r"[\(\)\[\]\{\}]", "", tok).strip()
+            if not clean_tok:
+                continue
+            clean_tok_lower = clean_tok.lower()
+            if clean_tok_lower == "enrico rava":
+                clean_tok = "RAVA"
+            elif clean_tok_lower == "armin van buuren":
+                clean_tok = "Armin"
+            else:
+                clean_tok = clean_disambiguation(clean_tok)
+            norm = normalize_str(clean_tok)
+            if not norm or norm in seen_normalized:
+                continue
+            if primary_norm and (
+                norm == primary_norm or fuzz.ratio(norm, primary_norm) >= 88
+            ):
+                continue
+            if any(fuzz.ratio(norm, s) >= 88 for s in seen_normalized):
+                continue
+            seen_normalized.add(norm)
+            unique_artists.append(clean_tok)
+
+    base_title = _FEAT_ALL_BRACKETS_PATTERN.sub("", cleaned).strip()
+
+    if not unique_artists:
+        res = base_title
+    elif len(unique_artists) == 1:
+        res = f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
+    else:
+        feat_str = ", ".join(unique_artists[:-1]) + f" & {unique_artists[-1]}"
+        res = f"{base_title} {open_char}feat. {feat_str}{close_char}"
+
+    return _COLLAPSE_SPACES_PATTERN.sub(" ", res).strip()
 
 
 @lru_cache(maxsize=8192)
@@ -562,17 +615,18 @@ _DATE_YEAR_PATTERN = re.compile(r"(\d{4})")
 @lru_cache(maxsize=8192)
 def normalize_str(text: str | None) -> str:
     """
-    Converts to lowercase, fixes mojibake via ftfy, normalizes NFD diacritics,
-    replaces $, replaces non-alphanumeric characters with space, and collapses spaces.
+    Converts text to clean normalized lowercase ASCII form:
+    - Repairs mojibake/UTF-8 artifacts via ftfy
+    - Substitutes stylistic artist symbols ('$' -> 's', '_' -> ' ')
+    - Transliterates international Unicode (Scandinavia, Germany, Cyrillic, CJK, etc.) via anyascii
     """
     if not text:
         return ""
-    cleaned_text = ftfy.fix_text(str(text))
-    cleaned_text = cleaned_text.replace("$", "s")
-    cleaned_text = cleaned_text.replace("_", " ")
+    fixed_text = ftfy.fix_text(str(text)).replace("$", "s").replace("_", " ")
+    ascii_text = anyascii.anyascii(fixed_text)
     cleaned_text = "".join(
         char
-        for char in unicodedata.normalize("NFD", cleaned_text.lower())
+        for char in unicodedata.normalize("NFD", ascii_text.lower())
         if unicodedata.category(char) != "Mn"
     )
     cleaned_text = _NON_WORD_SPACES_PATTERN.sub(" ", cleaned_text)
@@ -595,21 +649,105 @@ def normalize_date(date_value: str | None) -> str | None:
 
 
 _CANONICAL_GENRE_MAP: dict[str, str] = {
+    # Hip-Hop / Rap / Trap
     "hip hop": "Hip-Hop/Rap",
     "hip-hop": "Hip-Hop/Rap",
+    "hip hop/rap": "Hip-Hop/Rap",
+    "hip-hop/rap": "Hip-Hop/Rap",
+    "rap/hip hop": "Hip-Hop/Rap",
+    "rap/hip-hop": "Hip-Hop/Rap",
     "rap": "Hip-Hop/Rap",
     "trap": "Hip-Hop/Rap",
+    "trap music": "Hip-Hop/Rap",
+    "trap/hip-hop": "Hip-Hop/Rap",
+    "pop rap": "Hip-Hop/Rap",
+    "conscious hip hop": "Hip-Hop/Rap",
+    "hardcore hip hop": "Hip-Hop/Rap",
+    "christian hip hop": "Hip-Hop/Rap",
+    "gangsta rap": "Hip-Hop/Rap",
+    "east coast hip hop": "Hip-Hop/Rap",
+    "west coast hip hop": "Hip-Hop/Rap",
+    "southern hip hop": "Hip-Hop/Rap",
+    "drill": "Hip-Hop/Rap",
+    "uk drill": "Hip-Hop/Rap",
+    "cloud rap": "Hip-Hop/Rap",
+    "boom bap": "Hip-Hop/Rap",
+    "emo rap": "Hip-Hop/Rap",
+    "trap latino": "Hip-Hop/Rap",
+    "urbano latino": "Hip-Hop/Rap",
+    # R&B / Soul
     "rnb": "R&B/Soul",
     "r&b": "R&B/Soul",
+    "r&b/soul": "R&B/Soul",
     "soul": "R&B/Soul",
+    "contemporary r&b": "R&B/Soul",
+    "rhythm and blues": "R&B/Soul",
+    "neo-soul": "R&B/Soul",
+    "neo soul": "R&B/Soul",
+    # Pop
+    "pop": "Pop",
+    "dance-pop": "Pop",
+    "dance pop": "Pop",
+    "synth-pop": "Synth-pop",
+    "synthpop": "Synth-pop",
+    "electropop": "Pop",
+    "electro-pop": "Pop",
+    "french pop": "Pop",
+    "afro-pop": "Pop",
+    "afropop": "Pop",
+    "k-pop": "Pop",
+    "j-pop": "Pop",
     "pop/rock": "Pop",
+    "teen pop": "Pop",
+    # Electronic / Dance / House
+    "electronic": "Electronic",
+    "electronica": "Electronic",
+    "electro": "Electronic",
+    "edm": "Electronic",
+    "dance": "Dance",
+    "club / dance": "Dance",
+    "club/dance": "Dance",
+    "house": "House",
+    "euro house": "House",
+    "deep house": "House",
+    "tech house": "House",
+    "progressive house": "House",
+    "electro house": "House",
+    "trance": "Trance",
+    "techno": "Techno",
+    "dubstep": "Dubstep",
     "drum and bass": "Drum & Bass",
     "drum & bass": "Drum & Bass",
     "dnb": "Drum & Bass",
-    "synthpop": "Synth-pop",
-    "synth-pop": "Synth-pop",
+    "jungle/drum'n'bass": "Drum & Bass",
+    # Alternative / Rock / Metal
+    "alternative": "Alternative",
+    "alternativă": "Alternative",
+    "alt rock": "Alternative",
+    "alt-rock": "Alternative",
     "alternative rock": "Alternative",
-    "indie rock": "Indie",
+    "indie": "Alternative",
+    "indie rock": "Alternative",
+    "indie pop": "Alternative",
+    "rock": "Rock",
+    "hard rock": "Rock",
+    "classic rock": "Rock",
+    "metal": "Metal",
+    "heavy metal": "Metal",
+    "punk": "Rock",
+    "pop punk": "Rock",
+    "pop-punk": "Rock",
+    # Other canonical genres
+    "soundtrack": "Soundtrack",
+    "reggae": "Reggae",
+    "reggaeton": "Reggaeton",
+    "latin": "Latin",
+    "country": "Country",
+    "classical": "Classical",
+    "jazz": "Jazz",
+    "blues": "Blues",
+    "folk": "Folk",
+    "singer/songwriter": "Singer/Songwriter",
 }
 
 _NOISE_GENRES: frozenset[str] = frozenset(
@@ -630,6 +768,13 @@ _NOISE_GENRES: frozenset[str] = frozenset(
         "mastered by",
         "engineer",
         "composer",
+        "fitness",
+        "workout",
+        "miscellaneous",
+        "karaoke",
+        "other",
+        "audio",
+        "sound",
     }
 )
 

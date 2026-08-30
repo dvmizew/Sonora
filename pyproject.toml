@@ -47,6 +47,7 @@ dependencies = [
     "pyloudnorm>=0.2.0",
     "pathvalidate>=3.2.0",
     "cyclopts>=4.0.0",
+    "anyascii>=0.3.2",
 ]
 
 [project.optional-dependencies]
