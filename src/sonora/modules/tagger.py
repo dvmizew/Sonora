@@ -1123,6 +1123,11 @@ def normalize_single_track(
     cleaned_genre = normalize_genre(current_info.genre)
     cleaned_date = normalize_date(current_info.date)
 
+    cleaned_featured = current_info.featured_artists
+    m_feat = _FEAT_ALL_BRACKETS_PATTERN.search(cleaned_title)
+    if m_feat:
+        cleaned_featured = m_feat.group(2).strip()
+
     updated_bpm = current_info.bpm
     if fetch_bpm and (force or current_info.bpm is None):
         try:
@@ -1138,6 +1143,7 @@ def normalize_single_track(
         title=cleaned_title or current_info.title,
         album=cleaned_album or current_info.album,
         album_artist=cleaned_album_artist,
+        featured_artists=cleaned_featured,
         genre=cleaned_genre or current_info.genre,
         date=cleaned_date or current_info.date,
         bpm=updated_bpm,
