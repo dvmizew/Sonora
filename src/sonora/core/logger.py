@@ -97,6 +97,8 @@ class SonoraLogger:
                 table.add_row(metric, value, style=style)
             else:
                 table.add_row(metric, value)
+        with _LOG_LOCK:
+            CONSOLE.print(table)
 
 
 LOG = SonoraLogger()

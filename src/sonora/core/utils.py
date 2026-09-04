@@ -1076,3 +1076,26 @@ def relocate_companion_lyrics(
             safe_case_rename(companion, target_companion)
         moved_lyrics.append(target_companion)
     return moved_lyrics
+
+
+def format_filesize(size_bytes: float) -> str:
+    """Format a byte count into a human-readable string (e.g. 4.25 MB, 1.20 GB)."""
+    size = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size) < 1024.0 or unit == "TB":
+            return f"{int(size)} B" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} TB"
+
+
+def clear_utils_cache() -> None:
+    """Clear all in-memory LRU caches in Sonora utils."""
+    clean_disambiguation.cache_clear()
+    _load_user_overrides.cache_clear()
+    resolve_artist_name.cache_clear()
+    is_single_group_artist.cache_clear()
+    deduplicate_title_features.cache_clear()
+    clean_title.cache_clear()
+    normalize_str.cache_clear()
+    normalize_date.cache_clear()
+    normalize_genre.cache_clear()

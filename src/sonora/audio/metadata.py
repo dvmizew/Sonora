@@ -380,3 +380,17 @@ def write_track_metadata(
         raise RuntimeError(
             f"Failed to write metadata for {track_info.file_path}: {error}"
         ) from error
+
+
+def clear_metadata_cache() -> int:
+    """Clear the in-memory metadata cache and return the number of entries cleared."""
+    with _METADATA_CACHE_LOCK:
+        count = len(_METADATA_CACHE)
+        _METADATA_CACHE.clear()
+        return count
+
+
+def get_metadata_cache_size() -> int:
+    """Return the number of entries currently cached in memory."""
+    with _METADATA_CACHE_LOCK:
+        return len(_METADATA_CACHE)
