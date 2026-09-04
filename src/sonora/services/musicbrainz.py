@@ -31,6 +31,9 @@ def init_musicbrainz(
         LOG.debug(f"MusicBrainz User-Agent initialization failed: {error}")
 
 
+init_musicbrainz()
+
+
 def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
     """
     Fetch and cache the entire discography (releases) of an artist from MusicBrainz in a single API call.
@@ -318,6 +321,9 @@ def fetch_musicbrainz_recording_details(
             work_id = work_rels[0].get("work", {}).get("id")
 
         details: dict[str, object] = {
+            "title": recording_dict.get("title"),
+            "artist": recording_dict.get("artist-credit-phrase"),
+            "first-release-date": recording_dict.get("first-release-date"),
             "isrc": isrc,
             "disambiguation": recording_dict.get("disambiguation"),
             "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
@@ -393,6 +399,17 @@ def fetch_musicbrainz_release_details(
             label_name = first_label.get("label", {}).get("name")
             catalog_number = first_label.get("catalog-number")
 
+        release_title = release_dict.get("title")
+        release_artist = release_dict.get("artist-credit-phrase")
+        if not release_artist:
+            artist_credits = release_dict.get("artist-credit", [])
+            if (
+                artist_credits
+                and isinstance(artist_credits, list)
+                and isinstance(artist_credits[0], dict)
+            ):
+                release_artist = artist_credits[0].get("artist", {}).get("name")
+
         mediums = release_dict.get("medium-list", [])
         media_format = None
         total_tracks = 0
@@ -449,7 +466,14 @@ def fetch_musicbrainz_release_details(
                         if is_valid_uuid(w_id):
                             rec_work_id = str(w_id)
 
+                    track_artist = (
+                        track_item.get("artist-credit-phrase")
+                        or rec.get("artist-credit-phrase")
+                        or release_artist
+                    )
                     rec_details: dict[str, object] = {
+                        "title": rec.get("title") or track_item.get("title"),
+                        "artist": track_artist,
                         "recording_mbid": rec_id if is_valid_uuid(rec_id) else None,
                         "isrc": rec_isrc,
                         "disambiguation": rec.get("disambiguation"),
@@ -488,6 +512,9 @@ def fetch_musicbrainz_release_details(
             artist_sort = artist_credits[0].get("artist", {}).get("sort-name")
 
         details: dict[str, object] = {
+            "title": release_title,
+            "album_artist": release_artist,
+            "artist": release_artist,
             "barcode": barcode,
             "release_country": country,
             "release_status": status,
@@ -503,6 +530,9 @@ def fetch_musicbrainz_release_details(
             "language": language,
             "script": script,
             "artist_sort": artist_sort,
+            "date": release_dict.get("date"),
+            "original_date": release_group.get("first-release-date")
+            or release_dict.get("date"),
             "tracks_by_position": tracks_by_position,
             "tracks_by_mbid": tracks_by_mbid,
         }

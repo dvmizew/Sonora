@@ -10,11 +10,13 @@ from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     clean_disambiguation,
     clean_title,
+    clean_unicode_punct,
     deduplicate_title_features,
     get_primary_artist,
     group_files_by_parent,
     is_single_group_artist,
     is_valid_uuid,
+    normalize_date,
     normalize_genre,
     normalize_str,
     relocate_companion_lyrics,
@@ -183,6 +185,28 @@ class TestCoreUtils(unittest.TestCase):
             ),
             "MĂ AGITĂ (feat. RAVA, Armin, Ravisval & Super ED)",
         )
+        self.assertEqual(
+            deduplicate_title_features("AX8 (feat. Lentile Blur, Ares (ROU))"),
+            "AX8 (feat. Lentile Blur & Ares)",
+        )
+        self.assertEqual(
+            deduplicate_title_features(
+                "Undeva-n Balkani (Double L remix) (feat. Viper, Reptile (Rapper))"
+            ),
+            "Undeva-n Balkani (Double L remix) (feat. Viper & Reptile)",
+        )
+        self.assertEqual(
+            deduplicate_title_features("Lately (feat. Bugus & Musa (KingofBabylon))"),
+            "Lately (feat. Bugus & Musa)",
+        )
+        self.assertEqual(
+            deduplicate_title_features("sex with my ex (og version) (feat. my ex)"),
+            "sex with my ex (og version) (feat. my ex)",
+        )
+        self.assertEqual(
+            deduplicate_title_features("sex with my ex (feat. my ex)"),
+            "sex with my ex (feat. my ex)",
+        )
         self.assertEqual(deduplicate_title_features(""), "")
         self.assertEqual(deduplicate_title_features(None), "")
 
@@ -229,6 +253,27 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(normalize_genre("12345"))  # Digits
         self.assertIsNone(normalize_genre(""))
         self.assertIsNone(normalize_genre(None))
+
+    def test_clean_unicode_punct(self):
+        self.assertEqual(clean_unicode_punct("Connect‐R"), "Connect-R")
+        self.assertEqual(clean_unicode_punct("K‐POP"), "K-POP")
+        self.assertEqual(clean_unicode_punct("Saint‐Tropez"), "Saint-Tropez")
+        self.assertEqual(clean_unicode_punct("Făt‐Frumos"), "Făt-Frumos")
+        self.assertEqual(clean_unicode_punct("\u200bits me"), "its me")
+        self.assertEqual(clean_unicode_punct(""), "")
+        self.assertEqual(clean_unicode_punct(None), "")
+
+    def test_normalize_date(self):
+        self.assertEqual(normalize_date("2024-07-12"), "2024-07-12")
+        self.assertEqual(normalize_date("2003"), "2003")
+        self.assertIsNone(normalize_date("0"))
+        self.assertIsNone(normalize_date("0000"))
+        self.assertIsNone(normalize_date("None"))
+        self.assertIsNone(normalize_date("null"))
+        self.assertIsNone(normalize_date(""))
+        self.assertIsNone(normalize_date(None))
+        self.assertIsNone(normalize_date("1899"))
+        self.assertIsNone(normalize_date("2099"))
 
     def test_resolve_artist_name_exact_match(self):
         from sonora.core.utils import resolve_artist_name

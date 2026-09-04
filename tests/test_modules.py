@@ -34,6 +34,7 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
+    _resolve_album_folder_identity,
     normalize_library,
     normalize_single_track,
     process_single_track,
@@ -509,6 +510,47 @@ class TestCoreModules(unittest.TestCase):
         ):
             results = tag_album_folder(album_dir, max_threads=2)
         self.assertEqual(len(results), 2)
+
+    def test_resolve_album_folder_identity(self) -> None:
+        album_dir = self.tmp_path / "Artist - Great Album"
+        f1 = album_dir / "01 - Song.wav"
+        f2 = album_dir / "02 - Other.wav"
+        create_dummy_wav(f1)
+        create_dummy_wav(f2)
+
+        with patch("sonora.modules.tagger.read_track_metadata") as mock_read:
+            # Track 1 has corrupted metadata (e.g. wrong album/artist)
+            mock_read.side_effect = [
+                TrackInfo(file_path=f1, artist="Corrupt Artist", album="Corrupt Album"),
+                TrackInfo(file_path=f2, artist="Artist", album="Great Album"),
+            ]
+            artist, album = _resolve_album_folder_identity(album_dir, [f1, f2])
+            self.assertEqual(artist, "Artist")
+            self.assertEqual(album, "Great Album")
+
+    @patch("sonora.modules.tagger.write_track_metadata")
+    @patch("sonora.modules.tagger.read_track_metadata")
+    def test_process_single_track_filename_alignment(
+        self, mock_read: Any, mock_write: Any
+    ) -> None:
+        track_file = self.tmp_path / "02 - Track Title.wav"
+        create_dummy_wav(track_file)
+        mock_read.return_value = TrackInfo(
+            file_path=track_file,
+            artist="Artist",
+            title="Track Title",
+            track_number=1,  # Corrupted track number from single release
+            album="Great Album",
+        )
+        mbids = {1: "uuid-1", 2: "uuid-2"}
+        with patch("sonora.modules.tagger._enrich_musicbrainz"):
+            res = process_single_track(
+                track_file,
+                album_track_mbids=mbids,
+                force=True,
+                fetch_bpm=False,
+            )
+            self.assertEqual(res.track_number, 2)
 
     def test_check_file_blacklisted_genre(self) -> None:
         wav = self.tmp_path / "song.wav"
