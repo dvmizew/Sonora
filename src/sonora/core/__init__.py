@@ -1,4 +1,5 @@
 from sonora.core.constants import (
+    DIRS,
     FLAC_CMD,
     IS_WINDOWS,
     SUPPORTED_EXTS,
@@ -17,6 +18,7 @@ from sonora.core.utils import (
 
 __all__ = [
     "CONSOLE",
+    "DIRS",
     "FLAC_CMD",
     "IS_WINDOWS",
     "LOG",

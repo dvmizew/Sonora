@@ -1,6 +1,5 @@
 import atexit
 import dataclasses
-import os
 import shutil
 import threading
 from pathlib import Path
@@ -8,6 +7,7 @@ from typing import Any
 
 import diskcache
 
+from sonora.core.constants import DIRS
 from sonora.core.logger import LOG
 
 DEFAULT_API_TTL_SECONDS: int = 2419200  # 28 days
@@ -18,15 +18,10 @@ _IGNORE_CACHE = False
 
 def get_cache_dir() -> Path:
     """
-    Return Sonora cache directory following the XDG Base Directory specification.
-    Prefers $XDG_CACHE_HOME/sonora, falling back to ~/.cache/sonora.
+    Return Sonora cache directory following standard platform and XDG specifications.
+    Uses DIRS.user_cache_path with automatic $XDG_CACHE_HOME support.
     """
-    xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
-    if xdg_cache_home and xdg_cache_home.strip():
-        base = Path(xdg_cache_home.strip())
-    else:
-        base = Path.home() / ".cache"
-    return base / "sonora"
+    return DIRS.user_cache_path
 
 
 def get_api_cache_dir() -> Path:

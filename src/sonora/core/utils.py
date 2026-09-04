@@ -31,6 +31,7 @@ from rapidfuzz import fuzz
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import (
     COMPANION_LYRICS_EXTS,
+    DIRS,
     SUPPORTED_EXTS,
 )
 from sonora.core.http import SESSION
@@ -204,11 +205,16 @@ def clean_disambiguation(name: str | None) -> str:
 @lru_cache(maxsize=1)
 def _load_user_overrides() -> dict[str, str]:
     candidate_paths = [
+        DIRS.user_config_path / "aliases.json",
         Path.home() / ".config" / "sonora" / "aliases.json",
         Path("sonora_aliases.json"),
     ]
+    seen_paths: set[Path] = set()
     overrides: dict[str, str] = {}
     for path in candidate_paths:
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
         try:
             if path.exists() and path.is_file() and path.stat().st_size > 0:
                 data = json.loads(path.read_text(encoding="utf-8"))

@@ -25,6 +25,7 @@ from sonora.core.cache import (
     set_cached_api,
     set_ignore_cache,
 )
+from sonora.core.constants import DIRS
 from sonora.core.state import LibraryStateManager, reset_library_state
 from sonora.core.utils import clear_utils_cache, format_filesize
 
@@ -87,6 +88,21 @@ class TestCacheArchitecture(unittest.TestCase):
             patch.dict(os.environ, {"XDG_CACHE_HOME": tmpdir}),
         ):
             self.assertEqual(get_cache_dir(), Path(tmpdir) / "sonora")
+
+    def test_dirs_cache_path(self) -> None:
+        self.assertEqual(get_cache_dir(), DIRS.user_cache_path)
+
+    def test_dirs_config_dir_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            expected = Path.home() / ".config" / "sonora"
+            self.assertEqual(DIRS.user_config_path, expected)
+
+    def test_dirs_config_dir_xdg_override(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": tmpdir}),
+        ):
+            self.assertEqual(DIRS.user_config_path, Path(tmpdir) / "sonora")
 
     def test_format_filesize(self) -> None:
         self.assertEqual(format_filesize(0), "0 B")

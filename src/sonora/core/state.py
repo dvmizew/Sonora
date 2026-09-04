@@ -5,13 +5,12 @@ import time
 from collections.abc import Generator
 from pathlib import Path
 
+from sonora.core.constants import DIRS
 from sonora.core.logger import LOG
 
 
 def _get_default_db_path() -> Path:
-    from sonora.core.cache import get_cache_dir
-
-    return get_cache_dir() / "library_state.db"
+    return DIRS.user_cache_path / "library_state.db"
 
 
 _STATE_LOCK = threading.RLock()

@@ -1,10 +1,14 @@
 import sys
 
+from platformdirs import PlatformDirs
+
 from sonora import __version__
 
 IS_WINDOWS = sys.platform == "win32"
 
 FLAC_CMD = "flac.exe" if IS_WINDOWS else "flac"
+
+DIRS: PlatformDirs = PlatformDirs(appname="sonora", appauthor=False)
 
 SUPPORTED_EXTS = frozenset(
     {
