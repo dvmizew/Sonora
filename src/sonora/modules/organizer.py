@@ -1,3 +1,4 @@
+import contextlib
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -252,10 +253,8 @@ def organize_library_singles(
                     old_art = path.parent / art_name
                     new_art = single_folder / art_name
                     if old_art.exists() and not new_art.exists():
-                        try:
+                        with contextlib.suppress(OSError):
                             shutil.move(str(old_art), str(new_art))
-                        except OSError:
-                            pass
             shutil.move(str(path), str(target_file))
         else:
             LOG.info(
@@ -298,10 +297,16 @@ def cleanup_empty_dirs(path: Path, target_singles_dir: Path | None = None) -> in
         ):
             continue
         try:
-            audio_files = find_audio_files(child, recursive=True)
-            if not audio_files:
-                shutil.rmtree(str(child), ignore_errors=True)
-                removed_count += 1
+            for junk in child.iterdir():
+                if junk.is_file() and junk.name in (
+                    ".DS_Store",
+                    "Thumbs.db",
+                    "desktop.ini",
+                ):
+                    with contextlib.suppress(OSError):
+                        junk.unlink()
+            child.rmdir()
+            removed_count += 1
         except OSError as error:
-            LOG.debug(f"Could not remove empty/orphaned dir {child}: {error}")
+            LOG.debug(f"Could not remove non-empty dir {child}: {error}")
     return removed_count

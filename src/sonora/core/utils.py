@@ -150,6 +150,27 @@ def extract_series_number(text: str | None) -> int | None:
     return None
 
 
+def safe_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    val_str = str(value).split("/")[0].strip()
+    return int(val_str) if val_str.isdigit() else None
+
+
+def safe_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    val_str = str(value).replace(" dB", "").strip()
+    try:
+        return float(val_str)
+    except ValueError:
+        return None
+
+
 _UNICODE_HYPHENS_PATTERN = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2015]")
 _ZERO_WIDTH_PATTERN = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
 
@@ -162,7 +183,7 @@ def clean_unicode_punct(text: str | None) -> str:
 
 
 _DISAMBIGUATION_PATTERN = re.compile(
-    r"\s*\((?:[A-Za-z]{2,4}|\d+|rapper|producer|dj|singer|vocalist|songwriter|kingofbabylon|romanian rapper)\)(?=\s*(?:[,;/&+-\\]|\b(?:feat\.?|ft\.?|featuring|with|and|vs\.?|cu|și|si)\b|$))",
+    r"\s*\([^()]{1,40}\)(?=\s*(?:[,;/&+-\\]|\b(?:feat\.?|ft\.?|featuring|with|and|vs\.?|cu|și|si)\b|$))",
     re.IGNORECASE,
 )
 _COLLAPSE_SPACES_PATTERN = re.compile(r"\s+")
@@ -201,12 +222,10 @@ def _load_user_overrides() -> dict[str, str]:
 
 def _ensure_musicbrainz_init() -> None:
     try:
-        from sonora import __version__
+        from sonora.services.musicbrainz import init_musicbrainz
 
-        musicbrainzngs.set_useragent(
-            "Sonora", __version__, "https://github.com/dvmizew/Sonora"
-        )
-    except (OSError, ValueError, RuntimeError, musicbrainzngs.MusicBrainzError):
+        init_musicbrainz()
+    except (OSError, ValueError, RuntimeError):
         pass
 
 
@@ -448,10 +467,6 @@ _TITLE_EDITION_PATTERN = re.compile(
     r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd).*?[\)\]\}]",
     re.IGNORECASE,
 )
-_FEAT_ALL_BRACKETS_PATTERN = re.compile(
-    r"\s*([\({\[])\s*(?:feat\.?|ft\.?|with|featuring|cu|și|si)\s+(.*?)([\)}\]])",
-    re.IGNORECASE,
-)
 
 
 def extract_balanced_features(
@@ -632,12 +647,23 @@ def match_score(
     if query_title_clean == candidate_title_clean:
         title_score = 100.0
     else:
-        title_wratio = fuzz.WRatio(query_title_clean, candidate_title_clean)
-        title_ratio = fuzz.ratio(query_title_clean, candidate_title_clean)
-        if len(query_title_clean) <= 3:
-            title_score = float(title_ratio)
-        else:
-            title_score = max(title_wratio, title_ratio)
+        title_ratio = float(fuzz.ratio(query_title_clean, candidate_title_clean))
+        title_token_sort = float(
+            fuzz.token_sort_ratio(query_title_clean, candidate_title_clean)
+        )
+        title_score = max(title_ratio, title_token_sort)
+
+        # Check match after stripping leading articles ('the ', 'a ', 'an ')
+        q_no_art = re.sub(r"^(?:the|a|an)\s+", "", query_title_clean).strip()
+        c_no_art = re.sub(r"^(?:the|a|an)\s+", "", candidate_title_clean).strip()
+        if (
+            q_no_art
+            and c_no_art
+            and (q_no_art != query_title_clean or c_no_art != candidate_title_clean)
+        ):
+            art_ratio = float(fuzz.ratio(q_no_art, c_no_art))
+            art_sort = float(fuzz.token_sort_ratio(q_no_art, c_no_art))
+            title_score = max(title_score, art_ratio, art_sort)
 
     q_ver = is_version_or_remix(query_title) or is_version_or_remix(query_title_clean)
     c_ver = is_version_or_remix(candidate_title) or is_version_or_remix(

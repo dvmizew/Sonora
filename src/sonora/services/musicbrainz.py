@@ -15,6 +15,7 @@ from sonora.core.utils import (
     is_valid_uuid,
     match_score,
     normalize_str,
+    safe_int,
 )
 
 _MB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_MUSICBRAINZ)
@@ -68,15 +69,83 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
         return []
 
 
-def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | None:
+def _score_musicbrainz_candidate(
+    release: dict[str, object],
+    artist: str,
+    album: str,
+    expected_track_count: int | None = None,
+) -> float:
+    rel_title = str(release.get("title", ""))
+    rel_artist = ""
+    artist_credit = release.get("artist-credit", [])
+    if (
+        isinstance(artist_credit, list)
+        and artist_credit
+        and isinstance(artist_credit[0], dict)
+    ):
+        art_dict = artist_credit[0].get("artist", {})
+        if isinstance(art_dict, dict):
+            rel_artist = str(art_dict.get("name", ""))
+
+    base_score = match_score(artist, album, rel_artist, rel_title)
+    if base_score < 80.0:
+        return 0.0
+
+    score = base_score
+    album_norm = normalize_str(album)
+    disambig = str(release.get("disambiguation") or "").strip().lower()
+
+    for kw in (
+        "chopped",
+        "instrumental",
+        "karaoke",
+        "commentary",
+        "acapella",
+        "remix",
+    ):
+        if kw in disambig and kw not in album_norm:
+            score -= 50.0
+
+    if not disambig:
+        score += 15.0
+    elif disambig in ("clean", "explicit", "digital", "deluxe"):
+        score += 10.0
+
+    if expected_track_count is not None and expected_track_count > 0:
+        med_track_count = safe_int(release.get("medium-track-count"))
+        if med_track_count is not None:
+            if med_track_count == expected_track_count:
+                score += 40.0
+            else:
+                diff = abs(med_track_count - expected_track_count)
+                score -= min(40.0, diff * 2.5)
+
+    status = str(release.get("status") or "").strip().lower()
+    if status == "official":
+        score += 10.0
+    elif status in ("promotion", "bootleg", "pseudo-release"):
+        score -= 25.0
+
+    return score
+
+
+def search_musicbrainz_release(
+    artist: str, album: str, expected_track_count: int | None = None
+) -> dict[str, object] | None:
     """Search MusicBrainz for an album release matching artist and album name."""
     if not album or normalize_str(album) in ["unknown album", "unknown"]:
         return None
 
-    cache_key = f"mb_release:{normalize_str(artist)}:{normalize_str(album)}"
+    count_suffix = f":{expected_track_count}" if expected_track_count else ""
+    cache_key = (
+        f"mb_release:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}"
+    )
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
+
+    best_score = 0.0
+    target_release: dict[str, object] | None = None
 
     # Batch strategy: Check artist discography cache first
     discography = fetch_artist_discography(artist)
@@ -84,36 +153,36 @@ def search_musicbrainz_release(artist: str, album: str) -> dict[str, object] | N
     for release in discography:
         release_title_value = release.get("title", "")
         release_title = normalize_str(str(release_title_value))
-        if release_title == album_lower or album_lower in release_title:
-            set_cached_api(cache_key, release)
-            return release
+        if release_title == album_lower or (
+            album_lower in release_title and len(album_lower) >= 4
+        ):
+            c_score = _score_musicbrainz_candidate(
+                release, artist, album, expected_track_count
+            )
+            if c_score > best_score and c_score >= 80.0:
+                best_score = c_score
+                target_release = release
+
+    # If an exact high-confidence match was found from discography, use it
+    if target_release and (best_score >= 120.0 or expected_track_count is None):
+        set_cached_api(cache_key, target_release)
+        return target_release
 
     _MB_LIMITER.wait()
     try:
-        result = musicbrainzngs.search_releases(artist=artist, release=album, limit=5)
+        result = musicbrainzngs.search_releases(artist=artist, release=album, limit=10)
         raw_releases = (
             result.get("release-list", []) if isinstance(result, dict) else []
         )
         releases: list[dict[str, object]] = [
             release for release in raw_releases if isinstance(release, dict)
         ]
-        target_release: dict[str, object] | None = None
-        best_score = 0.0
         for release in releases:
-            rel_title = str(release.get("title", ""))
-            rel_artist = ""
-            artist_credit = release.get("artist-credit", [])
-            if (
-                isinstance(artist_credit, list)
-                and artist_credit
-                and isinstance(artist_credit[0], dict)
-            ):
-                art_dict = artist_credit[0].get("artist", {})
-                if isinstance(art_dict, dict):
-                    rel_artist = str(art_dict.get("name", ""))
-            score = match_score(artist, album, rel_artist, rel_title)
-            if score > best_score and score >= 80.0:
-                best_score = score
+            c_score = _score_musicbrainz_candidate(
+                release, artist, album, expected_track_count
+            )
+            if c_score > best_score and c_score >= 80.0:
+                best_score = c_score
                 target_release = release
 
         set_cached_api(cache_key, target_release)

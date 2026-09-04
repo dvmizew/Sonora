@@ -175,7 +175,7 @@ class TestServicesEngine(unittest.TestCase):
         mock_get.side_effect = [mock_search_response, mock_release_response]
 
         release_result = search_discogs_release(
-            "Artist", "Album", user_token="dummy_token"
+            "Artist", "Test Album", user_token="dummy_token"
         )
         self.assertIsNotNone(release_result)
         if release_result:

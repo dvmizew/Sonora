@@ -34,7 +34,10 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
+    _enrich_musicbrainz,
     _resolve_album_folder_identity,
+    _resolve_album_track_position,
+    is_alien_album_track,
     normalize_library,
     normalize_single_track,
     process_single_track,
@@ -551,6 +554,257 @@ class TestCoreModules(unittest.TestCase):
                 fetch_bpm=False,
             )
             self.assertEqual(res.track_number, 2)
+
+    def test_resolve_album_track_position(self) -> None:
+        mb_release: dict[str, object] = {
+            "title": "That's My Name",
+            "album_artist": "Akcent",
+            "tracks_by_position": {
+                1: {"title": "Kylie", "artist": "Akcent", "isrc": "RO001"},
+                2: {"title": "That's My Name", "artist": "Akcent", "isrc": "RO002"},
+                3: {"title": "My Passion", "artist": "Akcent", "isrc": "RO003"},
+                4: {"title": "Kamelia", "artist": "Akcent", "isrc": "RO004"},
+                5: {"title": "Te Quiero", "artist": "Akcent", "isrc": "RO005"},
+                6: {"title": "Amor Gitana", "artist": "Akcent", "isrc": "RO006"},
+            },
+        }
+
+        # Case 1: Misnumbered file on disk (named 06 - That's My Name.flac, track_number=6)
+        # Should resolve to position 2 by title match (and not get poisoned by track 6 Amor Gitana)
+        track_misnumbered = TrackInfo(
+            file_path=Path("/music/Akcent - That's My Name/06 - That's My Name.flac"),
+            artist="Akcent",
+            title="That's My Name",
+            track_number=6,
+            album="That's My Name",
+        )
+        pos = _resolve_album_track_position(
+            track_info=track_misnumbered,
+            file_path=track_misnumbered.file_path,
+            album_mb_release_details=mb_release,
+        )
+        self.assertEqual(pos, 2)
+
+        # Case 2: Authoritative ISRC match heals corrupted leak title
+        track_corrupted = TrackInfo(
+            file_path=Path("/music/Akcent - That's My Name/02 - Leaked Audio.flac"),
+            artist="Akcent",
+            title="Leaked Audio",
+            isrc="RO002",
+            track_number=2,
+            album="That's My Name",
+        )
+        pos = _resolve_album_track_position(
+            track_info=track_corrupted,
+            file_path=track_corrupted.file_path,
+            album_mb_release_details=mb_release,
+        )
+        self.assertEqual(pos, 2)
+
+        # Case 3: Alien track with completely different song matches none of the album tracks
+        track_alien = TrackInfo(
+            file_path=Path(
+                "/music/Akcent - That's My Name/07 - Drake - Hotline Bling.flac"
+            ),
+            artist="Drake",
+            title="Hotline Bling",
+            track_number=7,
+            album="Views",
+        )
+        pos = _resolve_album_track_position(
+            track_info=track_alien,
+            file_path=track_alien.file_path,
+            album_mb_release_details=mb_release,
+        )
+        self.assertIsNone(pos)
+
+    def test_is_alien_album_track(self) -> None:
+        track_path = Path("/music/21 Savage - Issa Album/03 - Blue Jeans.wav")
+        alien_track = TrackInfo(
+            file_path=track_path,
+            artist="Lana Del Rey",
+            title="Blue Jeans",
+            album="Born to Die",
+        )
+        mb_release: dict[str, object] = {
+            "title": "Issa Album",
+            "album_artist": "21 Savage",
+            "tracks_by_position": {
+                1: {"title": "Famous", "artist": "21 Savage"},
+                2: {"title": "Bank Account", "artist": "21 Savage"},
+                3: {"title": "Close My Eyes", "artist": "21 Savage"},
+            },
+        }
+        # True positive: Lana Del Rey inside 21 Savage album
+        self.assertTrue(
+            is_alien_album_track(
+                track_info=alien_track,
+                file_path=track_path,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                album_mb_release_details=mb_release,
+            )
+        )
+
+        # False positive check: Valid 21 Savage track
+        valid_track = TrackInfo(
+            file_path=Path("/music/21 Savage - Issa Album/02 - Bank Account.wav"),
+            artist="21 Savage",
+            title="Bank Account",
+            album="Issa Album",
+        )
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=valid_track,
+                file_path=valid_track.file_path,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                album_mb_release_details=mb_release,
+            )
+        )
+
+        # Unnamed / generic track in album should NOT be marked alien
+        generic_track = TrackInfo(
+            file_path=Path("/music/21 Savage - Issa Album/01.wav"),
+            artist="Unknown Artist",
+            title="Track 01",
+            album="Unknown Album",
+        )
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=generic_track,
+                file_path=generic_track.file_path,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                album_mb_release_details=mb_release,
+            )
+        )
+
+        # Featured artist / collaboration track
+        collab_track = TrackInfo(
+            file_path=Path("/music/Drake & 21 Savage - Her Loss/01 - Rich Flex.wav"),
+            artist="21 Savage",
+            title="Rich Flex",
+        )
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=collab_track,
+                file_path=collab_track.file_path,
+                target_album_artist="Drake & 21 Savage",
+                target_album_title="Her Loss",
+            )
+        )
+
+        # Corrupted title with verified ISRC match should NOT be marked alien
+        healed_track = TrackInfo(
+            file_path=Path(
+                "/music/James Arthur - Back From the Edge/04 - Lust for Life.wav"
+            ),
+            artist="James Arthur",
+            title="Lust for Life (feat. Lana Del Rey & The Weeknd)",
+            album="Back From the Edge",
+            isrc="DEE861600588",
+            track_number=4,
+        )
+        mb_release_ja: dict[str, object] = {
+            "title": "Back From the Edge",
+            "album_artist": "James Arthur",
+            "tracks_by_position": {
+                4: {
+                    "title": "Can I Be Him",
+                    "artist": "James Arthur",
+                    "isrc": "DEE861600588",
+                    "recording_mbid": "c8b03190-306c-4125-9b32-3f9d86d60a12",
+                },
+            },
+        }
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=healed_track,
+                file_path=healed_track.file_path,
+                target_album_artist="James Arthur",
+                target_album_title="Back From the Edge",
+                album_mb_release_details=mb_release_ja,
+            )
+        )
+
+    def test_enrich_musicbrainz_heals_corrupted_title_via_isrc(self) -> None:
+        track = TrackInfo(
+            file_path=Path("dummy.wav"),
+            artist="James Arthur",
+            title="Lust for Life (feat. Lana Del Rey & The Weeknd)",
+            album="Back From the Edge",
+            isrc="DEE861600588",
+            track_number=4,
+            musicbrainz_trackid="56a71671-a4cd-4fe7-96aa-1aadab6cd94e",
+        )
+        mb_release: dict[str, object] = {
+            "title": "Back From the Edge",
+            "album_artist": "James Arthur",
+            "tracks_by_position": {
+                4: {
+                    "title": "Can I Be Him",
+                    "artist": "James Arthur",
+                    "isrc": "DEE861600588",
+                    "recording_mbid": "c8b03190-306c-4125-9b32-3f9d86d60a12",
+                },
+            },
+        }
+        _enrich_musicbrainz(
+            track_info=track,
+            album_mbid="c6b7d374-1425-4414-ba65-2ddcb4d98196",
+            album_track_mbids={4: "c8b03190-306c-4125-9b32-3f9d86d60a12"},
+            album_mb_release_details=mb_release,
+            force=False,
+        )
+        self.assertEqual(track.title, "Can I Be Him")
+        self.assertEqual(
+            track.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
+        )
+
+    @patch("sonora.modules.tagger.write_track_metadata")
+    @patch("sonora.modules.tagger.read_track_metadata")
+    def test_process_single_track_shields_alien_track(
+        self, mock_read: Any, mock_write: Any
+    ) -> None:
+        track_file = self.tmp_path / "03 - Blue Jeans.wav"
+        create_dummy_wav(track_file)
+        mock_read.return_value = TrackInfo(
+            file_path=track_file,
+            artist="Lana Del Rey",
+            title="Blue Jeans",
+            album="Born to Die",
+            track_number=3,
+        )
+        mbids = {1: "uuid-1", 2: "uuid-2", 3: "uuid-3"}
+        mb_release: dict[str, object] = {
+            "title": "Issa Album",
+            "album_artist": "21 Savage",
+            "tracks_by_position": {
+                1: {"title": "Famous", "artist": "21 Savage"},
+                2: {"title": "Bank Account", "artist": "21 Savage"},
+                3: {"title": "Close My Eyes", "artist": "21 Savage"},
+            },
+        }
+        with (
+            patch("sonora.modules.tagger._enrich_musicbrainz"),
+            patch("sonora.modules.tagger._enrich_acoustid"),
+            patch("sonora.modules.tagger._enrich_deezer"),
+        ):
+            res = process_single_track(
+                track_file,
+                album_track_mbids=mbids,
+                album_mb_release_details=mb_release,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                force=True,
+                fetch_bpm=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+            )
+            self.assertTrue(res.is_alien)
+            self.assertEqual(res.artist, "Lana Del Rey")
+            self.assertEqual(res.title, "Blue Jeans")
 
     def test_check_file_blacklisted_genre(self) -> None:
         wav = self.tmp_path / "song.wav"

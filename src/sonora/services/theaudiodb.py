@@ -126,13 +126,3 @@ def fetch_theaudiodb_track_details(
             f"TheAudioDB track lookup failed for {artist_name} - {track_title}: {error}"
         )
     return None
-
-
-def fetch_track_video_url(artist_name: str, track_title: str) -> str | None:
-    """
-    Fetch official music video URL (strMusicVid) from TheAudioDB track search.
-    """
-    details = fetch_theaudiodb_track_details(artist_name, track_title)
-    if details and details.get("music_video_url"):
-        return str(details["music_video_url"])
-    return None

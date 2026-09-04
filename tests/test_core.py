@@ -21,6 +21,8 @@ from sonora.core.utils import (
     normalize_str,
     relocate_companion_lyrics,
     safe_case_rename,
+    safe_float,
+    safe_int,
     sanitize_name,
 )
 
@@ -145,6 +147,19 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(clean_disambiguation("Normal Artist"), "Normal Artist")
         self.assertEqual(clean_disambiguation(""), "")
         self.assertEqual(clean_disambiguation(None), "")
+
+    def test_safe_parsers(self) -> None:
+        self.assertEqual(safe_int(12), 12)
+        self.assertEqual(safe_int("12"), 12)
+        self.assertEqual(safe_int("04/10"), 4)
+        self.assertIsNone(safe_int(None))
+        self.assertIsNone(safe_int(""))
+        self.assertIsNone(safe_int("invalid"))
+        self.assertEqual(safe_float(4.5), 4.5)
+        self.assertEqual(safe_float("4.5"), 4.5)
+        self.assertEqual(safe_float("-2.5 dB"), -2.5)
+        self.assertIsNone(safe_float(None))
+        self.assertIsNone(safe_float("bad"))
 
     def test_deduplicate_title_features(self):
         self.assertEqual(
