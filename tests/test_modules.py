@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageDraw
 
-from sonora.audio.art import check_image_similarity, process_artist_artwork
+from sonora.audio.art import (
+    check_image_similarity,
+    process_artist_artwork,
+    process_label_artwork,
+)
 from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.models import TrackInfo
@@ -35,6 +39,7 @@ from sonora.modules.renamer import (
 )
 from sonora.modules.tagger import (
     _enrich_musicbrainz,
+    _enrich_shazam,
     _resolve_album_folder_identity,
     _resolve_album_track_position,
     is_alien_album_track,
@@ -43,6 +48,7 @@ from sonora.modules.tagger import (
     process_single_track,
     tag_album_folder,
 )
+from sonora.services.shazam import ShazamTrackInfo
 from sonora.services.theaudiodb import fetch_artist_images
 
 
@@ -1345,6 +1351,9 @@ class TestCoreModules(unittest.TestCase):
                 album="Album [Deluxe Edition]",
                 genre="hip hop",
                 date="2022-05-10",
+                release_country="US",
+                language="eng",
+                script="Latn",
                 bpm=None,
             )
 
@@ -1354,6 +1363,9 @@ class TestCoreModules(unittest.TestCase):
             self.assertEqual(result.artist, "Armin")
             self.assertEqual(result.title, "Melodie (feat. Nane)")
             self.assertEqual(result.genre, "Hip-Hop/Rap")
+            self.assertEqual(result.release_country, "United States")
+            self.assertEqual(result.language, "English")
+            self.assertEqual(result.script, "Latin")
             mock_write.assert_called_once()
 
             # Test normalize_library
@@ -1367,6 +1379,89 @@ class TestCoreModules(unittest.TestCase):
             )
             self.assertEqual(len(library_results), 1)
             self.assertEqual(library_results[0].artist, "Artist")
+
+    @patch("sonora.modules.tagger.recognize_audio_track")
+    def test_enrich_shazam_generic_and_force(self, mock_recognize: MagicMock) -> None:
+        audio_file = self.tmp_path / "01.flac"
+        audio_file.write_bytes(b"dummy")
+
+        mock_recognize.return_value = ShazamTrackInfo(
+            title="Recognized Title",
+            artist="Recognized Artist",
+            album="Recognized Album",
+            genre="Electronic",
+            apple_music_id="12345",
+            isrc="USABC1234567",
+            release_date="2024-01-01",
+            label="Recognized Label",
+            lyrics="Lyrics Line 1\nLyrics Line 2",
+        )
+
+        # Case 1: Generic title and artist gets healed by Shazam
+        trk = TrackInfo(file_path=audio_file, title="Track 01", artist="Unknown Artist")
+        _enrich_shazam(trk, audio_file, force=False)
+        self.assertEqual(trk.title, "Recognized Title")
+        self.assertEqual(trk.artist, "Recognized Artist")
+        self.assertEqual(trk.album, "Recognized Album")
+        self.assertEqual(trk.genre, "Electronic")
+        self.assertEqual(trk.itunes_trackid, "12345")
+        self.assertEqual(trk.isrc, "USABC1234567")
+        self.assertEqual(trk.date, "2024-01-01")
+        self.assertEqual(trk.label, "Recognized Label")
+        self.assertEqual(trk.lyrics, "Lyrics Line 1\nLyrics Line 2")
+
+        # Case 2: Non-generic title is not overridden when force=False
+        trk2 = TrackInfo(
+            file_path=audio_file, title="Original Title", artist="Original Artist"
+        )
+        mock_recognize.reset_mock()
+        _enrich_shazam(trk2, audio_file, force=False)
+        self.assertEqual(trk2.title, "Original Title")
+        self.assertEqual(trk2.artist, "Original Artist")
+        mock_recognize.assert_not_called()
+
+        # Case 3: When force=True, non-generic title is updated
+        _enrich_shazam(trk2, audio_file, force=True)
+        self.assertEqual(trk2.title, "Recognized Title")
+        self.assertEqual(trk2.artist, "Recognized Artist")
+
+    @patch("sonora.audio.art.fetch_fanart_label")
+    @patch("sonora.audio.art.download_fanart_image_bytes")
+    def test_process_label_artwork(
+        self, mock_download: MagicMock, mock_fetch: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Album Dir"
+        album_dir.mkdir()
+        label_mbid = "11111111-2222-3333-4444-555555555555"
+
+        mock_fetch.return_value = MagicMock(
+            label_urls=("https://assets.fanart.tv/label.png",)
+        )
+        mock_download.return_value = b"LABEL_PNG_BYTES"
+
+        with patch("sonora.audio.art.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(fanart_api_key="valid_key")
+            process_label_artwork(
+                album_dir, label_mbid=label_mbid, label_name="Test Records"
+            )
+            label_file = album_dir / "label.png"
+            self.assertTrue(label_file.exists())
+            self.assertEqual(label_file.read_bytes(), b"LABEL_PNG_BYTES")
+
+            # Calling again skips if already exists
+            mock_fetch.reset_mock()
+            process_label_artwork(
+                album_dir, label_mbid=label_mbid, label_name="Test Records"
+            )
+            mock_fetch.assert_not_called()
+
+        # No key skips download
+        with patch("sonora.audio.art.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(fanart_api_key=None)
+            other_dir = self.tmp_path / "Other Dir"
+            other_dir.mkdir()
+            process_label_artwork(other_dir, label_mbid=label_mbid)
+            self.assertFalse((other_dir / "label.png").exists())
 
 
 if __name__ == "__main__":

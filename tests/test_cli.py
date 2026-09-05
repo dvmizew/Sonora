@@ -37,6 +37,26 @@ class TestCLIInterface(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             mock_tag_album_folder.assert_called_once()
 
+    def test_handle_tag_subcommand_with_fanart_and_shazam_flags(self) -> None:
+        with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:
+            mock_tag_album_folder.return_value = [
+                TrackInfo(file_path=Path("dummy.flac"))
+            ]
+            exit_code = main(
+                [
+                    "tag",
+                    str(self.temporary_path),
+                    "--fanart-key",
+                    "test_fanart_key",
+                    "--no-shazam",
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            mock_tag_album_folder.assert_called_once()
+            _, kwargs = mock_tag_album_folder.call_args
+            self.assertEqual(kwargs.get("fanart_api_key"), "test_fanart_key")
+            self.assertFalse(kwargs.get("enable_shazam"))
+
     def test_handle_tag_subcommand_with_json_report(self) -> None:
         with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:
             mock_tag_album_folder.return_value = [

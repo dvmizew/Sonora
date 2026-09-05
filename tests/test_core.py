@@ -28,8 +28,11 @@ from sonora.core.utils import (
     group_files_by_parent,
     is_single_group_artist,
     is_valid_uuid,
+    normalize_country_name,
     normalize_date,
     normalize_genre,
+    normalize_language_name,
+    normalize_script_name,
     normalize_str,
     relocate_companion_lyrics,
     safe_case_rename,
@@ -596,6 +599,77 @@ class TestSonoraConfig(unittest.TestCase):
             dup_pat.sub("", "Track feat. Artist (feat. Artist)"),
             "Track (feat. Artist)",
         )
+
+    def test_normalize_country_name(self) -> None:
+        self.assertEqual(normalize_country_name("US"), "United States")
+        self.assertEqual(normalize_country_name("USA"), "United States")
+        self.assertEqual(normalize_country_name("RO"), "Romania")
+        self.assertEqual(normalize_country_name("ROU"), "Romania")
+        self.assertEqual(normalize_country_name("GB"), "United Kingdom")
+        self.assertEqual(normalize_country_name("GBR"), "United Kingdom")
+        self.assertEqual(normalize_country_name("DE"), "Germany")
+        self.assertEqual(normalize_country_name("United States"), "United States")
+        self.assertEqual(normalize_country_name("Romania"), "Romania")
+        self.assertEqual(normalize_country_name("XW"), "Worldwide")
+        self.assertEqual(normalize_country_name("worldwide"), "Worldwide")
+        self.assertEqual(normalize_country_name("XE"), "Europe")
+        self.assertEqual(
+            normalize_country_name("SU"),
+            "USSR, Union of Soviet Socialist Republics",
+        )
+        self.assertEqual(
+            normalize_country_name("SUN"),
+            "USSR, Union of Soviet Socialist Republics",
+        )
+        self.assertIsNone(normalize_country_name(None))
+        self.assertIsNone(normalize_country_name(""))
+        self.assertIsNone(normalize_country_name("   "))
+        self.assertEqual(
+            normalize_country_name("CustomFictionalCountryXYZ"),
+            "CustomFictionalCountryXYZ",
+        )
+
+    def test_normalize_language_name(self) -> None:
+        self.assertEqual(normalize_language_name("en"), "English")
+        self.assertEqual(normalize_language_name("eng"), "English")
+        self.assertEqual(normalize_language_name("English"), "English")
+        self.assertEqual(normalize_language_name("ro"), "Romanian")
+        self.assertEqual(normalize_language_name("ron"), "Romanian")
+        self.assertEqual(normalize_language_name("Romanian"), "Romanian")
+        self.assertEqual(normalize_language_name("de"), "German")
+        self.assertEqual(normalize_language_name("deu"), "German")
+        self.assertEqual(normalize_language_name("ger"), "German")
+        self.assertEqual(normalize_language_name("ja"), "Japanese")
+        self.assertEqual(normalize_language_name("jpn"), "Japanese")
+        self.assertIsNone(normalize_language_name(None))
+        self.assertIsNone(normalize_language_name(""))
+        self.assertIsNone(normalize_language_name("   "))
+        self.assertEqual(
+            normalize_language_name("KlingonXYZ"),
+            "KlingonXYZ",
+        )
+
+    def test_normalize_script_name(self) -> None:
+        self.assertEqual(normalize_script_name("Latn"), "Latin")
+        self.assertEqual(normalize_script_name("latin"), "Latin")
+        self.assertEqual(normalize_script_name("Latin"), "Latin")
+        self.assertEqual(normalize_script_name("Cyrl"), "Cyrillic")
+        self.assertEqual(normalize_script_name("Cyrillic"), "Cyrillic")
+        self.assertEqual(normalize_script_name("Arab"), "Arabic")
+        self.assertIsNone(normalize_script_name(None))
+        self.assertIsNone(normalize_script_name(""))
+        self.assertIsNone(normalize_script_name("   "))
+        self.assertEqual(normalize_script_name("UnknownScriptXYZ"), "UnknownScriptXYZ")
+
+    def test_fanart_and_shazam_config(self) -> None:
+        cfg = SonoraConfig(
+            fanart_api_key="test_api_key",
+            fanart_client_key="test_client_key",
+            enable_shazam=False,
+        )
+        self.assertEqual(cfg.fanart_api_key, "test_api_key")
+        self.assertEqual(cfg.fanart_client_key, "test_client_key")
+        self.assertFalse(cfg.enable_shazam)
 
 
 if __name__ == "__main__":

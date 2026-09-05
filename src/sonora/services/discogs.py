@@ -13,6 +13,7 @@ from sonora.core.utils import (
     RateLimiter,
     clean_disambiguation,
     match_score,
+    normalize_country_name,
     normalize_str,
 )
 
@@ -199,7 +200,7 @@ def fetch_discogs_release_details(
             "released": data.get("released"),
             "genres": list(data.get("genres", []) or []),
             "styles": list(data.get("styles", []) or []),
-            "country": data.get("country"),
+            "country": normalize_country_name(data.get("country")),
             "label": label_name,
             "catalog_number": catalog_number,
             "barcode": barcode_value,
@@ -351,7 +352,7 @@ def search_discogs_release(
             "released": first.get("year"),
             "genres": list(first.get("genre", []) or []),
             "styles": list(first.get("style", []) or []),
-            "country": first.get("country"),
+            "country": normalize_country_name(first.get("country")),
             "label": label_name,
             "catalog_number": catalog_number,
             "barcode": barcode_value,

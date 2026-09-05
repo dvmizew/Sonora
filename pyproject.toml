@@ -51,6 +51,9 @@ dependencies = [
     "cyclopts>=4.0.0",
     "anyascii>=0.3.2",
     "tomli>=1.1.0; python_version < '3.11'",
+    "pycountry>=24.0.0",
+    "shazamio>=0.8.1",
+    "shazamio-core>=1.2.0",
 ]
 
 [project.optional-dependencies]

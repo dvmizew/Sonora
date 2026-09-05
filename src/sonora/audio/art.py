@@ -13,6 +13,12 @@ from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.utils import normalize_str
 from sonora.services.deezer import fetch_deezer_cover_art_url
+from sonora.services.fanart import (
+    download_fanart_image_bytes,
+    fetch_fanart_album,
+    fetch_fanart_artist,
+    fetch_fanart_label,
+)
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.musicbrainz import fetch_cover_art_archive_url
 from sonora.services.theaudiodb import fetch_artist_images
@@ -143,6 +149,21 @@ def process_album_cover_art(
             except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
                 LOG.debug(f"Cover art download failed: {error}")
 
+    if musicbrainz_album_id and get_config().fanart_api_key:
+        cdart_path = target_dir / "cdart.png"
+        if not cdart_path.exists() and not dry_run:
+            try:
+                fanart_album = fetch_fanart_album(musicbrainz_album_id)
+                if fanart_album and fanart_album.cdart_urls:
+                    cdart_bytes = download_fanart_image_bytes(
+                        fanart_album.cdart_urls[0]
+                    )
+                    if cdart_bytes:
+                        cdart_path.write_bytes(cdart_bytes)
+                        LOG.info("   ∟ 💿 Downloaded CD disc art -> cdart.png")
+            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+                LOG.debug(f"CD art download failed: {error}")
+
     if cover_image_path.exists() and cover_image_path.stat().st_size > 0:
         return cover_image_path
     return None
@@ -169,13 +190,12 @@ def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
 
     # 2. Check for close variation (excluding generic folder names like singles, flac, mp3)
     for cand in candidates:
-        cand_norm = normalize_str(cand.name)
         if (
-            cand_norm
-            and not get_config().is_generic_container(cand_norm)
+            not get_config().is_generic_container(cand.name)
+            and not get_config().is_disc_folder(cand.name)
             and (
-                fuzz.ratio(cand_norm, clean_artist) >= ARTIST_MATCH_THRESHOLD
-                or fuzz.token_sort_ratio(cand_norm, clean_artist)
+                clean_artist in normalize_str(cand.name)
+                or fuzz.ratio(clean_artist, normalize_str(cand.name))
                 >= ARTIST_MATCH_THRESHOLD
             )
         ):
@@ -185,9 +205,12 @@ def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
 
 
 def process_artist_artwork(
-    folder_path: Path, artist_name: str, dry_run: bool = False
+    folder_path: Path,
+    artist_name: str,
+    artist_mbid: str | None = None,
+    dry_run: bool = False,
 ) -> None:
-    """Ensure artist.jpg and banner.jpg exist in the artist's root folder."""
+    """Ensure artist.jpg, banner.jpg, and optional fanart.tv logo.png exist in the artist root."""
     if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
         return
 
@@ -201,6 +224,51 @@ def process_artist_artwork(
         (artist_dir / filename).exists()
         for filename in ["banner.jpg", "banner.png", "fanart.jpg"]
     )
+    has_logo_image = (artist_dir / "logo.png").exists()
+
+    if artist_mbid and get_config().fanart_api_key and not dry_run:
+        try:
+            fanart_artist = fetch_fanart_artist(artist_mbid)
+            if fanart_artist:
+                if not has_logo_image and fanart_artist.logo_urls:
+                    logo_bytes = download_fanart_image_bytes(fanart_artist.logo_urls[0])
+                    if logo_bytes:
+                        (artist_dir / "logo.png").write_bytes(logo_bytes)
+                        LOG.info(
+                            f"   ∟ 💎 Downloaded artist logo: {escape(artist_name)} -> logo.png"
+                        )
+                if not has_banner_image and fanart_artist.background_urls:
+                    bg_bytes = download_fanart_image_bytes(
+                        fanart_artist.background_urls[0]
+                    )
+                    if bg_bytes:
+                        (artist_dir / "fanart.jpg").write_bytes(bg_bytes)
+                        has_banner_image = True
+                        LOG.info(
+                            f"   ∟ 🎨 Downloaded artist fanart: {escape(artist_name)} -> fanart.jpg"
+                        )
+                if not has_artist_image and fanart_artist.thumb_urls:
+                    thumb_bytes = download_fanart_image_bytes(
+                        fanart_artist.thumb_urls[0]
+                    )
+                    if thumb_bytes:
+                        (artist_dir / "artist.jpg").write_bytes(thumb_bytes)
+                        has_artist_image = True
+                        LOG.info(
+                            f"   ∟ 👤 Downloaded artist thumbnail: {escape(artist_name)} -> artist.jpg"
+                        )
+                if not has_banner_image and fanart_artist.banner_urls:
+                    banner_bytes = download_fanart_image_bytes(
+                        fanart_artist.banner_urls[0]
+                    )
+                    if banner_bytes:
+                        (artist_dir / "banner.jpg").write_bytes(banner_bytes)
+                        has_banner_image = True
+                        LOG.info(
+                            f"   ∟ 🎨 Downloaded artist banner: {escape(artist_name)} -> banner.jpg"
+                        )
+        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"Fanart artist fetch failed: {error}")
 
     if has_artist_image and has_banner_image:
         return
@@ -228,3 +296,29 @@ def process_artist_artwork(
             )
         except OSError as error:
             LOG.debug(f"Failed to write artist banner image: {error}")
+
+
+def process_label_artwork(
+    folder_path: Path,
+    label_mbid: str | None = None,
+    label_name: str | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Download transparent record label logo (label.png) from Fanart.tv if available."""
+    if not label_mbid or not get_config().fanart_api_key or dry_run:
+        return
+
+    label_path = folder_path / "label.png"
+    if label_path.exists():
+        return
+
+    try:
+        fanart_label = fetch_fanart_label(label_mbid)
+        if fanart_label and fanart_label.label_urls:
+            logo_bytes = download_fanart_image_bytes(fanart_label.label_urls[0])
+            if logo_bytes:
+                label_path.write_bytes(logo_bytes)
+                name_display = escape(label_name) if label_name else "Record Label"
+                LOG.info(f"   ∟ 🏷️  Downloaded label logo: {name_display} -> label.png")
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+        LOG.debug(f"Record label logo download failed for {label_mbid}: {error}")

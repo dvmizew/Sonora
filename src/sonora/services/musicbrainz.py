@@ -14,6 +14,9 @@ from sonora.core.utils import (
     clean_title,
     is_valid_uuid,
     match_score,
+    normalize_country_name,
+    normalize_language_name,
+    normalize_script_name,
     normalize_str,
     safe_int,
 )
@@ -28,6 +31,7 @@ def init_musicbrainz(
 ) -> None:
     try:
         musicbrainzngs.set_useragent(app_name, version, contact)
+        musicbrainzngs.set_rate_limit(limit_or_interval=1.0, new_requests=1)
     except (ValueError, AttributeError, RuntimeError) as error:
         LOG.debug(f"MusicBrainz User-Agent initialization failed: {error}")
 
@@ -462,11 +466,15 @@ def fetch_musicbrainz_release_details(
 
         label_name = None
         catalog_number = None
+        label_mbid = None
         label_info_list = release_dict.get("label-info-list", [])
         if label_info_list and isinstance(label_info_list, list):
             first_label = label_info_list[0]
             label_name = first_label.get("label", {}).get("name")
             catalog_number = first_label.get("catalog-number")
+            raw_label_id = first_label.get("label", {}).get("id")
+            if is_valid_uuid(raw_label_id):
+                label_mbid = str(raw_label_id)
 
         release_title = release_dict.get("title")
         release_artist = release_dict.get("artist-credit-phrase")
@@ -585,19 +593,20 @@ def fetch_musicbrainz_release_details(
             "album_artist": release_artist,
             "artist": release_artist,
             "barcode": barcode,
-            "release_country": country,
+            "release_country": normalize_country_name(country),
             "release_status": status,
             "release_type": release_type,
             "musicbrainz_releasegroupid": str(release_group_id)
             if is_valid_uuid(release_group_id)
             else None,
             "label": label_name,
+            "label_mbid": label_mbid,
             "catalog_number": catalog_number,
             "media": media_format,
             "total_tracks": total_tracks if total_tracks > 0 else None,
             "total_discs": total_discs,
-            "language": language,
-            "script": script,
+            "language": normalize_language_name(language),
+            "script": normalize_script_name(script),
             "artist_sort": artist_sort,
             "date": release_dict.get("date"),
             "original_date": release_group.get("first-release-date")

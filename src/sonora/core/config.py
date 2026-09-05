@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
 
 from sonora.core.constants import (
     ALBUM_MATCH_THRESHOLD,
@@ -84,6 +87,15 @@ class SonoraConfig:
         "mit",
     )
 
+    discogs_token: str | None = None
+    acoustid_api_key: str | None = None
+    genius_api_token: str | None = None
+    lastfm_api_key: str | None = None
+    musixmatch_token: str | None = None
+    fanart_api_key: str | None = None
+    fanart_client_key: str | None = None
+    enable_shazam: bool = True
+
     def is_disc_folder(self, folder_name: str) -> bool:
         clean = folder_name.strip()
         for pat in self.disc_folder_patterns:
@@ -120,6 +132,45 @@ def _parse_config_data(path: Path) -> dict[str, Any]:
     return {}
 
 
+def load_app_environment(target_path: Path | None = None) -> None:
+    """
+    Centralized discovery and loading of .env files from XDG config directories,
+    current working directory, and target directory hierarchies.
+    """
+    seen_paths: set[Path] = set()
+
+    def _safe_load(p: Path) -> None:
+        try:
+            resolved = p.resolve()
+            if (
+                resolved not in seen_paths
+                and resolved.is_file()
+                and resolved.stat().st_size > 0
+            ):
+                seen_paths.add(resolved)
+                load_dotenv(dotenv_path=resolved)
+        except OSError:
+            pass
+
+    # 1. Standard cwd / parent discovery
+    load_dotenv()
+
+    # 2. XDG user config directory (~/.config/sonora/.env)
+    _safe_load(DIRS.user_config_path / ".env")
+
+    # 3. Target directory and its parents (e.g. /home/dvmi/Music/.env)
+    if target_path is not None:
+        try:
+            curr = target_path.resolve()
+            if not curr.is_dir():
+                curr = curr.parent
+            while curr != curr.parent:
+                _safe_load(curr / ".env")
+                curr = curr.parent
+        except (OSError, RuntimeError):
+            pass
+
+
 def _discover_config_file() -> Path | None:
     candidate_paths = [
         DIRS.user_config_path / "config.toml",
@@ -145,13 +196,9 @@ def _discover_config_file() -> Path | None:
 
 @functools.cache
 def get_config() -> SonoraConfig:
+    load_app_environment()
     config_file = _discover_config_file()
-    if config_file is None:
-        return SonoraConfig()
-
-    raw_data = _parse_config_data(config_file)
-    if not raw_data:
-        return SonoraConfig()
+    raw_data = _parse_config_data(config_file) if config_file is not None else {}
 
     kwargs: dict[str, Any] = {}
 
@@ -198,6 +245,78 @@ def get_config() -> SonoraConfig:
             kwargs["featuring_conjunctions"] = tuple(
                 str(c).lower() for c in conjunctions if c
             )
+
+    discogs_token = (
+        raw_data.get("discogs_token")
+        or raw_data.get("discogs_user_token")
+        or os.environ.get("DISCOGS_TOKEN")
+        or os.environ.get("DISCOGS_USER_TOKEN")
+    )
+    if discogs_token:
+        kwargs["discogs_token"] = str(discogs_token).strip()
+
+    acoustid_key = (
+        raw_data.get("acoustid_api_key")
+        or raw_data.get("acoustid_key")
+        or os.environ.get("ACOUSTID_API_KEY")
+    )
+    if acoustid_key:
+        kwargs["acoustid_api_key"] = str(acoustid_key).strip()
+
+    genius_token = (
+        raw_data.get("genius_api_token")
+        or raw_data.get("genius_token")
+        or os.environ.get("GENIUS_API_TOKEN")
+        or os.environ.get("GENIUS_TOKEN")
+    )
+    if genius_token:
+        kwargs["genius_api_token"] = str(genius_token).strip()
+
+    lastfm_key = (
+        raw_data.get("lastfm_api_key")
+        or raw_data.get("lastfm_key")
+        or os.environ.get("LASTFM_API_KEY")
+    )
+    if lastfm_key:
+        kwargs["lastfm_api_key"] = str(lastfm_key).strip()
+
+    musixmatch_token = (
+        raw_data.get("musixmatch_token")
+        or os.environ.get("MUSIXMATCH_TOKEN")
+        or os.environ.get("MUSIXMATCH_USER_TOKEN")
+    )
+    if musixmatch_token:
+        kwargs["musixmatch_token"] = str(musixmatch_token).strip()
+
+    fanart_key = (
+        raw_data.get("fanart_api_key")
+        or raw_data.get("fanart_key")
+        or os.environ.get("FANART_API_KEY")
+        or os.environ.get("FANART_KEY")
+    )
+    if fanart_key:
+        kwargs["fanart_api_key"] = str(fanart_key).strip()
+
+    fanart_client = (
+        raw_data.get("fanart_client_key")
+        or raw_data.get("fanart_client")
+        or os.environ.get("FANART_CLIENT_KEY")
+    )
+    if fanart_client:
+        kwargs["fanart_client_key"] = str(fanart_client).strip()
+
+    shazam_env = os.environ.get("ENABLE_SHAZAM") or os.environ.get(
+        "SONORA_ENABLE_SHAZAM"
+    )
+    if shazam_env is not None:
+        kwargs["enable_shazam"] = shazam_env.strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+    elif "enable_shazam" in raw_data:
+        kwargs["enable_shazam"] = bool(raw_data["enable_shazam"])
 
     return SonoraConfig(**kwargs)
 

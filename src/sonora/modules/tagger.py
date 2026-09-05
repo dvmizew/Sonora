@@ -1,5 +1,6 @@
 import dataclasses
 import gc
+import os
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,13 +14,17 @@ from musicbrainzngs import MusicBrainzError
 from rapidfuzz import fuzz
 from rich.markup import escape
 
-from sonora.audio.art import process_album_cover_art, process_artist_artwork
+from sonora.audio.art import (
+    process_album_cover_art,
+    process_artist_artwork,
+    process_label_artwork,
+)
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.key import detect_key_details, detect_musical_key
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.config import get_config
+from sonora.core.config import clear_config_cache, get_config
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -39,8 +44,11 @@ from sonora.core.utils import (
     group_files_by_parent,
     is_valid_uuid,
     match_score,
+    normalize_country_name,
     normalize_date,
     normalize_genre,
+    normalize_language_name,
+    normalize_script_name,
     normalize_str,
     resolve_artist_name,
     safe_float,
@@ -66,6 +74,7 @@ from sonora.services.musicbrainz import (
     fetch_track_mbid,
     search_musicbrainz_release,
 )
+from sonora.services.shazam import recognize_audio_track
 from sonora.services.theaudiodb import (
     fetch_theaudiodb_track_details,
 )
@@ -223,6 +232,51 @@ def _is_generic_title(title: str | None) -> bool:
     return val.isdigit() or bool(
         re.match(r"^(track|audio\s*track|audiotrack|title)\s*\d*$", val)
     )
+
+
+def _enrich_shazam(
+    track_info: TrackInfo,
+    file_path: Path,
+    force: bool = False,
+) -> None:
+    """Identify track via Shazam acoustic recognition if tags are missing, generic, or unverified."""
+    if not get_config().enable_shazam:
+        return
+    is_missing_metadata = (
+        not track_info.title
+        or _is_generic_title(track_info.title)
+        or not track_info.artist
+        or _is_generic(track_info.artist, "artist")
+    )
+    if not is_missing_metadata and not force:
+        return
+
+    try:
+        shazam_match = recognize_audio_track(file_path)
+        if shazam_match and (is_missing_metadata or force):
+            track_info.title = shazam_match.title
+            track_info.artist = resolve_artist_name(shazam_match.artist)
+            if shazam_match.album and (
+                not track_info.album or _is_generic(track_info.album, "album") or force
+            ):
+                track_info.album = shazam_match.album
+            if shazam_match.genre and not track_info.genre:
+                track_info.genre = shazam_match.genre
+            if shazam_match.apple_music_id and not track_info.itunes_trackid:
+                track_info.itunes_trackid = shazam_match.apple_music_id
+            if shazam_match.isrc and not track_info.isrc:
+                track_info.isrc = shazam_match.isrc
+            if shazam_match.release_date and not track_info.date:
+                track_info.date = shazam_match.release_date
+            if shazam_match.label and not track_info.label:
+                track_info.label = shazam_match.label
+            if shazam_match.lyrics and not track_info.lyrics:
+                track_info.lyrics = shazam_match.lyrics
+            LOG.info(
+                f"   ∟ ⚡ [Shazam] Identified: [white]{escape(shazam_match.artist)} - {escape(shazam_match.title)}[/]"
+            )
+    except _NETWORK_EXCEPTIONS as error:
+        LOG.debug(f"Shazam acoustic recognition failed: {error}")
 
 
 def _enrich_musicbrainz(
@@ -983,6 +1037,14 @@ def _enrich_lyrics(
                 LOG.info(
                     f"   ∟ [yellow]🔄 Updated {tag_type} lyrics for {escape(file_path.name)}[/]"
                 )
+        elif not had_lrc and track_info.lyrics and not dry_run:
+            try:
+                lrc_path.write_text(track_info.lyrics, encoding="utf-8")
+                LOG.info(
+                    f"   ∟ [green]✅ Saved plain lyrics for {escape(file_path.name)}[/]"
+                )
+            except OSError as write_err:
+                LOG.debug(f"Failed to write fallback lyrics: {write_err}")
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Lyrics fetch failed for {track_info.title}: {error}")
 
@@ -1487,6 +1549,14 @@ def process_single_track(
         orig_info = dataclasses.replace(track_info)
         track_info.artist = resolve_artist_name(track_info.artist)
 
+        if not bool(
+            album_track_mbids or album_mb_release_details or target_album_title
+        ) and (
+            _is_generic_title(track_info.title)
+            or _is_generic(track_info.artist, "artist")
+        ):
+            _enrich_shazam(track_info, file_path, force=False)
+
         # Check whether this track is an outlier / alien track in an album folder
         has_album_context = bool(
             album_track_mbids
@@ -1581,6 +1651,8 @@ def process_single_track(
             album_track_mbids=album_track_mbids,
             force=force,
         )
+        if not track_info.musicbrainz_trackid:
+            _enrich_shazam(track_info, file_path, force=force)
         _enrich_itunes(
             track_info, album_itunes_details=album_itunes_details, force=force
         )
@@ -1726,11 +1798,24 @@ def tag_album_folder(
     acoustid_api_key: str | None = None,
     discogs_user_token: str | None = None,
     genius_api_token: str | None = None,
+    fanart_api_key: str | None = None,
+    fanart_client_key: str | None = None,
+    enable_shazam: bool | None = None,
     force: bool = False,
     dry_run: bool = False,
 ) -> list[TrackInfo]:
     if not folder_path.exists() or not folder_path.is_dir():
         raise FileNotFoundError(f"Album folder not found: {folder_path}")
+
+    if fanart_api_key:
+        os.environ["FANART_API_KEY"] = fanart_api_key
+        clear_config_cache()
+    if fanart_client_key:
+        os.environ["FANART_CLIENT_KEY"] = fanart_client_key
+        clear_config_cache()
+    if enable_shazam is not None:
+        os.environ["ENABLE_SHAZAM"] = str(enable_shazam).lower()
+        clear_config_cache()
 
     global LAST_TAGGING_FAILURES, LAST_TAGGED_TRACKS
     LAST_TAGGING_FAILURES = []
@@ -1917,10 +2002,36 @@ def tag_album_folder(
                         )
                         try:
                             process_artist_artwork(
-                                album_dir, primary_artist, dry_run=dry_run
+                                album_dir,
+                                primary_artist,
+                                artist_mbid=rep_track.musicbrainz_artistid,
+                                dry_run=dry_run,
                             )
                         except _NETWORK_EXCEPTIONS as error:
                             LOG.debug(f"Artist art download failed: {error}")
+
+                        try:
+                            label_mbid = (
+                                str(album_mb_release_details.get("label_mbid"))
+                                if album_mb_release_details
+                                and album_mb_release_details.get("label_mbid")
+                                else None
+                            )
+                            label_name = (
+                                str(album_mb_release_details.get("label"))
+                                if album_mb_release_details
+                                and album_mb_release_details.get("label")
+                                else rep_track.label
+                            )
+                            if label_mbid:
+                                process_label_artwork(
+                                    album_dir,
+                                    label_mbid=label_mbid,
+                                    label_name=label_name,
+                                    dry_run=dry_run,
+                                )
+                        except _NETWORK_EXCEPTIONS as error:
+                            LOG.debug(f"Label logo download failed: {error}")
 
                     results.extend(current_album_results)
                     current_album_results = []
@@ -1988,6 +2099,9 @@ def normalize_single_track(
 
     cleaned_genre = normalize_genre(current_info.genre)
     cleaned_date = normalize_date(current_info.date)
+    cleaned_country = normalize_country_name(current_info.release_country)
+    cleaned_language = normalize_language_name(current_info.language)
+    cleaned_script = normalize_script_name(current_info.script)
 
     cleaned_featured = current_info.featured_artists
     _, feat_list, _, _ = extract_balanced_features(cleaned_title)
@@ -2021,6 +2135,9 @@ def normalize_single_track(
         featured_artists=cleaned_featured,
         genre=cleaned_genre or current_info.genre,
         date=cleaned_date or current_info.date,
+        release_country=cleaned_country or current_info.release_country,
+        language=cleaned_language or current_info.language,
+        script=cleaned_script or current_info.script,
         bpm=updated_bpm,
         initial_key=updated_key,
     )

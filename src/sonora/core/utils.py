@@ -12,6 +12,7 @@ from typing import TypeGuard
 import anyascii
 import ftfy
 import httpx
+import pycountry
 from music_metadata_filter.filter import MetadataFilter
 from music_metadata_filter.functions import (
     fix_track_suffix,
@@ -888,6 +889,129 @@ def normalize_genre(genre_value: str | None) -> str | None:
     return raw_genre.title()
 
 
+@lru_cache(maxsize=2048)
+def normalize_country_name(country_input: str | None) -> str | None:
+    """Standardize a country identifier (ISO 3166-1 alpha-2, alpha-3, historic, or common name) into official name."""
+    if not country_input:
+        return None
+    cleaned = country_input.strip()
+    if not cleaned:
+        return None
+
+    upper = cleaned.upper()
+    if upper in ("XW", "WORLDWIDE", "GLOBAL", "WORLD"):
+        return "Worldwide"
+    if upper in ("XE", "EUROPE"):
+        return "Europe"
+
+    try:
+        if len(cleaned) == 2:
+            match = pycountry.countries.get(alpha_2=upper)
+            if match is not None and hasattr(match, "name"):
+                return str(match.name)
+            historic = pycountry.historic_countries.get(alpha_2=upper)
+            if historic is not None and hasattr(historic, "name"):
+                return str(historic.name)
+
+        if len(cleaned) == 3:
+            match = pycountry.countries.get(alpha_3=upper)
+            if match is not None and hasattr(match, "name"):
+                return str(match.name)
+            historic = pycountry.historic_countries.get(alpha_3=upper)
+            if historic is not None and hasattr(historic, "name"):
+                return str(historic.name)
+
+        if len(cleaned) == 4:
+            historic = pycountry.historic_countries.get(alpha_4=upper)
+            if historic is not None and hasattr(historic, "name"):
+                return str(historic.name)
+
+        match = pycountry.countries.get(name=cleaned)
+        if match is not None and hasattr(match, "name"):
+            return str(match.name)
+
+        historic = pycountry.historic_countries.get(name=cleaned)
+        if historic is not None and hasattr(historic, "name"):
+            return str(historic.name)
+
+        fuzzy_matches = pycountry.countries.search_fuzzy(cleaned)
+        if fuzzy_matches and hasattr(fuzzy_matches[0], "name"):
+            return str(fuzzy_matches[0].name)
+    except (LookupError, AttributeError):
+        pass
+
+    return cleaned
+
+
+@lru_cache(maxsize=1024)
+def normalize_language_name(language_input: str | None) -> str | None:
+    """Standardize an ISO 639-1 / 639-2 language code or localized name into official English name."""
+    if not language_input:
+        return None
+    cleaned = language_input.strip()
+    if not cleaned:
+        return None
+
+    lower = cleaned.lower()
+    try:
+        if len(cleaned) == 2:
+            lang = pycountry.languages.get(alpha_2=lower)
+            if lang is not None and hasattr(lang, "name"):
+                return str(lang.name)
+
+        if len(cleaned) == 3:
+            lang = pycountry.languages.get(alpha_3=lower)
+            if lang is not None and hasattr(lang, "name"):
+                return str(lang.name)
+            try:
+                lang = pycountry.languages.get(bibliographic=lower)
+                if lang is not None and hasattr(lang, "name"):
+                    return str(lang.name)
+            except KeyError:
+                pass
+
+        lang = pycountry.languages.get(name=cleaned)
+        if lang is not None and hasattr(lang, "name"):
+            return str(lang.name)
+
+        match = pycountry.languages.lookup(cleaned)
+        if match is not None and hasattr(match, "name"):
+            return str(match.name)
+    except (LookupError, AttributeError):
+        pass
+
+    return cleaned
+
+
+@lru_cache(maxsize=512)
+def normalize_script_name(script_input: str | None) -> str | None:
+    """Standardize an ISO 15924 4-letter script code or script name into official English name."""
+    if not script_input:
+        return None
+    cleaned = script_input.strip()
+    if not cleaned:
+        return None
+
+    try:
+        if len(cleaned) == 4:
+            script_code = cleaned[:1].upper() + cleaned[1:].lower()
+            sc = pycountry.scripts.get(alpha_4=script_code)
+            if sc is not None and hasattr(sc, "name"):
+                return str(sc.name)
+
+        sc = pycountry.scripts.get(name=cleaned)
+        if sc is not None and hasattr(sc, "name"):
+            return str(sc.name)
+
+        match = pycountry.scripts.lookup(cleaned)
+        if match is not None and hasattr(match, "name"):
+            return str(match.name)
+    except (LookupError, AttributeError):
+        pass
+
+    return cleaned
+
+
 def sanitize_name(name: str | None) -> str:
     """
     Clean string for safe cross-platform filesystem paths.
@@ -1066,3 +1190,6 @@ def clear_utils_cache() -> None:
     normalize_str.cache_clear()
     normalize_date.cache_clear()
     normalize_genre.cache_clear()
+    normalize_country_name.cache_clear()
+    normalize_language_name.cache_clear()
+    normalize_script_name.cache_clear()

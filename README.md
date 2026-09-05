@@ -25,6 +25,8 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 | **Genius** | Song descriptions, featured artists, producers |
 | **Last.fm** | Top tags (genres/moods), listener counts, play counts |
 | **TheAudioDB** | Artist avatars (`artist.jpg`), banners (`banner.jpg`), music video URLs |
+| **Shazam** | Acoustic recognition (identifies un-tagged/corrupted audio directly from sound waveform) |
+| **Fanart.tv** | Audiophile artwork: transparent CD disc art (`cdart.png`), artist logos (`logo.png`), 4K fanart |
 | **AcoustID** | Fingerprint-based MBID lookup using Chromaprint (`fpcalc`) |
 | **Syncedlyrics** | Synced `.lrc` and plain lyrics from Musixmatch, Lrclib, and NetEase |
 | **Cover Art Archive** | Front cover art for MusicBrainz releases |
@@ -71,7 +73,18 @@ DISCOGS_TOKEN="your_token"          # https://www.discogs.com/settings/developer
 ACOUSTID_API_KEY="your_api_key"     # https://acoustid.org/api-key -> Get API key
 GENIUS_API_TOKEN="your_token"       # https://genius.com/api-clients -> Create client -> Generate Access Token
 LASTFM_API_KEY="your_api_key"       # https://www.lastfm.com/api/account/create -> Create API account
+FANART_API_KEY="your_api_key"       # https://fanart.tv/get-an-api-key -> Get Personal API Key
 MUSIXMATCH_TOKEN="your_token"       # (Optional) Desktop app/web token for word-synced lyrics
+```
+
+You can also use a configuration file at `~/.config/sonora/config.toml`:
+
+```toml
+[sonora]
+artist_match_threshold = 85.0
+album_match_threshold = 75.0
+fanart_api_key = "your_api_key"
+enable_shazam = true
 ```
 
 | Key | Where to get it | What it unlocks |
@@ -80,9 +93,10 @@ MUSIXMATCH_TOKEN="your_token"       # (Optional) Desktop app/web token for word-
 | **`ACOUSTID_API_KEY`** | [AcoustID API](https://acoustid.org/api-key) | Audio fingerprinting (identifies tracks with 0 initial tags) |
 | **`GENIUS_API_TOKEN`** | [Genius API Clients](https://genius.com/api-clients) | Song descriptions and background stories in comment tag |
 | **`LASTFM_API_KEY`** | [Last.fm API](https://www.last.fm/api) | Dynamic mood & style tags |
+| **`FANART_API_KEY`** | [Fanart.tv API](https://fanart.tv/get-an-api-key) | CD art (`cdart.png`), transparent artist logos (`logo.png`), 4K fanart |
 | **`MUSIXMATCH_TOKEN`** | Desktop app / web dump | Word-by-word synced lyrics (`<mm:ss.xx>`) |
 
-*MusicBrainz, Cover Art Archive, Apple Music/iTunes, TheAudioDB, and Deezer require no keys.*
+*MusicBrainz, Cover Art Archive, Apple Music/iTunes, TheAudioDB, Deezer, **Shazam**, and **PyCountry** require no keys.*
 
 ---
 

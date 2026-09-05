@@ -16,6 +16,12 @@ from sonora.services.discogs import (
     fetch_discogs_release_details,
     search_discogs_release,
 )
+from sonora.services.fanart import (
+    download_fanart_image_bytes,
+    fetch_fanart_album,
+    fetch_fanart_artist,
+    fetch_fanart_label,
+)
 from sonora.services.genius import fetch_genius_description
 from sonora.services.itunes import fetch_itunes_cover_art_url
 from sonora.services.lastfm import fetch_lastfm_tags
@@ -29,6 +35,7 @@ from sonora.services.musicbrainz import (
     fetch_track_mbid,
     search_musicbrainz_release,
 )
+from sonora.services.shazam import get_shazam_track_about, recognize_audio_track
 
 
 class TestServicesEngine(unittest.TestCase):
@@ -51,6 +58,8 @@ class TestServicesEngine(unittest.TestCase):
             "sonora.services.genius",
             "sonora.services.deezer",
             "sonora.services.theaudiodb",
+            "sonora.services.fanart",
+            "sonora.services.shazam",
         ]
         for service in services:
             patcher = patch(f"{service}.get_cached_api", return_value=None)
@@ -511,6 +520,210 @@ class TestServicesEngine(unittest.TestCase):
             self.assertEqual(dur2, 180.0)
             self.assertEqual(fp2, "AQADtEmSJEqiJE")
             self.assertEqual(mock_fp.call_count, 1)
+
+    @patch("sonora.core.http.SESSION.get")
+    def test_fetch_fanart_artist(self, mock_get: MagicMock) -> None:
+        mbid = "11111111-2222-3333-4444-555555555555"
+
+        # 1. Missing api key returns None
+        with patch("sonora.services.fanart.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(
+                fanart_api_key=None, fanart_client_key=None
+            )
+            self.assertIsNone(fetch_fanart_artist(mbid))
+
+        # 2. Happy path with valid payload
+        with patch("sonora.services.fanart.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(
+                fanart_api_key="valid_key", fanart_client_key="client_key"
+            )
+            mock_resp = MagicMock(status_code=200)
+            mock_resp.json.return_value = {
+                "name": "Test Artist",
+                "hdmusiclogo": [
+                    {"url": "https://assets.fanart.tv/hdlogo.png", "likes": "5"}
+                ],
+                "musiclogo": [
+                    {"url": "https://assets.fanart.tv/logo.png", "likes": "1"}
+                ],
+                "artistbackground": [
+                    {"url": "https://assets.fanart.tv/fanart.jpg", "likes": "10"}
+                ],
+                "musicbanner": [
+                    {"url": "https://assets.fanart.tv/banner.jpg", "likes": "2"}
+                ],
+                "artistthumb": [
+                    {"url": "https://assets.fanart.tv/thumb.jpg", "likes": "3"}
+                ],
+            }
+            mock_get.return_value = mock_resp
+
+            artwork = fetch_fanart_artist(mbid)
+            self.assertIsNotNone(artwork)
+            if artwork:
+                self.assertIn("https://assets.fanart.tv/hdlogo.png", artwork.logo_urls)
+                self.assertIn(
+                    "https://assets.fanart.tv/fanart.jpg", artwork.background_urls
+                )
+                self.assertIn(
+                    "https://assets.fanart.tv/banner.jpg", artwork.banner_urls
+                )
+
+        # 3. 404 response returns None
+        with patch("sonora.services.fanart.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(
+                fanart_api_key="valid_key", fanart_client_key=None
+            )
+            mock_resp = MagicMock(status_code=404)
+            mock_get.return_value = mock_resp
+            self.assertIsNone(fetch_fanart_artist(mbid))
+
+        # 4. Invalid mbid returns None
+        self.assertIsNone(fetch_fanart_artist("invalid-uuid-format"))
+
+    @patch("sonora.core.http.SESSION.get")
+    def test_fetch_fanart_album(self, mock_get: MagicMock) -> None:
+        rg_mbid = "11111111-2222-3333-4444-555555555555"
+
+        with patch("sonora.services.fanart.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(
+                fanart_api_key="valid_key", fanart_client_key=None
+            )
+            mock_resp = MagicMock(status_code=200)
+            mock_resp.json.return_value = {
+                "albums": {
+                    rg_mbid: {
+                        "cdart": [
+                            {"url": "https://assets.fanart.tv/cdart.png", "likes": "4"}
+                        ],
+                        "albumcover": [
+                            {"url": "https://assets.fanart.tv/cover.jpg", "likes": "2"}
+                        ],
+                    }
+                }
+            }
+            mock_get.return_value = mock_resp
+
+            artwork = fetch_fanart_album(rg_mbid)
+            self.assertIsNotNone(artwork)
+            if artwork:
+                self.assertIn("https://assets.fanart.tv/cdart.png", artwork.cdart_urls)
+                self.assertIn("https://assets.fanart.tv/cover.jpg", artwork.cover_urls)
+
+    @patch("sonora.core.http.SESSION.get")
+    def test_fetch_fanart_label(self, mock_get: MagicMock) -> None:
+        label_mbid = "11111111-2222-3333-4444-555555555555"
+
+        with patch("sonora.services.fanart.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(
+                fanart_api_key="valid_key", fanart_client_key=None
+            )
+            mock_resp = MagicMock(status_code=200)
+            mock_resp.json.return_value = {
+                "name": "Atlantic Records",
+                "id": label_mbid,
+                "musiclabel": [
+                    {"url": "https://assets.fanart.tv/label.png", "likes": "3"}
+                ],
+            }
+            mock_get.return_value = mock_resp
+
+            artwork = fetch_fanart_label(label_mbid)
+            self.assertIsNotNone(artwork)
+            if artwork:
+                self.assertIn("https://assets.fanart.tv/label.png", artwork.label_urls)
+
+        # Missing API key returns None
+        with patch("sonora.services.fanart.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(
+                fanart_api_key=None, fanart_client_key=None
+            )
+            self.assertIsNone(fetch_fanart_label(label_mbid))
+
+    @patch("sonora.core.http.SESSION.get")
+    def test_download_fanart_image_bytes(self, mock_get: MagicMock) -> None:
+        mock_resp = MagicMock(status_code=200, content=b"FANART_IMAGE_BYTES")
+        mock_get.return_value = mock_resp
+        res = download_fanart_image_bytes("https://assets.fanart.tv/test.png")
+        self.assertEqual(res, b"FANART_IMAGE_BYTES")
+
+        mock_get.return_value = MagicMock(status_code=404)
+        self.assertIsNone(
+            download_fanart_image_bytes("https://assets.fanart.tv/missing.png")
+        )
+        self.assertIsNone(download_fanart_image_bytes(None))
+
+    @patch("sonora.services.shazam._recognize_async")
+    def test_recognize_audio_track(self, mock_shazam_async: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_file = Path(tmp_dir) / "test.flac"
+            audio_file.write_bytes(b"dummy flac content")
+
+            # 1. Happy path: successful recognition
+            mock_shazam_async.return_value = {
+                "track": {
+                    "title": "Starboy",
+                    "subtitle": "The Weeknd",
+                    "genres": {"primary": "R&B/Soul"},
+                    "images": {"coverarthq": "https://shazam.com/cover.jpg"},
+                    "key": "123456",
+                    "isrc": "USUM71607007",
+                    "sections": [
+                        {
+                            "type": "SONG",
+                            "metadata": [
+                                {"title": "Album", "text": "Starboy"},
+                                {"title": "Released", "text": "2016"},
+                                {"title": "Label", "text": "Republic Records"},
+                            ],
+                        },
+                        {
+                            "type": "LYRICS",
+                            "text": [
+                                "I'm tryna put you in the worst mood, ah",
+                                "P1 cleaner than your church shoes, ah",
+                            ],
+                        },
+                    ],
+                }
+            }
+
+            info = recognize_audio_track(audio_file)
+            self.assertIsNotNone(info)
+            if info:
+                self.assertEqual(info.title, "Starboy")
+                self.assertEqual(info.artist, "The Weeknd")
+                self.assertEqual(info.album, "Starboy")
+                self.assertEqual(info.genre, "R&B/Soul")
+                self.assertEqual(info.isrc, "USUM71607007")
+                self.assertEqual(info.apple_music_id, "123456")
+                self.assertEqual(info.cover_art_url, "https://shazam.com/cover.jpg")
+                self.assertEqual(info.release_date, "2016")
+                self.assertEqual(info.label, "Republic Records")
+                self.assertIsNotNone(info.lyrics)
+                if info.lyrics:
+                    self.assertIn("worst mood", info.lyrics)
+
+            # 2. Edge case: empty or invalid track payload
+            mock_shazam_async.return_value = {"matches": []}
+            self.assertIsNone(recognize_audio_track(audio_file))
+
+            # 3. Edge case: non-existent file
+            non_existent = Path(tmp_dir) / "non_existent.flac"
+            self.assertIsNone(recognize_audio_track(non_existent))
+
+            # 4. Edge case: disabled by config
+            with patch("sonora.services.shazam.get_config") as mock_cfg:
+                mock_cfg.return_value = MagicMock(enable_shazam=False)
+                self.assertIsNone(recognize_audio_track(audio_file))
+
+    @patch("sonora.services.shazam._track_about_async")
+    def test_get_shazam_track_about(self, mock_about_async: MagicMock) -> None:
+        mock_about_async.return_value = {"id": 123456, "title": "Starboy"}
+        res = get_shazam_track_about(123456)
+        self.assertEqual(res, {"id": 123456, "title": "Starboy"})
+        self.assertIsNone(get_shazam_track_about(0))
+        self.assertIsNone(get_shazam_track_about(-1))
 
 
 if __name__ == "__main__":

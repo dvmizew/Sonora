@@ -1,7 +1,6 @@
 import contextlib
 import dataclasses
 import datetime
-import os
 import signal
 import socket
 import sys
@@ -13,7 +12,6 @@ from typing import Annotated
 import orjson
 from cyclopts import App, Parameter
 from cyclopts.exceptions import CycloptsError
-from dotenv import load_dotenv
 from rich.markup import escape
 
 from sonora import __version__
@@ -28,6 +26,11 @@ from sonora.core.cache import (
 )
 from sonora.core.cache import (
     clear_cache as perform_clear_cache,
+)
+from sonora.core.config import (
+    clear_config_cache,
+    get_config,
+    load_app_environment,
 )
 from sonora.core.logger import (
     LOG,
@@ -66,7 +69,7 @@ from sonora.modules.tagger import (
 from sonora.services.lyrics import init_musixmatch_token, process_track_lyrics
 from sonora.services.musicbrainz import init_musicbrainz
 
-load_dotenv()
+load_app_environment()
 socket.setdefaulttimeout(15)
 
 if hasattr(signal, "SIGCONT"):
@@ -169,6 +172,27 @@ def tag(
             help="Genius API token for song descriptions",
         ),
     ] = None,
+    fanart_api_key: Annotated[
+        str | None,
+        Parameter(
+            name=["--fanart-key"],
+            help="Fanart.tv project API key for CD art, logos, and HD fanart",
+        ),
+    ] = None,
+    fanart_client_key: Annotated[
+        str | None,
+        Parameter(
+            name=["--fanart-client-key"],
+            help="Fanart.tv personal VIP client key for immediate image updates",
+        ),
+    ] = None,
+    enable_shazam: Annotated[
+        bool,
+        Parameter(
+            name=["--shazam"],
+            help="Enable acoustic recognition via Shazam for untagged tracks",
+        ),
+    ] = True,
     threads: Annotated[
         int,
         Parameter(
@@ -187,23 +211,22 @@ def tag(
     """
     Tag audio files and albums automatically with all metadata, artwork, BPM, ReplayGain & lyrics.
     """
+    load_app_environment(path)
+    clear_config_cache()
     init_musicbrainz()
     init_musixmatch_token()
 
     if force:
         set_ignore_cache(True)
 
-    resolved_lastfm_key = lastfm_api_key or os.environ.get("LASTFM_API_KEY")
-    resolved_acoustid_key = acoustid_api_key or os.environ.get("ACOUSTID_API_KEY")
-    resolved_discogs_token = (
-        discogs_user_token
-        or os.environ.get("DISCOGS_TOKEN")
-        or os.environ.get("DISCOGS_USER_TOKEN")
-    )
-    resolved_genius_token = genius_api_token or os.environ.get("GENIUS_API_TOKEN")
-    has_musixmatch = bool(
-        os.environ.get("MUSIXMATCH_TOKEN") or os.environ.get("MUSIXMATCH_USER_TOKEN")
-    )
+    cfg = get_config()
+    resolved_lastfm_key = lastfm_api_key or cfg.lastfm_api_key
+    resolved_acoustid_key = acoustid_api_key or cfg.acoustid_api_key
+    resolved_discogs_token = discogs_user_token or cfg.discogs_token
+    resolved_genius_token = genius_api_token or cfg.genius_api_token
+    resolved_fanart_key = fanart_api_key or cfg.fanart_api_key
+    resolved_fanart_client_key = fanart_client_key or cfg.fanart_client_key
+    has_musixmatch = bool(cfg.musixmatch_token)
 
     active_keys: list[str] = []
     if resolved_discogs_token:
@@ -216,6 +239,8 @@ def tag(
         active_keys.append("[bold green]Last.fm[/]")
     if has_musixmatch:
         active_keys.append("[bold green]Musixmatch[/]")
+    if resolved_fanart_key:
+        active_keys.append("[bold green]Fanart.tv[/]")
 
     if active_keys:
         LOG.info(f"🔑 [bold]Active API Keys/Tokens:[/] {', '.join(active_keys)}")
@@ -240,6 +265,9 @@ def tag(
             acoustid_api_key=resolved_acoustid_key,
             discogs_user_token=resolved_discogs_token,
             genius_api_token=resolved_genius_token,
+            fanart_api_key=resolved_fanart_key,
+            fanart_client_key=resolved_fanart_client_key,
+            enable_shazam=enable_shazam,
             force=force,
             dry_run=dry_run,
         )
