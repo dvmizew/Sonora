@@ -17,6 +17,7 @@ from rich.markup import escape
 
 from sonora import __version__
 from sonora.audio.bpm import calculate_bpm
+from sonora.audio.key import detect_key_details
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.cache import (
@@ -95,6 +96,13 @@ def tag(
         Parameter(
             name=["--bpm"],
             help="Calculate audio tempo (BPM)",
+        ),
+    ] = True,
+    fetch_key: Annotated[
+        bool,
+        Parameter(
+            name=["--key"],
+            help="Detect musical key and Camelot wheel tonality",
         ),
     ] = True,
     fetch_replaygain: Annotated[
@@ -223,6 +231,7 @@ def tag(
             path,
             max_threads=threads,
             fetch_bpm=fetch_bpm,
+            fetch_key=fetch_key,
             fetch_replaygain=fetch_replaygain,
             fetch_lyrics=fetch_lyrics,
             fetch_itunes_art=fetch_artwork,
@@ -876,6 +885,13 @@ def normalize(
             help="Calculate audio tempo (BPM) locally",
         ),
     ] = True,
+    fetch_key: Annotated[
+        bool,
+        Parameter(
+            name=["--key"],
+            help="Detect musical key and Camelot wheel tonality locally",
+        ),
+    ] = True,
     fetch_replaygain: Annotated[
         bool,
         Parameter(
@@ -906,7 +922,7 @@ def normalize(
     ] = False,
 ) -> int:
     """
-    Locally clean tags, remove bracket noise, and calculate BPM/ReplayGain (100% offline).
+    Locally clean tags, remove bracket noise, and calculate BPM/Key/ReplayGain (100% offline).
     """
     LOG.info(f"Normalizing audio tags in [bold]{path}[/bold] (offline mode)...")
     interrupted = False
@@ -914,6 +930,7 @@ def normalize(
         results = normalize_library(
             path,
             fetch_bpm=fetch_bpm,
+            fetch_key=fetch_key,
             fetch_replaygain=fetch_replaygain,
             force=force,
             dry_run=dry_run,
@@ -936,6 +953,7 @@ def normalize(
         ("Target Directory", str(path.resolve()), None),
         ("Tracks Normalized", str(count), "green" if count else "white"),
         ("BPM Included", "Yes" if fetch_bpm else "No", None),
+        ("Musical Key Included", "Yes" if fetch_key else "No", None),
         ("ReplayGain Included", "Yes" if fetch_replaygain else "No", None),
     ]
     LOG.summary_table("Normalization Summary", summary_rows)
@@ -1032,6 +1050,106 @@ def bpm(
         ("Already Tagged / Skipped", str(skipped), None),
     ]
     LOG.summary_table("BPM Summary", summary_rows)
+    if interrupted:
+        return 130
+    return 0
+
+
+@app.command
+def key(
+    path: Annotated[
+        Path,
+        Parameter(help="Directory containing audio files to detect musical key for"),
+    ],
+    force: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Force recalculation even if musical key tag exists",
+        ),
+    ] = False,
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
+        ),
+    ] = 4,
+    dry_run: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Simulate actions without modifying files on disk",
+        ),
+    ] = False,
+) -> int:
+    """
+    Detect and embed musical key (INITIALKEY) and Camelot wheel tags locally.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+
+    audio_files = find_audio_files(path, recursive=True)
+    if not audio_files:
+        LOG.warning("No audio files found.")
+        return 0
+
+    LOG.info(
+        f"Detecting musical key for {len(audio_files)} files in [bold]{path}[/bold]..."
+    )
+    computed = 0
+    skipped = 0
+    interrupted = False
+
+    def _process_key(audio_path: Path) -> tuple[Path, str | None, bool]:
+        wait_if_paused()
+        try:
+            info = read_track_metadata(audio_path)
+            if not force and info.initial_key is not None:
+                return audio_path, info.initial_key, False
+            details = detect_key_details(audio_path)
+            if details is not None:
+                val, camelot, _ = details
+                if not dry_run:
+                    updated = dataclasses.replace(info, initial_key=val)
+                    write_track_metadata(updated)
+                return audio_path, f"{val} ({camelot})", True
+            return audio_path, None, False
+        except (OSError, ValueError, RuntimeError) as err:
+            LOG.debug(f"Key detection error for {audio_path}: {err}")
+            return audio_path, None, False
+
+    with create_progress() as progress:
+        task = progress.add_task(
+            "[cyan]Detecting musical key...", total=len(audio_files)
+        )
+        with interactive_pause_listener(progress, task):
+            executor = ThreadPoolExecutor(max_workers=threads)
+            try:
+                futures = [executor.submit(_process_key, f) for f in audio_files]
+                for future in as_completed(futures):
+                    wait_if_paused()
+                    _, key_val, modified = future.result()
+                    if modified and key_val is not None:
+                        computed += 1
+                    else:
+                        skipped += 1
+                    progress.advance(task)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                interrupted = True
+                LOG.warning(
+                    "\n⏹️  [bold yellow]INTERRUPTED[/] - Key detection stopped by user (Ctrl+C)."
+                )
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+    summary_rows = [
+        ("Total Files Scanned", str(len(audio_files)), None),
+        ("Key Detected & Tagged", str(computed), "green" if computed else "white"),
+        ("Already Tagged / Skipped", str(skipped), None),
+    ]
+    LOG.summary_table("Musical Key Summary", summary_rows)
     if interrupted:
         return 130
     return 0

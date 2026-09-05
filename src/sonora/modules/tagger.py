@@ -16,6 +16,7 @@ from rich.markup import escape
 from sonora.audio.art import process_album_cover_art, process_artist_artwork
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
+from sonora.audio.key import detect_key_details, detect_musical_key
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.logger import (
@@ -909,6 +910,25 @@ def _enrich_bpm(
             LOG.debug(f"BPM calculation failed for {track_info.title}: {error}")
 
 
+def _enrich_key(
+    track_info: TrackInfo,
+    file_path: Path,
+    fetch_key: bool,
+    force: bool = False,
+) -> None:
+    if fetch_key and (track_info.initial_key is None or force):
+        try:
+            key_details = detect_key_details(file_path)
+            if key_details is not None:
+                key_name, camelot, _ = key_details
+                track_info.initial_key = key_name
+                LOG.info(
+                    f"   ∟ 🎵 Musical Key: [green]{escape(key_name)}[/] ({escape(camelot)})"
+                )
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"Key calculation failed for {track_info.title}: {error}")
+
+
 def _enrich_artwork(
     track_info: TrackInfo,
     file_path: Path,
@@ -1436,6 +1456,7 @@ def is_alien_album_track(
 def process_single_track(
     file_path: Path,
     fetch_bpm: bool = True,
+    fetch_key: bool = True,
     fetch_lyrics: bool = True,
     fetch_itunes_art: bool = True,
     lastfm_api_key: str | None = None,
@@ -1576,6 +1597,7 @@ def process_single_track(
         # 2. Audio features, artwork, cuesheet & lyrics
         _enrich_cuesheet(track_info, file_path, cuesheet_content)
         _enrich_bpm(track_info, file_path, fetch_bpm, force=force)
+        _enrich_key(track_info, file_path, fetch_key, force=force)
         cover_image = (
             album_cover_path
             if album_cover_path and album_cover_path.exists()
@@ -1682,6 +1704,7 @@ def tag_album_folder(
     folder_path: Path,
     max_threads: int = 4,
     fetch_bpm: bool = True,
+    fetch_key: bool = True,
     fetch_replaygain: bool = True,
     fetch_lyrics: bool = True,
     fetch_itunes_art: bool = True,
@@ -1809,6 +1832,7 @@ def tag_album_folder(
                             process_single_track,
                             file_path=audio_file,
                             fetch_bpm=fetch_bpm,
+                            fetch_key=fetch_key,
                             fetch_lyrics=fetch_lyrics,
                             fetch_itunes_art=fetch_itunes_art,
                             lastfm_api_key=lastfm_api_key,
@@ -1907,6 +1931,7 @@ def get_last_normalized_count() -> int:
 def normalize_single_track(
     file_path: Path,
     fetch_bpm: bool = False,
+    fetch_key: bool = False,
     force: bool = False,
     dry_run: bool = False,
 ) -> TrackInfo | None:
@@ -1918,6 +1943,7 @@ def normalize_single_track(
     - Canonicalizes genres via normalize_genre
     - Standardizes dates via normalize_date
     - Optionally calculates audio BPM locally
+    - Optionally detects musical key locally
     """
     if not file_path.exists():
         return None
@@ -1961,6 +1987,15 @@ def normalize_single_track(
         except (OSError, ValueError, RuntimeError) as error:
             LOG.debug(f"BPM calculation failed for {file_path}: {error}")
 
+    updated_key = current_info.initial_key
+    if fetch_key and (force or current_info.initial_key is None):
+        try:
+            calculated_key = detect_musical_key(file_path)
+            if calculated_key is not None:
+                updated_key = calculated_key
+        except (OSError, ValueError, RuntimeError) as error:
+            LOG.debug(f"Key calculation failed for {file_path}: {error}")
+
     updated_info = dataclasses.replace(
         current_info,
         artist=cleaned_artist or current_info.artist,
@@ -1971,6 +2006,7 @@ def normalize_single_track(
         genre=cleaned_genre or current_info.genre,
         date=cleaned_date or current_info.date,
         bpm=updated_bpm,
+        initial_key=updated_key,
     )
 
     if not dry_run:
@@ -1987,6 +2023,7 @@ def normalize_single_track(
 def normalize_library(
     directory: Path,
     fetch_bpm: bool = False,
+    fetch_key: bool = False,
     fetch_replaygain: bool = False,
     force: bool = False,
     dry_run: bool = False,
@@ -2021,6 +2058,7 @@ def normalize_library(
                             normalize_single_track,
                             file_path=f,
                             fetch_bpm=fetch_bpm,
+                            fetch_key=fetch_key,
                             force=force,
                             dry_run=dry_run,
                         ): f

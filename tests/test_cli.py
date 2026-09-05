@@ -149,6 +149,22 @@ class TestCLIInterface(unittest.TestCase):
             mock_read.assert_called_once()
             mock_calc_bpm.assert_called_once()
 
+    def test_handle_key_subcommand(self):
+        song = self.temporary_path / "song.flac"
+        song.write_bytes(b"dummy")
+        with (
+            patch("sonora.cli.main.detect_key_details") as mock_detect_key,
+            patch("sonora.cli.main.read_track_metadata") as mock_read,
+            patch("sonora.cli.main.write_track_metadata") as mock_write,
+        ):
+            mock_read.return_value = TrackInfo(file_path=song, initial_key=None)
+            mock_detect_key.return_value = ("C#m", "12A", 0.85)
+            exit_code = main(["key", str(self.temporary_path)])
+            self.assertEqual(exit_code, 0)
+            mock_write.assert_called_once()
+            mock_read.assert_called_once()
+            mock_detect_key.assert_called_once()
+
     def test_handle_replaygain_subcommand(self):
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
