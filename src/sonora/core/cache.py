@@ -1,6 +1,8 @@
 import atexit
 import dataclasses
+import re
 import shutil
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,16 @@ def get_api_cache_dir() -> Path:
 
 
 def _migrate_legacy_cache(cache_dir: Path, api_cache_dir: Path) -> None:
-    """Migrate legacy cache files from cache root to dedicated api/ subdirectory."""
+    """Migrate legacy cache files from cache root and clean up obsolete FanoutCache shards."""
+    for parent in (cache_dir, api_cache_dir):
+        if parent.exists() and parent.is_dir():
+            try:
+                for item in parent.iterdir():
+                    if item.is_dir() and re.match(r"^\d{3}$", item.name):
+                        shutil.rmtree(item, ignore_errors=True)
+            except OSError as error:
+                LOG.debug(f"Legacy shard cleanup failed: {error}")
+
     legacy_db = cache_dir / "cache.db"
     if not legacy_db.exists():
         return
@@ -326,6 +337,28 @@ def clear_cache(
                     diskcache.Timeout,
                 ) as error:
                     LOG.debug(f"Cache clear/check failed: {error}")
+
+            if api_cache_dir.exists() and api_cache_dir.is_dir():
+                try:
+                    for item in api_cache_dir.iterdir():
+                        if item.is_dir() and re.match(r"^\d{3}$", item.name):
+                            shutil.rmtree(item, ignore_errors=True)
+                except OSError as error:
+                    LOG.debug(f"Legacy shard cleanup failed: {error}")
+
+            db_path = api_cache_dir / "cache.db"
+            if db_path.exists():
+                try:
+                    close_cache()
+                    conn = sqlite3.connect(str(db_path), timeout=30.0)
+                    try:
+                        conn.isolation_level = None
+                        conn.execute("VACUUM;")
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    finally:
+                        conn.close()
+                except (sqlite3.Error, OSError) as error:
+                    LOG.debug(f"Failed to vacuum API cache DB: {error}")
 
         api_bytes_after = _get_api_cache_size(api_cache_dir)
         api_bytes_freed = max(0, api_bytes_before - api_bytes_after)
