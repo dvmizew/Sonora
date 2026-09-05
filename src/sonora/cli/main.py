@@ -223,7 +223,7 @@ def tag(
             "🔑 [dim]Active API Keys/Tokens:[/] [yellow]None (using free unauthenticated tiers)[/]"
         )
 
-    LOG.info(f"Tagging album directory: [bold]{path}[/bold]")
+    LOG.info(f"Tagging album directory: [bold]{escape(str(path))}[/bold]")
     tagged_tracks: list[TrackInfo] = []
     interrupted = False
     try:
@@ -708,7 +708,9 @@ def organize(
     Organize single tracks into a Singles directory structure.
     """
     destination_directory = target_singles or (path / "Singles")
-    LOG.info(f"Organizing single tracks from {path} to {destination_directory}")
+    LOG.info(
+        f"Organizing single tracks from {escape(str(path))} to {escape(str(destination_directory))}"
+    )
     interrupted = False
     try:
         organized_count = organize_library_singles(

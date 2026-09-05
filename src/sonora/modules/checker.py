@@ -11,6 +11,7 @@ from music_metadata_filter.functions import (
 )
 from mutagen._util import MutagenError
 from mutagen.flac import FLAC, FLACNoHeaderError
+from rich.markup import escape
 
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
@@ -165,6 +166,11 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             issues.append("Missing REPLAYGAIN_TRACK_GAIN tag.")
         if track.replaygain_track_peak is None:
             issues.append("Missing REPLAYGAIN_TRACK_PEAK tag.")
+        if track.initial_key:
+            from sonora.audio.key import key_to_camelot
+
+            if key_to_camelot(track.initial_key) is None:
+                issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
         for field_name, tag_label in [
             ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID"),
             ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID"),
@@ -379,9 +385,9 @@ def check_library(
                             display_name = str(path.relative_to(folder_path))
                         except ValueError:
                             display_name = path.name
-                        LOG.warning(f"🔍 [bold]{display_name}[/bold]")
+                        LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
                         for issue in file_issues:
-                            LOG.warning(f"   ∟ ⚠️  {issue}")
+                            LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
                         if any(
                             "corrupt" in normalize_str(issue)
                             or "checksum" in normalize_str(issue)
@@ -453,9 +459,9 @@ def check_library(
                 display_folder = str(folder.relative_to(folder_path))
             except ValueError:
                 display_folder = folder.name
-            LOG.warning(f"📁 [bold]{display_folder}[/bold]")
+            LOG.warning(f"📁 [bold]{escape(display_folder)}[/bold]")
             for issue in folder_issues:
-                LOG.warning(f"   ∟ ⚠️  {issue}")
+                LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
 
     if output_json:
         write_check_report_json(report, folder_path, output_json, aborted_by_user=False)
