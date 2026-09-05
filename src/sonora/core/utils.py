@@ -12,7 +12,6 @@ from typing import TypeGuard
 import anyascii
 import ftfy
 import httpx
-import musicbrainzngs
 from music_metadata_filter.filter import MetadataFilter
 from music_metadata_filter.functions import (
     fix_track_suffix,
@@ -226,15 +225,6 @@ def _load_user_overrides() -> dict[str, str]:
     return overrides
 
 
-def _ensure_musicbrainz_init() -> None:
-    try:
-        from sonora.services.musicbrainz import init_musicbrainz
-
-        init_musicbrainz()
-    except (OSError, ValueError, RuntimeError):
-        pass
-
-
 @lru_cache(maxsize=4096)
 def resolve_artist_name(raw_name: str | None) -> str:
     """
@@ -260,14 +250,13 @@ def resolve_artist_name(raw_name: str | None) -> str:
     if isinstance(cached, str):
         return clean_unicode_punct(cached)
 
-    _ensure_musicbrainz_init()
-
     # Tier 3: MusicBrainz Alias / Legal Name lookup
     try:
-        res = musicbrainzngs.search_artists(
+        from sonora.services.musicbrainz import search_musicbrainz_artists
+
+        artists = search_musicbrainz_artists(
             query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
         )
-        artists = res.get("artist-list", [])
 
         # Priority 1: Exact case-insensitive name match
         for artist in artists:
@@ -325,7 +314,6 @@ def resolve_artist_name(raw_name: str | None) -> str:
         OSError,
         ValueError,
         RuntimeError,
-        musicbrainzngs.MusicBrainzError,
     ):
         pass
 
@@ -389,17 +377,18 @@ def is_single_group_artist(raw_name: str | None) -> bool:
     if isinstance(cached, bool):
         return cached
 
-    _ensure_musicbrainz_init()
-
     # Format query ensuring spacing around delimiters like '&'
     query_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", clean_name).strip()
 
     try:
-        res = musicbrainzngs.search_artists(query=f'artist:"{query_name}"', limit=5)
-        artist_list = res.get("artist-list", [])
+        from sonora.services.musicbrainz import search_musicbrainz_artists
+
+        artist_list = search_musicbrainz_artists(
+            query=f'artist:"{query_name}"', limit=5
+        )
         for artist in artist_list:
             name_match = normalize_str(artist.get("name")) == normalized
-            score = int(artist.get("ext:score", 0))
+            score = safe_int(artist.get("ext:score")) or 0
             artist_type = artist.get("type")
             if name_match and (score >= 90 or artist_type == "Group"):
                 set_cached_api(cache_key, True)
@@ -411,7 +400,6 @@ def is_single_group_artist(raw_name: str | None) -> bool:
         OSError,
         ValueError,
         RuntimeError,
-        musicbrainzngs.MusicBrainzError,
     ):
         return False
 

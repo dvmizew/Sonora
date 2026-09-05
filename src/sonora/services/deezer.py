@@ -6,7 +6,13 @@ from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_DEEZER
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, clean_title, match_score, normalize_str
+from sonora.core.utils import (
+    RateLimiter,
+    clean_title,
+    match_score,
+    normalize_str,
+    safe_int,
+)
 
 _DEEZER_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_DEEZER)
 
@@ -280,21 +286,8 @@ def fetch_deezer_track_details(
                     ):
                         lyricists.append(contributor_name)
 
-        pos_val = track_data.get("track_position")
-        track_pos: int | None = None
-        if pos_val is not None:
-            try:
-                track_pos = int(str(pos_val))
-            except (ValueError, TypeError):
-                track_pos = None
-
-        disk_val = track_data.get("disk_number")
-        disk_num: int | None = None
-        if disk_val is not None:
-            try:
-                disk_num = int(str(disk_val))
-            except (ValueError, TypeError):
-                disk_num = None
+        track_pos = safe_int(track_data.get("track_position"))
+        disk_num = safe_int(track_data.get("disk_number"))
 
         result = {
             "isrc": track_data.get("isrc"),

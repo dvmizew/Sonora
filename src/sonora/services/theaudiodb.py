@@ -6,7 +6,7 @@ from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_THEAUDIODB
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, normalize_str
+from sonora.core.utils import RateLimiter, normalize_str, safe_float
 
 _THEAUDIODB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_THEAUDIODB)
 
@@ -95,13 +95,7 @@ def fetch_theaudiodb_track_details(
             tracks = response.json().get("track", [])
             if tracks and isinstance(tracks, list) and tracks[0]:
                 raw_track = tracks[0]
-                rating_raw = raw_track.get("intScore")
-                rating: float | None = None
-                if rating_raw is not None:
-                    try:
-                        rating = float(rating_raw)
-                    except (ValueError, TypeError):
-                        rating = None
+                rating = safe_float(raw_track.get("intScore"))
 
                 def _clean_str(val: object) -> str | None:
                     if val is None:
