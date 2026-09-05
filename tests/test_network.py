@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import httpx
 import musicbrainzngs
 
-from sonora.audio.art import fetch_cover_art_archive_url
 from sonora.core.constants import USER_AGENT
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
@@ -33,6 +32,7 @@ from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import fetch_synced_lyrics, process_track_lyrics
 from sonora.services.musicbrainz import (
     fetch_album_track_mbids,
+    fetch_cover_art_archive_url,
     fetch_musicbrainz_recording_details,
     fetch_musicbrainz_release_details,
     fetch_track_mbid,

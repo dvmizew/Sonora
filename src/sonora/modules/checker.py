@@ -11,10 +11,12 @@ from music_metadata_filter.functions import (
 )
 from mutagen._util import MutagenError
 from mutagen.flac import FLAC, FLACNoHeaderError
+from rich.markup import escape
 
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
 from sonora.audio.spectral import detect_fake_lossless
+from sonora.core.config import get_config
 from sonora.core.constants import FEAT_KEYWORDS, SUPPORTED_EXTS
 from sonora.core.logger import (
     LOG,
@@ -34,10 +36,6 @@ from sonora.core.utils import (
 )
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
-
-_CODEC_RIP_KEYWORDS: frozenset[str] = frozenset(
-    {"flac", "mp3", "320", "320kbps", "lossless", "rip", "cdrip", "webrip", "hq", "hd"}
-)
 
 # [text], (text), {text}
 _BRACKET_PATTERN = re.compile(r"[\(\[\{][^\(\)\[\]\{\}]+[\)\]\}]")
@@ -80,7 +78,7 @@ def _is_corrupt_bracket(full_bracket: str, tokens: set[str]) -> bool:
     ):
         return True
 
-    return bool(tokens & _CODEC_RIP_KEYWORDS)
+    return bool(tokens & get_config().codec_rip_keywords)
 
 
 def check_brackets_corruption(name: str) -> list[str]:
@@ -165,6 +163,11 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             issues.append("Missing REPLAYGAIN_TRACK_GAIN tag.")
         if track.replaygain_track_peak is None:
             issues.append("Missing REPLAYGAIN_TRACK_PEAK tag.")
+        if track.initial_key:
+            from sonora.audio.key import key_to_camelot
+
+            if key_to_camelot(track.initial_key) is None:
+                issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
         for field_name, tag_label in [
             ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID"),
             ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID"),
@@ -379,9 +382,9 @@ def check_library(
                             display_name = str(path.relative_to(folder_path))
                         except ValueError:
                             display_name = path.name
-                        LOG.warning(f"🔍 [bold]{display_name}[/bold]")
+                        LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
                         for issue in file_issues:
-                            LOG.warning(f"   ∟ ⚠️  {issue}")
+                            LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
                         if any(
                             "corrupt" in normalize_str(issue)
                             or "checksum" in normalize_str(issue)
@@ -453,9 +456,9 @@ def check_library(
                 display_folder = str(folder.relative_to(folder_path))
             except ValueError:
                 display_folder = folder.name
-            LOG.warning(f"📁 [bold]{display_folder}[/bold]")
+            LOG.warning(f"📁 [bold]{escape(display_folder)}[/bold]")
             for issue in folder_issues:
-                LOG.warning(f"   ∟ ⚠️  {issue}")
+                LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
 
     if output_json:
         write_check_report_json(report, folder_path, output_json, aborted_by_user=False)

@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageDraw
 
-from sonora.audio.art import check_image_similarity, process_artist_artwork
+from sonora.audio.art import (
+    check_image_similarity,
+    process_artist_artwork,
+    process_label_artwork,
+)
 from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.models import TrackInfo
@@ -34,11 +38,17 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
+    _enrich_musicbrainz,
+    _enrich_shazam,
+    _resolve_album_folder_identity,
+    _resolve_album_track_position,
+    is_alien_album_track,
     normalize_library,
     normalize_single_track,
     process_single_track,
     tag_album_folder,
 )
+from sonora.services.shazam import ShazamTrackInfo
 from sonora.services.theaudiodb import fetch_artist_images
 
 
@@ -92,25 +102,23 @@ class TestCoreModules(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp_dir.cleanup()
 
-    @patch("sonora.core.utils.musicbrainzngs.search_artists")
-    def test_resolve_artist_name(self, mock_search: Any) -> None:
+    @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
+    def test_resolve_artist_name(self, mock_search: MagicMock) -> None:
         resolve_artist_name.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [
-                {
-                    "name": "M.G.L.",
-                    "alias-list": [{"alias": "mgl"}],
-                },
-                {
-                    "name": "Killa Fonic",
-                    "alias-list": [],
-                },
-                {
-                    "name": "Nane",
-                    "alias-list": [],
-                },
-            ]
-        }
+        mock_search.return_value = [
+            {
+                "name": "M.G.L.",
+                "alias-list": [{"alias": "mgl"}],
+            },
+            {
+                "name": "Killa Fonic",
+                "alias-list": [],
+            },
+            {
+                "name": "Nane",
+                "alias-list": [],
+            },
+        ]
         self.assertEqual(resolve_artist_name("mgl"), "M.G.L.")
         self.assertEqual(resolve_artist_name("killa fonic"), "Killa Fonic")
         self.assertEqual(resolve_artist_name("nane"), "Nane")
@@ -235,6 +243,21 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue(new_folder.exists())
         self.assertEqual(new_folder.name, "21 Savage - Issa Album")
 
+    def test_rename_album_folder_shields_artist_container(self) -> None:
+        artist_folder = self.tmp_path / "3 Doors Down"
+        artist_folder.mkdir()
+        # Case 1: Folder name matches artist, but album is different -> should not rename artist folder
+        result = rename_album_folder(artist_folder, "3 Doors Down", "Away From The Sun")
+        self.assertEqual(result, artist_folder)
+        self.assertTrue(artist_folder.exists())
+
+        # Case 2: Folder contains child directories that are not discs
+        album_folder = self.tmp_path / "Album With Subdirs"
+        album_folder.mkdir()
+        (album_folder / "Singles").mkdir()
+        result2 = rename_album_folder(album_folder, "Artist", "Album With Subdirs")
+        self.assertEqual(result2, album_folder)
+
     def test_is_single_folder(self) -> None:
         album_dir = self.tmp_path / "album"
         album_dir.mkdir()
@@ -298,6 +321,73 @@ class TestCoreModules(unittest.TestCase):
                 target_dir / "Single Artist - Single Song" / "01 - Single Song.lrc"
             ).exists()
         )
+
+    @patch("sonora.modules.organizer.read_track_metadata")
+    def test_organize_library_singles_quarantines_duplicates(
+        self, mock_read: Any
+    ) -> None:
+        src_dir = self.tmp_path / "Singles" / "source"
+        target_dir = self.tmp_path / "OrganizedSingles"
+        audio1 = src_dir / "track1.wav"
+        audio2 = src_dir / "track2.wav"
+        audio3 = src_dir / "track3.wav"
+        lrc2 = src_dir / "track2.lrc"
+        create_dummy_wav(audio1)
+        create_dummy_wav(audio2)
+        create_dummy_wav(audio3)
+        lrc2.write_text("[00:01.00] dup lyrics", encoding="utf-8")
+
+        def mock_read_meta(path: Path) -> TrackInfo:
+            if path == audio1:
+                return TrackInfo(
+                    file_path=audio1,
+                    artist="Dup Artist",
+                    title="Dup Song",
+                    isrc="US1234567890",
+                )
+            if path == audio2:
+                return TrackInfo(
+                    file_path=audio2,
+                    artist="Dup Artist",
+                    title="Dup Song",
+                    isrc="US1234567890",
+                )
+            return TrackInfo(
+                file_path=audio3,
+                artist="Dup Artist",
+                title="Dup Song",
+                isrc="US1234567890",
+            )
+
+        mock_read.side_effect = mock_read_meta
+
+        # Dry-run first: files should NOT be moved or unlinked
+        moved_dry = organize_library_singles(
+            src_dir, target_dir, dry_run=True, max_threads=1
+        )
+        self.assertEqual(moved_dry, 1)
+        self.assertTrue(audio1.exists())
+        self.assertTrue(audio2.exists())
+        self.assertTrue(audio3.exists())
+        self.assertTrue(lrc2.exists())
+
+        # Real run: first single moved, remaining duplicates quarantined to .duplicates/
+        moved = organize_library_singles(
+            src_dir, target_dir, dry_run=False, max_threads=1
+        )
+        self.assertEqual(moved, 1)
+
+        # First track organized
+        self.assertTrue(
+            (target_dir / "Dup Artist - Dup Song" / "01 - Dup Song.wav").exists()
+        )
+
+        # Quarantined duplicates exist in .duplicates/ (NOT unlinked/destroyed)
+        quarantine_dir = target_dir / ".duplicates"
+        self.assertTrue(quarantine_dir.exists())
+        self.assertTrue((quarantine_dir / "track2.wav").exists())
+        self.assertTrue((quarantine_dir / "track2.lrc").exists())
+        self.assertTrue((quarantine_dir / "track3.wav").exists())
 
     @patch("sonora.modules.organizer.get_primary_artist", side_effect=lambda a: a)
     @patch("sonora.modules.organizer.read_track_metadata")
@@ -509,6 +599,322 @@ class TestCoreModules(unittest.TestCase):
         ):
             results = tag_album_folder(album_dir, max_threads=2)
         self.assertEqual(len(results), 2)
+
+    def test_resolve_album_folder_identity(self) -> None:
+        album_dir = self.tmp_path / "Artist - Great Album"
+        f1 = album_dir / "01 - Song.wav"
+        f2 = album_dir / "02 - Other.wav"
+        create_dummy_wav(f1)
+        create_dummy_wav(f2)
+
+        with patch("sonora.modules.tagger.read_track_metadata") as mock_read:
+            # Track 1 has corrupted metadata (e.g. wrong album/artist)
+            mock_read.side_effect = [
+                TrackInfo(file_path=f1, artist="Corrupt Artist", album="Corrupt Album"),
+                TrackInfo(file_path=f2, artist="Artist", album="Great Album"),
+            ]
+            artist, album = _resolve_album_folder_identity(album_dir, [f1, f2])
+            self.assertEqual(artist, "Artist")
+            self.assertEqual(album, "Great Album")
+
+        # Case 2: Multi-disc directory structure: Artist / Album / CD1
+        disc_dir = self.tmp_path / "Pink Floyd" / "The Wall" / "CD1"
+        f_disc = disc_dir / "01.wav"
+        create_dummy_wav(f_disc)
+        with patch("sonora.modules.tagger.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(
+                file_path=f_disc, artist="Pink Floyd", album="The Wall"
+            )
+            artist, album = _resolve_album_folder_identity(disc_dir, [f_disc])
+            self.assertEqual(artist, "Pink Floyd")
+            self.assertEqual(album, "The Wall")
+
+        # Case 3: Singles folder should not resolve album as 'Singles'
+        singles_dir = self.tmp_path / "3 Doors Down" / "Singles"
+        f_single = singles_dir / "01.wav"
+        create_dummy_wav(f_single)
+        with patch("sonora.modules.tagger.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(
+                file_path=f_single, artist="3 Doors Down", album="Unknown Album"
+            )
+            artist, album = _resolve_album_folder_identity(singles_dir, [f_single])
+            self.assertEqual(artist, "3 Doors Down")
+            self.assertIsNone(album)
+
+    @patch("sonora.modules.tagger.write_track_metadata")
+    @patch("sonora.modules.tagger.read_track_metadata")
+    def test_process_single_track_filename_alignment(
+        self, mock_read: Any, mock_write: Any
+    ) -> None:
+        track_file = self.tmp_path / "02 - Track Title.wav"
+        create_dummy_wav(track_file)
+        mock_read.return_value = TrackInfo(
+            file_path=track_file,
+            artist="Artist",
+            title="Track Title",
+            track_number=1,  # Corrupted track number from single release
+            album="Great Album",
+        )
+        mbids = {1: "uuid-1", 2: "uuid-2"}
+        with patch("sonora.modules.tagger._enrich_musicbrainz"):
+            res = process_single_track(
+                track_file,
+                album_track_mbids=mbids,
+                force=True,
+                fetch_bpm=False,
+            )
+            self.assertEqual(res.track_number, 2)
+
+    def test_resolve_album_track_position(self) -> None:
+        mb_release: dict[str, object] = {
+            "title": "That's My Name",
+            "album_artist": "Akcent",
+            "tracks_by_position": {
+                1: {"title": "Kylie", "artist": "Akcent", "isrc": "RO001"},
+                2: {"title": "That's My Name", "artist": "Akcent", "isrc": "RO002"},
+                3: {"title": "My Passion", "artist": "Akcent", "isrc": "RO003"},
+                4: {"title": "Kamelia", "artist": "Akcent", "isrc": "RO004"},
+                5: {"title": "Te Quiero", "artist": "Akcent", "isrc": "RO005"},
+                6: {"title": "Amor Gitana", "artist": "Akcent", "isrc": "RO006"},
+            },
+        }
+
+        # Case 1: Misnumbered file on disk (named 06 - That's My Name.flac, track_number=6)
+        # Should resolve to position 2 by title match (and not get poisoned by track 6 Amor Gitana)
+        track_misnumbered = TrackInfo(
+            file_path=Path("/music/Akcent - That's My Name/06 - That's My Name.flac"),
+            artist="Akcent",
+            title="That's My Name",
+            track_number=6,
+            album="That's My Name",
+        )
+        pos = _resolve_album_track_position(
+            track_info=track_misnumbered,
+            file_path=track_misnumbered.file_path,
+            album_mb_release_details=mb_release,
+        )
+        self.assertEqual(pos, 2)
+
+        # Case 2: Authoritative ISRC match heals corrupted leak title
+        track_corrupted = TrackInfo(
+            file_path=Path("/music/Akcent - That's My Name/02 - Leaked Audio.flac"),
+            artist="Akcent",
+            title="Leaked Audio",
+            isrc="RO002",
+            track_number=2,
+            album="That's My Name",
+        )
+        pos = _resolve_album_track_position(
+            track_info=track_corrupted,
+            file_path=track_corrupted.file_path,
+            album_mb_release_details=mb_release,
+        )
+        self.assertEqual(pos, 2)
+
+        # Case 3: Alien track with completely different song matches none of the album tracks
+        track_alien = TrackInfo(
+            file_path=Path(
+                "/music/Akcent - That's My Name/07 - Drake - Hotline Bling.flac"
+            ),
+            artist="Drake",
+            title="Hotline Bling",
+            track_number=7,
+            album="Views",
+        )
+        pos = _resolve_album_track_position(
+            track_info=track_alien,
+            file_path=track_alien.file_path,
+            album_mb_release_details=mb_release,
+        )
+        self.assertIsNone(pos)
+
+    def test_is_alien_album_track(self) -> None:
+        track_path = Path("/music/21 Savage - Issa Album/03 - Blue Jeans.wav")
+        alien_track = TrackInfo(
+            file_path=track_path,
+            artist="Lana Del Rey",
+            title="Blue Jeans",
+            album="Born to Die",
+        )
+        mb_release: dict[str, object] = {
+            "title": "Issa Album",
+            "album_artist": "21 Savage",
+            "tracks_by_position": {
+                1: {"title": "Famous", "artist": "21 Savage"},
+                2: {"title": "Bank Account", "artist": "21 Savage"},
+                3: {"title": "Close My Eyes", "artist": "21 Savage"},
+            },
+        }
+        # True positive: Lana Del Rey inside 21 Savage album
+        self.assertTrue(
+            is_alien_album_track(
+                track_info=alien_track,
+                file_path=track_path,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                album_mb_release_details=mb_release,
+            )
+        )
+
+        # False positive check: Valid 21 Savage track
+        valid_track = TrackInfo(
+            file_path=Path("/music/21 Savage - Issa Album/02 - Bank Account.wav"),
+            artist="21 Savage",
+            title="Bank Account",
+            album="Issa Album",
+        )
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=valid_track,
+                file_path=valid_track.file_path,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                album_mb_release_details=mb_release,
+            )
+        )
+
+        # Unnamed / generic track in album should NOT be marked alien
+        generic_track = TrackInfo(
+            file_path=Path("/music/21 Savage - Issa Album/01.wav"),
+            artist="Unknown Artist",
+            title="Track 01",
+            album="Unknown Album",
+        )
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=generic_track,
+                file_path=generic_track.file_path,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                album_mb_release_details=mb_release,
+            )
+        )
+
+        # Featured artist / collaboration track
+        collab_track = TrackInfo(
+            file_path=Path("/music/Drake & 21 Savage - Her Loss/01 - Rich Flex.wav"),
+            artist="21 Savage",
+            title="Rich Flex",
+        )
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=collab_track,
+                file_path=collab_track.file_path,
+                target_album_artist="Drake & 21 Savage",
+                target_album_title="Her Loss",
+            )
+        )
+
+        # Corrupted title with verified ISRC match should NOT be marked alien
+        healed_track = TrackInfo(
+            file_path=Path(
+                "/music/James Arthur - Back From the Edge/04 - Lust for Life.wav"
+            ),
+            artist="James Arthur",
+            title="Lust for Life (feat. Lana Del Rey & The Weeknd)",
+            album="Back From the Edge",
+            isrc="DEE861600588",
+            track_number=4,
+        )
+        mb_release_ja: dict[str, object] = {
+            "title": "Back From the Edge",
+            "album_artist": "James Arthur",
+            "tracks_by_position": {
+                4: {
+                    "title": "Can I Be Him",
+                    "artist": "James Arthur",
+                    "isrc": "DEE861600588",
+                    "recording_mbid": "c8b03190-306c-4125-9b32-3f9d86d60a12",
+                },
+            },
+        }
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=healed_track,
+                file_path=healed_track.file_path,
+                target_album_artist="James Arthur",
+                target_album_title="Back From the Edge",
+                album_mb_release_details=mb_release_ja,
+            )
+        )
+
+    def test_enrich_musicbrainz_heals_corrupted_title_via_isrc(self) -> None:
+        track = TrackInfo(
+            file_path=Path("dummy.wav"),
+            artist="James Arthur",
+            title="Lust for Life (feat. Lana Del Rey & The Weeknd)",
+            album="Back From the Edge",
+            isrc="DEE861600588",
+            track_number=4,
+            musicbrainz_trackid="56a71671-a4cd-4fe7-96aa-1aadab6cd94e",
+        )
+        mb_release: dict[str, object] = {
+            "title": "Back From the Edge",
+            "album_artist": "James Arthur",
+            "tracks_by_position": {
+                4: {
+                    "title": "Can I Be Him",
+                    "artist": "James Arthur",
+                    "isrc": "DEE861600588",
+                    "recording_mbid": "c8b03190-306c-4125-9b32-3f9d86d60a12",
+                },
+            },
+        }
+        _enrich_musicbrainz(
+            track_info=track,
+            album_mbid="c6b7d374-1425-4414-ba65-2ddcb4d98196",
+            album_track_mbids={4: "c8b03190-306c-4125-9b32-3f9d86d60a12"},
+            album_mb_release_details=mb_release,
+            force=False,
+        )
+        self.assertEqual(track.title, "Can I Be Him")
+        self.assertEqual(
+            track.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
+        )
+
+    @patch("sonora.modules.tagger.write_track_metadata")
+    @patch("sonora.modules.tagger.read_track_metadata")
+    def test_process_single_track_shields_alien_track(
+        self, mock_read: Any, mock_write: Any
+    ) -> None:
+        track_file = self.tmp_path / "03 - Blue Jeans.wav"
+        create_dummy_wav(track_file)
+        mock_read.return_value = TrackInfo(
+            file_path=track_file,
+            artist="Lana Del Rey",
+            title="Blue Jeans",
+            album="Born to Die",
+            track_number=3,
+        )
+        mbids = {1: "uuid-1", 2: "uuid-2", 3: "uuid-3"}
+        mb_release: dict[str, object] = {
+            "title": "Issa Album",
+            "album_artist": "21 Savage",
+            "tracks_by_position": {
+                1: {"title": "Famous", "artist": "21 Savage"},
+                2: {"title": "Bank Account", "artist": "21 Savage"},
+                3: {"title": "Close My Eyes", "artist": "21 Savage"},
+            },
+        }
+        with (
+            patch("sonora.modules.tagger._enrich_musicbrainz"),
+            patch("sonora.modules.tagger._enrich_acoustid"),
+            patch("sonora.modules.tagger._enrich_deezer"),
+        ):
+            res = process_single_track(
+                track_file,
+                album_track_mbids=mbids,
+                album_mb_release_details=mb_release,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                force=True,
+                fetch_bpm=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+            )
+            self.assertTrue(res.is_alien)
+            self.assertEqual(res.artist, "Lana Del Rey")
+            self.assertEqual(res.title, "Blue Jeans")
 
     def test_check_file_blacklisted_genre(self) -> None:
         wav = self.tmp_path / "song.wav"
@@ -945,6 +1351,9 @@ class TestCoreModules(unittest.TestCase):
                 album="Album [Deluxe Edition]",
                 genre="hip hop",
                 date="2022-05-10",
+                release_country="US",
+                language="eng",
+                script="Latn",
                 bpm=None,
             )
 
@@ -954,6 +1363,9 @@ class TestCoreModules(unittest.TestCase):
             self.assertEqual(result.artist, "Armin")
             self.assertEqual(result.title, "Melodie (feat. Nane)")
             self.assertEqual(result.genre, "Hip-Hop/Rap")
+            self.assertEqual(result.release_country, "United States")
+            self.assertEqual(result.language, "English")
+            self.assertEqual(result.script, "Latin")
             mock_write.assert_called_once()
 
             # Test normalize_library
@@ -967,6 +1379,89 @@ class TestCoreModules(unittest.TestCase):
             )
             self.assertEqual(len(library_results), 1)
             self.assertEqual(library_results[0].artist, "Artist")
+
+    @patch("sonora.modules.tagger.recognize_audio_track")
+    def test_enrich_shazam_generic_and_force(self, mock_recognize: MagicMock) -> None:
+        audio_file = self.tmp_path / "01.flac"
+        audio_file.write_bytes(b"dummy")
+
+        mock_recognize.return_value = ShazamTrackInfo(
+            title="Recognized Title",
+            artist="Recognized Artist",
+            album="Recognized Album",
+            genre="Electronic",
+            apple_music_id="12345",
+            isrc="USABC1234567",
+            release_date="2024-01-01",
+            label="Recognized Label",
+            lyrics="Lyrics Line 1\nLyrics Line 2",
+        )
+
+        # Case 1: Generic title and artist gets healed by Shazam
+        trk = TrackInfo(file_path=audio_file, title="Track 01", artist="Unknown Artist")
+        _enrich_shazam(trk, audio_file, force=False)
+        self.assertEqual(trk.title, "Recognized Title")
+        self.assertEqual(trk.artist, "Recognized Artist")
+        self.assertEqual(trk.album, "Recognized Album")
+        self.assertEqual(trk.genre, "Electronic")
+        self.assertEqual(trk.itunes_trackid, "12345")
+        self.assertEqual(trk.isrc, "USABC1234567")
+        self.assertEqual(trk.date, "2024-01-01")
+        self.assertEqual(trk.label, "Recognized Label")
+        self.assertEqual(trk.lyrics, "Lyrics Line 1\nLyrics Line 2")
+
+        # Case 2: Non-generic title is not overridden when force=False
+        trk2 = TrackInfo(
+            file_path=audio_file, title="Original Title", artist="Original Artist"
+        )
+        mock_recognize.reset_mock()
+        _enrich_shazam(trk2, audio_file, force=False)
+        self.assertEqual(trk2.title, "Original Title")
+        self.assertEqual(trk2.artist, "Original Artist")
+        mock_recognize.assert_not_called()
+
+        # Case 3: When force=True, non-generic title is updated
+        _enrich_shazam(trk2, audio_file, force=True)
+        self.assertEqual(trk2.title, "Recognized Title")
+        self.assertEqual(trk2.artist, "Recognized Artist")
+
+    @patch("sonora.audio.art.fetch_fanart_label")
+    @patch("sonora.audio.art.download_fanart_image_bytes")
+    def test_process_label_artwork(
+        self, mock_download: MagicMock, mock_fetch: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Album Dir"
+        album_dir.mkdir()
+        label_mbid = "11111111-2222-3333-4444-555555555555"
+
+        mock_fetch.return_value = MagicMock(
+            label_urls=("https://assets.fanart.tv/label.png",)
+        )
+        mock_download.return_value = b"LABEL_PNG_BYTES"
+
+        with patch("sonora.audio.art.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(fanart_api_key="valid_key")
+            process_label_artwork(
+                album_dir, label_mbid=label_mbid, label_name="Test Records"
+            )
+            label_file = album_dir / "label.png"
+            self.assertTrue(label_file.exists())
+            self.assertEqual(label_file.read_bytes(), b"LABEL_PNG_BYTES")
+
+            # Calling again skips if already exists
+            mock_fetch.reset_mock()
+            process_label_artwork(
+                album_dir, label_mbid=label_mbid, label_name="Test Records"
+            )
+            mock_fetch.assert_not_called()
+
+        # No key skips download
+        with patch("sonora.audio.art.get_config") as mock_cfg:
+            mock_cfg.return_value = MagicMock(fanart_api_key=None)
+            other_dir = self.tmp_path / "Other Dir"
+            other_dir.mkdir()
+            process_label_artwork(other_dir, label_mbid=label_mbid)
+            self.assertFalse((other_dir / "label.png").exists())
 
 
 if __name__ == "__main__":

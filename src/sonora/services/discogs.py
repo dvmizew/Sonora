@@ -13,6 +13,7 @@ from sonora.core.utils import (
     RateLimiter,
     clean_disambiguation,
     match_score,
+    normalize_country_name,
     normalize_str,
 )
 
@@ -199,7 +200,7 @@ def fetch_discogs_release_details(
             "released": data.get("released"),
             "genres": list(data.get("genres", []) or []),
             "styles": list(data.get("styles", []) or []),
-            "country": data.get("country"),
+            "country": normalize_country_name(data.get("country")),
             "label": label_name,
             "catalog_number": catalog_number,
             "barcode": barcode_value,
@@ -216,8 +217,52 @@ def fetch_discogs_release_details(
         return None
 
 
+def _score_discogs_candidate(item: dict[str, Any], artist: str, album: str) -> float:
+    item_title = str(item.get("title", ""))
+    if " - " in item_title:
+        cand_artist, cand_album = item_title.split(" - ", 1)
+    else:
+        cand_artist, cand_album = artist, item_title
+    base_score = match_score(artist, album, cand_artist, cand_album)
+    if base_score < 80.0:
+        return 0.0
+
+    score = base_score
+    raw_formats = item.get("format", [])
+    formats: list[str] = (
+        [str(f).lower() for f in raw_formats]
+        if isinstance(raw_formats, list)
+        else [str(raw_formats).lower()]
+    )
+
+    if any(f in ("file", "digital", "aac", "mp3", "flac") for f in formats):
+        score += 30.0
+    elif any(f in ("cd", "cd-r", "hdcd") for f in formats):
+        score += 15.0
+    elif any(
+        f in ("vinyl", "lp", "cassette", "acetate", "flexi-disc") for f in formats
+    ):
+        score -= 20.0
+
+    if any(
+        f in ("unofficial", "bootleg", "misprint", "promo", "promotional")
+        for f in formats
+    ):
+        score -= 35.0
+
+    album_norm = normalize_str(album)
+    for kw in ("instrumental", "karaoke", "chopped", "remix"):
+        if any(kw in f for f in formats) and kw not in album_norm:
+            score -= 40.0
+
+    return score
+
+
 def search_discogs_release(
-    artist: str, album: str, user_token: str | None = None
+    artist: str,
+    album: str,
+    user_token: str | None = None,
+    expected_track_count: int | None = None,
 ) -> dict[str, Any] | None:
     """
     Search Discogs for release metadata using official REST API and User token.
@@ -230,8 +275,9 @@ def search_discogs_release(
     if normalize_str(album) in ["unknown album", "unknown"]:
         return None
 
+    count_suffix = f":{expected_track_count}" if expected_track_count else ""
     artist_key = normalize_str(artist)
-    cache_key = f"discogs_search:{artist_key}:{normalize_str(album)}"
+    cache_key = f"discogs_search:{artist_key}:{normalize_str(album)}{count_suffix}"
 
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
@@ -249,7 +295,7 @@ def search_discogs_release(
             "release_title": album,
             "artist": artist,
             "type": "release",
-            "per_page": "5",
+            "per_page": "10",
         }
         response = SESSION.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
@@ -264,12 +310,7 @@ def search_discogs_release(
         for item in results:
             if not isinstance(item, dict):
                 continue
-            item_title = str(item.get("title", ""))
-            if " - " in item_title:
-                cand_artist, cand_album = item_title.split(" - ", 1)
-            else:
-                cand_artist, cand_album = artist, item_title
-            score = match_score(artist, album, cand_artist, cand_album)
+            score = _score_discogs_candidate(item, artist, album)
             if score > best_score and score >= 80.0:
                 best_score = score
                 best_candidate = item
@@ -311,7 +352,7 @@ def search_discogs_release(
             "released": first.get("year"),
             "genres": list(first.get("genre", []) or []),
             "styles": list(first.get("style", []) or []),
-            "country": first.get("country"),
+            "country": normalize_country_name(first.get("country")),
             "label": label_name,
             "catalog_number": catalog_number,
             "barcode": barcode_value,

@@ -74,6 +74,7 @@ class TrackInfo:
     is_lossless: bool = True
     art_width: int | None = None
     art_height: int | None = None
+    is_alien: bool = False
 
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""

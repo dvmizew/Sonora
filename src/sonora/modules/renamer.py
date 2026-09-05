@@ -6,6 +6,7 @@ from pathlib import Path
 from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata
+from sonora.core.config import get_config
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -21,6 +22,7 @@ from sonora.core.utils import (
     normalize_str,
     relocate_companion_lyrics,
     safe_case_rename,
+    safe_int,
     sanitize_name,
 )
 
@@ -84,23 +86,17 @@ def build_new_filename(
         return None
 
     clean_title = sanitize_name(deduplicate_title_features(title)) or "Untitled"
-    track_number_str = str(track_number).split("/")[0] if track_number else ""
-    track_digits = "".join(filter(str.isdigit, track_number_str))
+    track_num_int = safe_int(track_number)
 
     disc_prefix = ""
-    if disc_number:
-        disc_clean = "".join(filter(str.isdigit, str(disc_number).split("/")[0]))
-        if disc_clean:
-            discs_count = (
-                int("".join(filter(str.isdigit, str(total_discs).split("/")[0])))
-                if total_discs
-                else 1
-            )
-            if int(disc_clean) > 1 or discs_count > 1:
-                disc_prefix = f"{int(disc_clean)}-"
+    disc_num_int = safe_int(disc_number)
+    if disc_num_int:
+        discs_count = safe_int(total_discs) or 1
+        if disc_num_int > 1 or discs_count > 1:
+            disc_prefix = f"{disc_num_int}-"
 
-    if track_digits:
-        return f"{disc_prefix}{int(track_digits):02d} - {clean_title}{extension}"
+    if track_num_int is not None:
+        return f"{disc_prefix}{track_num_int:02d} - {clean_title}{extension}"
     return f"{disc_prefix}{clean_title}{extension}"
 
 
@@ -168,7 +164,6 @@ def rename_track_file(
         if companion.suffix.lower() == ".lrc" and not dry_run:
             sync_lrc_metadata(companion, track_info.artist, track_info.title)
 
-    # Perform file rename
     if file_path.name != new_name or file_path.parent != new_path.parent:
         base_stem = Path(new_name).stem
         if new_path.exists() and (
@@ -187,10 +182,12 @@ def rename_track_file(
         if not dry_run:
             try:
                 safe_case_rename(file_path, new_path)
-                LOG.info(f"   ∟ 🎵 [dim]{file_path.name}[/] -> [white]{new_name}[/]")
+                LOG.info(
+                    f"   ∟ 🎵 [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
+                )
                 relocate_companion_lyrics(file_path, new_path, dry_run=False)
             except (OSError, ValueError, RuntimeError) as error:
-                LOG.warning(f"Failed to rename file {file_path.name}: {error}")
+                LOG.warning(f"Failed to rename file {escape(file_path.name)}: {error}")
         else:
             LOG.info(
                 f"[DRY-RUN] Would rename {escape(file_path.name)} -> {escape(new_name)}"
@@ -202,11 +199,27 @@ def rename_track_file(
 def rename_album_folder(
     folder_path: Path, artist: str, album: str, dry_run: bool = False
 ) -> Path:
-    if not album or album.lower() in ["singles", "unknown album", "unknown"]:
+    if not album or get_config().is_generic_container(album):
         return folder_path
 
     folder_now = folder_path.name
-    is_in_singles = "singles" in (p.lower() for p in folder_path.parts)
+    is_in_singles = any(get_config().is_generic_container(p) for p in folder_path.parts)
+
+    # Shield artist container folders from being renamed to album names
+    if normalize_str(folder_now) == normalize_str(artist) and normalize_str(
+        album
+    ) != normalize_str(artist):
+        return folder_path
+
+    # Do not rename if this directory contains child directories other than CD/Disc folders
+    try:
+        if any(
+            p.is_dir() and not get_config().is_disc_folder(p.name)
+            for p in folder_path.iterdir()
+        ):
+            return folder_path
+    except OSError:
+        return folder_path
 
     expected_name = sanitize_name(f"{artist} - {album}")
 
@@ -234,7 +247,7 @@ def rename_album_folder(
                 )
                 return new_folder
             except (OSError, ValueError, RuntimeError) as error:
-                LOG.warning(f"Failed to rename folder {folder_now}: {error}")
+                LOG.warning(f"Failed to rename folder {escape(folder_now)}: {error}")
                 return folder_path
         else:
             LOG.info(
@@ -290,7 +303,9 @@ def rename_directory_files(
                             )
                             return path, info, new_path
                         except (OSError, ValueError, RuntimeError) as error:
-                            LOG.warning(f"Failed to rename file {path}: {error}")
+                            LOG.warning(
+                                f"Failed to rename file {escape(str(path))}: {error}"
+                            )
                             return path, None, None
 
                     if max_threads > 1 and len(files) > 1:

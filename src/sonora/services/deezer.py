@@ -6,7 +6,13 @@ from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_DEEZER
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, clean_title, match_score, normalize_str
+from sonora.core.utils import (
+    RateLimiter,
+    clean_title,
+    match_score,
+    normalize_str,
+    safe_int,
+)
 
 _DEEZER_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_DEEZER)
 
@@ -92,9 +98,31 @@ def fetch_deezer_album_details(
             response.json().get("data", []) if isinstance(response.json(), dict) else []
         )
         if not items:
+            set_cached_api(cache_key, None)
             return None
 
-        album_id = items[0].get("id")
+        best_item = None
+        best_score = 0.0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_title = str(item.get("title", ""))
+            item_artist = str(item.get("artist", {}).get("name", ""))
+            score = match_score(artist, clean_album, item_artist, item_title)
+            if normalize_str(item_title) == normalize_str(clean_album):
+                score += 50.0
+            if score > best_score and score >= 60.0:
+                best_score = score
+                best_item = item
+
+        if not best_item and items and isinstance(items[0], dict):
+            best_item = items[0]
+
+        if not best_item:
+            set_cached_api(cache_key, None)
+            return None
+
+        album_id = best_item.get("id")
         if not album_id:
             return None
 
@@ -120,10 +148,11 @@ def fetch_deezer_album_details(
             else []
         )
 
-        for item in tracks_data:
+        for idx, item in enumerate(tracks_data, start=1):
             if not isinstance(item, dict):
                 continue
-            pos = item.get("track_position")
+            raw_pos = item.get("track_position")
+            pos = raw_pos if isinstance(raw_pos, int) else idx
             t_name = str(item.get("title", ""))
             artist_name = (
                 item.get("artist", {}).get("name")
@@ -137,7 +166,7 @@ def fetch_deezer_album_details(
                 "title": t_name,
                 "artist": artist_name,
                 "track_position": pos,
-                "disk_number": item.get("disk_number"),
+                "disk_number": item.get("disk_number", 1),
                 "isrc": item.get("isrc"),
                 "bpm": item.get("bpm"),
                 "gain": item.get("gain"),
@@ -145,12 +174,19 @@ def fetch_deezer_album_details(
                 "release_date": album_data.get("release_date"),
                 "genre": genres[0] if genres else None,
             }
-            if isinstance(pos, int):
-                tracks_by_position[pos] = track_dict
+            tracks_by_position[pos] = track_dict
             if t_name:
+                tracks_by_title[normalize_str(clean_title(t_name))] = track_dict
                 tracks_by_title[normalize_str(t_name)] = track_dict
 
         result = {
+            "title": album_data.get("title"),
+            "artist": (
+                album_data.get("artist", {}).get("name")
+                if isinstance(album_data.get("artist"), dict)
+                else None
+            ),
+            "nb_tracks": album_data.get("nb_tracks"),
             "label": album_data.get("label"),
             "barcode": album_data.get("upc"),
             "release_date": album_data.get("release_date"),
@@ -250,21 +286,8 @@ def fetch_deezer_track_details(
                     ):
                         lyricists.append(contributor_name)
 
-        pos_val = track_data.get("track_position")
-        track_pos: int | None = None
-        if pos_val is not None:
-            try:
-                track_pos = int(str(pos_val))
-            except (ValueError, TypeError):
-                track_pos = None
-
-        disk_val = track_data.get("disk_number")
-        disk_num: int | None = None
-        if disk_val is not None:
-            try:
-                disk_num = int(str(disk_val))
-            except (ValueError, TypeError):
-                disk_num = None
+        track_pos = safe_int(track_data.get("track_position"))
+        disk_num = safe_int(track_data.get("disk_number"))
 
         result = {
             "isrc": track_data.get("isrc"),

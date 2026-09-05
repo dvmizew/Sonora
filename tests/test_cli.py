@@ -17,18 +17,18 @@ from sonora.core.models import CheckReport, TrackInfo
 
 
 class TestCLIInterface(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.temporary_path = Path(self.temporary_directory.name)
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
-    def test_main_no_args_returns_zero(self):
+    def test_main_no_args_returns_zero(self) -> None:
         exit_code = main([])
         self.assertEqual(exit_code, 0)
 
-    def test_handle_tag_subcommand(self):
+    def test_handle_tag_subcommand(self) -> None:
         with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:
             mock_tag_album_folder.return_value = [
                 TrackInfo(file_path=Path("dummy.flac"))
@@ -37,7 +37,27 @@ class TestCLIInterface(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             mock_tag_album_folder.assert_called_once()
 
-    def test_handle_tag_subcommand_with_json_report(self):
+    def test_handle_tag_subcommand_with_fanart_and_shazam_flags(self) -> None:
+        with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:
+            mock_tag_album_folder.return_value = [
+                TrackInfo(file_path=Path("dummy.flac"))
+            ]
+            exit_code = main(
+                [
+                    "tag",
+                    str(self.temporary_path),
+                    "--fanart-key",
+                    "test_fanart_key",
+                    "--no-shazam",
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            mock_tag_album_folder.assert_called_once()
+            _, kwargs = mock_tag_album_folder.call_args
+            self.assertEqual(kwargs.get("fanart_api_key"), "test_fanart_key")
+            self.assertFalse(kwargs.get("enable_shazam"))
+
+    def test_handle_tag_subcommand_with_json_report(self) -> None:
         with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:
             mock_tag_album_folder.return_value = [
                 TrackInfo(
@@ -58,21 +78,21 @@ class TestCLIInterface(unittest.TestCase):
             self.assertIn("summary_text", content)
             self.assertIn('"bpm_calculated_count": 1', content)
 
-    def test_handle_check_subcommand(self):
+    def test_handle_check_subcommand(self) -> None:
         with patch("sonora.cli.main.check_library") as mock_check:
             mock_check.return_value = CheckReport(total_files=1, corrupt_files=0)
             exit_code = main(["check", str(self.temporary_path)])
             self.assertEqual(exit_code, 0)
             mock_check.assert_called_once()
 
-    def test_handle_rename_subcommand(self):
+    def test_handle_rename_subcommand(self) -> None:
         with patch("sonora.cli.main.rename_directory_files") as mock_rename:
             mock_rename.return_value = [Path("01 - Artist - Title.flac")]
             exit_code = main(["rename", str(self.temporary_path)])
             self.assertEqual(exit_code, 0)
             mock_rename.assert_called_once()
 
-    def test_handle_organize_subcommand(self):
+    def test_handle_organize_subcommand(self) -> None:
         with patch("sonora.cli.main.organize_library_singles") as mock_organize:
             mock_organize.return_value = 5
             target_directory = self.temporary_path / "Singles"
@@ -87,14 +107,14 @@ class TestCLIInterface(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             mock_organize.assert_called_once()
 
-    def test_handle_backup_subcommand(self):
+    def test_handle_backup_subcommand(self) -> None:
         with patch("sonora.cli.main.backup_library_tags") as mock_backup:
             mock_backup.return_value = self.temporary_path / "backup.json"
             exit_code = main(["backup", str(self.temporary_path)])
             self.assertEqual(exit_code, 0)
             mock_backup.assert_called_once()
 
-    def test_handle_rename_subcommand_with_json(self):
+    def test_handle_rename_subcommand_with_json(self) -> None:
         with patch("sonora.cli.main.rename_directory_files") as mock_rename:
             mock_rename.return_value = [Path("01 - Artist - Title.flac")]
             json_output = self.temporary_path / "rename_report.json"
@@ -104,7 +124,7 @@ class TestCLIInterface(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_output.exists())
 
-    def test_handle_organize_subcommand_with_json(self):
+    def test_handle_organize_subcommand_with_json(self) -> None:
         with patch("sonora.cli.main.organize_library_singles") as mock_organize:
             mock_organize.return_value = 3
             json_output = self.temporary_path / "organize_report.json"
@@ -114,7 +134,7 @@ class TestCLIInterface(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_output.exists())
 
-    def test_handle_restore_subcommand_with_json(self):
+    def test_handle_restore_subcommand_with_json(self) -> None:
         with patch("sonora.cli.main.restore_library_tags") as mock_restore:
             mock_restore.return_value = 5
             dummy_backup = self.temporary_path / "backup.json"
@@ -124,7 +144,7 @@ class TestCLIInterface(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_output.exists())
 
-    def test_handle_normalize_subcommand(self):
+    def test_handle_normalize_subcommand(self) -> None:
         with patch("sonora.cli.main.normalize_library") as mock_normalize:
             mock_normalize.return_value = [TrackInfo(file_path=Path("song.flac"))]
             exit_code = main(
@@ -133,7 +153,7 @@ class TestCLIInterface(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             mock_normalize.assert_called_once()
 
-    def test_handle_bpm_subcommand(self):
+    def test_handle_bpm_subcommand(self) -> None:
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
         with (
@@ -149,7 +169,23 @@ class TestCLIInterface(unittest.TestCase):
             mock_read.assert_called_once()
             mock_calc_bpm.assert_called_once()
 
-    def test_handle_replaygain_subcommand(self):
+    def test_handle_key_subcommand(self) -> None:
+        song = self.temporary_path / "song.flac"
+        song.write_bytes(b"dummy")
+        with (
+            patch("sonora.cli.main.detect_key_details") as mock_detect_key,
+            patch("sonora.cli.main.read_track_metadata") as mock_read,
+            patch("sonora.cli.main.write_track_metadata") as mock_write,
+        ):
+            mock_read.return_value = TrackInfo(file_path=song, initial_key=None)
+            mock_detect_key.return_value = ("C#m", "12A", 0.85)
+            exit_code = main(["key", str(self.temporary_path)])
+            self.assertEqual(exit_code, 0)
+            mock_write.assert_called_once()
+            mock_read.assert_called_once()
+            mock_detect_key.assert_called_once()
+
+    def test_handle_replaygain_subcommand(self) -> None:
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
         with patch("sonora.cli.main.calculate_album_replaygain") as mock_rg:
@@ -158,7 +194,7 @@ class TestCLIInterface(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             mock_rg.assert_called_once()
 
-    def test_handle_lyrics_subcommand(self):
+    def test_handle_lyrics_subcommand(self) -> None:
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
         with (
@@ -176,7 +212,7 @@ class TestCLIInterface(unittest.TestCase):
             mock_lyrics.assert_called_once()
             mock_write.assert_called_once()
 
-    def test_handle_keyboard_interrupts(self):
+    def test_handle_keyboard_interrupts(self) -> None:
         dummy_backup = self.temporary_path / "backup.json"
         dummy_backup.write_text("{}", encoding="utf-8")
 

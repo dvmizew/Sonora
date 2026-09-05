@@ -1,7 +1,6 @@
 import contextlib
 import dataclasses
 import datetime
-import os
 import signal
 import socket
 import sys
@@ -12,13 +11,27 @@ from typing import Annotated
 
 import orjson
 from cyclopts import App, Parameter
-from dotenv import load_dotenv
+from cyclopts.exceptions import CycloptsError
+from rich.markup import escape
 
 from sonora import __version__
 from sonora.audio.bpm import calculate_bpm
+from sonora.audio.key import detect_key_details
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.cache import set_ignore_cache
+from sonora.core.cache import (
+    CacheStats,
+    get_cache_stats,
+    set_ignore_cache,
+)
+from sonora.core.cache import (
+    clear_cache as perform_clear_cache,
+)
+from sonora.core.config import (
+    clear_config_cache,
+    get_config,
+    load_app_environment,
+)
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -26,7 +39,11 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import CheckReport, TrackInfo
-from sonora.core.utils import find_audio_files, group_files_by_parent
+from sonora.core.utils import (
+    find_audio_files,
+    format_filesize,
+    group_files_by_parent,
+)
 from sonora.modules.backup import (
     backup_library_tags,
     get_last_restored_count,
@@ -52,7 +69,7 @@ from sonora.modules.tagger import (
 from sonora.services.lyrics import init_musixmatch_token, process_track_lyrics
 from sonora.services.musicbrainz import init_musicbrainz
 
-load_dotenv()
+load_app_environment()
 socket.setdefaulttimeout(15)
 
 if hasattr(signal, "SIGCONT"):
@@ -83,6 +100,13 @@ def tag(
         Parameter(
             name=["--bpm"],
             help="Calculate audio tempo (BPM)",
+        ),
+    ] = True,
+    fetch_key: Annotated[
+        bool,
+        Parameter(
+            name=["--key"],
+            help="Detect musical key and Camelot wheel tonality",
         ),
     ] = True,
     fetch_replaygain: Annotated[
@@ -148,6 +172,27 @@ def tag(
             help="Genius API token for song descriptions",
         ),
     ] = None,
+    fanart_api_key: Annotated[
+        str | None,
+        Parameter(
+            name=["--fanart-key"],
+            help="Fanart.tv project API key for CD art, logos, and HD fanart",
+        ),
+    ] = None,
+    fanart_client_key: Annotated[
+        str | None,
+        Parameter(
+            name=["--fanart-client-key"],
+            help="Fanart.tv personal VIP client key for immediate image updates",
+        ),
+    ] = None,
+    enable_shazam: Annotated[
+        bool,
+        Parameter(
+            name=["--shazam"],
+            help="Enable acoustic recognition via Shazam for untagged tracks",
+        ),
+    ] = True,
     threads: Annotated[
         int,
         Parameter(
@@ -166,23 +211,22 @@ def tag(
     """
     Tag audio files and albums automatically with all metadata, artwork, BPM, ReplayGain & lyrics.
     """
+    load_app_environment(path)
+    clear_config_cache()
     init_musicbrainz()
     init_musixmatch_token()
 
     if force:
         set_ignore_cache(True)
 
-    resolved_lastfm_key = lastfm_api_key or os.environ.get("LASTFM_API_KEY")
-    resolved_acoustid_key = acoustid_api_key or os.environ.get("ACOUSTID_API_KEY")
-    resolved_discogs_token = (
-        discogs_user_token
-        or os.environ.get("DISCOGS_TOKEN")
-        or os.environ.get("DISCOGS_USER_TOKEN")
-    )
-    resolved_genius_token = genius_api_token or os.environ.get("GENIUS_API_TOKEN")
-    has_musixmatch = bool(
-        os.environ.get("MUSIXMATCH_TOKEN") or os.environ.get("MUSIXMATCH_USER_TOKEN")
-    )
+    cfg = get_config()
+    resolved_lastfm_key = lastfm_api_key or cfg.lastfm_api_key
+    resolved_acoustid_key = acoustid_api_key or cfg.acoustid_api_key
+    resolved_discogs_token = discogs_user_token or cfg.discogs_token
+    resolved_genius_token = genius_api_token or cfg.genius_api_token
+    resolved_fanart_key = fanart_api_key or cfg.fanart_api_key
+    resolved_fanart_client_key = fanart_client_key or cfg.fanart_client_key
+    has_musixmatch = bool(cfg.musixmatch_token)
 
     active_keys: list[str] = []
     if resolved_discogs_token:
@@ -195,6 +239,8 @@ def tag(
         active_keys.append("[bold green]Last.fm[/]")
     if has_musixmatch:
         active_keys.append("[bold green]Musixmatch[/]")
+    if resolved_fanart_key:
+        active_keys.append("[bold green]Fanart.tv[/]")
 
     if active_keys:
         LOG.info(f"🔑 [bold]Active API Keys/Tokens:[/] {', '.join(active_keys)}")
@@ -203,7 +249,7 @@ def tag(
             "🔑 [dim]Active API Keys/Tokens:[/] [yellow]None (using free unauthenticated tiers)[/]"
         )
 
-    LOG.info(f"Tagging album directory: [bold]{path}[/bold]")
+    LOG.info(f"Tagging album directory: [bold]{escape(str(path))}[/bold]")
     tagged_tracks: list[TrackInfo] = []
     interrupted = False
     try:
@@ -211,6 +257,7 @@ def tag(
             path,
             max_threads=threads,
             fetch_bpm=fetch_bpm,
+            fetch_key=fetch_key,
             fetch_replaygain=fetch_replaygain,
             fetch_lyrics=fetch_lyrics,
             fetch_itunes_art=fetch_artwork,
@@ -218,6 +265,9 @@ def tag(
             acoustid_api_key=resolved_acoustid_key,
             discogs_user_token=resolved_discogs_token,
             genius_api_token=resolved_genius_token,
+            fanart_api_key=resolved_fanart_key,
+            fanart_client_key=resolved_fanart_client_key,
+            enable_shazam=enable_shazam,
             force=force,
             dry_run=dry_run,
         )
@@ -687,7 +737,9 @@ def organize(
     Organize single tracks into a Singles directory structure.
     """
     destination_directory = target_singles or (path / "Singles")
-    LOG.info(f"Organizing single tracks from {path} to {destination_directory}")
+    LOG.info(
+        f"Organizing single tracks from {escape(str(path))} to {escape(str(destination_directory))}"
+    )
     interrupted = False
     try:
         organized_count = organize_library_singles(
@@ -864,6 +916,13 @@ def normalize(
             help="Calculate audio tempo (BPM) locally",
         ),
     ] = True,
+    fetch_key: Annotated[
+        bool,
+        Parameter(
+            name=["--key"],
+            help="Detect musical key and Camelot wheel tonality locally",
+        ),
+    ] = True,
     fetch_replaygain: Annotated[
         bool,
         Parameter(
@@ -894,7 +953,7 @@ def normalize(
     ] = False,
 ) -> int:
     """
-    Locally clean tags, remove bracket noise, and calculate BPM/ReplayGain (100% offline).
+    Locally clean tags, remove bracket noise, and calculate BPM/Key/ReplayGain (100% offline).
     """
     LOG.info(f"Normalizing audio tags in [bold]{path}[/bold] (offline mode)...")
     interrupted = False
@@ -902,6 +961,7 @@ def normalize(
         results = normalize_library(
             path,
             fetch_bpm=fetch_bpm,
+            fetch_key=fetch_key,
             fetch_replaygain=fetch_replaygain,
             force=force,
             dry_run=dry_run,
@@ -924,6 +984,7 @@ def normalize(
         ("Target Directory", str(path.resolve()), None),
         ("Tracks Normalized", str(count), "green" if count else "white"),
         ("BPM Included", "Yes" if fetch_bpm else "No", None),
+        ("Musical Key Included", "Yes" if fetch_key else "No", None),
         ("ReplayGain Included", "Yes" if fetch_replaygain else "No", None),
     ]
     LOG.summary_table("Normalization Summary", summary_rows)
@@ -1020,6 +1081,106 @@ def bpm(
         ("Already Tagged / Skipped", str(skipped), None),
     ]
     LOG.summary_table("BPM Summary", summary_rows)
+    if interrupted:
+        return 130
+    return 0
+
+
+@app.command
+def key(
+    path: Annotated[
+        Path,
+        Parameter(help="Directory containing audio files to detect musical key for"),
+    ],
+    force: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Force recalculation even if musical key tag exists",
+        ),
+    ] = False,
+    threads: Annotated[
+        int,
+        Parameter(
+            name=["-t", "--threads"],
+            help="Number of parallel threads",
+        ),
+    ] = 4,
+    dry_run: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Simulate actions without modifying files on disk",
+        ),
+    ] = False,
+) -> int:
+    """
+    Detect and embed musical key (INITIALKEY) and Camelot wheel tags locally.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+
+    audio_files = find_audio_files(path, recursive=True)
+    if not audio_files:
+        LOG.warning("No audio files found.")
+        return 0
+
+    LOG.info(
+        f"Detecting musical key for {len(audio_files)} files in [bold]{path}[/bold]..."
+    )
+    computed = 0
+    skipped = 0
+    interrupted = False
+
+    def _process_key(audio_path: Path) -> tuple[Path, str | None, bool]:
+        wait_if_paused()
+        try:
+            info = read_track_metadata(audio_path)
+            if not force and info.initial_key is not None:
+                return audio_path, info.initial_key, False
+            details = detect_key_details(audio_path)
+            if details is not None:
+                val, camelot, _ = details
+                if not dry_run:
+                    updated = dataclasses.replace(info, initial_key=val)
+                    write_track_metadata(updated)
+                return audio_path, f"{val} ({camelot})", True
+            return audio_path, None, False
+        except (OSError, ValueError, RuntimeError) as err:
+            LOG.debug(f"Key detection error for {audio_path}: {err}")
+            return audio_path, None, False
+
+    with create_progress() as progress:
+        task = progress.add_task(
+            "[cyan]Detecting musical key...", total=len(audio_files)
+        )
+        with interactive_pause_listener(progress, task):
+            executor = ThreadPoolExecutor(max_workers=threads)
+            try:
+                futures = [executor.submit(_process_key, f) for f in audio_files]
+                for future in as_completed(futures):
+                    wait_if_paused()
+                    _, key_val, modified = future.result()
+                    if modified and key_val is not None:
+                        computed += 1
+                    else:
+                        skipped += 1
+                    progress.advance(task)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=False, cancel_futures=True)
+                interrupted = True
+                LOG.warning(
+                    "\n⏹️  [bold yellow]INTERRUPTED[/] - Key detection stopped by user (Ctrl+C)."
+                )
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+    summary_rows = [
+        ("Total Files Scanned", str(len(audio_files)), None),
+        ("Key Detected & Tagged", str(computed), "green" if computed else "white"),
+        ("Already Tagged / Skipped", str(skipped), None),
+    ]
+    LOG.summary_table("Musical Key Summary", summary_rows)
     if interrupted:
         return 130
     return 0
@@ -1224,6 +1385,274 @@ def lyrics(
     return 0
 
 
+cache_app = App(
+    "cache",
+    help="Inspect and manage Sonora cache and persistent state",
+    result_action="return_value",
+)
+app.command(cache_app)
+
+
+def _display_cache_stats(stats: CacheStats) -> None:
+    rows = [
+        ("Cache Directory", escape(str(stats.cache_dir)), "cyan"),
+        (
+            "API Cached Entries",
+            f"{stats.api_entries:,}",
+            "green" if stats.api_entries else "white",
+        ),
+        (
+            "API Cache Size on Disk",
+            format_filesize(stats.api_size_bytes),
+            "green" if stats.api_size_bytes else "white",
+        ),
+        (
+            "Library State Entries",
+            f"{stats.state_entries:,}",
+            "green" if stats.state_entries else "white",
+        ),
+        (
+            "Library State Size on Disk",
+            format_filesize(stats.state_size_bytes),
+            "green" if stats.state_size_bytes else "white",
+        ),
+        (
+            "Memory Metadata Cache",
+            f"{stats.memory_metadata_entries:,} items",
+            "cyan",
+        ),
+        (
+            "Total Cache Disk Usage",
+            format_filesize(stats.total_size_bytes),
+            "bold magenta",
+        ),
+    ]
+    LOG.summary_table("Sonora Cache Statistics", rows)
+
+
+@cache_app.command(name="stats")
+def cache_stats(
+    all_layers: Annotated[
+        bool,
+        Parameter(
+            name=["-a", "--all"],
+            negative="",
+            help="Display comprehensive statistics across all cache layers",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        Parameter(
+            name=["--json"],
+            negative="",
+            help="Output statistics in JSON format",
+        ),
+    ] = False,
+) -> int:
+    """
+    Display current cache statistics and disk usage.
+    """
+    stats = get_cache_stats()
+    if json_output:
+        print(orjson.dumps(stats.to_dict(), option=orjson.OPT_INDENT_2).decode("utf-8"))
+        return 0
+
+    _display_cache_stats(stats)
+    return 0
+
+
+@cache_app.command(name="clear")
+def cache_clear_cmd(
+    all_caches: Annotated[
+        bool,
+        Parameter(
+            name=["-a", "--all"],
+            negative="",
+            help="Clear all cache layers (API metadata, library state, and in-memory caches)",
+        ),
+    ] = False,
+    api: Annotated[
+        bool,
+        Parameter(
+            name=["--api"],
+            negative="",
+            help="Clear API metadata cache",
+        ),
+    ] = False,
+    state: Annotated[
+        bool,
+        Parameter(
+            name=["--state"],
+            negative="",
+            help="Clear persistent library tracking state database",
+        ),
+    ] = False,
+    memory: Annotated[
+        bool,
+        Parameter(
+            name=["--memory"],
+            negative="",
+            help="Clear in-memory metadata and normalization caches",
+        ),
+    ] = False,
+    purge: Annotated[
+        bool,
+        Parameter(
+            name=["-p", "--purge"],
+            negative="",
+            help="Purge cache files and SQLite databases entirely from disk",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        Parameter(
+            negative="",
+            help="Simulate cache clearing without modifying or deleting files",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        Parameter(
+            name=["--json"],
+            negative="",
+            help="Output results in JSON format",
+        ),
+    ] = False,
+) -> int:
+    """
+    Clear Sonora API cache, library state, and memory caches.
+    """
+    if all_caches:
+        do_api = True
+        do_state = True
+        do_memory = True
+    elif not (api or state or memory):
+        do_api = True
+        do_state = False
+        do_memory = True
+    else:
+        do_api = api
+        do_state = state
+        do_memory = memory
+
+    result = perform_clear_cache(
+        clear_api=do_api,
+        clear_state=do_state,
+        clear_memory=do_memory,
+        purge=purge,
+        dry_run=dry_run,
+    )
+
+    if json_output:
+        print(
+            orjson.dumps(result.to_dict(), option=orjson.OPT_INDENT_2).decode("utf-8")
+        )
+        return 0
+
+    if dry_run:
+        LOG.info(
+            f"[yellow][DRY RUN][/yellow] Simulated cache clearing for [bold]{escape(str(result.cache_dir))}[/bold]:"
+        )
+        rows = [
+            (
+                "API Cache Target",
+                (
+                    f"{result.api_entries_cleared:,} entries ({format_filesize(result.api_bytes_freed)})"
+                    if result.api_cleared
+                    else "Skipped"
+                ),
+                "yellow" if result.api_cleared else "white",
+            ),
+            (
+                "Library State Target",
+                (
+                    f"{result.state_entries_cleared:,} tracks ({format_filesize(result.state_bytes_freed)})"
+                    if result.state_cleared
+                    else "Preserved (use --state or --all to clear)"
+                ),
+                "yellow" if result.state_cleared else "white",
+            ),
+            (
+                "In-Memory Cache Target",
+                (
+                    f"{result.memory_metadata_cleared:,} entries"
+                    if result.memory_cleared
+                    else "Skipped"
+                ),
+                "yellow" if result.memory_cleared else "white",
+            ),
+            (
+                "Action Mode",
+                "Purge completely from disk" if purge else "Clear & Reclaim",
+                "cyan",
+            ),
+            (
+                "Total Space Reclaimable",
+                format_filesize(result.total_bytes_freed),
+                "bold yellow",
+            ),
+        ]
+        LOG.summary_table("Dry Run Cache Clearing", rows)
+        return 0
+
+    mode_label = "Purged" if purge else "Cleared"
+    rows = [
+        ("Cache Directory", escape(str(result.cache_dir)), "cyan"),
+        (
+            "API Metadata Cache",
+            (
+                f"{result.api_entries_cleared:,} entries cleared ({format_filesize(result.api_bytes_freed)} freed)"
+                if result.api_cleared
+                else "Skipped"
+            ),
+            "green" if result.api_cleared else "white",
+        ),
+        (
+            "Library State Cache",
+            (
+                f"{result.state_entries_cleared:,} tracks cleared ({format_filesize(result.state_bytes_freed)} freed)"
+                if result.state_cleared
+                else "Preserved (use --state or --all to clear)"
+            ),
+            "green" if result.state_cleared else "white",
+        ),
+        (
+            "In-Memory Caches",
+            (
+                f"{result.memory_metadata_cleared:,} entries reset"
+                if result.memory_cleared
+                else "Skipped"
+            ),
+            "cyan" if result.memory_cleared else "white",
+        ),
+        ("Action Type", mode_label, "magenta"),
+        (
+            "Total Space Freed",
+            format_filesize(result.total_bytes_freed),
+            "bold green",
+        ),
+    ]
+    LOG.summary_table(f"Cache {mode_label} Summary", rows)
+    LOG.success(f"Cache successfully {mode_label.lower()}.")
+    return 0
+
+
+@cache_app.default
+def cache_default() -> int:
+    """
+    Inspect Sonora cache status and available actions.
+    """
+    stats = get_cache_stats()
+    _display_cache_stats(stats)
+    LOG.info(
+        "Run [bold cyan]sonora cache clear[/bold cyan] to clear API caches, or [bold cyan]sonora cache clear --all[/bold cyan] for a complete reset."
+    )
+    return 0
+
+
+app.command(cache_clear_cmd, name="clear-cache")
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
     """
     CLI Entrypoint. Executes cyclopts App with provided or sys arguments.
@@ -1243,7 +1672,17 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         LOG.warning("Aborted by user. Shutting down gracefully...")
         return 130
-    except (OSError, ValueError, TypeError, RuntimeError) as error:
+    except CycloptsError:
+        return 2
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        RuntimeError,
+        KeyError,
+        IndexError,
+        AttributeError,
+    ) as error:
         LOG.error(f"Error: {error}")
         return 1
 

@@ -8,7 +8,13 @@ import taglib
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
-from sonora.core.utils import is_valid_uuid, normalize_date, normalize_genre
+from sonora.core.utils import (
+    is_valid_uuid,
+    normalize_date,
+    normalize_genre,
+    safe_float,
+    safe_int,
+)
 
 _METADATA_CACHE: dict[tuple[str, int, int], TrackInfo] = {}
 _METADATA_CACHE_LOCK = threading.RLock()
@@ -156,24 +162,16 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 or 1
             )
             raw_total_tracks = _get_tag(tags, "TRACKTOTAL", "TOTALTRACKS")
-            total_tracks = (
-                int(raw_total_tracks)
-                if raw_total_tracks and raw_total_tracks.isdigit()
-                else None
-            )
+            total_tracks = safe_int(raw_total_tracks)
             raw_total_discs = _get_tag(tags, "DISCTOTAL", "TOTALDISCS")
-            total_discs = (
-                int(raw_total_discs)
-                if raw_total_discs and raw_total_discs.isdigit()
-                else None
-            )
+            total_discs = safe_int(raw_total_discs)
 
             # Numerical and audio stats
             bpm = _parse_float_tag(
                 _get_tag(tags, "BPM", "TBPM", "WM/BEATSPERMINUTE"), "BPM"
             )
             raw_rating = _get_tag(tags, "RATING", "POPM")
-            rating = float(raw_rating) if raw_rating else None
+            rating = safe_float(raw_rating)
 
             raw_compilation = _get_tag(tags, "COMPILATION", "TCMP")
             compilation = (
@@ -380,3 +378,17 @@ def write_track_metadata(
         raise RuntimeError(
             f"Failed to write metadata for {track_info.file_path}: {error}"
         ) from error
+
+
+def clear_metadata_cache() -> int:
+    """Clear the in-memory metadata cache and return the number of entries cleared."""
+    with _METADATA_CACHE_LOCK:
+        count = len(_METADATA_CACHE)
+        _METADATA_CACHE.clear()
+        return count
+
+
+def get_metadata_cache_size() -> int:
+    """Return the number of entries currently cached in memory."""
+    with _METADATA_CACHE_LOCK:
+        return len(_METADATA_CACHE)

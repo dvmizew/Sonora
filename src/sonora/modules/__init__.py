@@ -11,6 +11,7 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
+    is_alien_album_track,
     process_single_track,
     tag_album_folder,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "check_brackets_corruption",
     "check_file",
     "check_library",
+    "is_alien_album_track",
     "is_single_folder",
     "organize_library_singles",
     "process_single_track",

@@ -5,7 +5,12 @@ from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import ALBUM_MATCH_THRESHOLD, RATE_LIMIT_ITUNES
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, extract_series_number, normalize_str
+from sonora.core.utils import (
+    RateLimiter,
+    extract_series_number,
+    normalize_country_name,
+    normalize_str,
+)
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 _ITUNES_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_ITUNES)
@@ -147,7 +152,9 @@ def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | 
         "itunes_artistid": str(best_result["artistId"])
         if best_result.get("artistId")
         else None,
-        "release_country": best_result.get("country"),
+        "release_country": normalize_country_name(str(best_result["country"]))
+        if best_result.get("country")
+        else None,
         "track_number": best_result.get("trackNumber"),
         "total_tracks": best_result.get("trackCount"),
         "disc_number": best_result.get("discNumber"),
@@ -212,7 +219,9 @@ def fetch_itunes_album_details(artist: str, album: str) -> dict[str, object] | N
             else None,
             "genre": best_album.get("primaryGenreName"),
             "copyright": best_album.get("copyright"),
-            "release_country": best_album.get("country"),
+            "release_country": normalize_country_name(str(best_album["country"]))
+            if best_album.get("country")
+            else None,
             "total_tracks": best_album.get("trackCount"),
             "tracks_by_number": tracks_by_number,
             "tracks_by_title": tracks_by_title,
@@ -243,7 +252,9 @@ def fetch_itunes_album_details(artist: str, album: str) -> dict[str, object] | N
                 "itunes_artistid": str(item.get("artistId"))
                 if item.get("artistId")
                 else None,
-                "release_country": item.get("country"),
+                "release_country": normalize_country_name(str(item["country"]))
+                if item.get("country")
+                else None,
                 "track_number": t_num,
                 "total_tracks": item.get("trackCount"),
                 "disc_number": item.get("discNumber"),
