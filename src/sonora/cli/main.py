@@ -12,6 +12,7 @@ from typing import Annotated
 
 import orjson
 from cyclopts import App, Parameter
+from cyclopts.exceptions import CycloptsError
 from dotenv import load_dotenv
 from rich.markup import escape
 
@@ -1403,6 +1404,14 @@ def _display_cache_stats(stats: CacheStats) -> None:
 
 @cache_app.command(name="stats")
 def cache_stats(
+    all_layers: Annotated[
+        bool,
+        Parameter(
+            name=["-a", "--all"],
+            negative="",
+            help="Display comprehensive statistics across all cache layers",
+        ),
+    ] = False,
     json_output: Annotated[
         bool,
         Parameter(
@@ -1635,7 +1644,17 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         LOG.warning("Aborted by user. Shutting down gracefully...")
         return 130
-    except (OSError, ValueError, TypeError, RuntimeError) as error:
+    except CycloptsError:
+        return 2
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        RuntimeError,
+        KeyError,
+        IndexError,
+        AttributeError,
+    ) as error:
         LOG.error(f"Error: {error}")
         return 1
 
