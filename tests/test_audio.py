@@ -238,6 +238,42 @@ class TestAudioEngine(unittest.TestCase):
         if found:
             self.assertEqual(found.resolve(), cover_path.resolve())
 
+    def test_format_lossless_and_lossy_classification(self) -> None:
+        lossless_exts = [".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"]
+        lossy_exts = [".mp3", ".ogg", ".opus", ".mpc", ".wma"]
+
+        for ext in lossless_exts:
+            p = self.tmp_path / f"track{ext}"
+            p.write_bytes(b"dummy")
+            with patch("taglib.File") as mock_taglib:
+                mock_song = MagicMock()
+                mock_song.tags = {"ARTIST": ["A"], "TITLE": ["T"]}
+                mock_song.sampleRate = 44100
+                mock_song.bitrate = 1411
+                mock_song.channels = 2
+                mock_song.pictures = []
+                mock_taglib.return_value.__enter__.return_value = mock_song
+                info = read_track_metadata(p)
+                self.assertTrue(
+                    info.is_lossless, f"Expected {ext} to be classified as lossless"
+                )
+
+        for ext in lossy_exts:
+            p = self.tmp_path / f"track{ext}"
+            p.write_bytes(b"dummy")
+            with patch("taglib.File") as mock_taglib:
+                mock_song = MagicMock()
+                mock_song.tags = {"ARTIST": ["A"], "TITLE": ["T"]}
+                mock_song.sampleRate = 44100
+                mock_song.bitrate = 320
+                mock_song.channels = 2
+                mock_song.pictures = []
+                mock_taglib.return_value.__enter__.return_value = mock_song
+                info = read_track_metadata(p)
+                self.assertFalse(
+                    info.is_lossless, f"Expected {ext} to be classified as lossy"
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

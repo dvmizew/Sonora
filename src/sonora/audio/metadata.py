@@ -1,5 +1,6 @@
 import dataclasses
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -211,6 +212,25 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 for field, tag_keys in _TAG_SCHEMA.items()
             }
 
+            file_ext = file_path.suffix.lower()
+            if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
+                is_lossless = True
+            elif file_ext in {".mp3", ".ogg", ".opus", ".mpc", ".wma"}:
+                is_lossless = False
+            elif file_ext in {".m4a", ".mp4"}:
+                try:
+                    import mutagen.mp4
+
+                    mp4_loader: Callable[..., Any] = mutagen.mp4.MP4
+                    mp4_audio: Any = mp4_loader(str(file_path))
+                    is_lossless = (
+                        str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
+                    )
+                except (OSError, ValueError, RuntimeError, AttributeError, KeyError):
+                    is_lossless = False
+            else:
+                is_lossless = True
+
             track_info = TrackInfo(
                 file_path=file_path,
                 artist=artist,
@@ -230,6 +250,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 sample_rate=song.sampleRate,
                 bitrate=song.bitrate,
                 channels=song.channels,
+                is_lossless=is_lossless,
                 replaygain_track_gain=replaygain_track_gain,
                 replaygain_track_peak=replaygain_track_peak,
                 replaygain_album_gain=replaygain_album_gain,
