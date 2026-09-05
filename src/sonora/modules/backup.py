@@ -30,7 +30,10 @@ def _read_track_for_backup(audio_file: Path) -> tuple[str, dict[str, Any] | None
 
 
 def _restore_single_track(
-    file_path_str: str, tags_dict: Any, base_dir: Path | None = None
+    file_path_str: str,
+    tags_dict: Any,
+    base_dir: Path | None = None,
+    candidate_lookup: dict[str, Path] | None = None,
 ) -> tuple[bool, bool]:
     wait_if_paused()
     target_path = Path(file_path_str)
@@ -40,7 +43,9 @@ def _restore_single_track(
         direct_candidate = base_dir / target_path.name
         if direct_candidate.exists():
             target_path = direct_candidate
-        else:
+        elif candidate_lookup and target_path.name in candidate_lookup:
+            target_path = candidate_lookup[target_path.name]
+        elif candidate_lookup is None and base_dir.exists():
             matches = list(base_dir.rglob(target_path.name))
             if matches:
                 target_path = matches[0]
@@ -176,6 +181,10 @@ def restore_library_tags(
     failed = 0
     missing = 0
     search_base_dir = target_directory or backup_file.parent
+    candidate_lookup: dict[str, Path] = {}
+    if search_base_dir.exists():
+        for p in find_audio_files(search_base_dir, recursive=True):
+            candidate_lookup.setdefault(p.name, p)
 
     with create_progress() as progress:
         task = progress.add_task(
@@ -186,7 +195,11 @@ def restore_library_tags(
             try:
                 futures = [
                     executor.submit(
-                        _restore_single_track, file_str, tags, search_base_dir
+                        _restore_single_track,
+                        file_str,
+                        tags,
+                        search_base_dir,
+                        candidate_lookup,
                     )
                     for file_str, tags in backup_dict.items()
                 ]

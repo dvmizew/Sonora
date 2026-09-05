@@ -28,24 +28,24 @@ from sonora.core.utils import (
 
 
 class TestCoreUtils(unittest.TestCase):
-    def test_normalize_str_basic(self):
+    def test_normalize_str_basic(self) -> None:
         self.assertEqual(normalize_str("Hello World"), "hello world")
         self.assertEqual(normalize_str("$tring!"), "string")
 
-    def test_normalize_str_diacritics_and_symbols(self):
+    def test_normalize_str_diacritics_and_symbols(self) -> None:
         self.assertEqual(normalize_str("Beyoncé"), "beyonce")
         self.assertEqual(normalize_str("Mötley Crüe"), "motley crue")
 
-    def test_sanitize_name_filesystem_chars(self):
+    def test_sanitize_name_filesystem_chars(self) -> None:
         self.assertEqual(sanitize_name("AC/DC"), "AC_DC")
         self.assertEqual(sanitize_name("Artist: Album?"), "Artist Album")
         self.assertEqual(sanitize_name("Track 01.flac."), "Track 01.flac")
 
-    def test_sanitize_name_empty(self):
+    def test_sanitize_name_empty(self) -> None:
         self.assertEqual(sanitize_name(""), "Unknown")
         self.assertEqual(sanitize_name(None), "Unknown")
 
-    def test_normalize_str_edge_cases(self):
+    def test_normalize_str_edge_cases(self) -> None:
         self.assertEqual(normalize_str(None), "")
         self.assertEqual(normalize_str(""), "")
         self.assertEqual(normalize_str("   "), "")
@@ -58,7 +58,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(normalize_str("DEBANDADĂ FAC"), "debandada fac")
         self.assertEqual(normalize_str("Nopți prea lungi"), "nopti prea lungi")
 
-    def test_sanitize_name_complex_edge_cases(self):
+    def test_sanitize_name_complex_edge_cases(self) -> None:
         self.assertEqual(sanitize_name("Artist / Title <HQ>:"), "Artist _ Title HQ")
         self.assertEqual(sanitize_name("CON"), "CON_")
         self.assertEqual(sanitize_name("NUL"), "NUL_")
@@ -69,7 +69,7 @@ class TestCoreUtils(unittest.TestCase):
             "Satra B.E.N.Z. - O.$.O.D. IV",
         )
 
-    def test_is_valid_uuid(self):
+    def test_is_valid_uuid(self) -> None:
         self.assertTrue(is_valid_uuid("c8b03190-306c-4125-9b32-3f9d86d60a12"))
         self.assertTrue(is_valid_uuid("C8B03190-306C-4125-9B32-3F9D86D60A12"))
         self.assertFalse(is_valid_uuid("not-a-uuid"))
@@ -81,7 +81,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertFalse(is_valid_uuid(None))
         self.assertFalse(is_valid_uuid(""))
 
-    def test_extract_series_number_all_formats(self):
+    def test_extract_series_number_all_formats(self) -> None:
         from sonora.core.utils import extract_series_number
 
         # Arabic numbers
@@ -116,7 +116,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(extract_series_number(""))
         self.assertIsNone(extract_series_number(None))
 
-    def test_clean_title_remaster_and_features(self):
+    def test_clean_title_remaster_and_features(self) -> None:
         self.assertEqual(clean_title("In the End (2020 Remaster)"), "In the End")
         self.assertEqual(clean_title("Rockstar (feat. 21 Savage)"), "Rockstar")
         self.assertEqual(clean_title("Song [Explicit]"), "Song")
@@ -132,7 +132,7 @@ class TestCoreUtils(unittest.TestCase):
         )
         self.assertEqual(clean_title(""), "")
 
-    def test_clean_disambiguation(self):
+    def test_clean_disambiguation(self) -> None:
         self.assertEqual(clean_disambiguation("Armin (ROU)"), "Armin")
         self.assertEqual(clean_disambiguation("IDK (ROU)"), "IDK")
         self.assertEqual(clean_disambiguation("Swisher (ROU)"), "Swisher")
@@ -161,7 +161,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(safe_float(None))
         self.assertIsNone(safe_float("bad"))
 
-    def test_deduplicate_title_features(self):
+    def test_deduplicate_title_features(self) -> None:
         self.assertEqual(
             deduplicate_title_features(
                 "Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"
@@ -225,7 +225,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(deduplicate_title_features(""), "")
         self.assertEqual(deduplicate_title_features(None), "")
 
-    def test_deduplicate_title_features_with_user_aliases(self):
+    def test_deduplicate_title_features_with_user_aliases(self) -> None:
         with patch(
             "sonora.core.utils._load_user_overrides",
             return_value={"ravi": "Ravisval"},
@@ -235,7 +235,7 @@ class TestCoreUtils(unittest.TestCase):
                 "SEMAKA (feat. Ravisval & Armin)",
             )
 
-    def test_load_user_overrides_corrupt_json(self):
+    def test_load_user_overrides_corrupt_json(self) -> None:
         from sonora.core.utils import _load_user_overrides
 
         _load_user_overrides.cache_clear()
@@ -249,7 +249,7 @@ class TestCoreUtils(unittest.TestCase):
             self.assertEqual(overrides, {})
         _load_user_overrides.cache_clear()
 
-    def test_normalize_genre_mapping_and_filtering(self):
+    def test_normalize_genre_mapping_and_filtering(self) -> None:
         self.assertEqual(normalize_genre("Hip Hop"), "Hip-Hop/Rap")
         self.assertEqual(normalize_genre("Rap"), "Hip-Hop/Rap")
         self.assertEqual(normalize_genre("Trap"), "Hip-Hop/Rap")
@@ -269,7 +269,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(normalize_genre(""))
         self.assertIsNone(normalize_genre(None))
 
-    def test_clean_unicode_punct(self):
+    def test_clean_unicode_punct(self) -> None:
         self.assertEqual(clean_unicode_punct("Connect‐R"), "Connect-R")
         self.assertEqual(clean_unicode_punct("K‐POP"), "K-POP")
         self.assertEqual(clean_unicode_punct("Saint‐Tropez"), "Saint-Tropez")
@@ -278,7 +278,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(clean_unicode_punct(""), "")
         self.assertEqual(clean_unicode_punct(None), "")
 
-    def test_normalize_date(self):
+    def test_normalize_date(self) -> None:
         self.assertEqual(normalize_date("2024-07-12"), "2024-07-12")
         self.assertEqual(normalize_date("2003"), "2003")
         self.assertIsNone(normalize_date("0"))
@@ -290,22 +290,20 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(normalize_date("1899"))
         self.assertIsNone(normalize_date("2099"))
 
-    def test_resolve_artist_name_exact_match(self):
+    def test_resolve_artist_name_exact_match(self) -> None:
         from sonora.core.utils import resolve_artist_name
 
-        with patch("sonora.core.utils.musicbrainzngs.search_artists") as mock_mb:
+        with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
             # Simulate MusicBrainz returning Enrico Rava with score 100 and RAVA with score 90
-            mock_mb.return_value = {
-                "artist-list": [
-                    {"name": "Enrico Rava", "ext:score": "100", "id": "uuid-1"},
-                    {"name": "RAVA", "ext:score": "90", "id": "uuid-2"},
-                ]
-            }
+            mock_mb.return_value = [
+                {"name": "Enrico Rava", "ext:score": "100", "id": "uuid-1"},
+                {"name": "RAVA", "ext:score": "90", "id": "uuid-2"},
+            ]
             # Must prioritize exact match RAVA over higher-scored Enrico Rava
             self.assertEqual(resolve_artist_name("RAVA"), "RAVA")
             self.assertEqual(resolve_artist_name("rava"), "RAVA")
 
-    def test_match_score_series_and_version_disambiguation(self):
+    def test_match_score_series_and_version_disambiguation(self) -> None:
         from sonora.core.utils import match_score
 
         # Series volumes must never match each other
@@ -358,82 +356,72 @@ class TestCoreUtils(unittest.TestCase):
             90.0,
         )
 
-    @patch("sonora.core.utils.musicbrainzngs.search_artists")
-    def test_is_single_group_artist(self, mock_search):
+    @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
+    def test_is_single_group_artist(self, mock_search: MagicMock) -> None:
         is_single_group_artist.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [
-                {
-                    "name": "Above & Beyond",
-                    "type": "Group",
-                    "ext:score": "100",
-                }
-            ]
-        }
+        mock_search.return_value = [
+            {
+                "name": "Above & Beyond",
+                "type": "Group",
+                "ext:score": "100",
+            }
+        ]
         self.assertTrue(is_single_group_artist("Above & Beyond"))
 
         is_single_group_artist.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [{"name": "Drake", "type": "Person", "ext:score": "80"}]
-        }
+        mock_search.return_value = [
+            {"name": "Drake", "type": "Person", "ext:score": "80"}
+        ]
         self.assertFalse(is_single_group_artist("Drake & 21 Savage"))
         self.assertFalse(is_single_group_artist("SingleArtist"))
         self.assertFalse(is_single_group_artist(""))
         self.assertFalse(is_single_group_artist(None))
 
-    @patch("sonora.core.utils.musicbrainzngs.search_artists")
-    def test_get_primary_artist(self, mock_search):
+    @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
+    def test_get_primary_artist(self, mock_search: MagicMock) -> None:
         is_single_group_artist.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [
-                {
-                    "name": "Above & Beyond",
-                    "type": "Group",
-                    "ext:score": "100",
-                }
-            ]
-        }
+        mock_search.return_value = [
+            {
+                "name": "Above & Beyond",
+                "type": "Group",
+                "ext:score": "100",
+            }
+        ]
         self.assertEqual(get_primary_artist("Above & Beyond"), "Above & Beyond")
 
         is_single_group_artist.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [
-                {
-                    "name": "Alan & Kepa",
-                    "type": "Group",
-                    "ext:score": "100",
-                }
-            ]
-        }
+        mock_search.return_value = [
+            {
+                "name": "Alan & Kepa",
+                "type": "Group",
+                "ext:score": "100",
+            }
+        ]
         self.assertEqual(get_primary_artist("Alan & Kepa"), "Alan & Kepa")
 
         is_single_group_artist.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [
-                {
-                    "name": "Play & Win",
-                    "type": "Group",
-                    "ext:score": "100",
-                }
-            ]
-        }
+        mock_search.return_value = [
+            {
+                "name": "Play & Win",
+                "type": "Group",
+                "ext:score": "100",
+            }
+        ]
         self.assertEqual(get_primary_artist("Play & Win"), "Play & Win")
         self.assertEqual(get_primary_artist("Play&Win"), "Play & Win")
 
         is_single_group_artist.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [
-                {
-                    "name": "Simon & Garfunkel",
-                    "type": "Group",
-                    "ext:score": "100",
-                }
-            ]
-        }
+        mock_search.return_value = [
+            {
+                "name": "Simon & Garfunkel",
+                "type": "Group",
+                "ext:score": "100",
+            }
+        ]
         self.assertEqual(get_primary_artist("Simon & Garfunkel"), "Simon & Garfunkel")
 
         is_single_group_artist.cache_clear()
-        mock_search.return_value = {"artist-list": []}
+        mock_search.return_value = []
         self.assertEqual(
             get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
         )
@@ -442,7 +430,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(get_primary_artist(""), "Unknown")
         self.assertEqual(get_primary_artist(None), "Unknown")
 
-    def test_group_files_by_parent(self):
+    def test_group_files_by_parent(self) -> None:
         f1 = Path("/tmp/album1/01.flac")
         f2 = Path("/tmp/album1/02.flac")
         f3 = Path("/tmp/album2/01.flac")
@@ -451,7 +439,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(grouped[Path("/tmp/album1")], [f1, f2])
         self.assertEqual(grouped[Path("/tmp/album2")], [f3])
 
-    def test_safe_case_rename_and_relocate_companion_lyrics(self):
+    def test_safe_case_rename_and_relocate_companion_lyrics(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -474,7 +462,7 @@ class TestCoreUtils(unittest.TestCase):
 
 
 class TestCoreModels(unittest.TestCase):
-    def test_track_info_serialization(self):
+    def test_track_info_serialization(self) -> None:
         track = TrackInfo(
             file_path=Path("/music/song.flac"),
             artist="Beyoncé",

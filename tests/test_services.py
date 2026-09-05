@@ -58,7 +58,7 @@ class TestServicesEngine(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     @patch("sonora.core.http.SESSION.get")
-    def test_fetch_itunes_cover_art_url(self, mock_get):
+    def test_fetch_itunes_cover_art_url(self, mock_get: MagicMock) -> None:
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "results": [
@@ -76,7 +76,7 @@ class TestServicesEngine(unittest.TestCase):
         )
 
     @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics(self, mock_syncedlyrics):
+    def test_fetch_synced_lyrics(self, mock_syncedlyrics: MagicMock) -> None:
         # 1. Basic search
         mock_syncedlyrics.search.return_value = "[00:12.34] Test lyric line"
         lyrics = fetch_synced_lyrics("Artist", "Title")
@@ -107,17 +107,17 @@ class TestServicesEngine(unittest.TestCase):
 
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics_raises_api_service_error_on_failure(
-        self, mock_syncedlyrics
-    ):
+        self, mock_syncedlyrics: MagicMock
+    ) -> None:
         mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
         with self.assertRaises(RuntimeError):
             fetch_synced_lyrics("FailArtist", "FailTitle")
 
-    def test_synced_lyrics_empty_query_returns_none(self):
+    def test_synced_lyrics_empty_query_returns_none(self) -> None:
         self.assertIsNone(fetch_synced_lyrics("", ""))
 
     @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_fetch_track_mbid(self, mock_mb):
+    def test_fetch_track_mbid(self, mock_mb: MagicMock) -> None:
         mock_mb.search_recordings.return_value = {
             "recording-list": [
                 {
@@ -132,7 +132,7 @@ class TestServicesEngine(unittest.TestCase):
         self.assertEqual(mbid, "12345678-1234-1234-1234-123456789abc")
 
     @patch("sonora.services.discogs.SESSION.get")
-    def test_search_discogs_release(self, mock_get):
+    def test_search_discogs_release(self, mock_get: MagicMock) -> None:
         # 1. Search response
         mock_search_response = MagicMock()
         mock_search_response.status_code = 200
@@ -192,11 +192,13 @@ class TestServicesEngine(unittest.TestCase):
                 release_result["track_credits"]["1"]["producers"], "Southside"
             )
 
-    def test_search_discogs_without_token_returns_none(self):
+    def test_search_discogs_without_token_returns_none(self) -> None:
         self.assertIsNone(search_discogs_release("Artist", "Album", user_token=None))
 
     @patch("sonora.services.discogs.SESSION.get")
-    def test_fetch_discogs_release_details_without_token(self, mock_get):
+    def test_fetch_discogs_release_details_without_token(
+        self, mock_get: MagicMock
+    ) -> None:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -216,11 +218,11 @@ class TestServicesEngine(unittest.TestCase):
             "https://api.discogs.com/releases/12345", headers={}, timeout=10
         )
 
-    def test_fetch_discogs_release_details_empty_id(self):
+    def test_fetch_discogs_release_details_empty_id(self) -> None:
         self.assertIsNone(fetch_discogs_release_details("", user_token=None))
 
     @patch("sonora.services.acoustid.acoustid")
-    def test_lookup_acoustid(self, mock_acoustid):
+    def test_lookup_acoustid(self, mock_acoustid: MagicMock) -> None:
         mock_acoustid.fingerprint_file.return_value = (120.0, "fingerprint_data_str")
         mock_acoustid.lookup.return_value = {}
         mock_acoustid.parse_lookup_result.return_value = [
@@ -231,7 +233,7 @@ class TestServicesEngine(unittest.TestCase):
         self.assertEqual(mbid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
 
     @patch("sonora.core.http.SESSION.get")
-    def test_fetch_lastfm_tags(self, mock_get):
+    def test_fetch_lastfm_tags(self, mock_get: MagicMock) -> None:
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "toptags": {"tag": [{"name": "pop"}, {"name": "rnb"}]}
@@ -242,7 +244,7 @@ class TestServicesEngine(unittest.TestCase):
         self.assertEqual(tags, ["Pop", "Rnb"])
 
     @patch("sonora.core.http.SESSION.get")
-    def test_fetch_genius_description(self, mock_get):
+    def test_fetch_genius_description(self, mock_get: MagicMock) -> None:
         mock_search_response = MagicMock()
         mock_search_response.json.return_value = {
             "response": {
@@ -278,7 +280,7 @@ class TestServicesEngine(unittest.TestCase):
         self.assertEqual(song_description, "Song story description")
 
     @patch("sonora.services.genius.get_cached_api")
-    def test_fetch_genius_song_details_cached(self, mock_cache):
+    def test_fetch_genius_song_details_cached(self, mock_cache: MagicMock) -> None:
         mock_cache.return_value = {
             "genius_song_id": 999,
             "description": "Cached story",
@@ -290,11 +292,11 @@ class TestServicesEngine(unittest.TestCase):
         details = fetch_genius_description("Artist", "Title", api_token="dummy_token")
         self.assertEqual(details, "Cached story")
 
-    def test_acoustid_no_api_key_returns_none(self):
+    def test_acoustid_no_api_key_returns_none(self) -> None:
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key=""))
 
     @patch("sonora.services.acoustid.acoustid")
-    def test_acoustid_low_score_returns_none(self, mock_acoustid):
+    def test_acoustid_low_score_returns_none(self, mock_acoustid: MagicMock) -> None:
         mock_acoustid.fingerprint_file.return_value = (100.0, "fp_data")
         mock_acoustid.lookup.return_value = {}
         mock_acoustid.parse_lookup_result.return_value = [
@@ -303,11 +305,11 @@ class TestServicesEngine(unittest.TestCase):
 
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key="dummy_key"))
 
-    def test_lastfm_no_api_key_returns_empty(self):
+    def test_lastfm_no_api_key_returns_empty(self) -> None:
         self.assertEqual(fetch_lastfm_tags("Artist", "Title", api_key=None), [])
 
     @patch("sonora.core.http.SESSION.get")
-    def test_genius_rejects_lyrics_unavailable_text(self, mock_get):
+    def test_genius_rejects_lyrics_unavailable_text(self, mock_get: MagicMock) -> None:
         mock_search_response = MagicMock()
         mock_search_response.json.return_value = {
             "response": {"hits": [{"result": {"api_path": "/songs/1"}}]}
@@ -327,7 +329,7 @@ class TestServicesEngine(unittest.TestCase):
         )
 
     @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_musicbrainz_error_handling(self, mock_mb):
+    def test_musicbrainz_error_handling(self, mock_mb: MagicMock) -> None:
         mock_mb.search_recordings.side_effect = musicbrainzngs.MusicBrainzError(
             "MusicBrainz server 500"
         )
@@ -335,14 +337,14 @@ class TestServicesEngine(unittest.TestCase):
         self.assertIsNone(mbid_result)
 
     @patch("sonora.services.discogs.SESSION.get")
-    def test_discogs_error_handling(self, mock_get):
+    def test_discogs_error_handling(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.HTTPError("Discogs 401 Unauthorized")
         release_result = search_discogs_release(
             "Artist", "Album", user_token="bad_token"
         )
         self.assertIsNone(release_result)
 
-    def test_clean_lyrics_text(self):
+    def test_clean_lyrics_text(self) -> None:
         dirty = (
             "[00:12.34] Valid lyric line\n"
             "12 Contributors\n"
@@ -362,7 +364,7 @@ class TestServicesEngine(unittest.TestCase):
         )
 
     @patch("sonora.services.deezer.SESSION.get")
-    def test_fetch_deezer_album_details(self, mock_get):
+    def test_fetch_deezer_album_details(self, mock_get: MagicMock) -> None:
         mock_search = MagicMock()
         mock_search.status_code = 200
         mock_search.json.return_value = {"data": [{"id": 12345}]}
@@ -387,7 +389,7 @@ class TestServicesEngine(unittest.TestCase):
             self.assertEqual(release_result["genre"], "Hip Hop")
 
     @patch("sonora.services.deezer.SESSION.get")
-    def test_fetch_deezer_track_details(self, mock_get):
+    def test_fetch_deezer_track_details(self, mock_get: MagicMock) -> None:
         mock_search = MagicMock()
         mock_search.status_code = 200
         mock_search.json.return_value = {
@@ -414,7 +416,7 @@ class TestServicesEngine(unittest.TestCase):
             self.assertEqual(track_details["isrc"], "USUM71703861")
 
     @patch("sonora.services.musicbrainz.SESSION.head")
-    def test_fetch_cover_art_archive_url(self, mock_head):
+    def test_fetch_cover_art_archive_url(self, mock_head: MagicMock) -> None:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.url = "https://ia8000.us.archive.org/cover.jpg"
@@ -423,11 +425,11 @@ class TestServicesEngine(unittest.TestCase):
         url = fetch_cover_art_archive_url("c8b03190-306c-4125-9b32-3f9d86d60a12")
         self.assertEqual(url, "https://ia8000.us.archive.org/cover.jpg")
 
-    def test_fetch_cover_art_archive_invalid_uuid_returns_none(self):
+    def test_fetch_cover_art_archive_invalid_uuid_returns_none(self) -> None:
         self.assertIsNone(fetch_cover_art_archive_url("invalid-uuid"))
 
     @patch("sonora.services.musicbrainz.musicbrainzngs")
-    def test_search_musicbrainz_release(self, mock_mb):
+    def test_search_musicbrainz_release(self, mock_mb: MagicMock) -> None:
         mock_mb.search_releases.return_value = {
             "release-list": [
                 {
@@ -456,7 +458,7 @@ class TestServicesEngine(unittest.TestCase):
             self.assertEqual(release_result["country"], "US")
 
     @patch("sonora.services.lyrics.fetch_synced_lyrics")
-    def test_process_track_lyrics_quality_upgrade(self, mock_fetch):
+    def test_process_track_lyrics_quality_upgrade(self, mock_fetch: MagicMock) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             audio_file = Path(tmp_dir) / "track.flac"
             audio_file.write_bytes(b"dummy")
@@ -493,7 +495,7 @@ class TestServicesEngine(unittest.TestCase):
             self.assertEqual(tag_type, "enhanced")
 
     @patch("sonora.services.acoustid.acoustid.fingerprint_file")
-    def test_fingerprint_in_memory_cache(self, mock_fp):
+    def test_fingerprint_in_memory_cache(self, mock_fp: MagicMock) -> None:
         mock_fp.return_value = (180.0, "AQADtEmSJEqiJE")
         with tempfile.TemporaryDirectory() as tmp_dir:
             audio_file = Path(tmp_dir) / "track.flac"

@@ -17,6 +17,7 @@ class TestLibraryState(unittest.TestCase):
         self.test_file2.write_bytes(b"dummy audio 2")
 
     def tearDown(self) -> None:
+        self.state_mgr.close()
         self.temp_dir.cleanup()
 
     def test_state_lifecycle(self) -> None:

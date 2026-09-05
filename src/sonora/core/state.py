@@ -1,3 +1,4 @@
+import atexit
 import contextlib
 import sqlite3
 import threading
@@ -23,13 +24,15 @@ class LibraryStateManager:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path if db_path is not None else _get_default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn: sqlite3.Connection | None = None
         self._init_db()
 
-    @contextlib.contextmanager
-    def _connection(self) -> Generator[sqlite3.Connection, None, None]:
-        needs_init = not self.db_path.exists()
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
-        try:
+    def _get_connection(self) -> sqlite3.Connection:
+        if self._conn is None:
+            needs_init = not self.db_path.exists()
+            conn = sqlite3.connect(
+                str(self.db_path), timeout=30.0, check_same_thread=False
+            )
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA temp_store=MEMORY;")
@@ -48,10 +51,19 @@ class LibraryStateManager:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_track_path ON track_state(file_path);"
                 )
+                conn.commit()
+            self._conn = conn
+        return self._conn
+
+    @contextlib.contextmanager
+    def _connection(self) -> Generator[sqlite3.Connection, None, None]:
+        conn = self._get_connection()
+        try:
             with conn:
                 yield conn
-        finally:
-            conn.close()
+        except sqlite3.OperationalError:
+            self.close()
+            raise
 
     def _init_db(self) -> None:
         with _STATE_LOCK, self._connection():
@@ -233,21 +245,22 @@ class LibraryStateManager:
         if not self.db_path.exists():
             return 0
         count = self.get_state_count()
-        if purge:
-            for p in (
-                self.db_path,
-                self.db_path.with_name(f"{self.db_path.name}-wal"),
-                self.db_path.with_name(f"{self.db_path.name}-shm"),
-            ):
+        with _STATE_LOCK:
+            self.close()
+            if purge:
+                for p in (
+                    self.db_path,
+                    self.db_path.with_name(f"{self.db_path.name}-wal"),
+                    self.db_path.with_name(f"{self.db_path.name}-shm"),
+                ):
+                    try:
+                        if p.exists():
+                            p.unlink()
+                    except OSError as error:
+                        LOG.debug(f"Failed to unlink {p}: {error}")
+                return count
+            else:
                 try:
-                    if p.exists():
-                        p.unlink()
-                except OSError as error:
-                    LOG.debug(f"Failed to unlink {p}: {error}")
-            return count
-        else:
-            try:
-                with _STATE_LOCK:
                     conn = sqlite3.connect(
                         str(self.db_path), timeout=30.0, check_same_thread=False
                     )
@@ -259,13 +272,20 @@ class LibraryStateManager:
                         conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
                     finally:
                         conn.close()
-                return count
-            except (sqlite3.Error, OSError) as error:
-                LOG.debug(f"Failed to clear state DB: {error}")
-                return 0
+                    return count
+                except (sqlite3.Error, OSError) as error:
+                    LOG.debug(f"Failed to clear state DB: {error}")
+                    return 0
 
     def close(self) -> None:
         """Cleanly close resources if needed."""
+        with _STATE_LOCK:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except (sqlite3.Error, OSError):
+                    pass
+                self._conn = None
 
 
 def get_library_state() -> LibraryStateManager:
@@ -284,3 +304,6 @@ def reset_library_state() -> None:
         if _STATE_INSTANCE is not None:
             _STATE_INSTANCE.close()
             _STATE_INSTANCE = None
+
+
+atexit.register(reset_library_state)

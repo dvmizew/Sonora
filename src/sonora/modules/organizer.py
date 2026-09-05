@@ -57,6 +57,28 @@ def is_single_folder(folder_path: Path) -> bool:
     return len(albums) > 1
 
 
+def _quarantine_file(file_path: Path, quarantine_dir: Path) -> Path:
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    target = quarantine_dir / file_path.name
+    counter = 1
+    while target.exists() and target.resolve() != file_path.resolve():
+        target = quarantine_dir / f"{file_path.stem} ({counter}){file_path.suffix}"
+        counter += 1
+    if target.resolve() != file_path.resolve():
+        shutil.move(str(file_path), str(target))
+    for companion in find_companion_lyrics(file_path):
+        comp_target = quarantine_dir / companion.name
+        c_counter = 1
+        while comp_target.exists() and comp_target.resolve() != companion.resolve():
+            comp_target = (
+                quarantine_dir / f"{companion.stem} ({c_counter}){companion.suffix}"
+            )
+            c_counter += 1
+        if comp_target.resolve() != companion.resolve():
+            shutil.move(str(companion), str(comp_target))
+    return target
+
+
 LAST_ORGANIZED_COUNT: int = 0
 
 
@@ -152,46 +174,72 @@ def organize_library_singles(
                             singles_to_process.append((path, info))
                     else:
                         for _path, info in folder_track_infos:
-                            primary_artist_key = get_primary_artist(info.artist).lower()
-                            track_identity_key = (
-                                f"{primary_artist_key} - {info.title.lower()}"
+                            primary_artist_key = normalize_str(
+                                get_primary_artist(info.artist)
                             )
-                            album_fingerprints.add(track_identity_key)
+                            clean_t = normalize_str(
+                                deduplicate_title_features(info.title)
+                            )
+                            album_fingerprints.add(f"{primary_artist_key} - {clean_t}")
+                            if info.isrc:
+                                album_fingerprints.add(
+                                    f"isrc:{info.isrc.strip().upper()}"
+                                )
+                            if info.musicbrainz_trackid:
+                                album_fingerprints.add(
+                                    f"mbid:{info.musicbrainz_trackid.strip().lower()}"
+                                )
             finally:
                 executor.shutdown(wait=False)
 
     seen_single_fingerprints: set[str] = set()
+    quarantine_dir = (target_singles_dir or (source_dir / "Singles")) / ".duplicates"
 
-    # Process and move collected singles (with deduplication against album tracks and duplicate singles)
+    # Process and move collected singles (with safe quarantining against album tracks and duplicate singles)
     for path, track_info in singles_to_process:
         primary_artist = get_primary_artist(track_info.artist)
         clean_title = deduplicate_title_features(track_info.title)
         primary_artist_key = normalize_str(primary_artist)
         track_identity_key = f"{primary_artist_key} - {normalize_str(clean_title)}"
 
-        # Deduplicate: if an identical track exists inside a full album or another single, remove the duplicate
-        if (
+        is_duplicate = (
             track_identity_key in album_fingerprints
             or track_identity_key in seen_single_fingerprints
-        ):
+            or bool(
+                track_info.isrc
+                and f"isrc:{track_info.isrc.strip().upper()}" in album_fingerprints
+            )
+            or bool(
+                track_info.musicbrainz_trackid
+                and f"mbid:{track_info.musicbrainz_trackid.strip().lower()}"
+                in album_fingerprints
+            )
+        )
+
+        # Deduplicate: if an identical track exists inside a full album or another single, quarantine the duplicate
+        if is_duplicate:
             if not dry_run:
                 try:
-                    path.unlink(missing_ok=True)
-                    for companion in find_companion_lyrics(path):
-                        companion.unlink(missing_ok=True)
+                    _quarantine_file(path, quarantine_dir)
                     LOG.info(
-                        f"   ∟ 🗑️ Removed duplicate single: {escape(track_identity_key)}"
+                        f"   ∟ 📦 Quarantined duplicate single: {escape(track_identity_key)} -> .duplicates/"
                     )
                 except OSError as error:
-                    LOG.debug(f"Failed to remove duplicate single {path}: {error}")
+                    LOG.debug(f"Failed to quarantine duplicate single {path}: {error}")
             else:
                 LOG.info(
-                    f"[DRY-RUN] Would remove duplicate single: {escape(track_identity_key)}"
+                    f"[DRY-RUN] Would quarantine duplicate single: {escape(track_identity_key)}"
                 )
             removed_dupes += 1
             continue
 
         seen_single_fingerprints.add(track_identity_key)
+        if track_info.isrc:
+            seen_single_fingerprints.add(f"isrc:{track_info.isrc.strip().upper()}")
+        if track_info.musicbrainz_trackid:
+            seen_single_fingerprints.add(
+                f"mbid:{track_info.musicbrainz_trackid.strip().lower()}"
+            )
 
         single_folder_name = sanitize_name(f"{primary_artist} - {track_info.title}")
         primary_artist_clean = sanitize_name(primary_artist)
@@ -222,21 +270,19 @@ def organize_library_singles(
             single_folder / f"01 - {sanitize_name(track_info.title)}{path.suffix}"
         )
 
-        # Handle destination collisions cleanly (remove redundant duplicate single if target already exists)
+        # Handle destination collisions cleanly (quarantine redundant duplicate single if target already exists)
         if path.resolve() != target_file.resolve() and target_file.exists():
             if not dry_run:
                 try:
-                    path.unlink(missing_ok=True)
-                    for companion in find_companion_lyrics(path):
-                        companion.unlink(missing_ok=True)
+                    _quarantine_file(path, quarantine_dir)
                     LOG.info(
-                        f"   ∟ 🗑️ Removed duplicate single: {escape(track_identity_key)}"
+                        f"   ∟ 📦 Quarantined duplicate single (target exists): {escape(track_identity_key)} -> .duplicates/"
                     )
                 except OSError as error:
-                    LOG.debug(f"Failed to remove duplicate single {path}: {error}")
+                    LOG.debug(f"Failed to quarantine duplicate single {path}: {error}")
             else:
                 LOG.info(
-                    f"[DRY-RUN] Would remove duplicate single: {escape(track_identity_key)}"
+                    f"[DRY-RUN] Would quarantine duplicate single (target exists): {escape(track_identity_key)}"
                 )
             removed_dupes += 1
             continue

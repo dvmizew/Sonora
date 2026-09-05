@@ -15,7 +15,7 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
         raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        loaded = load_audio(file_path, mono=True)
+        loaded = load_audio(file_path, mono=True, max_seconds=30.0)
         if loaded is None:
             return False, 1.0, None
 

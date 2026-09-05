@@ -617,3 +617,29 @@ def fetch_musicbrainz_release_details(
             f"MusicBrainz release details fetch failed for {release_mbid}: {error}"
         )
         return None
+
+
+def search_musicbrainz_artists(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """
+    Search MusicBrainz for artists matching query with strict rate limiting and error resilience.
+    Returns list of artist dictionaries.
+    """
+    init_musicbrainz()
+    _MB_LIMITER.wait()
+    try:
+        res: Any = musicbrainzngs.search_artists(query=query, limit=limit)
+        if isinstance(res, dict):
+            raw_list = res.get("artist-list", [])
+            if isinstance(raw_list, list):
+                return [a for a in raw_list if isinstance(a, dict)]
+        return []
+    except (
+        MusicBrainzError,
+        httpx.HTTPError,
+        OSError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+    ) as error:
+        LOG.debug(f"MusicBrainz artist search failed for '{query}': {error}")
+        return []
