@@ -92,7 +92,7 @@ pyinstaller sonora-linux-x86_64.spec --clean -y
 
 ## Configuration (API Keys)
 
-Sonora works out of the box without keys. To unlock full metadata and higher rate limits, add a `.env` file in your music folder, working directory, or `~/.config/sonora/.env`:
+Sonora works out of the box without keys. To unlock full metadata and higher rate limits, copy `.env.example` to `.env` in your music folder, working directory, or `~/.config/sonora/.env`:
 
 ```env
 DISCOGS_TOKEN="your_token"          # https://www.discogs.com/settings/developers -> Generate token
