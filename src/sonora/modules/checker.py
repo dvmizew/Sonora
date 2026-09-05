@@ -16,6 +16,7 @@ from rich.markup import escape
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import read_track_metadata
 from sonora.audio.spectral import detect_fake_lossless
+from sonora.core.config import get_config
 from sonora.core.constants import FEAT_KEYWORDS, SUPPORTED_EXTS
 from sonora.core.logger import (
     LOG,
@@ -35,10 +36,6 @@ from sonora.core.utils import (
 )
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
-
-_CODEC_RIP_KEYWORDS: frozenset[str] = frozenset(
-    {"flac", "mp3", "320", "320kbps", "lossless", "rip", "cdrip", "webrip", "hq", "hd"}
-)
 
 # [text], (text), {text}
 _BRACKET_PATTERN = re.compile(r"[\(\[\{][^\(\)\[\]\{\}]+[\)\]\}]")
@@ -81,7 +78,7 @@ def _is_corrupt_bracket(full_bracket: str, tokens: set[str]) -> bool:
     ):
         return True
 
-    return bool(tokens & _CODEC_RIP_KEYWORDS)
+    return bool(tokens & get_config().codec_rip_keywords)
 
 
 def check_brackets_corruption(name: str) -> list[str]:

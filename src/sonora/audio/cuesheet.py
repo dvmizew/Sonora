@@ -75,7 +75,6 @@ def parse_cuesheet(cue_path: Path) -> list[dict[str, str | int]]:
                 globals_meta["total_discs"] = int(val)
             continue
 
-        # Handle track start: TRACK 01 AUDIO
         if command == "TRACK" and len(tokens) >= 2:
             if current_track:
                 tracks.append(current_track)
@@ -87,7 +86,6 @@ def parse_cuesheet(cue_path: Path) -> list[dict[str, str | int]]:
             }
             continue
 
-        # Handle track and global directives
         if len(tokens) >= 2:
             value = " ".join(tokens[1:])
             if command == "PERFORMER":

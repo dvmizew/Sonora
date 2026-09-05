@@ -6,6 +6,7 @@ from pathlib import Path
 from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata
+from sonora.core.config import get_config
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -163,7 +164,6 @@ def rename_track_file(
         if companion.suffix.lower() == ".lrc" and not dry_run:
             sync_lrc_metadata(companion, track_info.artist, track_info.title)
 
-    # Perform file rename
     if file_path.name != new_name or file_path.parent != new_path.parent:
         base_stem = Path(new_name).stem
         if new_path.exists() and (
@@ -199,11 +199,11 @@ def rename_track_file(
 def rename_album_folder(
     folder_path: Path, artist: str, album: str, dry_run: bool = False
 ) -> Path:
-    if not album or album.lower() in ["singles", "unknown album", "unknown"]:
+    if not album or get_config().is_generic_container(album):
         return folder_path
 
     folder_now = folder_path.name
-    is_in_singles = "singles" in (p.lower() for p in folder_path.parts)
+    is_in_singles = any(get_config().is_generic_container(p) for p in folder_path.parts)
 
     # Shield artist container folders from being renamed to album names
     if normalize_str(folder_now) == normalize_str(artist) and normalize_str(
@@ -214,8 +214,7 @@ def rename_album_folder(
     # Do not rename if this directory contains child directories other than CD/Disc folders
     try:
         if any(
-            p.is_dir()
-            and not re.match(r"^(?:cd|disc|side)\s*\d+$", p.name, re.IGNORECASE)
+            p.is_dir() and not get_config().is_disc_folder(p.name)
             for p in folder_path.iterdir()
         ):
             return folder_path

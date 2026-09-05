@@ -6,6 +6,7 @@ from pathlib import Path
 from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata
+from sonora.core.config import get_config
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -34,7 +35,7 @@ def is_single_folder(folder_path: Path) -> bool:
     if not folder_path.exists() or not folder_path.is_dir():
         return False
 
-    if "singles" in (p.lower() for p in folder_path.parts):
+    if any(get_config().is_generic_container(p) for p in folder_path.parts):
         return True
 
     audio_files = find_audio_files(folder_path, recursive=False)
@@ -120,7 +121,7 @@ def organize_library_singles(
         try:
             return f_path, read_track_metadata(f_path)
         except (OSError, ValueError, RuntimeError) as err:
-            LOG.warning(f"Failed to read metadata for {f_path}: {err}")
+            LOG.warning(f"Failed to read metadata for {escape(str(f_path))}: {err}")
             return f_path, None
 
     with create_progress() as progress:
@@ -132,8 +133,8 @@ def organize_library_singles(
             try:
                 for folder, files in folder_files.items():
                     wait_if_paused()
-                    is_single = len(files) <= 2 or "singles" in (
-                        p.lower() for p in folder.parts
+                    is_single = len(files) <= 2 or any(
+                        get_config().is_generic_container(p) for p in folder.parts
                     )
                     folder_track_infos: list[tuple[Path, TrackInfo]] = []
                     albums_in_folder: set[str] = set()
@@ -145,11 +146,9 @@ def organize_library_singles(
                             p, info = fut.result()
                             if info is not None:
                                 folder_track_infos.append((p, info))
-                                if info.album and info.album.lower() not in [
-                                    "singles",
-                                    "unknown album",
-                                    "unknown",
-                                ]:
+                                if info.album and not get_config().is_generic_container(
+                                    info.album
+                                ):
                                     albums_in_folder.add(normalize_str(info.album))
                             progress.advance(task)
                     else:
@@ -158,11 +157,9 @@ def organize_library_singles(
                             p, info = _read_file_info(path)
                             if info is not None:
                                 folder_track_infos.append((p, info))
-                                if info.album and info.album.lower() not in [
-                                    "singles",
-                                    "unknown album",
-                                    "unknown",
-                                ]:
+                                if info.album and not get_config().is_generic_container(
+                                    info.album
+                                ):
                                     albums_in_folder.add(normalize_str(info.album))
                             progress.advance(task)
 

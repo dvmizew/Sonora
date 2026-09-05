@@ -7,6 +7,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from rapidfuzz import fuzz
 from rich.markup import escape
 
+from sonora.core.config import get_config
 from sonora.core.constants import ARTIST_MATCH_THRESHOLD
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
@@ -81,7 +82,17 @@ def process_album_cover_art(
     Tries iTunes API first, then Cover Art Archive fallback.
     Returns Path to cover.jpg if present/downloaded, else None.
     """
-    cover_image_path = folder_path / "cover.jpg"
+    target_dir = folder_path
+    if (
+        get_config().is_disc_folder(folder_path.name)
+        and folder_path.parent != folder_path
+    ):
+        parent_cover = folder_path.parent / "cover.jpg"
+        if parent_cover.exists() and parent_cover.stat().st_size > 0:
+            return parent_cover
+        target_dir = folder_path.parent
+
+    cover_image_path = target_dir / "cover.jpg"
     artwork_already_present = (
         cover_image_path.exists() and cover_image_path.stat().st_size > 0 and not force
     )
@@ -161,7 +172,7 @@ def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
         cand_norm = normalize_str(cand.name)
         if (
             cand_norm
-            and cand_norm not in ("singles", "flac", "mp3", "music")
+            and not get_config().is_generic_container(cand_norm)
             and (
                 fuzz.ratio(cand_norm, clean_artist) >= ARTIST_MATCH_THRESHOLD
                 or fuzz.token_sort_ratio(cand_norm, clean_artist)

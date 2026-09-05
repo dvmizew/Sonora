@@ -249,13 +249,11 @@ def detect_key_from_chroma(
     for i in range(12):
         base_name = PITCH_CLASSES[i]
 
-        # Major correlation
         score_maj = _pearson_r(chroma_vector, np.roll(SHAATH_MAJOR, i))
         if score_maj > best_score:
             best_score = score_maj
             best_key = base_name
 
-        # Minor correlation
         score_min = _pearson_r(chroma_vector, np.roll(SHAATH_MINOR, i))
         if score_min > best_score:
             best_score = score_min
