@@ -96,25 +96,23 @@ class TestCoreModules(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp_dir.cleanup()
 
-    @patch("sonora.core.utils.musicbrainzngs.search_artists")
-    def test_resolve_artist_name(self, mock_search: Any) -> None:
+    @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
+    def test_resolve_artist_name(self, mock_search: MagicMock) -> None:
         resolve_artist_name.cache_clear()
-        mock_search.return_value = {
-            "artist-list": [
-                {
-                    "name": "M.G.L.",
-                    "alias-list": [{"alias": "mgl"}],
-                },
-                {
-                    "name": "Killa Fonic",
-                    "alias-list": [],
-                },
-                {
-                    "name": "Nane",
-                    "alias-list": [],
-                },
-            ]
-        }
+        mock_search.return_value = [
+            {
+                "name": "M.G.L.",
+                "alias-list": [{"alias": "mgl"}],
+            },
+            {
+                "name": "Killa Fonic",
+                "alias-list": [],
+            },
+            {
+                "name": "Nane",
+                "alias-list": [],
+            },
+        ]
         self.assertEqual(resolve_artist_name("mgl"), "M.G.L.")
         self.assertEqual(resolve_artist_name("killa fonic"), "Killa Fonic")
         self.assertEqual(resolve_artist_name("nane"), "Nane")
@@ -239,6 +237,21 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue(new_folder.exists())
         self.assertEqual(new_folder.name, "21 Savage - Issa Album")
 
+    def test_rename_album_folder_shields_artist_container(self) -> None:
+        artist_folder = self.tmp_path / "3 Doors Down"
+        artist_folder.mkdir()
+        # Case 1: Folder name matches artist, but album is different -> should not rename artist folder
+        result = rename_album_folder(artist_folder, "3 Doors Down", "Away From The Sun")
+        self.assertEqual(result, artist_folder)
+        self.assertTrue(artist_folder.exists())
+
+        # Case 2: Folder contains child directories that are not discs
+        album_folder = self.tmp_path / "Album With Subdirs"
+        album_folder.mkdir()
+        (album_folder / "Singles").mkdir()
+        result2 = rename_album_folder(album_folder, "Artist", "Album With Subdirs")
+        self.assertEqual(result2, album_folder)
+
     def test_is_single_folder(self) -> None:
         album_dir = self.tmp_path / "album"
         album_dir.mkdir()
@@ -302,6 +315,73 @@ class TestCoreModules(unittest.TestCase):
                 target_dir / "Single Artist - Single Song" / "01 - Single Song.lrc"
             ).exists()
         )
+
+    @patch("sonora.modules.organizer.read_track_metadata")
+    def test_organize_library_singles_quarantines_duplicates(
+        self, mock_read: Any
+    ) -> None:
+        src_dir = self.tmp_path / "Singles" / "source"
+        target_dir = self.tmp_path / "OrganizedSingles"
+        audio1 = src_dir / "track1.wav"
+        audio2 = src_dir / "track2.wav"
+        audio3 = src_dir / "track3.wav"
+        lrc2 = src_dir / "track2.lrc"
+        create_dummy_wav(audio1)
+        create_dummy_wav(audio2)
+        create_dummy_wav(audio3)
+        lrc2.write_text("[00:01.00] dup lyrics", encoding="utf-8")
+
+        def mock_read_meta(path: Path) -> TrackInfo:
+            if path == audio1:
+                return TrackInfo(
+                    file_path=audio1,
+                    artist="Dup Artist",
+                    title="Dup Song",
+                    isrc="US1234567890",
+                )
+            if path == audio2:
+                return TrackInfo(
+                    file_path=audio2,
+                    artist="Dup Artist",
+                    title="Dup Song",
+                    isrc="US1234567890",
+                )
+            return TrackInfo(
+                file_path=audio3,
+                artist="Dup Artist",
+                title="Dup Song",
+                isrc="US1234567890",
+            )
+
+        mock_read.side_effect = mock_read_meta
+
+        # Dry-run first: files should NOT be moved or unlinked
+        moved_dry = organize_library_singles(
+            src_dir, target_dir, dry_run=True, max_threads=1
+        )
+        self.assertEqual(moved_dry, 1)
+        self.assertTrue(audio1.exists())
+        self.assertTrue(audio2.exists())
+        self.assertTrue(audio3.exists())
+        self.assertTrue(lrc2.exists())
+
+        # Real run: first single moved, remaining duplicates quarantined to .duplicates/
+        moved = organize_library_singles(
+            src_dir, target_dir, dry_run=False, max_threads=1
+        )
+        self.assertEqual(moved, 1)
+
+        # First track organized
+        self.assertTrue(
+            (target_dir / "Dup Artist - Dup Song" / "01 - Dup Song.wav").exists()
+        )
+
+        # Quarantined duplicates exist in .duplicates/ (NOT unlinked/destroyed)
+        quarantine_dir = target_dir / ".duplicates"
+        self.assertTrue(quarantine_dir.exists())
+        self.assertTrue((quarantine_dir / "track2.wav").exists())
+        self.assertTrue((quarantine_dir / "track2.lrc").exists())
+        self.assertTrue((quarantine_dir / "track3.wav").exists())
 
     @patch("sonora.modules.organizer.get_primary_artist", side_effect=lambda a: a)
     @patch("sonora.modules.organizer.read_track_metadata")
