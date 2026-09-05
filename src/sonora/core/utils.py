@@ -28,6 +28,14 @@ from pathvalidate import sanitize_filename
 from rapidfuzz import fuzz
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.config import (
+    get_artist_split_pattern,
+    get_balanced_feat_pattern,
+    get_bracket_feat_pattern,
+    get_disambiguation_pattern,
+    get_duplicate_feat_pattern,
+    get_feat_tokens_pattern,
+)
 from sonora.core.constants import (
     COMPANION_LYRICS_EXTS,
     DIRS,
@@ -35,22 +43,6 @@ from sonora.core.constants import (
 )
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-
-_ARTIST_SEPARATORS = [
-    r"\s+fea?t\.?\s+",
-    r"\s+featuring\s+",
-    r"\s+and\s+",
-    r"\s+și\s+",
-    r"\s+si\s+",
-    r"\s+cu\s+",
-    r"\s+vs\.?\s+",
-    r"\s+[xX\u00d7]\s+",
-    r"\s*&\s*",
-    r"\s*,\s*",
-    r"\s*;\s*",
-    r"\s*/\s*",
-]
-_ARTIST_SPLIT_PATTERN = re.compile("|".join(_ARTIST_SEPARATORS), re.IGNORECASE)
 
 _ROMAN_MAP: dict[str, int] = {
     "i": 1,
@@ -182,10 +174,6 @@ def clean_unicode_punct(text: str | None) -> str:
     return _UNICODE_HYPHENS_PATTERN.sub("-", cleaned)
 
 
-_DISAMBIGUATION_PATTERN = re.compile(
-    r"\s*\([^()]{1,40}\)(?=\s*(?:[,;/&+-\\]|\b(?:feat\.?|ft\.?|featuring|with|and|vs\.?|cu|și|si)\b|$))",
-    re.IGNORECASE,
-)
 _COLLAPSE_SPACES_PATTERN = re.compile(r"\s+")
 
 
@@ -197,7 +185,7 @@ def clean_disambiguation(name: str | None) -> str:
     """
     if not name:
         return ""
-    cleaned = _DISAMBIGUATION_PATTERN.sub("", str(name)).strip()
+    cleaned = get_disambiguation_pattern().sub("", str(name)).strip()
     return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned)
 
 
@@ -417,7 +405,7 @@ def get_primary_artist(artist_name: str | None) -> str:
     if is_single_group_artist(raw_artist_name):
         return sanitize_name(resolve_artist_name(raw_artist_name))
 
-    parts = _ARTIST_SPLIT_PATTERN.split(raw_artist_name, maxsplit=1)
+    parts = get_artist_split_pattern().split(raw_artist_name, maxsplit=1)
     primary = parts[0].strip() if parts else raw_artist_name
     return sanitize_name(resolve_artist_name(primary) or "Unknown")
 
@@ -450,13 +438,6 @@ _METADATA_FILTER = MetadataFilter(
     }
 )
 
-_DUPLICATE_FEAT_PATTERN = re.compile(
-    r"\s+(?:cu|și|si|fea?t\.?|featuring)\s+([A-Za-z0-9\s\.\'\-]+?)(?=\s*[\(\[\{]\s*(?:fea?t\.?|featuring|cu)\s+\1[\)\]\}])",
-    re.IGNORECASE,
-)
-_TITLE_ROMANIAN_FEAT_PATTERN = re.compile(
-    r"\s*[\(\[\{]\s*(?:cu|și|si)\s+.*?[\)\]\}]", re.IGNORECASE
-)
 _TITLE_EDITION_PATTERN = re.compile(
     r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd).*?[\)\]\}]",
     re.IGNORECASE,
@@ -496,11 +477,7 @@ def extract_balanced_features(
             if depth == 0:
                 end = i
                 inner = text[start + 1 : end - 1].strip()
-                feat_m = re.match(
-                    r"^(?:feat\.?|ft\.?|featuring|cu\b|și\b|si\b)\s+(.*)$",
-                    inner,
-                    re.IGNORECASE,
-                )
+                feat_m = get_balanced_feat_pattern().match(inner)
                 if feat_m:
                     base_parts.append(text[last_end:start])
                     matches.append(feat_m.group(1).strip())
@@ -524,7 +501,7 @@ def deduplicate_title_features(
     if not title:
         return ""
     fixed_title = clean_unicode_punct(ftfy.fix_text(str(title)))
-    cleaned = _DUPLICATE_FEAT_PATTERN.sub("", fixed_title)
+    cleaned = get_duplicate_feat_pattern().sub("", fixed_title)
 
     base_title, matches, open_char, close_char = extract_balanced_features(cleaned)
     if not matches:
@@ -535,11 +512,7 @@ def deduplicate_title_features(
     primary_norm = normalize_str(primary_artist) if primary_artist else None
 
     for raw_feats in matches:
-        tokens = re.split(
-            r"[,;&+]|\b(?:feat\.?|ft\.?|and|cu|și|si)\b",
-            raw_feats,
-            flags=re.IGNORECASE,
-        )
+        tokens = get_feat_tokens_pattern().split(raw_feats)
         for tok in tokens:
             if not tok.strip():
                 continue
@@ -582,7 +555,7 @@ def clean_title(title: str) -> str:
     fixed_title = clean_unicode_punct(ftfy.fix_text(str(title)))
     deduped = deduplicate_title_features(fixed_title)
     cleaned = _METADATA_FILTER.filter_field("track", deduped)
-    cleaned = _TITLE_ROMANIAN_FEAT_PATTERN.sub("", cleaned)
+    cleaned = get_bracket_feat_pattern().sub("", cleaned)
     cleaned = _TITLE_EDITION_PATTERN.sub("", cleaned)
     return cleaned.strip()
 

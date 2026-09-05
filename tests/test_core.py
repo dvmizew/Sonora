@@ -6,6 +6,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import unittest
 from unittest.mock import MagicMock, patch
 
+from sonora.core.config import (
+    SonoraConfig,
+    _parse_config_data,
+    clear_config_cache,
+    get_artist_split_pattern,
+    get_balanced_feat_pattern,
+    get_bracket_feat_pattern,
+    get_config,
+    get_disambiguation_pattern,
+    get_duplicate_feat_pattern,
+    get_feat_tokens_pattern,
+)
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     clean_disambiguation,
@@ -482,6 +494,108 @@ class TestCoreModels(unittest.TestCase):
         self.assertEqual(empty_data["artist"], "Unknown Artist")
         self.assertIsNone(empty_data["track_number"])
         self.assertIsNone(empty_data["bpm"])
+
+
+class TestSonoraConfig(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_config_cache()
+
+    def tearDown(self) -> None:
+        clear_config_cache()
+
+    def test_default_config_properties(self) -> None:
+        cfg = get_config()
+        self.assertTrue(cfg.is_disc_folder("CD1"))
+        self.assertTrue(cfg.is_disc_folder("Disc 2"))
+        self.assertTrue(cfg.is_disc_folder("side 1"))
+        self.assertFalse(cfg.is_disc_folder("Great Album"))
+
+        self.assertTrue(cfg.is_generic_container("flac"))
+        self.assertTrue(cfg.is_generic_container("singles"))
+        self.assertTrue(cfg.is_generic_container("downloads"))
+        self.assertFalse(cfg.is_generic_container("Pink Floyd"))
+
+    def test_custom_config_instantiation(self) -> None:
+        custom_cfg = SonoraConfig(
+            disc_folder_patterns=(r"^part\s*\d+$",),
+            generic_containers=frozenset({"custom_box"}),
+            featuring_conjunctions=("feat", "ft", "avec"),
+        )
+        self.assertTrue(custom_cfg.is_disc_folder("part 1"))
+        self.assertFalse(custom_cfg.is_disc_folder("CD1"))
+        self.assertTrue(custom_cfg.is_generic_container("custom_box"))
+        self.assertFalse(custom_cfg.is_generic_container("flac"))
+
+    def test_config_parsing_toml_and_json(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+
+            toml_path = tmp_path / "config.toml"
+            toml_path.write_text(
+                '[sonora]\nartist_match_threshold = 92.5\ndisc_folder_patterns = ["^disc_\\\\d+$"]\n',
+                encoding="utf-8",
+            )
+            parsed_toml = _parse_config_data(toml_path)
+            self.assertEqual(parsed_toml.get("artist_match_threshold"), 92.5)
+            self.assertEqual(parsed_toml.get("disc_folder_patterns"), ["^disc_\\d+$"])
+
+            json_path = tmp_path / "config.json"
+            json_path.write_text(
+                '{"artist_match_threshold": 88.0, "featuring_conjunctions": ["feat", "ft"]}',
+                encoding="utf-8",
+            )
+            parsed_json = _parse_config_data(json_path)
+            self.assertEqual(parsed_json.get("artist_match_threshold"), 88.0)
+
+            empty_path = tmp_path / "empty.toml"
+            empty_path.write_text("", encoding="utf-8")
+            self.assertEqual(_parse_config_data(empty_path), {})
+
+            corrupt_path = tmp_path / "corrupt.toml"
+            corrupt_path.write_text("invalid [ [ toml", encoding="utf-8")
+            self.assertEqual(_parse_config_data(corrupt_path), {})
+
+    def test_dynamic_pattern_generation(self) -> None:
+        split_pat = get_artist_split_pattern()
+        self.assertEqual(
+            split_pat.split("Artist A feat. Artist B"), ["Artist A", "Artist B"]
+        )
+        self.assertEqual(
+            split_pat.split("Artist A & Artist B"), ["Artist A", "Artist B"]
+        )
+
+        bracket_pat = get_bracket_feat_pattern()
+        self.assertEqual(bracket_pat.sub("", "Title (feat. Artist)").strip(), "Title")
+        self.assertEqual(bracket_pat.sub("", "Title [con Artist]").strip(), "Title")
+
+        balanced_pat = get_balanced_feat_pattern()
+        self.assertIsNotNone(balanced_pat.match("feat. Someone"))
+        self.assertIsNotNone(balanced_pat.match("con Alguien"))
+        self.assertIsNone(balanced_pat.match("Random Word"))
+
+        tokens_pat = get_feat_tokens_pattern()
+        self.assertEqual(
+            [
+                t.strip()
+                for t in tokens_pat.split("Artist A & Artist B feat. Artist C")
+                if t.strip()
+            ],
+            ["Artist A", "Artist B", "Artist C"],
+        )
+
+        disambig_pat = get_disambiguation_pattern()
+        self.assertEqual(
+            disambig_pat.sub("", "Armin (ROU) feat. ASSAF (ROU)").strip(),
+            "Armin feat. ASSAF",
+        )
+
+        dup_pat = get_duplicate_feat_pattern()
+        self.assertEqual(
+            dup_pat.sub("", "Track feat. Artist (feat. Artist)"),
+            "Track (feat. Artist)",
+        )
 
 
 if __name__ == "__main__":
