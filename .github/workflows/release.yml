@@ -49,6 +49,10 @@ jobs:
             --collect-all scipy \
             --collect-all rich \
             --collect-all anyascii \
+            --collect-all pycountry \
+            --collect-all syncedlyrics \
+            --collect-all shazamio \
+            --collect-all shazamio_core \
             src/sonora/cli/main.py
 
       - name: Upload build artifact
