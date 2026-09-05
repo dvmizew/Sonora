@@ -5,6 +5,7 @@ import httpx
 import imagehash
 from PIL import Image, ImageOps, UnidentifiedImageError
 from rapidfuzz import fuzz
+from rich.markup import escape
 
 from sonora.core.constants import ARTIST_MATCH_THRESHOLD
 from sonora.core.http import SESSION
@@ -139,26 +140,35 @@ def process_album_cover_art(
 def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
     """Dynamically determine artist root folder by walking the directory hierarchy."""
     clean_artist = normalize_str(artist_name)
-    current = folder_path.resolve()
+    if not clean_artist:
+        return folder_path
 
-    # Traverse up directory tree to find matching artist folder
+    current = folder_path.resolve()
+    candidates: list[Path] = []
     for _ in range(4):
-        curr_norm = normalize_str(current.name)
-        if (
-            curr_norm == clean_artist
-            or fuzz.token_set_ratio(curr_norm, clean_artist) >= ARTIST_MATCH_THRESHOLD
-        ):
-            return current
+        candidates.append(current)
         if current.parent == current:
             break
         current = current.parent
 
-    # If folder is an album subdirectory (e.g. /Music/Artist/Album), return its parent
-    if (
-        folder_path.parent != folder_path
-        and folder_path.parent != folder_path.parent.parent
-    ):
-        return folder_path.parent
+    # 1. Prioritize exact match anywhere in the ancestor hierarchy
+    for cand in candidates:
+        if normalize_str(cand.name) == clean_artist:
+            return cand
+
+    # 2. Check for close variation (excluding generic folder names like singles, flac, mp3)
+    for cand in candidates:
+        cand_norm = normalize_str(cand.name)
+        if (
+            cand_norm
+            and cand_norm not in ("singles", "flac", "mp3", "music")
+            and (
+                fuzz.ratio(cand_norm, clean_artist) >= ARTIST_MATCH_THRESHOLD
+                or fuzz.token_sort_ratio(cand_norm, clean_artist)
+                >= ARTIST_MATCH_THRESHOLD
+            )
+        ):
+            return cand
 
     return folder_path
 
@@ -193,13 +203,17 @@ def process_artist_artwork(
     if thumbnail_bytes and not has_artist_image and not dry_run:
         try:
             (artist_dir / "artist.jpg").write_bytes(thumbnail_bytes)
-            LOG.info(f"   ∟ 👤 Downloaded artist avatar: {artist_name} -> artist.jpg")
+            LOG.info(
+                f"   ∟ 👤 Downloaded artist avatar: {escape(artist_name)} -> artist.jpg"
+            )
         except OSError as error:
             LOG.debug(f"Failed to write artist avatar image: {error}")
 
     if banner_bytes and not has_banner_image and not dry_run:
         try:
             (artist_dir / "banner.jpg").write_bytes(banner_bytes)
-            LOG.info(f"   ∟ 🎨 Downloaded artist banner: {artist_name} -> banner.jpg")
+            LOG.info(
+                f"   ∟ 🎨 Downloaded artist banner: {escape(artist_name)} -> banner.jpg"
+            )
         except OSError as error:
             LOG.debug(f"Failed to write artist banner image: {error}")

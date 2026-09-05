@@ -72,6 +72,11 @@ CAMELOT_MAP: dict[str, str] = {
 }
 
 _CAMELOT_REGEX: re.Pattern[str] = re.compile(r"^(?:1[0-2]|[1-9])[ABab]$")
+_EMBEDDED_CAMELOT_REGEX: re.Pattern[str] = re.compile(r"\b(1[0-2]|[1-9])[ABab]\b")
+_KEY_NOTE_REGEX: re.Pattern[str] = re.compile(
+    r"^([A-Ga-g][#b♭♯]?)(?:\s*(minor|min|major|maj)\b|\s*(m)\b|(m)$|(m)(?=[^a-zA-Z]))?",
+    re.IGNORECASE,
+)
 
 
 def key_to_camelot(key_str: str | None) -> str | None:
@@ -82,30 +87,27 @@ def key_to_camelot(key_str: str | None) -> str | None:
     if not key_str:
         return None
 
-    cleaned = key_str.strip()
+    cleaned = key_str.strip().replace("♯", "#").replace("♭", "b")
     if _CAMELOT_REGEX.match(cleaned):
         return cleaned.upper()
 
-    # Clean punctuation and normalize symbols (musical sharp / flat)
-    cleaned = cleaned.replace("♯", "#").replace("♭", "b")
-    # Normalize descriptors
-    is_minor = bool(
-        re.search(r"(?:minor|min|\bm\b)", cleaned, flags=re.IGNORECASE)
-        or (len(cleaned) >= 2 and cleaned.endswith("m") and not cleaned.endswith("pm"))
-    )
+    match = _KEY_NOTE_REGEX.match(cleaned)
+    if match:
+        base = match.group(1)
+        base = base[0].upper() + (base[1].lower() if len(base) > 1 else "")
+        mode = (
+            match.group(2) or match.group(3) or match.group(4) or match.group(5) or ""
+        )
+        is_minor = mode.lower() in ("m", "min", "minor")
+        lookup = f"{base}m" if is_minor else base
+        if lookup in CAMELOT_MAP:
+            return CAMELOT_MAP[lookup]
 
-    # Extract base note (A-G with optional # or b)
-    match = re.match(r"^([A-Ga-g][#b]?)", cleaned)
-    if not match:
-        return None
+    cam_match = _EMBEDDED_CAMELOT_REGEX.search(cleaned)
+    if cam_match:
+        return cam_match.group(0).upper()
 
-    base_note = match.group(1)
-    base_note = base_note[0].upper() + (
-        base_note[1].lower() if len(base_note) > 1 else ""
-    )
-
-    lookup_key = f"{base_note}m" if is_minor else base_note
-    return CAMELOT_MAP.get(lookup_key)
+    return None
 
 
 def _hz_to_octs(
