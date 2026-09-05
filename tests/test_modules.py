@@ -611,6 +611,30 @@ class TestCoreModules(unittest.TestCase):
             self.assertEqual(artist, "Artist")
             self.assertEqual(album, "Great Album")
 
+        # Case 2: Multi-disc directory structure: Artist / Album / CD1
+        disc_dir = self.tmp_path / "Pink Floyd" / "The Wall" / "CD1"
+        f_disc = disc_dir / "01.wav"
+        create_dummy_wav(f_disc)
+        with patch("sonora.modules.tagger.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(
+                file_path=f_disc, artist="Pink Floyd", album="The Wall"
+            )
+            artist, album = _resolve_album_folder_identity(disc_dir, [f_disc])
+            self.assertEqual(artist, "Pink Floyd")
+            self.assertEqual(album, "The Wall")
+
+        # Case 3: Singles folder should not resolve album as 'Singles'
+        singles_dir = self.tmp_path / "3 Doors Down" / "Singles"
+        f_single = singles_dir / "01.wav"
+        create_dummy_wav(f_single)
+        with patch("sonora.modules.tagger.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(
+                file_path=f_single, artist="3 Doors Down", album="Unknown Album"
+            )
+            artist, album = _resolve_album_folder_identity(singles_dir, [f_single])
+            self.assertEqual(artist, "3 Doors Down")
+            self.assertIsNone(album)
+
     @patch("sonora.modules.tagger.write_track_metadata")
     @patch("sonora.modules.tagger.read_track_metadata")
     def test_process_single_track_filename_alignment(

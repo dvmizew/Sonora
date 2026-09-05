@@ -19,6 +19,7 @@ from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.key import detect_key_details, detect_musical_key
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
+from sonora.core.config import get_config
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -976,11 +977,11 @@ def _enrich_lyrics(
             track_info.lyrics = lyrics_text
             if not had_lrc:
                 LOG.info(
-                    f"   ∟ [green]✅ Saved {tag_type} lyrics for {file_path.name}[/]"
+                    f"   ∟ [green]✅ Saved {tag_type} lyrics for {escape(file_path.name)}[/]"
                 )
             elif force:
                 LOG.info(
-                    f"   ∟ [yellow]🔄 Updated {tag_type} lyrics for {file_path.name}[/]"
+                    f"   ∟ [yellow]🔄 Updated {tag_type} lyrics for {escape(file_path.name)}[/]"
                 )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Lyrics fetch failed for {track_info.title}: {error}")
@@ -1662,16 +1663,29 @@ def _resolve_album_folder_identity(
     directory structure ("Artist - Album" or parent artist directory) with
     metadata consensus across audio files.
     """
-    folder_name = album_dir.name
+    effective_dir = album_dir
+    if get_config().is_disc_folder(album_dir.name) and album_dir.parent != album_dir:
+        effective_dir = album_dir.parent
+
+    folder_name = effective_dir.name
     folder_artist: str | None = None
     folder_album: str | None = None
 
     if " - " in folder_name:
         parts = folder_name.split(" - ", 1)
         folder_artist, folder_album = parts[0].strip(), parts[1].strip()
-    elif album_dir.parent and album_dir.parent.name and album_dir.parent.name != "FLAC":
-        folder_artist = album_dir.parent.name
+    elif (
+        effective_dir.parent
+        and effective_dir.parent.name
+        and not get_config().is_generic_container(effective_dir.parent.name)
+    ):
+        folder_artist = effective_dir.parent.name
         folder_album = folder_name
+
+    if folder_artist and get_config().is_generic_container(folder_artist):
+        folder_artist = None
+    if folder_album and get_config().is_generic_container(folder_album):
+        folder_album = None
 
     album_counts: dict[str, int] = {}
     artist_counts: dict[str, int] = {}
@@ -1679,10 +1693,10 @@ def _resolve_album_folder_identity(
     for af in audio_files[:10]:
         try:
             m = read_track_metadata(af)
-            if m.album and m.album.lower() not in ("unknown album", "singles"):
+            if m.album and not get_config().is_generic_container(m.album):
                 album_counts[m.album] = album_counts.get(m.album, 0) + 1
             art = m.album_artist or m.artist
-            if art and art.lower() not in ("unknown artist",):
+            if art and not get_config().is_generic_container(art):
                 artist_counts[art] = artist_counts.get(art, 0) + 1
         except (OSError, ValueError, RuntimeError):
             pass
@@ -1752,7 +1766,7 @@ def tag_album_folder(
                     wait_if_paused()
                     folder_name = album_dir.name
                     LOG.force_info(
-                        f"📁 [bold cyan]Album:[/] [white]{folder_name}[/] [dim]({len(audio_files)} tracks)[/]"
+                        f"📁 [bold cyan]Album:[/] [white]{escape(folder_name)}[/] [dim]({len(audio_files)} tracks)[/]"
                     )
 
                     # Pre-resolve Cuesheet content once for entire album
@@ -1863,7 +1877,9 @@ def tag_album_folder(
                             current_album_results.append(track_info)
                             LAST_TAGGED_TRACKS.append(track_info)
                         except _NETWORK_EXCEPTIONS as error:
-                            LOG.warning(f"Failed to process {audio_file.name}: {error}")
+                            LOG.warning(
+                                f"Failed to process {escape(audio_file.name)}: {error}"
+                            )
                             LAST_TAGGING_FAILURES.append(
                                 {
                                     "file": str(audio_file.resolve()),
@@ -2014,7 +2030,9 @@ def normalize_single_track(
             write_track_metadata(updated_info)
             get_library_state().record_track_state(file_path, "TAGGED_OK")
         except (OSError, ValueError, RuntimeError) as error:
-            LOG.warning(f"Failed to save normalized tags for {file_path.name}: {error}")
+            LOG.warning(
+                f"Failed to save normalized tags for {escape(file_path.name)}: {error}"
+            )
             return None
 
     return updated_info

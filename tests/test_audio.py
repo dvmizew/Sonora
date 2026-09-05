@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import unittest
 
-from sonora.audio.art import _find_artist_directory
+from sonora.audio.art import _find_artist_directory, process_album_cover_art
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import (
@@ -224,6 +224,19 @@ class TestAudioEngine(unittest.TestCase):
             self.assertEqual(info.total_tracks, 12)
             self.assertEqual(info.total_discs, 2)
             self.assertIsNone(info.rating)
+
+    def test_process_album_cover_art_disc_folder(self) -> None:
+        album_dir = self.tmp_path / "The Wall"
+        disc_dir = album_dir / "CD1"
+        disc_dir.mkdir(parents=True)
+        cover_path = album_dir / "cover.jpg"
+        cover_path.write_bytes(b"dummy image data")
+
+        # Looking up art for CD1 should discover existing cover.jpg in the parent album folder
+        found = process_album_cover_art(disc_dir, "Pink Floyd", "The Wall")
+        self.assertIsNotNone(found)
+        if found:
+            self.assertEqual(found.resolve(), cover_path.resolve())
 
 
 if __name__ == "__main__":
