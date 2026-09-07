@@ -122,7 +122,11 @@ def _score_musicbrainz_candidate(
                 score += 40.0
             else:
                 diff = abs(med_track_count - expected_track_count)
-                score -= min(40.0, diff * 2.5)
+                ratio_diff = diff / max(expected_track_count, 1)
+                if ratio_diff > 0.25:
+                    score -= 60.0
+                else:
+                    score -= min(40.0, diff * 5.0)
 
     status = str(release.get("status") or "").strip().lower()
     if status == "official":

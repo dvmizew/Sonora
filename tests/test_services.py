@@ -10,6 +10,7 @@ from sonora.core.utils import RateLimiter
 from sonora.services.acoustid import fingerprint_audio_file, lookup_acoustid
 from sonora.services.deezer import (
     fetch_deezer_album_details,
+    fetch_deezer_track_by_isrc,
     fetch_deezer_track_details,
 )
 from sonora.services.discogs import (
@@ -376,7 +377,11 @@ class TestServicesEngine(unittest.TestCase):
     def test_fetch_deezer_album_details(self, mock_get: MagicMock) -> None:
         mock_search = MagicMock()
         mock_search.status_code = 200
-        mock_search.json.return_value = {"data": [{"id": 12345}]}
+        mock_search.json.return_value = {
+            "data": [
+                {"id": 12345, "title": "Album Title", "artist": {"name": "Artist"}}
+            ]
+        }
 
         mock_album = MagicMock()
         mock_album.status_code = 200
@@ -423,6 +428,51 @@ class TestServicesEngine(unittest.TestCase):
         self.assertIsNotNone(track_details)
         if track_details:
             self.assertEqual(track_details["isrc"], "USUM71703861")
+
+    @patch("sonora.services.deezer.SESSION.get")
+    def test_fetch_deezer_track_by_isrc(self, mock_get: MagicMock) -> None:
+        # Happy path
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": 675779202,
+            "title": "Cartieru' Pantelimon (feat. Nico)",
+            "isrc": "ROCMA1911835",
+            "explicit_lyrics": True,
+            "track_position": 2,
+            "disk_number": 1,
+            "release_date": "2023-03-20",
+            "contributors": [
+                {"name": "B.U.G. Mafia", "role": "Main"},
+                {"name": "Nico", "role": "Featured"},
+            ],
+            "artist": {"name": "B.U.G. Mafia"},
+            "album": {"title": "Dupa Blocuri"},
+        }
+        mock_get.return_value = mock_response
+
+        res = fetch_deezer_track_by_isrc("ROCMA1911835")
+        self.assertIsNotNone(res)
+        if res:
+            self.assertEqual(res["title"], "Cartieru' Pantelimon (feat. Nico)")
+            self.assertEqual(res["isrc"], "ROCMA1911835")
+            self.assertEqual(res["track_position"], 2)
+            self.assertTrue(res["explicit_lyrics"])
+            self.assertEqual(res["featured_artists"], "Nico")
+
+        # Edge case: empty/whitespace returns None without network call
+        self.assertIsNone(fetch_deezer_track_by_isrc(""))
+        self.assertIsNone(fetch_deezer_track_by_isrc("   "))
+
+        # Edge case: not found / 404
+        mock_404 = MagicMock()
+        mock_404.status_code = 404
+        mock_get.return_value = mock_404
+        self.assertIsNone(fetch_deezer_track_by_isrc("UNKNOWNISRC12"))
+
+        # Edge case: network timeout/exception
+        mock_get.side_effect = httpx.ConnectTimeout("Timeout")
+        self.assertIsNone(fetch_deezer_track_by_isrc("TIMEOUTISRC12"))
 
     @patch("sonora.services.musicbrainz.SESSION.head")
     def test_fetch_cover_art_archive_url(self, mock_head: MagicMock) -> None:

@@ -8,6 +8,7 @@ from sonora.core.logger import LOG
 from sonora.core.utils import (
     RateLimiter,
     extract_series_number,
+    match_score,
     normalize_country_name,
     normalize_str,
 )
@@ -68,6 +69,13 @@ def fetch_itunes_cover_art_url(
     # Step 1: Look for exact normalized title match
     for result in results:
         collection_name = str(result.get("collectionName", ""))
+        cand_artist = str(result.get("artistName", ""))
+        if (
+            artist
+            and cand_artist
+            and match_score(artist, album, cand_artist, collection_name) < 60.0
+        ):
+            continue
         if normalize_str(collection_name) == normalized_target:
             best_result = result
             break
@@ -77,6 +85,13 @@ def fetch_itunes_cover_art_url(
         target_series = extract_series_number(normalized_target)
         for result in results:
             collection_name = str(result.get("collectionName", ""))
+            cand_artist = str(result.get("artistName", ""))
+            if (
+                artist
+                and cand_artist
+                and match_score(artist, album, cand_artist, collection_name) < 60.0
+            ):
+                continue
             normalized_collection = normalize_str(collection_name)
 
             # Strict similarity requirement: collection_name must be fuzzy similar to album title!
@@ -116,6 +131,14 @@ def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | 
 
     for result in results:
         track_name = str(result.get("trackName", ""))
+        result_artist = str(result.get("artistName", ""))
+        if (
+            artist
+            and result_artist
+            and match_score(artist, title, result_artist, track_name) < 60.0
+        ):
+            continue
+
         normalized_name = normalize_str(track_name)
         if (
             normalized_name == normalized_target
@@ -173,20 +196,34 @@ def fetch_itunes_album_details(artist: str, album: str) -> dict[str, object] | N
         return None
 
     normalized_target = normalize_str(album)
-    best_album: dict[str, object] | None = None
+    matching_albums: list[dict[str, object]] = []
 
     for result in results:
         collection_name = str(result.get("collectionName", ""))
+        cand_artist = str(result.get("artistName", ""))
+        if (
+            artist
+            and cand_artist
+            and match_score(artist, album, cand_artist, collection_name) < 60.0
+        ):
+            continue
         normalized_name = normalize_str(collection_name)
         if (
             normalized_name == normalized_target
             or fuzz.token_set_ratio(normalized_target, normalized_name) >= 80.0
         ):
-            best_album = result
-            break
+            matching_albums.append(result)
 
-    if best_album is None:
+    if not matching_albums:
         return None
+
+    # Prefer explicit edition over cleaned edition for album matching
+    explicit_albums = [
+        r
+        for r in matching_albums
+        if str(r.get("collectionExplicitness", "")).lower() == "explicit"
+    ]
+    best_album = explicit_albums[0] if explicit_albums else matching_albums[0]
 
     collection_id = best_album.get("collectionId")
     if not collection_id:

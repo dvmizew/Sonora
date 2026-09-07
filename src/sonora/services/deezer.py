@@ -1,4 +1,5 @@
 import urllib.parse
+from typing import Any
 
 import httpx
 
@@ -72,9 +73,7 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
         return None
 
 
-def fetch_deezer_album_details(
-    artist: str, album: str
-) -> dict[str, str | int | bool | None] | None:
+def fetch_deezer_album_details(artist: str, album: str) -> dict[str, Any] | None:
     if not (artist and album):
         return None
 
@@ -115,9 +114,6 @@ def fetch_deezer_album_details(
                 best_score = score
                 best_item = item
 
-        if not best_item and items and isinstance(items[0], dict):
-            best_item = items[0]
-
         if not best_item:
             set_cached_api(cache_key, None)
             return None
@@ -134,6 +130,8 @@ def fetch_deezer_album_details(
             return None
 
         album_data = detail_response.json()
+        if not isinstance(album_data, dict) or album_data.get("error"):
+            return None
         genres = [
             genre_item["name"]
             for genre_item in album_data.get("genres", {}).get("data", [])
@@ -203,6 +201,103 @@ def fetch_deezer_album_details(
         return None
 
 
+def _parse_deezer_track_payload(
+    track_data: dict[str, Any],
+) -> dict[str, str | int | float | bool | None]:
+    contributors = track_data.get("contributors", [])
+    featured: list[str] = []
+    producers: list[str] = []
+    composers: list[str] = []
+    lyricists: list[str] = []
+    if isinstance(contributors, list):
+        for contributor in contributors:
+            if isinstance(contributor, dict):
+                contributor_name = contributor.get("name")
+                contributor_role = str(contributor.get("role", "")).lower()
+                if not contributor_name:
+                    continue
+                if "featured" in contributor_role:
+                    featured.append(str(contributor_name))
+                elif "producer" in contributor_role:
+                    producers.append(str(contributor_name))
+                elif "composer" in contributor_role:
+                    composers.append(str(contributor_name))
+                elif (
+                    "author" in contributor_role
+                    or "lyricist" in contributor_role
+                    or "writer" in contributor_role
+                ):
+                    lyricists.append(str(contributor_name))
+
+    track_pos = safe_int(track_data.get("track_position"))
+    disk_num = safe_int(track_data.get("disk_number"))
+    artist_data = track_data.get("artist")
+    artist_name = (
+        str(artist_data.get("name"))
+        if isinstance(artist_data, dict) and artist_data.get("name")
+        else None
+    )
+    album_data = track_data.get("album")
+    album_title = (
+        str(album_data.get("title"))
+        if isinstance(album_data, dict) and album_data.get("title")
+        else None
+    )
+
+    return {
+        "title": track_data.get("title"),
+        "artist": artist_name,
+        "album": album_title,
+        "isrc": track_data.get("isrc"),
+        "explicit_lyrics": track_data.get("explicit_lyrics"),
+        "featured_artists": ", ".join(dict.fromkeys(featured)) if featured else None,
+        "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
+        "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
+        "lyricist": ", ".join(dict.fromkeys(lyricists)) if lyricists else None,
+        "track_position": track_pos,
+        "disk_number": disk_num,
+        "release_date": track_data.get("release_date"),
+    }
+
+
+def fetch_deezer_track_by_isrc(
+    isrc: str,
+) -> dict[str, str | int | float | bool | None] | None:
+    clean_isrc = isrc.strip().upper()
+    if not clean_isrc:
+        return None
+
+    cache_key = f"deezer_isrc:{clean_isrc}"
+    cached = get_cached_api(cache_key)
+    if isinstance(cached, dict):
+        return cached
+
+    _DEEZER_LIMITER.wait()
+    url = f"https://api.deezer.com/track/isrc:{urllib.parse.quote(clean_isrc)}"
+
+    try:
+        response = SESSION.get(url, timeout=6)
+        if response.status_code != 200:
+            set_cached_api(cache_key, None)
+            return None
+
+        track_data = response.json()
+        if (
+            not isinstance(track_data, dict)
+            or track_data.get("error")
+            or not track_data.get("id")
+        ):
+            set_cached_api(cache_key, None)
+            return None
+
+        result = _parse_deezer_track_payload(track_data)
+        set_cached_api(cache_key, result)
+        return result
+    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+        LOG.debug(f"Deezer track lookup by ISRC failed for {isrc}: {error}")
+        return None
+
+
 def fetch_deezer_track_details(
     artist: str, title: str
 ) -> dict[str, str | int | float | bool | None] | None:
@@ -261,47 +356,10 @@ def fetch_deezer_track_details(
             return None
 
         track_data = detail_response.json()
-        contributors = track_data.get("contributors", [])
-        featured: list[str] = []
-        producers: list[str] = []
-        composers: list[str] = []
-        lyricists: list[str] = []
-        if isinstance(contributors, list):
-            for contributor in contributors:
-                if isinstance(contributor, dict):
-                    contributor_name = contributor.get("name")
-                    contributor_role = str(contributor.get("role", "")).lower()
-                    if not contributor_name:
-                        continue
-                    if "featured" in contributor_role:
-                        featured.append(contributor_name)
-                    elif "producer" in contributor_role:
-                        producers.append(contributor_name)
-                    elif "composer" in contributor_role:
-                        composers.append(contributor_name)
-                    elif (
-                        "author" in contributor_role
-                        or "lyricist" in contributor_role
-                        or "writer" in contributor_role
-                    ):
-                        lyricists.append(contributor_name)
+        if not isinstance(track_data, dict) or track_data.get("error"):
+            return None
 
-        track_pos = safe_int(track_data.get("track_position"))
-        disk_num = safe_int(track_data.get("disk_number"))
-
-        result = {
-            "isrc": track_data.get("isrc"),
-            "explicit_lyrics": track_data.get("explicit_lyrics"),
-            "featured_artists": ", ".join(dict.fromkeys(featured))
-            if featured
-            else None,
-            "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
-            "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
-            "lyricist": ", ".join(dict.fromkeys(lyricists)) if lyricists else None,
-            "track_position": track_pos,
-            "disk_number": disk_num,
-            "release_date": track_data.get("release_date"),
-        }
+        result = _parse_deezer_track_payload(track_data)
         set_cached_api(cache_key, result)
         return result
     except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:

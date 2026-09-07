@@ -440,7 +440,7 @@ _METADATA_FILTER = MetadataFilter(
 )
 
 _TITLE_EDITION_PATTERN = re.compile(
-    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd).*?[\)\]\}]",
+    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd|album\s+version).*?[\)\]\}]",
     re.IGNORECASE,
 )
 
@@ -651,11 +651,22 @@ def match_score(
         if query_artist_clean == candidate_artist_clean:
             artist_score = 100.0
         else:
-            artist_w = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
-            artist_token = fuzz.token_set_ratio(
-                query_artist_clean, candidate_artist_clean
-            )
-            artist_score = max(artist_w, artist_token)
+            q_prim = clean_title(get_primary_artist(query_artist_clean)).lower()
+            c_prim = clean_title(get_primary_artist(candidate_artist_clean)).lower()
+            if q_prim == c_prim:
+                artist_score = 100.0
+            else:
+                min_len = min(len(q_prim), len(c_prim))
+                if min_len <= 3:
+                    artist_score = 100.0 if q_prim == c_prim else 0.0
+                elif min_len <= 5:
+                    artist_score = float(fuzz.ratio(q_prim, c_prim))
+                else:
+                    artist_w = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
+                    artist_token = fuzz.token_set_ratio(
+                        query_artist_clean, candidate_artist_clean
+                    )
+                    artist_score = max(artist_w, artist_token)
 
         if title_score < 70.0 or artist_score < 70.0:
             return 0.0

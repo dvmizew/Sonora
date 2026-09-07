@@ -103,6 +103,8 @@ def lookup_acoustid(
                         str(candidate_artist),
                         str(candidate_title),
                     )
+                    if text_score < 60.0:
+                        continue
                     combined_score = (float(score) * 40.0) + (text_score * 0.6)
 
                 if combined_score > best_combined_score:
