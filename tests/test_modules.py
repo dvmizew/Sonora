@@ -19,6 +19,7 @@ from sonora.core.utils import (
     RateLimiter,
     find_audio_files,
     is_valid_uuid,
+    match_score,
     resolve_artist_name,
 )
 from sonora.modules.backup import backup_library_tags, restore_library_tags
@@ -38,6 +39,7 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
+    _apply_mapping,
     _enrich_musicbrainz,
     _enrich_shazam,
     _resolve_album_folder_identity,
@@ -838,6 +840,23 @@ class TestCoreModules(unittest.TestCase):
             )
         )
 
+        # Bonus track by the same artist whose title is not in known_titles
+        bonus_track = TrackInfo(
+            file_path=Path("/music/21 Savage - Issa Album/15 - Bonus Track.wav"),
+            artist="21 Savage",
+            title="7 Min Freestyle (Bonus)",
+            album="Issa Album",
+        )
+        self.assertFalse(
+            is_alien_album_track(
+                track_info=bonus_track,
+                file_path=bonus_track.file_path,
+                target_album_artist="21 Savage",
+                target_album_title="Issa Album",
+                album_mb_release_details=mb_release,
+            )
+        )
+
     def test_enrich_musicbrainz_heals_corrupted_title_via_isrc(self) -> None:
         track = TrackInfo(
             file_path=Path("dummy.wav"),
@@ -1462,6 +1481,98 @@ class TestCoreModules(unittest.TestCase):
             other_dir.mkdir()
             process_label_artwork(other_dir, label_mbid=label_mbid)
             self.assertFalse((other_dir / "label.png").exists())
+
+    def test_match_score_short_artist_name_isolation(self) -> None:
+        # Short artist names must not match candidates containing them as substrings
+        self.assertEqual(match_score("Ian", "Song", "Brian", "Song"), 0.0)
+        self.assertEqual(match_score("Ian", "Song", "Arkanian", "Song"), 0.0)
+        self.assertEqual(match_score("Ian", "Song", "Christian", "Song"), 0.0)
+        self.assertEqual(match_score("Tyga", "Song", "Tyga Ichinose", "Song"), 0.0)
+        self.assertEqual(match_score("Aaryan Shah", "Song", "Kavinsky", "Song"), 0.0)
+        # Collaborations and features on the same primary artist should match
+        self.assertGreaterEqual(
+            match_score("21 Savage & Metro Boomin", "Song", "21 Savage", "Song"), 80.0
+        )
+        self.assertGreaterEqual(
+            match_score(
+                "Kendrick Lamar feat. Travis Scott", "Song", "Kendrick Lamar", "Song"
+            ),
+            80.0,
+        )
+
+    def test_apply_mapping_genre_noise_rejection(self) -> None:
+        trk = TrackInfo(
+            file_path=Path("/dummy/song.flac"), artist="Artist", title="Title"
+        )
+        # Spam/noise genres must be rejected and not overwrite genre
+        _apply_mapping(trk, {"genre": "Karaoke"}, {"genre": "genre"})
+        self.assertIsNone(trk.genre)
+        _apply_mapping(trk, {"genre": "Fitness & Workout"}, {"genre": "genre"})
+        self.assertIsNone(trk.genre)
+        _apply_mapping(trk, {"genre": "Children's Music"}, {"genre": "genre"})
+        self.assertIsNone(trk.genre)
+        # Valid genres must be normalized and accepted
+        _apply_mapping(trk, {"genre": "Hip Hop"}, {"genre": "genre"})
+        self.assertEqual(trk.genre, "Hip-Hop/Rap")
+
+    @patch("sonora.modules.tagger._enrich_musicbrainz")
+    @patch("sonora.modules.tagger._enrich_acoustid")
+    @patch("sonora.modules.tagger._enrich_itunes")
+    @patch("sonora.modules.tagger._enrich_deezer")
+    @patch("sonora.modules.tagger._enrich_lastfm")
+    @patch("sonora.modules.tagger._enrich_discogs")
+    @patch("sonora.modules.tagger._enrich_genius")
+    @patch("sonora.modules.tagger._enrich_theaudiodb")
+    def test_album_context_identity_healing(
+        self,
+        mock_tadb: MagicMock,
+        mock_genius: MagicMock,
+        mock_discogs: MagicMock,
+        mock_lastfm: MagicMock,
+        mock_deezer: MagicMock,
+        mock_itunes: MagicMock,
+        mock_acoustid: MagicMock,
+        mock_mb: MagicMock,
+    ) -> None:
+        album_dir = self.tmp_path / "Aaryan Shah - The Arrival"
+        album_dir.mkdir()
+        audio_file = album_dir / "05 - Renegade.wav"
+        create_dummy_wav(audio_file)
+
+        # Corrupted artist on disk
+        trk = TrackInfo(
+            file_path=audio_file,
+            artist="Kavinsky",
+            title="Renegade",
+            track_number=5,
+            isrc="TCADM1875890",
+        )
+        write_track_metadata(trk)
+
+        mock_deezer_details = {
+            "title": "The Arrival",
+            "tracks_by_position": {
+                5: {
+                    "title": "Renegade",
+                    "artist": "Aaryan Shah",
+                    "isrc": "TCADM1875890",
+                }
+            },
+        }
+
+        result = process_single_track(
+            file_path=audio_file,
+            fetch_bpm=False,
+            fetch_key=False,
+            fetch_lyrics=False,
+            fetch_itunes_art=False,
+            album_deezer_details=mock_deezer_details,
+            target_album_artist="Aaryan Shah",
+            target_album_title="The Arrival",
+        )
+        # Corrupted artist 'Kavinsky' must be healed to 'Aaryan Shah'
+        self.assertEqual(result.artist, "Aaryan Shah")
+        self.assertEqual(result.album, "The Arrival")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,12 @@
 import dataclasses
+import io
 import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import taglib
+from PIL import Image
 
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG
@@ -204,13 +206,32 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             art_width, art_height = None, None
             if hasattr(song, "pictures") and song.pictures:
                 first_picture = song.pictures[0]
-                art_width = getattr(first_picture, "width", None)
-                art_height = getattr(first_picture, "height", None)
+                art_width = getattr(first_picture, "width", None) or None
+                art_height = getattr(first_picture, "height", None) or None
+                if (not art_width or not art_height) and getattr(
+                    first_picture, "data", None
+                ):
+                    try:
+                        with Image.open(io.BytesIO(first_picture.data)) as img:
+                            art_width, art_height = img.size
+                    except (OSError, ValueError, RuntimeError):
+                        pass
 
             mapped_fields: dict[str, Any] = {
                 field: _get_tag(tags, *tag_keys)
                 for field, tag_keys in _TAG_SCHEMA.items()
             }
+            raw_advisory = mapped_fields.get("advisory")
+            if raw_advisory:
+                raw_str = str(raw_advisory).strip().lower()
+                if raw_str in ("1", "explicit"):
+                    mapped_fields["advisory"] = "Explicit"
+                elif raw_str in ("2", "clean"):
+                    mapped_fields["advisory"] = "Clean"
+                elif raw_str in ("0", "none"):
+                    mapped_fields["advisory"] = None
+                else:
+                    mapped_fields["advisory"] = str(raw_advisory).strip().capitalize()
 
             file_ext = file_path.suffix.lower()
             if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
@@ -356,6 +377,15 @@ def write_track_metadata(
                     if field in _UUID_FIELDS and not is_valid_uuid(
                         val, allow_multivalue=True
                     ):
+                        continue
+                    if field == "advisory":
+                        norm_adv = str(val).strip().capitalize()
+                        if norm_adv == "Explicit":
+                            song.tags["ITUNESADVISORY"] = ["1"]
+                            song.tags["ADVISORY"] = ["Explicit"]
+                        elif norm_adv == "Clean":
+                            song.tags["ITUNESADVISORY"] = ["2"]
+                            song.tags["ADVISORY"] = ["Clean"]
                         continue
                     song.tags[tag_keys[0]] = [str(val)]
 
