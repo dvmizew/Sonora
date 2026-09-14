@@ -215,6 +215,8 @@ class TestCLIInterface(unittest.TestCase):
     def test_handle_keyboard_interrupts(self) -> None:
         dummy_backup = self.temporary_path / "backup.json"
         dummy_backup.write_text("{}", encoding="utf-8")
+        song = self.temporary_path / "song.flac"
+        song.write_bytes(b"dummy")
 
         with (
             patch("sonora.cli.main.tag_album_folder", side_effect=KeyboardInterrupt),
@@ -228,11 +230,23 @@ class TestCLIInterface(unittest.TestCase):
                 side_effect=KeyboardInterrupt,
             ),
             patch(
+                "sonora.cli.main.backup_library_tags",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch(
                 "sonora.cli.main.restore_library_tags",
                 side_effect=KeyboardInterrupt,
             ),
             patch(
                 "sonora.cli.main.normalize_library",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch(
+                "sonora.cli.main.calculate_album_replaygain",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch(
+                "sonora.cli.main.as_completed",
                 side_effect=KeyboardInterrupt,
             ),
         ):
@@ -241,8 +255,13 @@ class TestCLIInterface(unittest.TestCase):
                 ["check", str(self.temporary_path)],
                 ["rename", str(self.temporary_path)],
                 ["organize", str(self.temporary_path)],
+                ["backup", str(self.temporary_path)],
                 ["restore", str(dummy_backup)],
                 ["normalize", str(self.temporary_path)],
+                ["bpm", str(self.temporary_path), "--force"],
+                ["key", str(self.temporary_path), "--force"],
+                ["replaygain", str(self.temporary_path), "--force"],
+                ["lyrics", str(self.temporary_path), "--force"],
             ]:
                 with self.subTest(args=args):
                     exit_code = main(args)

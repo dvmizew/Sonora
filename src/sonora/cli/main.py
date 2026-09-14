@@ -1,6 +1,7 @@
 import contextlib
 import dataclasses
 import datetime
+import functools
 import signal
 import socket
 import sys
@@ -38,31 +39,26 @@ from sonora.core.logger import (
     interactive_pause_listener,
     wait_if_paused,
 )
-from sonora.core.models import CheckReport, TrackInfo
+from sonora.core.models import CheckReport, RenameReport, TrackInfo
 from sonora.core.utils import (
+    InterruptedOperationError,
     find_audio_files,
     format_filesize,
     group_files_by_parent,
 )
 from sonora.modules.backup import (
     backup_library_tags,
-    get_last_restored_count,
     restore_library_tags,
 )
 from sonora.modules.checker import (
     check_library,
-    get_last_check_report,
     write_check_report_json,
 )
 from sonora.modules.organizer import (
-    get_last_organized_count,
     organize_library_singles,
 )
-from sonora.modules.renamer import get_last_rename_report, rename_directory_files
+from sonora.modules.renamer import rename_directory_files
 from sonora.modules.tagger import (
-    get_last_normalized_count,
-    get_last_tagged_tracks,
-    get_last_tagging_failures,
     normalize_library,
     tag_album_folder,
 )
@@ -73,7 +69,7 @@ load_app_environment()
 socket.setdefaulttimeout(15)
 
 if hasattr(signal, "SIGCONT"):
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(ValueError, OSError):
         signal.signal(
             signal.SIGCONT,
             lambda *_: LOG.info("▶️ [green]Resumed execution.[/]"),
@@ -250,8 +246,9 @@ def tag(
         )
 
     LOG.info(f"Tagging album directory: [bold]{escape(str(path))}[/bold]")
-    tagged_tracks: list[TrackInfo] = []
     interrupted = False
+    failures: list[dict[str, str]] = []
+    tagged_tracks: list[TrackInfo] = []
     try:
         tagged_tracks = tag_album_folder(
             path,
@@ -270,10 +267,14 @@ def tag(
             enable_shazam=enable_shazam,
             force=force,
             dry_run=dry_run,
+            failures=failures,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        tagged_tracks = get_last_tagged_tracks()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, list
+        ):
+            tagged_tracks = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Tagging stopped by user (Ctrl+C). Generating summary for processed tracks..."
         )
@@ -416,7 +417,6 @@ def tag(
     LOG.summary_table("Tagging Summary", tag_summary_rows)
 
     if json_report:
-        failures = get_last_tagging_failures()
         summary_text = (
             f"Processed {total_tracks} tracks ({len(failures)} failures). "
             f"MusicBrainz {musicbrainz_count}/{total_tracks} ({musicbrainz_percentage:.0f}%), "
@@ -524,18 +524,23 @@ def check(
     """
     LOG.info(f"Checking music library: [bold]{path}[/bold]")
     interrupted = False
+    check_report = CheckReport(
+        total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
+    )
     try:
         check_report = check_library(
             path,
             output_json=json_report,
             check_spectral=spectral_analysis,
             max_threads=threads,
+            report=check_report,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        check_report = get_last_check_report() or CheckReport(
-            total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
-        )
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, CheckReport
+        ):
+            check_report = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Check stopped by user (Ctrl+C). Generating summary for scanned files..."
         )
@@ -636,12 +641,17 @@ def rename(
     """
     LOG.info(f"Renaming files in directory: [bold]{path}[/bold]")
     interrupted = False
+    report = RenameReport()
     try:
-        rename_directory_files(path, dry_run=dry_run, max_threads=threads)
-        report = get_last_rename_report()
-    except KeyboardInterrupt:
+        rename_directory_files(
+            path, dry_run=dry_run, max_threads=threads, report=report
+        )
+    except KeyboardInterrupt as exc:
         interrupted = True
-        report = get_last_rename_report()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, RenameReport
+        ):
+            report = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Renaming stopped by user (Ctrl+C). Generating summary..."
         )
@@ -741,13 +751,17 @@ def organize(
         f"Organizing single tracks from {escape(str(path))} to {escape(str(destination_directory))}"
     )
     interrupted = False
+    organized_count = 0
     try:
         organized_count = organize_library_singles(
             path, destination_directory, dry_run=dry_run, max_threads=threads
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        organized_count = get_last_organized_count()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, int
+        ):
+            organized_count = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Organization stopped by user (Ctrl+C). Generating summary..."
         )
@@ -859,11 +873,15 @@ def restore(
     Restore audio tags from JSON backup file.
     """
     interrupted = False
+    restored_count = 0
     try:
         restored_count = restore_library_tags(backup_file, max_threads=threads)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        restored_count = get_last_restored_count()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, int
+        ):
+            restored_count = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Restoration stopped by user (Ctrl+C). Generating summary for restored files..."
         )
@@ -957,6 +975,7 @@ def normalize(
     """
     LOG.info(f"Normalizing audio tags in [bold]{path}[/bold] (offline mode)...")
     interrupted = False
+    count = 0
     try:
         results = normalize_library(
             path,
@@ -968,9 +987,12 @@ def normalize(
             max_threads=threads,
         )
         count = len(results)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        count = get_last_normalized_count()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, list
+        ):
+            count = len(exc.partial_result)
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Normalization stopped by user (Ctrl+C)."
         )
@@ -991,6 +1013,24 @@ def normalize(
     if interrupted:
         return 130
     return 0
+
+
+def _process_bpm_file(
+    audio_path: Path, force: bool, dry_run: bool
+) -> tuple[Path, float | None, bool]:
+    wait_if_paused()
+    try:
+        info = read_track_metadata(audio_path)
+        if not force and info.bpm is not None:
+            return audio_path, info.bpm, False
+        val = calculate_bpm(audio_path)
+        if val is not None and not dry_run:
+            updated = dataclasses.replace(info, bpm=val)
+            write_track_metadata(updated)
+        return audio_path, val, True
+    except (OSError, ValueError, RuntimeError) as err:
+        LOG.debug(f"BPM error for {audio_path}: {err}")
+        return audio_path, None, False
 
 
 @app.command
@@ -1037,27 +1077,15 @@ def bpm(
     skipped = 0
     interrupted = False
 
-    def _process_bpm(audio_path: Path) -> tuple[Path, float | None, bool]:
-        wait_if_paused()
-        try:
-            info = read_track_metadata(audio_path)
-            if not force and info.bpm is not None:
-                return audio_path, info.bpm, False
-            val = calculate_bpm(audio_path)
-            if val is not None and not dry_run:
-                updated = dataclasses.replace(info, bpm=val)
-                write_track_metadata(updated)
-            return audio_path, val, True
-        except (OSError, ValueError, RuntimeError) as err:
-            LOG.debug(f"BPM error for {audio_path}: {err}")
-            return audio_path, None, False
-
+    worker = functools.partial(_process_bpm_file, force=force, dry_run=dry_run)
     with create_progress() as progress:
         task = progress.add_task("[cyan]Calculating BPM...", total=len(audio_files))
-        with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=threads)
+        with (
+            interactive_pause_listener(progress, task),
+            ThreadPoolExecutor(max_workers=threads) as executor,
+        ):
             try:
-                futures = [executor.submit(_process_bpm, f) for f in audio_files]
+                futures = [executor.submit(worker, f) for f in audio_files]
                 for future in as_completed(futures):
                     wait_if_paused()
                     _, bpm_val, modified = future.result()
@@ -1067,13 +1095,11 @@ def bpm(
                         skipped += 1
                     progress.advance(task)
             except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=True, cancel_futures=True)
                 interrupted = True
                 LOG.warning(
                     "\n⏹️  [bold yellow]INTERRUPTED[/] - BPM calculation stopped by user (Ctrl+C)."
                 )
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
 
     summary_rows = [
         ("Total Files Scanned", str(len(audio_files)), None),
@@ -1084,6 +1110,27 @@ def bpm(
     if interrupted:
         return 130
     return 0
+
+
+def _process_key_file(
+    audio_path: Path, force: bool, dry_run: bool
+) -> tuple[Path, str | None, bool]:
+    wait_if_paused()
+    try:
+        info = read_track_metadata(audio_path)
+        if not force and info.initial_key is not None:
+            return audio_path, info.initial_key, False
+        details = detect_key_details(audio_path)
+        if details is not None:
+            val, camelot, _ = details
+            if not dry_run:
+                updated = dataclasses.replace(info, initial_key=val)
+                write_track_metadata(updated)
+            return audio_path, f"{val} ({camelot})", True
+        return audio_path, None, False
+    except (OSError, ValueError, RuntimeError) as err:
+        LOG.debug(f"Key detection error for {audio_path}: {err}")
+        return audio_path, None, False
 
 
 @app.command
@@ -1132,32 +1179,17 @@ def key(
     skipped = 0
     interrupted = False
 
-    def _process_key(audio_path: Path) -> tuple[Path, str | None, bool]:
-        wait_if_paused()
-        try:
-            info = read_track_metadata(audio_path)
-            if not force and info.initial_key is not None:
-                return audio_path, info.initial_key, False
-            details = detect_key_details(audio_path)
-            if details is not None:
-                val, camelot, _ = details
-                if not dry_run:
-                    updated = dataclasses.replace(info, initial_key=val)
-                    write_track_metadata(updated)
-                return audio_path, f"{val} ({camelot})", True
-            return audio_path, None, False
-        except (OSError, ValueError, RuntimeError) as err:
-            LOG.debug(f"Key detection error for {audio_path}: {err}")
-            return audio_path, None, False
-
+    worker = functools.partial(_process_key_file, force=force, dry_run=dry_run)
     with create_progress() as progress:
         task = progress.add_task(
             "[cyan]Detecting musical key...", total=len(audio_files)
         )
-        with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=threads)
+        with (
+            interactive_pause_listener(progress, task),
+            ThreadPoolExecutor(max_workers=threads) as executor,
+        ):
             try:
-                futures = [executor.submit(_process_key, f) for f in audio_files]
+                futures = [executor.submit(worker, f) for f in audio_files]
                 for future in as_completed(futures):
                     wait_if_paused()
                     _, key_val, modified = future.result()
@@ -1167,13 +1199,11 @@ def key(
                         skipped += 1
                     progress.advance(task)
             except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=True, cancel_futures=True)
                 interrupted = True
                 LOG.warning(
                     "\n⏹️  [bold yellow]INTERRUPTED[/] - Key detection stopped by user (Ctrl+C)."
                 )
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
 
     summary_rows = [
         ("Total Files Scanned", str(len(audio_files)), None),
@@ -1270,6 +1300,35 @@ def replaygain(
     return 0
 
 
+def _process_lyrics_file(
+    audio_path: Path, force: bool, dry_run: bool
+) -> tuple[Path, str | None, str | None]:
+    wait_if_paused()
+    try:
+        info = read_track_metadata(audio_path)
+        lrc_path = audio_path.with_suffix(".lrc")
+        if not force and lrc_path.exists() and lrc_path.stat().st_size > 0:
+            return audio_path, "existing", "existing"
+        lyrics_text, tag_type = process_track_lyrics(
+            audio_path,
+            info.artist,
+            info.title,
+            force=force,
+            dry_run=dry_run,
+            isrc=info.isrc,
+        )
+        if lyrics_text and not dry_run:
+            try:
+                updated = dataclasses.replace(info, lyrics=lyrics_text)
+                write_track_metadata(updated)
+            except (OSError, ValueError, RuntimeError):
+                pass
+        return audio_path, lyrics_text, tag_type
+    except (OSError, ValueError, RuntimeError) as err:
+        LOG.debug(f"Lyrics error for {audio_path}: {err}")
+        return audio_path, None, None
+
+
 @app.command
 def lyrics(
     path: Annotated[
@@ -1318,38 +1377,15 @@ def lyrics(
     missing_count = 0
     interrupted = False
 
-    def _process_lyrics(audio_path: Path) -> tuple[Path, str | None, str | None]:
-        wait_if_paused()
-        try:
-            info = read_track_metadata(audio_path)
-            lrc_path = audio_path.with_suffix(".lrc")
-            if not force and lrc_path.exists() and lrc_path.stat().st_size > 0:
-                return audio_path, "existing", "existing"
-            lyrics_text, tag_type = process_track_lyrics(
-                audio_path,
-                info.artist,
-                info.title,
-                force=force,
-                dry_run=dry_run,
-                isrc=info.isrc,
-            )
-            if lyrics_text and not dry_run:
-                try:
-                    updated = dataclasses.replace(info, lyrics=lyrics_text)
-                    write_track_metadata(updated)
-                except (OSError, ValueError, RuntimeError):
-                    pass
-            return audio_path, lyrics_text, tag_type
-        except (OSError, ValueError, RuntimeError) as err:
-            LOG.debug(f"Lyrics error for {audio_path}: {err}")
-            return audio_path, None, None
-
+    worker = functools.partial(_process_lyrics_file, force=force, dry_run=dry_run)
     with create_progress() as progress:
         task = progress.add_task("[cyan]Fetching lyrics...", total=len(audio_files))
-        with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=threads)
+        with (
+            interactive_pause_listener(progress, task),
+            ThreadPoolExecutor(max_workers=threads) as executor,
+        ):
             try:
-                futures = [executor.submit(_process_lyrics, f) for f in audio_files]
+                futures = [executor.submit(worker, f) for f in audio_files]
                 for future in as_completed(futures):
                     wait_if_paused()
                     _, lyr_content, lyr_type = future.result()
@@ -1361,13 +1397,11 @@ def lyrics(
                         missing_count += 1
                     progress.advance(task)
             except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=True, cancel_futures=True)
                 interrupted = True
                 LOG.warning(
                     "\n⏹️  [bold yellow]INTERRUPTED[/] - Lyrics fetch stopped by user (Ctrl+C)."
                 )
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
 
     summary_rows = [
         ("Total Files Scanned", str(len(audio_files)), None),
@@ -1674,15 +1708,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 130
     except CycloptsError:
         return 2
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        RuntimeError,
-        KeyError,
-        IndexError,
-        AttributeError,
-    ) as error:
+    except (OSError, ValueError, RuntimeError) as error:
         LOG.error(f"Error: {error}")
         return 1
 

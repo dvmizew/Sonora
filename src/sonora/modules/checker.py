@@ -10,7 +10,7 @@ from music_metadata_filter.functions import (
     youtube,
 )
 from mutagen._util import MutagenError
-from mutagen.flac import FLAC, FLACNoHeaderError
+from mutagen.flac import FLAC
 from rich.markup import escape
 
 from sonora.audio.checksum import verify_flac_checksum
@@ -26,6 +26,7 @@ from sonora.core.logger import (
 )
 from sonora.core.models import CheckReport
 from sonora.core.utils import (
+    InterruptedOperationError,
     find_audio_files,
     find_companion_lyrics,
     is_single_group_artist,
@@ -115,16 +116,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             for index, picture in enumerate(audio_flac.pictures):
                 if len(picture.data) == 0:
                     issues.append(f"Corrupt 0-byte picture block at index {index}.")
-        except (
-            OSError,
-            ValueError,
-            RuntimeError,
-            AttributeError,
-            KeyError,
-            TypeError,
-            FLACNoHeaderError,
-            MutagenError,
-        ) as error:
+        except (MutagenError, OSError) as error:
             LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
 
     if check_spectral:
@@ -265,14 +257,6 @@ def _check_single_file(
     return path, file_issues, album, album_artist, disc_number, track_number
 
 
-LAST_CHECK_REPORT: CheckReport | None = None
-
-
-def get_last_check_report() -> CheckReport | None:
-    """Return the most recent or partially completed check report."""
-    return LAST_CHECK_REPORT
-
-
 def write_check_report_json(
     report: CheckReport,
     folder_path: Path,
@@ -323,15 +307,15 @@ def check_library(
     output_json: Path | None = None,
     check_spectral: bool = False,
     max_threads: int = 8,
+    report: CheckReport | None = None,
 ) -> CheckReport:
     if not folder_path.exists():
         raise FileNotFoundError(f"Directory not found: {folder_path}")
 
-    global LAST_CHECK_REPORT
-    report = CheckReport(
-        total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
-    )
-    LAST_CHECK_REPORT = report
+    if report is None:
+        report = CheckReport(
+            total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
+        )
 
     files_to_process = find_audio_files(folder_path, recursive=True)
 
@@ -342,18 +326,19 @@ def check_library(
         lambda: defaultdict(list)
     )
 
-    executor = ThreadPoolExecutor(max_workers=max_threads)
-    try:
+    with (
+        create_progress() as progress,
+        ThreadPoolExecutor(max_workers=max_threads) as executor,
+    ):
         future_to_path = {
             executor.submit(_check_single_file, path, check_spectral): path
             for path in files_to_process
         }
-
-        with create_progress() as progress:
-            task = progress.add_task(
-                "[cyan]Checking library...", total=len(files_to_process)
-            )
-            with interactive_pause_listener(progress, task):
+        task = progress.add_task(
+            "[cyan]Checking library...", total=len(files_to_process)
+        )
+        with interactive_pause_listener(progress, task):
+            try:
                 for future in as_completed(future_to_path):
                     (
                         path,
@@ -407,11 +392,9 @@ def check_library(
                             report.missing_lrc += 1
 
                     progress.advance(task)
-    except KeyboardInterrupt:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise InterruptedOperationError(report) from None
 
     # Folder-level checks after file checking completes
     for folder, albums in folder_albums.items():

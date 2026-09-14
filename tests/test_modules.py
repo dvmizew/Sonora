@@ -14,7 +14,10 @@ from sonora.audio.art import (
 )
 from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.audio.replaygain import calculate_album_replaygain
+from sonora.core.cache import close_cache
 from sonora.core.models import TrackInfo
+from sonora.core.state import reset_library_state
 from sonora.core.utils import (
     RateLimiter,
     find_audio_files,
@@ -40,6 +43,7 @@ from sonora.modules.renamer import (
 )
 from sonora.modules.tagger import (
     _apply_mapping,
+    _enrich_deezer,
     _enrich_musicbrainz,
     _enrich_shazam,
     _resolve_album_folder_identity,
@@ -95,6 +99,8 @@ class TestCoreModules(unittest.TestCase):
         RateLimiter.set_disabled(False)
 
     def setUp(self) -> None:
+        reset_library_state()
+        close_cache()
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp_dir.name)
         patcher = patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
@@ -103,6 +109,8 @@ class TestCoreModules(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp_dir.cleanup()
+        reset_library_state()
+        close_cache()
 
     @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
     def test_resolve_artist_name(self, mock_search: MagicMock) -> None:
@@ -857,6 +865,100 @@ class TestCoreModules(unittest.TestCase):
             )
         )
 
+        # Conflicting track by the same artist whose title is not on the album release
+        conflicting_track = TrackInfo(
+            file_path=Path("/music/XXXTENTACION - Revenge/04 - Revenge.flac"),
+            artist="XXXTENTACION",
+            title="Revenge",
+            album="Revenge",
+            track_number=4,
+            isrc="USUYG1156895",
+        )
+        mb_release_rev: dict[str, object] = {
+            "title": "Revenge",
+            "album_artist": "XXXTENTACION",
+            "tracks_by_position": {
+                1: {
+                    "title": "Look at Me!",
+                    "artist": "XXXTENTACION",
+                    "isrc": "USUYG1131080",
+                },
+                2: {
+                    "title": "I don't wanna do this anymore",
+                    "artist": "XXXTENTACION",
+                    "isrc": "USUYG1142046",
+                },
+                3: {
+                    "title": "Looking for a Star",
+                    "artist": "XXXTENTACION",
+                    "isrc": "USUYG1142047",
+                },
+                4: {"title": "KING", "artist": "XXXTENTACION", "isrc": "USUYG1142049"},
+                5: {
+                    "title": "Slipknot",
+                    "artist": "XXXTENTACION feat. Kin$oul & Killstation",
+                    "isrc": "USUYG1142050",
+                },
+                6: {
+                    "title": "YuNg BrAtZ",
+                    "artist": "XXXTENTACION",
+                    "isrc": "USUYG1142051",
+                },
+                7: {
+                    "title": 'R.I.P ROACH "EAST SIDE SOULJA"',
+                    "artist": "XXXTENTACION",
+                    "isrc": "USUYG1142052",
+                },
+            },
+        }
+        self.assertTrue(
+            is_alien_album_track(
+                track_info=conflicting_track,
+                file_path=conflicting_track.file_path,
+                target_album_artist="XXXTENTACION",
+                target_album_title="Revenge",
+                album_mb_release_details=mb_release_rev,
+            )
+        )
+
+    def test_enrich_musicbrainz_candidate_rec_mismatch_prevents_metadata_poisoning(
+        self,
+    ) -> None:
+        track = TrackInfo(
+            file_path=Path("/music/XXXTENTACION - Revenge/04 - Revenge.flac"),
+            artist="XXXTENTACION",
+            title="Revenge",
+            album="Revenge",
+            isrc="USUYG1156895",
+            track_number=4,
+        )
+        mb_release: dict[str, object] = {
+            "title": "Revenge",
+            "album_artist": "XXXTENTACION",
+            "tracks_by_position": {
+                4: {
+                    "title": "KING",
+                    "artist": "XXXTENTACION",
+                    "isrc": "USUYG1142049",
+                    "recording_mbid": "548be1ad-0000-0000-0000-000000000000",
+                    "producers": "King Yosef",
+                },
+            },
+        }
+        _enrich_musicbrainz(
+            track_info=track,
+            album_mbid="9d90908d-0a74-4df0-8e76-13c6473b33e5",
+            album_track_mbids={4: "548be1ad-0000-0000-0000-000000000000"},
+            album_mb_release_details=mb_release,
+            force=True,
+        )
+        # Position 4 in album is 'KING'; track is 'Revenge'.
+        # Track must retain its own title and ISRC, and must not adopt 'KING' MBID or credits.
+        self.assertEqual(track.title, "Revenge")
+        self.assertEqual(track.isrc, "USUYG1156895")
+        self.assertIsNone(track.musicbrainz_trackid)
+        self.assertIsNone(track.producers)
+
     def test_enrich_musicbrainz_heals_corrupted_title_via_isrc(self) -> None:
         track = TrackInfo(
             file_path=Path("dummy.wav"),
@@ -919,6 +1021,9 @@ class TestCoreModules(unittest.TestCase):
             patch("sonora.modules.tagger._enrich_musicbrainz"),
             patch("sonora.modules.tagger._enrich_acoustid"),
             patch("sonora.modules.tagger._enrich_deezer"),
+            patch("sonora.modules.tagger._enrich_itunes"),
+            patch("sonora.modules.tagger._enrich_theaudiodb"),
+            patch("sonora.modules.tagger._enrich_genius"),
         ):
             res = process_single_track(
                 track_file,
@@ -1573,6 +1678,308 @@ class TestCoreModules(unittest.TestCase):
         # Corrupted artist 'Kavinsky' must be healed to 'Aaryan Shah'
         self.assertEqual(result.artist, "Aaryan Shah")
         self.assertEqual(result.album, "The Arrival")
+
+    def test_enrich_deezer_fallback_preserves_album_track_number(self) -> None:
+        """Fallback track search from Deezer (e.g. single track_position=1) must not overwrite album track number."""
+        trk = TrackInfo(
+            file_path=Path("/music/album/17 - Dip.flac"),
+            artist="Tyga",
+            title="Dip",
+            album="Legendary",
+            track_number=17,
+            disc_number=1,
+        )
+        # Album has only track 1 (e.g. standard edition or incomplete match)
+        incomplete_album = {
+            "title": "Legendary",
+            "tracks_by_position": {1: {"title": "Too Many", "track_position": 1}},
+            "tracks_by_title": {"too many": {"title": "Too Many", "track_position": 1}},
+        }
+        with patch("sonora.modules.tagger.fetch_deezer_track_details") as mock_fetch:
+            # Fallback single search returns single track with track_position = 1
+            mock_fetch.return_value = {
+                "title": "Dip",
+                "artist": "Tyga",
+                "track_position": 1,
+                "disk_number": 1,
+                "producers": "D.A. Got That Dope",
+            }
+            _enrich_deezer(
+                trk,
+                album_deezer_details=incomplete_album,
+                has_album_context=True,
+                force=True,
+            )
+
+        # Track number and disc number must be preserved, while producer credit is enriched
+        self.assertEqual(trk.track_number, 17)
+        self.assertEqual(trk.disc_number, 1)
+        self.assertEqual(trk.producers, "D.A. Got That Dope")
+
+    def test_healer_preserves_credited_collaborative_artist(self) -> None:
+        """Legitimate track artist on collaborative/multi-artist album must not be overwritten by album artist."""
+        audio_file = self.tmp_path / "2-02 - What's in Your Heart.wav"
+        create_dummy_wav(audio_file)
+        trk = TrackInfo(
+            file_path=audio_file,
+            artist="Swae Lee",
+            title="What's in Your Heart?",
+            album="SR3MM",
+            track_number=2,
+            disc_number=2,
+        )
+        write_track_metadata(trk)
+
+        mock_mb_release: dict[str, object] = {
+            "title": "SR3MM",
+            "album_artist": "Rae Sremmurd",
+            "tracks_by_position": {
+                2: {
+                    "title": "What's in Your Heart?",
+                    "artist": "Swae Lee",
+                }
+            },
+        }
+
+        with (
+            patch("sonora.modules.tagger._enrich_musicbrainz"),
+            patch("sonora.modules.tagger._enrich_acoustid"),
+            patch("sonora.modules.tagger._enrich_deezer"),
+            patch("sonora.modules.tagger._enrich_itunes"),
+            patch("sonora.modules.tagger._enrich_theaudiodb"),
+            patch("sonora.modules.tagger._enrich_genius"),
+        ):
+            res = process_single_track(
+                file_path=audio_file,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+                album_mb_release_details=mock_mb_release,
+                target_album_artist="Rae Sremmurd",
+                target_album_title="SR3MM",
+                force=True,
+            )
+        # Swae Lee must be preserved as track artist, Rae Sremmurd set as album artist
+        self.assertEqual(res.artist, "Swae Lee")
+        self.assertEqual(res.album_artist, "Rae Sremmurd")
+
+    def test_album_genre_consensus_harmonization(self) -> None:
+        """Album genre consensus must harmonize isolated instrumental/unknown outliers to dominant genre."""
+        album_dir = self.tmp_path / "Lewis Capaldi - Divinely Uninspired"
+        album_dir.mkdir(parents=True, exist_ok=True)
+
+        f1 = album_dir / "01 - Grace.wav"
+        f2 = album_dir / "02 - Bruises.wav"
+        f3 = album_dir / "03 - Hold Me While You Wait.wav"
+        f4 = album_dir / "04 - Maybe.wav"
+        for f in (f1, f2, f3, f4):
+            create_dummy_wav(f)
+
+        write_track_metadata(
+            TrackInfo(
+                file_path=f1,
+                artist="Lewis Capaldi",
+                album="Divinely Uninspired",
+                title="Grace",
+                genre="Alternative",
+                track_number=1,
+            )
+        )
+        write_track_metadata(
+            TrackInfo(
+                file_path=f2,
+                artist="Lewis Capaldi",
+                album="Divinely Uninspired",
+                title="Bruises",
+                genre="Alternative",
+                track_number=2,
+            )
+        )
+        write_track_metadata(
+            TrackInfo(
+                file_path=f3,
+                artist="Lewis Capaldi",
+                album="Divinely Uninspired",
+                title="Hold Me While You Wait",
+                genre="Alternative",
+                track_number=3,
+            )
+        )
+        # Track 4 is an outlier with 'Instrumental'
+        write_track_metadata(
+            TrackInfo(
+                file_path=f4,
+                artist="Lewis Capaldi",
+                album="Divinely Uninspired",
+                title="Maybe",
+                genre="Instrumental",
+                track_number=4,
+            )
+        )
+
+        with (
+            patch(
+                "sonora.modules.tagger.search_musicbrainz_release", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_deezer_album_details", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_itunes_album_details", return_value=None
+            ),
+            patch("sonora.modules.tagger.process_artist_artwork"),
+            patch("sonora.modules.tagger.calculate_album_replaygain"),
+            patch("sonora.modules.tagger._enrich_musicbrainz"),
+            patch("sonora.modules.tagger._enrich_acoustid"),
+            patch("sonora.modules.tagger._enrich_deezer"),
+            patch("sonora.modules.tagger._enrich_itunes"),
+            patch("sonora.modules.tagger._enrich_theaudiodb"),
+            patch("sonora.modules.tagger._enrich_genius"),
+        ):
+            results = tag_album_folder(
+                album_dir,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_replaygain=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+            )
+
+        # All 4 tracks must now have 'Alternative' genre
+        genres = {t.title: t.genre for t in results}
+        self.assertEqual(genres["Maybe"], "Alternative")
+        self.assertEqual(genres["Grace"], "Alternative")
+
+
+class TestKeyboardInterruptHandling(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp_dir.name)
+
+    def tearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    def test_backup_handles_keyboard_interrupt(self) -> None:
+        wav = self.tmp_path / "test.wav"
+        create_dummy_wav(wav)
+        with (
+            patch(
+                "sonora.modules.backup._read_track_for_backup",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            backup_library_tags(self.tmp_path, max_threads=2)
+
+    def test_restore_handles_keyboard_interrupt(self) -> None:
+        backup_file = self.tmp_path / "backup.json"
+        backup_file.write_text('{"test.wav": {}}', encoding="utf-8")
+        with (
+            patch(
+                "sonora.modules.backup._restore_single_track",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            restore_library_tags(backup_file, max_threads=2)
+
+    def test_organize_handles_keyboard_interrupt(self) -> None:
+        wav1 = self.tmp_path / "test1.wav"
+        wav2 = self.tmp_path / "test2.wav"
+        create_dummy_wav(wav1)
+        create_dummy_wav(wav2)
+        with (
+            patch(
+                "sonora.modules.organizer.read_track_metadata",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            organize_library_singles(
+                self.tmp_path, self.tmp_path / "Singles", max_threads=2
+            )
+
+    def test_renamer_handles_keyboard_interrupt(self) -> None:
+        wav1 = self.tmp_path / "test1.wav"
+        wav2 = self.tmp_path / "test2.wav"
+        create_dummy_wav(wav1)
+        create_dummy_wav(wav2)
+        with (
+            patch(
+                "sonora.modules.renamer.read_track_metadata",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            rename_directory_files(self.tmp_path, max_threads=2)
+
+    def test_checker_handles_keyboard_interrupt(self) -> None:
+        wav = self.tmp_path / "test.wav"
+        create_dummy_wav(wav)
+        with (
+            patch(
+                "sonora.modules.checker._check_single_file",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            check_library(self.tmp_path, max_threads=2)
+
+    def test_replaygain_handles_keyboard_interrupt(self) -> None:
+        wav1 = self.tmp_path / "test1.wav"
+        wav2 = self.tmp_path / "test2.wav"
+        create_dummy_wav(wav1)
+        create_dummy_wav(wav2)
+        with (
+            patch(
+                "sonora.audio.replaygain._measure_track_loudness",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            calculate_album_replaygain([wav1, wav2], max_threads=2)
+
+    def test_normalize_handles_keyboard_interrupt(self) -> None:
+        wav = self.tmp_path / "test.wav"
+        create_dummy_wav(wav)
+        with (
+            patch(
+                "sonora.modules.tagger.normalize_single_track",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            normalize_library(self.tmp_path, max_threads=2)
+
+    def test_tagger_handles_keyboard_interrupt(self) -> None:
+        wav = self.tmp_path / "test.wav"
+        create_dummy_wav(wav)
+        with (
+            patch(
+                "sonora.modules.tagger.process_single_track",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch(
+                "sonora.modules.tagger.search_musicbrainz_release", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_deezer_album_details", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_itunes_album_details", return_value=None
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            tag_album_folder(
+                self.tmp_path,
+                max_threads=2,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_replaygain=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+            )
 
 
 if __name__ == "__main__":

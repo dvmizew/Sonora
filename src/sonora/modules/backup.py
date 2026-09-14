@@ -14,7 +14,7 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import TrackInfo
-from sonora.core.utils import find_audio_files
+from sonora.core.utils import InterruptedOperationError, find_audio_files
 
 _GZIP_MAGIC_HEADER = b"\x1f\x8b"
 
@@ -92,17 +92,19 @@ def backup_library_tags(
     backup_data: dict[str, Any] = {}
     failed = 0
 
-    with create_progress() as progress:
+    with (
+        create_progress() as progress,
+        ThreadPoolExecutor(max_workers=max_threads) as executor,
+    ):
         task = progress.add_task(
             "[cyan]Backing up audio tags...", total=len(audio_files)
         )
+        futures = [
+            executor.submit(_read_track_for_backup, file_path)
+            for file_path in audio_files
+        ]
         with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
-                futures = [
-                    executor.submit(_read_track_for_backup, file_path)
-                    for file_path in audio_files
-                ]
                 for future in as_completed(futures):
                     path_str, data = future.result()
                     if data is not None:
@@ -111,10 +113,8 @@ def backup_library_tags(
                         failed += 1
                     progress.advance(task)
             except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=True, cancel_futures=True)
                 raise
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
 
     try:
         raw_json_bytes = orjson.dumps(backup_data, option=orjson.OPT_INDENT_2)
@@ -139,14 +139,6 @@ def backup_library_tags(
         raise
 
 
-LAST_RESTORED_COUNT: int = 0
-
-
-def get_last_restored_count() -> int:
-    """Return the number of files restored during the most recent or interrupted restore run."""
-    return LAST_RESTORED_COUNT
-
-
 def restore_library_tags(
     backup_file: Path,
     target_directory: Path | None = None,
@@ -159,9 +151,6 @@ def restore_library_tags(
     if not backup_file.exists():
         raise FileNotFoundError(f"Backup file not found: {backup_file}")
 
-    global LAST_RESTORED_COUNT
-    LAST_RESTORED_COUNT = 0
-
     LOG.info(
         f"🔄 Starting tag restoration from {backup_file} (threads={max_threads})..."
     )
@@ -173,7 +162,7 @@ def restore_library_tags(
         backup_dict: dict[str, Any] = orjson.loads(content)
         if not isinstance(backup_dict, dict):
             raise TypeError("Backup file is not a valid JSON object")
-    except (orjson.JSONDecodeError, OSError, ValueError) as error:
+    except (orjson.JSONDecodeError, OSError, TypeError, ValueError) as error:
         LOG.error(f"Failed to read backup file: {error}")
         raise
 
@@ -186,38 +175,37 @@ def restore_library_tags(
         for p in find_audio_files(search_base_dir, recursive=True):
             candidate_lookup.setdefault(p.name, p)
 
-    with create_progress() as progress:
+    with (
+        create_progress() as progress,
+        ThreadPoolExecutor(max_workers=max_threads) as executor,
+    ):
         task = progress.add_task(
             "[cyan]Restoring audio tags...", total=len(backup_dict)
         )
+        futures = [
+            executor.submit(
+                _restore_single_track,
+                file_str,
+                tags,
+                search_base_dir,
+                candidate_lookup,
+            )
+            for file_str, tags in backup_dict.items()
+        ]
         with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
-                futures = [
-                    executor.submit(
-                        _restore_single_track,
-                        file_str,
-                        tags,
-                        search_base_dir,
-                        candidate_lookup,
-                    )
-                    for file_str, tags in backup_dict.items()
-                ]
                 for future in as_completed(futures):
                     success, is_missing = future.result()
                     if success:
                         count += 1
-                        LAST_RESTORED_COUNT = count
                     elif is_missing:
                         missing += 1
                     else:
                         failed += 1
                     progress.advance(task)
             except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise InterruptedOperationError(count) from None
 
     LOG.info(f"✅ Successfully restored {count} files")
     if missing > 0:

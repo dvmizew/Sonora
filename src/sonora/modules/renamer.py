@@ -15,6 +15,7 @@ from sonora.core.logger import (
 )
 from sonora.core.models import RenameReport, TrackInfo
 from sonora.core.utils import (
+    InterruptedOperationError,
     deduplicate_title_features,
     find_audio_files,
     find_companion_lyrics,
@@ -66,7 +67,7 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
             file_handle.writelines(new_lines)
         return True
 
-    except (OSError, ValueError, KeyError) as error:
+    except (OSError, ValueError) as error:
         LOG.debug(f"Failed to sync LRC metadata for {lrc_path}: {error}")
         return False
 
@@ -256,15 +257,23 @@ def rename_album_folder(
     return folder_path
 
 
-LAST_RENAME_REPORT: RenameReport = RenameReport()
-
-
-def get_last_rename_report() -> RenameReport:
-    return LAST_RENAME_REPORT
+def _rename_single_worker(
+    path: Path, dry_run: bool
+) -> tuple[Path, TrackInfo | None, Path | None]:
+    try:
+        info = read_track_metadata(path)
+        new_path = rename_track_file(path, track_info=info, dry_run=dry_run)
+        return path, info, new_path
+    except (OSError, ValueError, RuntimeError) as error:
+        LOG.warning(f"Failed to rename file {escape(str(path))}: {error}")
+        return path, None, None
 
 
 def rename_directory_files(
-    dir_path: Path, dry_run: bool = False, max_threads: int = 4
+    dir_path: Path,
+    dry_run: bool = False,
+    max_threads: int = 4,
+    report: RenameReport | None = None,
 ) -> list[Path]:
     """
     Scan a directory (recursively) and rename all supported audio files, their .lrc files,
@@ -278,77 +287,55 @@ def rename_directory_files(
     total_files_count = len(all_audio_files)
     folder_files = group_files_by_parent(all_audio_files)
 
-    global LAST_RENAME_REPORT
-    report = RenameReport(total_files=total_files_count)
-    LAST_RENAME_REPORT = report
+    if report is None:
+        report = RenameReport(total_files=total_files_count)
+    else:
+        report.total_files = total_files_count
 
     with create_progress() as progress:
         task = progress.add_task(
             "[cyan]Renaming audio files...", total=total_files_count
         )
-        with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=max_threads)
+        with (
+            interactive_pause_listener(progress, task),
+            ThreadPoolExecutor(max_workers=max_threads) as executor,
+        ):
             try:
                 for folder, files in folder_files.items():
                     album_consensus: Counter[tuple[str, str]] = Counter()
                     folder_renamed_paths: list[Path] = []
 
-                    def _process_file(
-                        path: Path,
-                    ) -> tuple[Path, TrackInfo | None, Path | None]:
-                        try:
-                            info = read_track_metadata(path)
-                            new_path = rename_track_file(
-                                path, track_info=info, dry_run=dry_run
+                    file_results = (
+                        (
+                            fut.result()
+                            for fut in as_completed(
+                                [
+                                    executor.submit(_rename_single_worker, p, dry_run)
+                                    for p in files
+                                ]
                             )
-                            return path, info, new_path
-                        except (OSError, ValueError, RuntimeError) as error:
-                            LOG.warning(
-                                f"Failed to rename file {escape(str(path))}: {error}"
-                            )
-                            return path, None, None
-
-                    if max_threads > 1 and len(files) > 1:
-                        futures = [executor.submit(_process_file, p) for p in files]
-                        for fut in as_completed(futures):
-                            wait_if_paused()
-                            path, info, new_path = fut.result()
-                            if info is not None and new_path is not None:
-                                search_artist = info.album_artist or info.artist
-                                if (
-                                    search_artist != "Unknown Artist"
-                                    and info.album != "Unknown Album"
-                                ):
-                                    album_consensus[(search_artist, info.album)] += 1
-                                folder_renamed_paths.append(new_path)
-                                if (
-                                    new_path.name != path.name
-                                    or new_path.parent != path.parent
-                                ):
-                                    report.files_renamed += 1
-                                else:
-                                    report.unchanged_files += 1
-                            progress.advance(task)
-                    else:
-                        for path in files:
-                            wait_if_paused()
-                            p, info, new_path = _process_file(path)
-                            if info is not None and new_path is not None:
-                                search_artist = info.album_artist or info.artist
-                                if (
-                                    search_artist != "Unknown Artist"
-                                    and info.album != "Unknown Album"
-                                ):
-                                    album_consensus[(search_artist, info.album)] += 1
-                                folder_renamed_paths.append(new_path)
-                                if (
-                                    new_path.name != path.name
-                                    or new_path.parent != path.parent
-                                ):
-                                    report.files_renamed += 1
-                                else:
-                                    report.unchanged_files += 1
-                            progress.advance(task)
+                        )
+                        if max_threads > 1 and len(files) > 1
+                        else (_rename_single_worker(p, dry_run) for p in files)
+                    )
+                    for path, info, new_path in file_results:
+                        wait_if_paused()
+                        if info is not None and new_path is not None:
+                            search_artist = info.album_artist or info.artist
+                            if (
+                                search_artist != "Unknown Artist"
+                                and info.album != "Unknown Album"
+                            ):
+                                album_consensus[(search_artist, info.album)] += 1
+                            folder_renamed_paths.append(new_path)
+                            if (
+                                new_path.name != path.name
+                                or new_path.parent != path.parent
+                            ):
+                                report.files_renamed += 1
+                            else:
+                                report.unchanged_files += 1
+                        progress.advance(task)
 
                     # Rename album folder based on consensus for this folder
                     final_folder = folder
@@ -381,7 +368,8 @@ def rename_directory_files(
                             renamed.append(final_folder / p.name)
                         else:
                             renamed.append(p)
-            finally:
-                executor.shutdown(wait=False)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise InterruptedOperationError(report) from None
 
     return renamed
