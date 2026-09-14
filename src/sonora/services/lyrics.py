@@ -63,7 +63,7 @@ def init_musixmatch_token(token_str: str | None = None) -> bool:
             extracted_token = data.get("token") or data.get("user_token")
         else:
             extracted_token = decoded
-    except (ValueError, KeyError):
+    except ValueError:
         extracted_token = raw.strip()
 
     if extracted_token:
@@ -322,10 +322,7 @@ def fetch_synced_lyrics(
             httpx.HTTPError,
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
-            AttributeError,
             TimeoutError,
         ) as error:
             last_exception = error
@@ -340,10 +337,7 @@ def fetch_synced_lyrics(
             httpx.HTTPError,
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
-            AttributeError,
             TimeoutError,
         ) as error:
             last_exception = error
@@ -359,10 +353,7 @@ def fetch_synced_lyrics(
             httpx.HTTPError,
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
-            AttributeError,
             TimeoutError,
         ) as error:
             last_exception = error
@@ -419,10 +410,7 @@ def process_track_lyrics(
         httpx.HTTPError,
         OSError,
         ValueError,
-        KeyError,
         RuntimeError,
-        TypeError,
-        AttributeError,
         TimeoutError,
     ) as error:
         LOG.debug(f"Lyrics lookup error for {title}: {error}")

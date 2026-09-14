@@ -212,7 +212,7 @@ def fetch_discogs_release_details(
         }
         set_cached_api(cache_key, release_result)
         return release_result
-    except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Discogs release fetch failed for ID {release_id}: {error}")
         return None
 
@@ -364,6 +364,6 @@ def search_discogs_release(
         }
         set_cached_api(cache_key, release_result)
         return release_result
-    except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Discogs search failed for {artist} - {album}: {error}")
         return None

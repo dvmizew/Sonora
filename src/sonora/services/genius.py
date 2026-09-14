@@ -127,6 +127,6 @@ def fetch_genius_song_details(
         set_cached_api(cache_key, result)
         return result
 
-    except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {error}")
         return None

@@ -68,17 +68,20 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
 
         set_cached_api(cache_key, best_cover_url)
         return best_cover_url
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"Deezer cover art lookup failed for {artist} - {album}: {error}")
         return None
 
 
-def fetch_deezer_album_details(artist: str, album: str) -> dict[str, Any] | None:
+def fetch_deezer_album_details(
+    artist: str, album: str, expected_track_count: int | None = None
+) -> dict[str, Any] | None:
     if not (artist and album):
         return None
 
     clean_album = clean_title(album)
-    cache_key = f"deezer_meta:{normalize_str(artist)}:{normalize_str(clean_album)}"
+    cache_suffix = f":{expected_track_count}" if expected_track_count else ""
+    cache_key = f"deezer_meta:{normalize_str(artist)}:{normalize_str(clean_album)}{cache_suffix}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -110,6 +113,24 @@ def fetch_deezer_album_details(artist: str, album: str) -> dict[str, Any] | None
             score = match_score(artist, clean_album, item_artist, item_title)
             if normalize_str(item_title) == normalize_str(clean_album):
                 score += 50.0
+
+            nb_tracks = safe_int(item.get("nb_tracks"))
+            record_type = str(item.get("record_type", "")).lower()
+            if expected_track_count is not None and nb_tracks is not None:
+                diff = abs(nb_tracks - expected_track_count)
+                if diff == 0:
+                    score += 40.0
+                elif diff <= 2:
+                    score += 20.0
+                elif expected_track_count >= 3 and nb_tracks == 1:
+                    score -= 60.0
+            if (
+                expected_track_count is not None
+                and expected_track_count >= 3
+                and record_type == "single"
+            ):
+                score -= 40.0
+
             if score > best_score and score >= 60.0:
                 best_score = score
                 best_item = item
@@ -196,7 +217,7 @@ def fetch_deezer_album_details(artist: str, album: str) -> dict[str, Any] | None
         }
         set_cached_api(cache_key, result)
         return result
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"Deezer album details lookup failed for {artist} - {album}: {error}")
         return None
 
@@ -293,7 +314,7 @@ def fetch_deezer_track_by_isrc(
         result = _parse_deezer_track_payload(track_data)
         set_cached_api(cache_key, result)
         return result
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"Deezer track lookup by ISRC failed for {isrc}: {error}")
         return None
 
@@ -362,6 +383,6 @@ def fetch_deezer_track_details(
         result = _parse_deezer_track_payload(track_data)
         set_cached_api(cache_key, result)
         return result
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"Deezer track details lookup failed for {artist} - {title}: {error}")
         return None

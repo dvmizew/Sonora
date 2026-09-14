@@ -11,6 +11,7 @@ from sonora.core.utils import (
     match_score,
     normalize_country_name,
     normalize_str,
+    safe_int,
 )
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
@@ -46,7 +47,7 @@ def search_itunes(
         ]
         set_cached_api(cache_key, results)
         return results
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"iTunes Search API request failed for {query_term}: {error}")
         return []
 
@@ -186,7 +187,36 @@ def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | 
     }
 
 
-def fetch_itunes_album_details(artist: str, album: str) -> dict[str, object] | None:
+def _score_itunes_album(
+    album_dict: dict[str, object],
+    artist: str,
+    album: str,
+    normalized_target: str,
+    expected_track_count: int | None = None,
+) -> float:
+    score = 0.0
+    coll_name = str(album_dict.get("collectionName", ""))
+    cand_art = str(album_dict.get("artistName", ""))
+    score += match_score(artist, album, cand_art, coll_name)
+    if normalize_str(coll_name) == normalized_target:
+        score += 30.0
+    if str(album_dict.get("collectionExplicitness", "")).lower() == "explicit":
+        score += 15.0
+    tc = safe_int(album_dict.get("trackCount"))
+    if expected_track_count is not None and tc is not None:
+        diff = abs(tc - expected_track_count)
+        if diff == 0:
+            score += 50.0
+        elif diff <= 2:
+            score += 25.0
+        elif expected_track_count >= 3 and tc == 1:
+            score -= 60.0
+    return score
+
+
+def fetch_itunes_album_details(
+    artist: str, album: str, expected_track_count: int | None = None
+) -> dict[str, object] | None:
     """
     Fetch album metadata and all track details in ONE single lookup from iTunes Search API.
     Returns mapping of album details and track items indexed by track number and title.
@@ -217,13 +247,12 @@ def fetch_itunes_album_details(artist: str, album: str) -> dict[str, object] | N
     if not matching_albums:
         return None
 
-    # Prefer explicit edition over cleaned edition for album matching
-    explicit_albums = [
-        r
-        for r in matching_albums
-        if str(r.get("collectionExplicitness", "")).lower() == "explicit"
-    ]
-    best_album = explicit_albums[0] if explicit_albums else matching_albums[0]
+    best_album = max(
+        matching_albums,
+        key=lambda cand: _score_itunes_album(
+            cand, artist, album, normalized_target, expected_track_count
+        ),
+    )
 
     collection_id = best_album.get("collectionId")
     if not collection_id:
@@ -282,6 +311,8 @@ def fetch_itunes_album_details(artist: str, album: str) -> dict[str, object] | N
             )
 
             t_info: dict[str, object] = {
+                "title": t_name,
+                "artist": item.get("artistName"),
                 "genre": item.get("primaryGenreName"),
                 "advisory": advisory,
                 "itunes_trackid": str(item["trackId"]) if item.get("trackId") else None,
@@ -304,6 +335,6 @@ def fetch_itunes_album_details(artist: str, album: str) -> dict[str, object] | N
 
         set_cached_api(cache_key, album_meta)
         return album_meta
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"iTunes album lookup failed for ID {collection_id}: {error}")
         return None

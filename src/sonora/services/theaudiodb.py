@@ -67,7 +67,7 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
                 if thumbnail_bytes or banner_bytes:
                     set_cached_api(cache_key, result)
                 return result
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"TheAudioDB fetch_artist_images failed for {artist_name}: {error}")
     return None, None
 
@@ -115,7 +115,7 @@ def fetch_theaudiodb_track_details(
                 }
                 set_cached_api(cache_key, details)
                 return details
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(
             f"TheAudioDB track lookup failed for {artist_name} - {track_title}: {error}"
         )

@@ -64,7 +64,7 @@ def fetch_lastfm_tags(
         final_tags = tag_names[:5]
         set_cached_api(cache_key, final_tags)
         return final_tags
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         if mbid and artist and title and not _retried:
             return fetch_lastfm_tags(
                 artist, title, api_key=api_key, mbid=None, _retried=True

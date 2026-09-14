@@ -46,8 +46,6 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
 
 
 _ACOUSTID_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_ACOUSTID)
-_ACOUSTID_FAILURES = 0
-_MAX_ACOUSTID_FAILURES = 3
 
 
 def lookup_acoustid(
@@ -61,8 +59,7 @@ def lookup_acoustid(
     Ranks candidate matches using a combination of acoustic score and title/artist match_score.
     Returns the MBID string if found, otherwise None.
     """
-    global _ACOUSTID_FAILURES
-    if not api_key or _ACOUSTID_FAILURES >= _MAX_ACOUSTID_FAILURES:
+    if not api_key:
         return None
 
     try:
@@ -112,18 +109,13 @@ def lookup_acoustid(
                     best_mbid = str(recording_id)
 
         set_cached_api(cache_key, best_mbid)
-        if best_mbid:
-            _ACOUSTID_FAILURES = 0
-            return best_mbid
-        return None
+        return best_mbid if best_mbid else None
     except (
         acoustid.AcoustidError,
         acoustid.WebServiceError,
         OSError,
         ValueError,
-        KeyError,
         RuntimeError,
     ) as error:
         LOG.debug(f"AcoustID lookup failed for {file_path.name}: {error}")
-        _ACOUSTID_FAILURES += 1
         return None

@@ -10,7 +10,7 @@ from sonora.core.config import get_config
 from sonora.core.constants import RATE_LIMIT_FANART
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, is_valid_uuid
+from sonora.core.utils import RateLimiter, is_valid_uuid, safe_int
 
 _FANART_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_FANART)
 _BASE_URL = "https://webservice.fanart.tv/v3.2/music"
@@ -40,15 +40,13 @@ def _extract_image_urls(raw_items: Any) -> list[str]:
     if not isinstance(raw_items, list):
         return []
 
-    def _get_likes(item: Any) -> int:
-        if isinstance(item, dict):
-            try:
-                return int(item.get("likes", 0))
-            except (ValueError, TypeError):
-                return 0
-        return 0
-
-    sorted_items = sorted(raw_items, key=_get_likes, reverse=True)
+    sorted_items = sorted(
+        raw_items,
+        key=lambda item: (
+            safe_int(item.get("likes")) or 0 if isinstance(item, dict) else 0
+        ),
+        reverse=True,
+    )
     urls: list[str] = []
     for item in sorted_items:
         if isinstance(item, dict):
@@ -141,7 +139,7 @@ def fetch_fanart_artist(
             },
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"Fanart.tv artist fetch failed for {artist_mbid}: {error}")
         return None
 
@@ -196,7 +194,7 @@ def fetch_fanart_label(
             {"label_urls": list(artwork.label_urls)},
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"Fanart.tv label fetch failed for {label_mbid}: {error}")
         return None
 
@@ -277,6 +275,6 @@ def fetch_fanart_album(
             },
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"Fanart.tv album fetch failed for {release_group_mbid}: {error}")
         return None

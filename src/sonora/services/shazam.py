@@ -16,6 +16,8 @@ from sonora.core.utils import RateLimiter
 _T = TypeVar("_T")
 _SHAZAM_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_SHAZAM)
 
+import aiohttp
+from shazamio.exceptions import BadParseData, FailedDecodeJson
 from shazamio_core.shazamio_core import SignatureError
 
 
@@ -56,13 +58,13 @@ async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
         return raw_result if isinstance(raw_result, dict) else None
     except (
         ImportError,
+        aiohttp.ClientError,
         OSError,
         ValueError,
         RuntimeError,
-        TypeError,
-        KeyError,
-        AttributeError,
         SignatureError,
+        BadParseData,
+        FailedDecodeJson,
     ) as error:
         LOG.debug(f"Shazam recognition error for {file_path.name}: {error}")
         return None
@@ -78,12 +80,12 @@ async def _track_about_async(track_id: int) -> dict[str, Any] | None:
         return raw_result if isinstance(raw_result, dict) else None
     except (
         ImportError,
+        aiohttp.ClientError,
         OSError,
         ValueError,
         RuntimeError,
-        TypeError,
-        KeyError,
-        AttributeError,
+        BadParseData,
+        FailedDecodeJson,
     ) as error:
         LOG.debug(f"Shazam track_about error for {track_id}: {error}")
         return None
