@@ -121,12 +121,17 @@ def set_ignore_cache(ignore: bool) -> None:
 
 def get_cache() -> Any:
     global _CACHE_INSTANCE
+    api_cache_dir = get_api_cache_dir()
+    if _CACHE_INSTANCE is not None and getattr(
+        _CACHE_INSTANCE, "directory", None
+    ) != str(api_cache_dir):
+        close_cache()
+
     if _CACHE_INSTANCE is None:
         with _CACHE_LOCK:
             if _CACHE_INSTANCE is None:
                 try:
                     cache_dir = get_cache_dir()
-                    api_cache_dir = get_api_cache_dir()
                     _migrate_legacy_cache(cache_dir, api_cache_dir)
                     api_cache_dir.mkdir(parents=True, exist_ok=True)
                     _CACHE_INSTANCE = diskcache.Cache(
@@ -136,9 +141,7 @@ def get_cache() -> Any:
                 except (
                     OSError,
                     ValueError,
-                    KeyError,
                     RuntimeError,
-                    TypeError,
                 ) as error:
                     LOG.debug(f"Cache initialization failed: {error}")
                     _CACHE_INSTANCE = None
@@ -157,9 +160,7 @@ def get_cached_api(key: str) -> Any | None:
         except (
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Cache fetch failed for key '{key}': {error}")
@@ -180,9 +181,7 @@ def set_cached_api(
         except (
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Cache store failed for key '{key}': {error}")
@@ -220,9 +219,7 @@ def get_cache_stats() -> CacheStats:
         except (
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Failed to get cache length: {error}")
@@ -308,9 +305,7 @@ def clear_cache(
             except (
                 OSError,
                 ValueError,
-                KeyError,
                 RuntimeError,
-                TypeError,
                 diskcache.Timeout,
             ) as error:
                 LOG.debug(f"Failed to read cache entries before clearing: {error}")
@@ -331,9 +326,7 @@ def clear_cache(
                 except (
                     OSError,
                     ValueError,
-                    KeyError,
                     RuntimeError,
-                    TypeError,
                     diskcache.Timeout,
                 ) as error:
                     LOG.debug(f"Cache clear/check failed: {error}")
@@ -409,9 +402,7 @@ def close_cache() -> None:
             except (
                 OSError,
                 ValueError,
-                KeyError,
                 RuntimeError,
-                TypeError,
                 diskcache.Timeout,
             ) as error:
                 LOG.debug(f"Cache close failed: {error}")

@@ -145,6 +145,10 @@ class TestCoreUtils(unittest.TestCase):
             clean_title("Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"),
             "Melodie",
         )
+        self.assertEqual(
+            clean_title('R.I.P ROACH "EAST SIDE SOULJA"'),
+            'R.I.P ROACH "EAST SIDE SOULJA"',
+        )
         self.assertEqual(clean_title(""), "")
 
     def test_clean_disambiguation(self) -> None:

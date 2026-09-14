@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 import anyascii
 import ftfy
@@ -23,7 +23,6 @@ from music_metadata_filter.functions import (
     remove_remastered,
     remove_zero_width,
     replace_nbsp,
-    youtube,
 )
 from pathvalidate import sanitize_filename
 from rapidfuzz import fuzz
@@ -102,6 +101,14 @@ _WORD_NUMBER_MAP: dict[str, int] = {
     "nineteen": 19,
     "twenty": 20,
 }
+
+
+class InterruptedOperationError(KeyboardInterrupt):
+    """Raised when an operation is cancelled via SIGINT / KeyboardInterrupt, carrying partial progress."""
+
+    def __init__(self, partial_result: Any = None) -> None:
+        super().__init__()
+        self.partial_result = partial_result
 
 
 def extract_series_number(text: str | None) -> int | None:
@@ -416,7 +423,6 @@ _METADATA_FILTER = MetadataFilter(
         "track": (
             remove_zero_width,
             replace_nbsp,
-            youtube,
             remove_clean_explicit,
             remove_reissue,
             remove_remastered,
@@ -440,7 +446,7 @@ _METADATA_FILTER = MetadataFilter(
 )
 
 _TITLE_EDITION_PATTERN = re.compile(
-    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd|album\s+version).*?[\)\]\}]",
+    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd|album\s+version|clean\s+version|explicit\s+version|parody|official\s+(?:music\s+)?video|official\s+audio).*?[\)\]\}]",
     re.IGNORECASE,
 )
 
@@ -584,6 +590,9 @@ def is_version_or_remix(text: str) -> bool:
     return any(keyword in text_lower for keyword in _VERSION_OR_REMIX_KEYWORDS)
 
 
+_NON_WORD_SPACES_PATTERN = re.compile(r"[^\w\s]")
+
+
 def match_score(
     query_artist: str,
     query_title: str,
@@ -621,6 +630,23 @@ def match_score(
         )
         title_score = max(title_ratio, title_token_sort)
 
+        # Check match with punctuation stripped (e.g. quotes or dots in subtitles/prefixes)
+        qw = _NON_WORD_SPACES_PATTERN.sub(" ", query_title_clean).strip()
+        cw = _NON_WORD_SPACES_PATTERN.sub(" ", candidate_title_clean).strip()
+        if qw and cw and (qw != query_title_clean or cw != candidate_title_clean):
+            title_score = max(
+                title_score,
+                float(fuzz.ratio(qw, cw)),
+                float(fuzz.token_sort_ratio(qw, cw)),
+            )
+            q_toks = qw.split()
+            c_toks = cw.split()
+            if (
+                min(len(q_toks), len(c_toks)) >= 3
+                and min(len(qw), len(cw)) / max(len(qw), len(cw)) >= 0.5
+            ):
+                title_score = max(title_score, float(fuzz.token_set_ratio(qw, cw)))
+
         # Check match after stripping leading articles ('the ', 'a ', 'an ')
         q_no_art = re.sub(r"^(?:the|a|an)\s+", "", query_title_clean).strip()
         c_no_art = re.sub(r"^(?:the|a|an)\s+", "", candidate_title_clean).strip()
@@ -638,7 +664,10 @@ def match_score(
         candidate_title_clean
     )
     if q_ver != c_ver:
-        title_score -= 35.0
+        if query_title_clean == candidate_title_clean:
+            title_score -= 15.0
+        else:
+            title_score -= 35.0
     elif q_ver and c_ver:
         for kw in _VERSION_OR_REMIX_KEYWORDS:
             if (kw in query_title_clean) != (kw in candidate_title_clean):
@@ -676,7 +705,6 @@ def match_score(
     return float(title_score)
 
 
-_NON_WORD_SPACES_PATTERN = re.compile(r"[^\w\s]")
 _DATE_ISO_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _DATE_YEAR_PATTERN = re.compile(r"(\d{4})")
 
@@ -692,22 +720,7 @@ def normalize_str(text: str | None) -> str:
     if not text:
         return ""
     fixed_text = ftfy.fix_text(str(text)).replace("$", "s").replace("_", " ")
-    try:
-        ascii_text = anyascii.anyascii(fixed_text)
-    except (
-        ImportError,
-        ModuleNotFoundError,
-        KeyError,
-        AttributeError,
-        TypeError,
-        ValueError,
-        OSError,
-    ):
-        ascii_text = (
-            unicodedata.normalize("NFKD", fixed_text)
-            .encode("ASCII", "ignore")
-            .decode("ASCII")
-        )
+    ascii_text = anyascii.anyascii(fixed_text)
     cleaned_text = "".join(
         char
         for char in unicodedata.normalize("NFD", ascii_text.lower())
@@ -916,39 +929,24 @@ def normalize_country_name(country_input: str | None) -> str | None:
         return "Europe"
 
     try:
-        if len(cleaned) == 2:
-            match = pycountry.countries.get(alpha_2=upper)
-            if match is not None and hasattr(match, "name"):
-                return str(match.name)
-            historic = pycountry.historic_countries.get(alpha_2=upper)
-            if historic is not None and hasattr(historic, "name"):
-                return str(historic.name)
-
-        if len(cleaned) == 3:
-            match = pycountry.countries.get(alpha_3=upper)
-            if match is not None and hasattr(match, "name"):
-                return str(match.name)
-            historic = pycountry.historic_countries.get(alpha_3=upper)
-            if historic is not None and hasattr(historic, "name"):
-                return str(historic.name)
-
-        if len(cleaned) == 4:
-            historic = pycountry.historic_countries.get(alpha_4=upper)
-            if historic is not None and hasattr(historic, "name"):
-                return str(historic.name)
-
-        match = pycountry.countries.get(name=cleaned)
+        match = pycountry.countries.lookup(cleaned)
         if match is not None and hasattr(match, "name"):
             return str(match.name)
+    except LookupError:
+        pass
 
-        historic = pycountry.historic_countries.get(name=cleaned)
+    try:
+        historic = pycountry.historic_countries.lookup(cleaned)
         if historic is not None and hasattr(historic, "name"):
             return str(historic.name)
+    except LookupError:
+        pass
 
+    try:
         fuzzy_matches = pycountry.countries.search_fuzzy(cleaned)
         if fuzzy_matches and hasattr(fuzzy_matches[0], "name"):
             return str(fuzzy_matches[0].name)
-    except (LookupError, AttributeError):
+    except LookupError:
         pass
 
     return cleaned
@@ -971,15 +969,11 @@ def normalize_language_name(language_input: str | None) -> str | None:
                 return str(lang.name)
 
         if len(cleaned) == 3:
-            lang = pycountry.languages.get(alpha_3=lower)
+            lang = pycountry.languages.get(alpha_3=lower) or pycountry.languages.get(
+                bibliographic=lower
+            )
             if lang is not None and hasattr(lang, "name"):
                 return str(lang.name)
-            try:
-                lang = pycountry.languages.get(bibliographic=lower)
-                if lang is not None and hasattr(lang, "name"):
-                    return str(lang.name)
-            except KeyError:
-                pass
 
         lang = pycountry.languages.get(name=cleaned)
         if lang is not None and hasattr(lang, "name"):
@@ -988,7 +982,7 @@ def normalize_language_name(language_input: str | None) -> str | None:
         match = pycountry.languages.lookup(cleaned)
         if match is not None and hasattr(match, "name"):
             return str(match.name)
-    except (LookupError, AttributeError):
+    except LookupError:
         pass
 
     return cleaned
@@ -1004,20 +998,10 @@ def normalize_script_name(script_input: str | None) -> str | None:
         return None
 
     try:
-        if len(cleaned) == 4:
-            script_code = cleaned[:1].upper() + cleaned[1:].lower()
-            sc = pycountry.scripts.get(alpha_4=script_code)
-            if sc is not None and hasattr(sc, "name"):
-                return str(sc.name)
-
-        sc = pycountry.scripts.get(name=cleaned)
-        if sc is not None and hasattr(sc, "name"):
-            return str(sc.name)
-
         match = pycountry.scripts.lookup(cleaned)
         if match is not None and hasattr(match, "name"):
             return str(match.name)
-    except (LookupError, AttributeError):
+    except LookupError:
         pass
 
     return cleaned
@@ -1090,7 +1074,7 @@ def is_valid_uuid(
     try:
         parsed = uuid.UUID(cleaned_uuid)
         return str(parsed).lower() == cleaned_uuid.lower()
-    except (ValueError, AttributeError, TypeError):
+    except ValueError:
         return False
 
 

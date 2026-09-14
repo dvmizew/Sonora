@@ -196,8 +196,20 @@ def interactive_pause_listener(
                         if _PAUSE_EVENT.is_set():
                             _PAUSE_EVENT.clear()
                             if on_pause:
-                                with contextlib.suppress(Exception):
+                                try:
                                     on_pause()
+                                except Exception as e:
+                                    if isinstance(
+                                        e,
+                                        (
+                                            TypeError,
+                                            NameError,
+                                            AttributeError,
+                                            KeyError,
+                                        ),
+                                    ):
+                                        raise
+                                    LOG.debug(f"Pause callback error: {e}")
                             else:
                                 _default_pause()
                             LOG.warning(
@@ -206,8 +218,20 @@ def interactive_pause_listener(
                         else:
                             _PAUSE_EVENT.set()
                             if on_resume:
-                                with contextlib.suppress(Exception):
+                                try:
                                     on_resume()
+                                except Exception as e:
+                                    if isinstance(
+                                        e,
+                                        (
+                                            TypeError,
+                                            NameError,
+                                            AttributeError,
+                                            KeyError,
+                                        ),
+                                    ):
+                                        raise
+                                    LOG.debug(f"Resume callback error: {e}")
                             else:
                                 _default_resume()
                             LOG.info(
@@ -220,7 +244,7 @@ def interactive_pause_listener(
                             else:
                                 break
         finally:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(OSError, getattr(termios, "error", OSError)):
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, orig_term)
 
     listener = threading.Thread(
