@@ -123,13 +123,8 @@ def calculate_bpm(file_path: Path) -> float | None:
         while bpm_value > 190.0:
             bpm_value /= 2.0
 
-        bpm_result = round(float(bpm_value), 1)
-        del spectrogram
-        del onset_env
-        del autocorr
-        del audio_mono
-        return bpm_result
+        return round(float(bpm_value), 1)
 
-    except (OSError, ValueError, RuntimeError, IndexError, TypeError) as error:
+    except (OSError, ValueError, RuntimeError) as error:
         LOG.debug(f"BPM calculation failed for {file_path}: {error}")
         return None

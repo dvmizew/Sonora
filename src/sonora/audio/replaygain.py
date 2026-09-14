@@ -1,3 +1,4 @@
+import functools
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -34,8 +35,6 @@ def _measure_track_loudness(
             if not (np.isnan(track_loudness) or np.isinf(track_loudness))
             else 0.0
         )
-        del audio_data
-        del meter
         return (audio_path, track_gain, track_peak, track_loudness, duration)
     except (ValueError, RuntimeError, OSError) as error:
         LOG.debug(f"Failed to measure loudness for {audio_path}: {error}")
@@ -57,6 +56,32 @@ def calculate_track_replaygain(
         return None
     _, track_gain, track_peak, _, _ = res
     return float(track_gain), float(track_peak)
+
+
+def _write_album_replaygain_track(
+    entry: tuple[Path, float, float, float, float],
+    album_gain: float,
+    max_album_peak: float,
+    dry_run: bool = False,
+) -> bool:
+    file_path, track_gain, track_peak, _, _ = entry
+    if dry_run:
+        LOG.info(
+            f"[DRY-RUN] Would tag {file_path.name}: Track Gain={track_gain:+.2f} dB, "
+            f"Album Gain={album_gain:+.2f} dB, Track Peak={track_peak:.6f}, Album Peak={max_album_peak:.6f}"
+        )
+        return True
+    try:
+        info = read_track_metadata(file_path)
+        info.replaygain_track_gain = round(track_gain, 2)
+        info.replaygain_track_peak = round(track_peak, 6)
+        info.replaygain_album_gain = round(album_gain, 2)
+        info.replaygain_album_peak = round(max_album_peak, 6)
+        write_track_metadata(info)
+        return True
+    except (OSError, ValueError, RuntimeError) as err:
+        LOG.debug(f"Failed to write ReplayGain tags to {file_path}: {err}")
+        return False
 
 
 def calculate_album_replaygain(
@@ -104,32 +129,23 @@ def calculate_album_replaygain(
     track_results: list[tuple[Path, float, float, float, float]] = []
     max_album_peak = 0.0
 
-    executor = ThreadPoolExecutor(max_workers=min(max_threads, 4))
-    try:
-        futures = [
-            executor.submit(_measure_track_loudness, audio_path, target_lufs)
-            for audio_path in valid_files
-        ]
-        for future in futures:
-            try:
-                res = future.result()
-                if res is not None:
-                    track_results.append(res)
-                    max_album_peak = max(max_album_peak, res[2])
-            except (
-                OSError,
-                ValueError,
-                RuntimeError,
-                TypeError,
-                KeyError,
-                AttributeError,
-            ) as error:
-                LOG.debug(f"Track loudness measurement failed: {error}")
-    except KeyboardInterrupt:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    with ThreadPoolExecutor(max_workers=min(max_threads, 4)) as executor:
+        try:
+            futures = [
+                executor.submit(_measure_track_loudness, audio_path, target_lufs)
+                for audio_path in valid_files
+            ]
+            for future in futures:
+                try:
+                    res = future.result()
+                    if res is not None:
+                        track_results.append(res)
+                        max_album_peak = max(max_album_peak, res[2])
+                except (OSError, ValueError, RuntimeError) as error:
+                    LOG.debug(f"Track loudness measurement failed: {error}")
+        except KeyboardInterrupt:
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
 
     if not track_results:
         LOG.warning("Could not calculate loudness for any audio files.")
@@ -158,34 +174,18 @@ def calculate_album_replaygain(
         album_gain = float(np.mean([result[1] for result in track_results]))
 
     # 4. Write ReplayGain metadata tags to each file in parallel
-    def _write_tags(entry: tuple[Path, float, float, float, float]) -> bool:
-        file_path, track_gain, track_peak, _, _ = entry
-        if dry_run:
-            LOG.info(
-                f"[DRY-RUN] Would tag {file_path.name}: Track Gain={track_gain:+.2f} dB, "
-                f"Album Gain={album_gain:+.2f} dB, Track Peak={track_peak:.6f}, Album Peak={max_album_peak:.6f}"
-            )
-            return True
+    writer = functools.partial(
+        _write_album_replaygain_track,
+        album_gain=album_gain,
+        max_album_peak=max_album_peak,
+        dry_run=dry_run,
+    )
+    with ThreadPoolExecutor(max_workers=max_threads) as executor_write:
         try:
-            info = read_track_metadata(file_path)
-            info.replaygain_track_gain = round(track_gain, 2)
-            info.replaygain_track_peak = round(track_peak, 6)
-            info.replaygain_album_gain = round(album_gain, 2)
-            info.replaygain_album_peak = round(max_album_peak, 6)
-            write_track_metadata(info)
-            return True
-        except (OSError, ValueError, RuntimeError) as err:
-            LOG.debug(f"Failed to write ReplayGain tags to {file_path}: {err}")
-            return False
-
-    executor_write = ThreadPoolExecutor(max_workers=max_threads)
-    try:
-        write_results = list(executor_write.map(_write_tags, track_results))
-    except KeyboardInterrupt:
-        executor_write.shutdown(wait=False, cancel_futures=True)
-        raise
-    finally:
-        executor_write.shutdown(wait=False, cancel_futures=True)
+            write_results = list(executor_write.map(writer, track_results))
+        except KeyboardInterrupt:
+            executor_write.shutdown(wait=True, cancel_futures=True)
+            raise
 
     tagged_count = sum(1 for success in write_results if success)
     LOG.info(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")

@@ -1,11 +1,12 @@
 import dataclasses
 import io
 import threading
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import mutagen.mp4
 import taglib
+from mutagen._util import MutagenError
 from PIL import Image
 
 from sonora.core.constants import SUPPORTED_EXTS
@@ -240,14 +241,11 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 is_lossless = False
             elif file_ext in {".m4a", ".mp4"}:
                 try:
-                    import mutagen.mp4
-
-                    mp4_loader: Callable[..., Any] = mutagen.mp4.MP4
-                    mp4_audio: Any = mp4_loader(str(file_path))
+                    mp4_audio: Any = cast(Any, mutagen.mp4.MP4)(str(file_path))
                     is_lossless = (
                         str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
                     )
-                except (OSError, ValueError, RuntimeError, AttributeError, KeyError):
+                except (MutagenError, OSError):
                     is_lossless = False
             else:
                 is_lossless = True
@@ -287,7 +285,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             return track_info
     except (RuntimeError, ValueError, FileNotFoundError):
         raise
-    except (OSError, KeyError) as error:
+    except OSError as error:
         raise RuntimeError(
             f"Failed to read metadata for {file_path}: {error}"
         ) from error
@@ -425,7 +423,7 @@ def write_track_metadata(
                 pass
     except (RuntimeError, ValueError, FileNotFoundError):
         raise
-    except (OSError, KeyError) as error:
+    except OSError as error:
         raise RuntimeError(
             f"Failed to write metadata for {track_info.file_path}: {error}"
         ) from error
