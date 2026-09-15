@@ -33,13 +33,7 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
         with _ACOUSTID_LOCK:
             _ACOUSTID_CACHE[cache_key] = result
         return result
-    except (
-        acoustid.AcoustidError,
-        acoustid.WebServiceError,
-        OSError,
-        ValueError,
-        RuntimeError,
-    ) as error:
+    except (acoustid.AcoustidError, acoustid.WebServiceError, OSError) as error:
         raise RuntimeError(
             f"Chromaprint fingerprinting failed for {file_path}: {error}"
         ) from error
@@ -76,7 +70,7 @@ def lookup_acoustid(
 
         _ACOUSTID_LIMITER.wait()
 
-        results = acoustid.lookup(api_key, fingerprint, duration)
+        acoustid_lookup_payload = acoustid.lookup(api_key, fingerprint, duration)
         best_mbid = None
         best_combined_score = -1.0
 
@@ -85,7 +79,7 @@ def lookup_acoustid(
             recording_id,
             candidate_title,
             candidate_artist,
-        ) in acoustid.parse_lookup_result(results):
+        ) in acoustid.parse_lookup_result(acoustid_lookup_payload):
             if score >= 0.75 and recording_id and is_valid_uuid(str(recording_id)):
                 combined_score = float(score) * 100.0
                 if (
@@ -110,12 +104,6 @@ def lookup_acoustid(
 
         set_cached_api(cache_key, best_mbid)
         return best_mbid or None
-    except (
-        acoustid.AcoustidError,
-        acoustid.WebServiceError,
-        OSError,
-        ValueError,
-        RuntimeError,
-    ) as error:
+    except (acoustid.AcoustidError, acoustid.WebServiceError, OSError) as error:
         LOG.debug(f"AcoustID lookup failed for {file_path.name}: {error}")
         return None

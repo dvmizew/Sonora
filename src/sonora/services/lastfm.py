@@ -47,8 +47,8 @@ def fetch_lastfm_tags(
         url = "https://ws.audioscrobbler.com/2.0/"
         response = SESSION.get(url, params=params, timeout=5)
         response.raise_for_status()
-        data = response.json()
-        tags = data.get("toptags", {}).get("tag", [])
+        lastfm_payload = response.json()
+        tags = lastfm_payload.get("toptags", {}).get("tag", [])
         tag_names = [
             tag["name"].title()
             for tag in tags
@@ -64,7 +64,7 @@ def fetch_lastfm_tags(
         final_tags = tag_names[:5]
         set_cached_api(cache_key, final_tags)
         return final_tags
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         if mbid and artist and title and not _retried:
             return fetch_lastfm_tags(
                 artist, title, api_key=api_key, mbid=None, _retried=True

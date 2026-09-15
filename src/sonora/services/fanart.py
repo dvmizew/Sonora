@@ -42,15 +42,15 @@ def _extract_image_urls(raw_items: Any) -> list[str]:
 
     sorted_items = sorted(
         raw_items,
-        key=lambda item: (
-            safe_int(item.get("likes")) or 0 if isinstance(item, dict) else 0
+        key=lambda image_entry: (
+            safe_int(image_entry.get("likes")) or 0 if isinstance(image_entry, dict) else 0
         ),
         reverse=True,
     )
     urls: list[str] = []
-    for item in sorted_items:
-        if isinstance(item, dict):
-            url = item.get("url")
+    for image_entry in sorted_items:
+        if isinstance(image_entry, dict):
+            url = image_entry.get("url")
             if isinstance(url, str) and url.startswith("http"):
                 urls.append(url)
     return urls
@@ -65,7 +65,7 @@ def download_fanart_image_bytes(url: str | None) -> bytes | None:
         response = SESSION.get(url, timeout=12)
         if response.status_code == 200:
             return response.content
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Failed to download fanart image from {url}: {error}")
     return None
 
@@ -111,16 +111,16 @@ def fetch_fanart_artist(
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, dict):
+        fanart_payload = response.json()
+        if not isinstance(fanart_payload, dict):
             return None
 
-        logos = _extract_image_urls(data.get("hdmusiclogo")) + _extract_image_urls(
-            data.get("musiclogo")
+        logos = _extract_image_urls(fanart_payload.get("hdmusiclogo")) + _extract_image_urls(
+            fanart_payload.get("musiclogo")
         )
-        backgrounds = _extract_image_urls(data.get("artistbackground"))
-        banners = _extract_image_urls(data.get("musicbanner"))
-        thumbs = _extract_image_urls(data.get("artistthumb"))
+        backgrounds = _extract_image_urls(fanart_payload.get("artistbackground"))
+        banners = _extract_image_urls(fanart_payload.get("musicbanner"))
+        thumbs = _extract_image_urls(fanart_payload.get("artistthumb"))
 
         artwork = FanartArtistArtwork(
             logo_urls=tuple(logos),
@@ -139,7 +139,7 @@ def fetch_fanart_artist(
             },
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Fanart.tv artist fetch failed for {artist_mbid}: {error}")
         return None
 
@@ -182,11 +182,11 @@ def fetch_fanart_label(
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, dict):
+        fanart_payload = response.json()
+        if not isinstance(fanart_payload, dict):
             return None
 
-        labels = _extract_image_urls(data.get("musiclabel"))
+        labels = _extract_image_urls(fanart_payload.get("musiclabel"))
         artwork = FanartLabelArtwork(label_urls=tuple(labels))
 
         set_cached_api(
@@ -194,7 +194,7 @@ def fetch_fanart_label(
             {"label_urls": list(artwork.label_urls)},
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Fanart.tv label fetch failed for {label_mbid}: {error}")
         return None
 
@@ -238,29 +238,29 @@ def fetch_fanart_album(
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, dict):
+        fanart_payload = response.json()
+        if not isinstance(fanart_payload, dict):
             return None
 
         cdart_urls: list[str] = []
         cover_urls: list[str] = []
 
-        album_data = data.get("albums")
-        if isinstance(album_data, dict):
-            entry = album_data.get(release_group_mbid) or next(
-                iter(album_data.values()), None
+        album_fanart_payload = fanart_payload.get("albums")
+        if isinstance(album_fanart_payload, dict):
+            entry = album_fanart_payload.get(release_group_mbid) or next(
+                iter(album_fanart_payload.values()), None
             )
             if isinstance(entry, dict):
                 cdart_urls.extend(_extract_image_urls(entry.get("cdart")))
                 cover_urls.extend(_extract_image_urls(entry.get("albumcover")))
-        elif isinstance(album_data, list):
-            for entry in album_data:
+        elif isinstance(album_fanart_payload, list):
+            for entry in album_fanart_payload:
                 if isinstance(entry, dict):
                     cdart_urls.extend(_extract_image_urls(entry.get("cdart")))
                     cover_urls.extend(_extract_image_urls(entry.get("albumcover")))
         else:
-            cdart_urls.extend(_extract_image_urls(data.get("cdart")))
-            cover_urls.extend(_extract_image_urls(data.get("albumcover")))
+            cdart_urls.extend(_extract_image_urls(fanart_payload.get("cdart")))
+            cover_urls.extend(_extract_image_urls(fanart_payload.get("albumcover")))
 
         artwork = FanartAlbumArtwork(
             cdart_urls=tuple(cdart_urls),
@@ -275,6 +275,6 @@ def fetch_fanart_album(
             },
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Fanart.tv album fetch failed for {release_group_mbid}: {error}")
         return None

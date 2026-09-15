@@ -40,14 +40,14 @@ def search_itunes(
     try:
         response = SESSION.get(ITUNES_SEARCH_URL, params=params, timeout=10)
         response.raise_for_status()
-        data = response.json()
-        raw_results = data.get("results", []) if isinstance(data, dict) else []
+        itunes_payload = response.json()
+        raw_results = itunes_payload.get("results", []) if isinstance(itunes_payload, dict) else []
         results: list[dict[str, object]] = [
-            item for item in raw_results if isinstance(item, dict)
+            track_entry for track_entry in raw_results if isinstance(track_entry, dict)
         ]
         set_cached_api(cache_key, results)
         return results
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"iTunes Search API request failed for {query_term}: {error}")
         return []
 
@@ -273,8 +273,8 @@ def fetch_itunes_album_details(
         }
         response = SESSION.get(url, params=params, timeout=10)
         response.raise_for_status()
-        data = response.json()
-        raw_items = data.get("results", []) if isinstance(data, dict) else []
+        itunes_payload = response.json()
+        raw_items = itunes_payload.get("results", []) if isinstance(itunes_payload, dict) else []
 
         tracks_by_number: dict[int, dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
@@ -293,12 +293,12 @@ def fetch_itunes_album_details(
             "tracks_by_title": tracks_by_title,
         }
 
-        for item in raw_items:
-            if not isinstance(item, dict) or item.get("wrapperType") != "track":
+        for track_entry in raw_items:
+            if not isinstance(track_entry, dict) or track_entry.get("wrapperType") != "track":
                 continue
-            t_num = item.get("trackNumber")
-            t_name = str(item.get("trackName", ""))
-            explicitness = str(item.get("trackExplicitness", "")).lower()
+            t_num = track_entry.get("trackNumber")
+            t_name = str(track_entry.get("trackName", ""))
+            explicitness = str(track_entry.get("trackExplicitness", "")).lower()
             advisory = (
                 "Explicit"
                 if explicitness == "explicit"
@@ -307,25 +307,25 @@ def fetch_itunes_album_details(
                 else None
             )
             r_date = (
-                str(item.get("releaseDate"))[:10] if item.get("releaseDate") else None
+                str(track_entry.get("releaseDate"))[:10] if track_entry.get("releaseDate") else None
             )
 
             t_info: dict[str, object] = {
                 "title": t_name,
-                "artist": item.get("artistName"),
-                "genre": item.get("primaryGenreName"),
+                "artist": track_entry.get("artistName"),
+                "genre": track_entry.get("primaryGenreName"),
                 "advisory": advisory,
-                "itunes_trackid": str(item["trackId"]) if item.get("trackId") else None,
+                "itunes_trackid": str(track_entry["trackId"]) if track_entry.get("trackId") else None,
                 "itunes_collectionid": str(collection_id),
-                "itunes_artistid": str(item.get("artistId"))
-                if item.get("artistId")
+                "itunes_artistid": str(track_entry.get("artistId"))
+                if track_entry.get("artistId")
                 else None,
-                "release_country": normalize_country_name(str(item["country"]))
-                if item.get("country")
+                "release_country": normalize_country_name(str(track_entry["country"]))
+                if track_entry.get("country")
                 else None,
                 "track_number": t_num,
-                "total_tracks": item.get("trackCount"),
-                "disc_number": item.get("discNumber"),
+                "total_tracks": track_entry.get("trackCount"),
+                "disc_number": track_entry.get("discNumber"),
                 "date": r_date,
             }
             if isinstance(t_num, int):
@@ -335,6 +335,6 @@ def fetch_itunes_album_details(
 
         set_cached_api(cache_key, album_meta)
         return album_meta
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"iTunes album lookup failed for ID {collection_id}: {error}")
         return None
