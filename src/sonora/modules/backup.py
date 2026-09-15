@@ -24,7 +24,7 @@ def _read_track_for_backup(audio_file: Path) -> tuple[str, dict[str, Any] | None
     try:
         track_info = read_track_metadata(audio_file)
         return str(audio_file), track_info.to_dict()
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError) as error:
         LOG.debug(f"Error reading {audio_file} for backup: {error}")
         return str(audio_file), None
 
@@ -60,7 +60,7 @@ def _restore_single_track(
             }
             write_track_metadata(TrackInfo(file_path=target_path, **clean_tags))
             return True, False
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError) as error:
         LOG.debug(f"Failed to restore {target_path}: {error}")
     return False, False
 
@@ -104,9 +104,9 @@ def backup_library_tags(
         with interactive_pause_listener(progress, task):
             try:
                 for future in as_completed(futures):
-                    path_str, data = future.result()
-                    if data is not None:
-                        backup_data[path_str] = data
+                    path_str, tag_dict = future.result()
+                    if tag_dict is not None:
+                        backup_data[path_str] = tag_dict
                     else:
                         failed += 1
                     progress.advance(task)
@@ -170,8 +170,8 @@ def restore_library_tags(
     search_base_dir = target_directory or backup_file.parent
     candidate_lookup: dict[str, Path] = {}
     if search_base_dir.exists():
-        for p in find_audio_files(search_base_dir, recursive=True):
-            candidate_lookup.setdefault(p.name, p)
+        for audio_file_path in find_audio_files(search_base_dir, recursive=True):
+            candidate_lookup.setdefault(audio_file_path.name, audio_file_path)
 
     with (
         create_progress() as progress,

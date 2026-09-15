@@ -54,7 +54,7 @@ def is_single_folder(folder_path: Path) -> bool:
                 albums.add(normalize_str(track_info.album))
                 if len(albums) > 1:
                     return True
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError) as error:
             LOG.debug(
                 f"Failed to read metadata for singles detection on {audio_file}: {error}"
             )
@@ -86,7 +86,7 @@ def _quarantine_file(file_path: Path, quarantine_dir: Path) -> Path:
 def _read_file_info(file_path: Path) -> tuple[Path, TrackInfo | None]:
     try:
         return file_path, read_track_metadata(file_path)
-    except (OSError, ValueError, RuntimeError) as err:
+    except (OSError) as err:
         LOG.warning(f"Failed to read metadata for {escape(str(file_path))}: {err}")
         return file_path, None
 

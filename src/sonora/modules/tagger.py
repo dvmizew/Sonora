@@ -120,12 +120,12 @@ def _has_diacritics(text: str | None) -> bool:
 
 def _apply_mapping(
     track_info: TrackInfo,
-    data: dict[str, Any],
+    metadata_dict: dict[str, Any],
     field_map: dict[str, str],
     force: bool = False,
 ) -> None:
     for src_key, target_attr in field_map.items():
-        val = data.get(src_key)
+        val = metadata_dict.get(src_key)
         if val is None:
             continue
         val_str = str(val).strip()
@@ -250,9 +250,9 @@ def _find_track_in_album_mapping(
         if norm_key in tracks_by_title and isinstance(tracks_by_title[norm_key], dict):
             return tracks_by_title[norm_key], True
     if isinstance(tracks_by_pos, dict) and track_number in tracks_by_pos:
-        item = tracks_by_pos[track_number]
-        if isinstance(item, dict):
-            return item, True
+        track_entry = tracks_by_pos[track_number]
+        if isinstance(track_entry, dict):
+            return track_entry, True
     return None, False
 
 
@@ -715,19 +715,19 @@ def _enrich_itunes(
     force: bool = False,
 ) -> None:
     try:
-        data = None
+        api_payload = None
         if album_itunes_details:
-            data, _ = _find_track_in_album_mapping(
+            api_payload, _ = _find_track_in_album_mapping(
                 album_itunes_details.get("tracks_by_title"),
                 album_itunes_details.get("tracks_by_number"),
                 track_info.title,
                 track_info.track_number,
             )
 
-        if not data and (not track_info.genre or not track_info.advisory):
-            data = fetch_itunes_track_metadata(track_info.artist, track_info.title)
+        if not api_payload and (not track_info.genre or not track_info.advisory):
+            api_payload = fetch_itunes_track_metadata(track_info.artist, track_info.title)
 
-        if data and isinstance(data, dict):
+        if api_payload and isinstance(api_payload, dict):
             itunes_map = {
                 "genre": "genre",
                 "advisory": "advisory",
@@ -739,13 +739,13 @@ def _enrich_itunes(
             }
             if not track_info.date:
                 itunes_map["date"] = "date"
-            if (not track_info.title or track_info.title == "Untitled") and data.get(
+            if (not track_info.title or track_info.title == "Untitled") and api_payload.get(
                 "trackName"
             ):
                 itunes_map["trackName"] = "title"
             _apply_mapping(
                 track_info,
-                data,
+                api_payload,
                 itunes_map,
                 force=force,
             )
@@ -1094,7 +1094,7 @@ def _enrich_bpm(
             if bpm is not None:
                 track_info.bpm = bpm
                 LOG.info(f"   ∟ 🎵 BPM Calculated: [green]{bpm}[/]")
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError) as error:
             LOG.debug(f"BPM calculation failed for {track_info.title}: {error}")
 
 
@@ -1113,7 +1113,7 @@ def _enrich_key(
                 LOG.info(
                     f"   ∟ 🎵 Musical Key: [green]{escape(key_name)}[/] ({escape(camelot)})"
                 )
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError) as error:
             LOG.debug(f"Key calculation failed for {track_info.title}: {error}")
 
 
@@ -2116,7 +2116,7 @@ def _resolve_album_folder_identity(
             art = m.album_artist or m.artist
             if art and not get_config().is_generic_container(art):
                 artist_counts[art] = artist_counts.get(art, 0) + 1
-        except (OSError, ValueError, RuntimeError):
+        except (OSError):
             pass
 
     consensus_album = (
@@ -2481,7 +2481,7 @@ def normalize_single_track(
 
     try:
         current_info = read_track_metadata(file_path)
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError) as error:
         LOG.debug(f"Failed to read metadata for {file_path}: {error}")
         return None
 
@@ -2518,7 +2518,7 @@ def normalize_single_track(
             calculated = calculate_bpm(file_path)
             if calculated is not None:
                 updated_bpm = calculated
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError) as error:
             LOG.debug(f"BPM calculation failed for {file_path}: {error}")
 
     updated_key = current_info.initial_key
@@ -2527,7 +2527,7 @@ def normalize_single_track(
             calculated_key = detect_musical_key(file_path)
             if calculated_key is not None:
                 updated_key = calculated_key
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError) as error:
             LOG.debug(f"Key calculation failed for {file_path}: {error}")
 
     updated_info = dataclasses.replace(
@@ -2550,7 +2550,7 @@ def normalize_single_track(
         try:
             write_track_metadata(updated_info)
             get_library_state().record_track_state(file_path, "TAGGED_OK")
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError) as error:
             LOG.warning(
                 f"Failed to save normalized tags for {escape(file_path.name)}: {error}"
             )
@@ -2604,9 +2604,9 @@ def normalize_library(
                     }
                     for future in as_completed(futures):
                         wait_if_paused()
-                        res = future.result()
-                        if res is not None:
-                            results.append(res)
+                        worker_result = future.result()
+                        if worker_result is not None:
+                            results.append(worker_result)
                         progress.advance(task)
 
                     if fetch_replaygain:

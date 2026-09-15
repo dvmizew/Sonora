@@ -113,7 +113,7 @@ def rename_track_file(
     try:
         if track_info is None:
             track_info = read_track_metadata(file_path)
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError) as error:
         raise RuntimeError(f"Cannot rename file without metadata: {error}") from error
 
     if format_pattern is None:
@@ -187,7 +187,7 @@ def rename_track_file(
                     f"   ∟ 🎵 [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
                 )
                 relocate_companion_lyrics(file_path, new_path, dry_run=False)
-            except (OSError, ValueError, RuntimeError) as error:
+            except (OSError) as error:
                 LOG.warning(f"Failed to rename file {escape(file_path.name)}: {error}")
         else:
             LOG.info(
@@ -247,7 +247,7 @@ def rename_album_folder(
                     f"   ∟ 📂 Album folder renamed: [dim]{escape(folder_now)}[/] -> [cyan]{escape(expected_name)}[/]"
                 )
                 return new_folder
-            except (OSError, ValueError, RuntimeError) as error:
+            except (OSError) as error:
                 LOG.warning(f"Failed to rename folder {escape(folder_now)}: {error}")
                 return folder_path
         else:
@@ -261,10 +261,10 @@ def _rename_single_worker(
     path: Path, dry_run: bool
 ) -> tuple[Path, TrackInfo | None, Path | None]:
     try:
-        info = read_track_metadata(path)
-        new_path = rename_track_file(path, track_info=info, dry_run=dry_run)
-        return path, info, new_path
-    except (OSError, ValueError, RuntimeError) as error:
+        extracted_track_info = read_track_metadata(path)
+        new_path = rename_track_file(path, track_info=extracted_track_info, dry_run=dry_run)
+        return path, extracted_track_info, new_path
+    except (OSError) as error:
         LOG.warning(f"Failed to rename file {escape(str(path))}: {error}")
         return path, None, None
 
@@ -318,15 +318,15 @@ def rename_directory_files(
                         if max_threads > 1 and len(files) > 1
                         else (_rename_single_worker(p, dry_run) for p in files)
                     )
-                    for path, info, new_path in file_results:
+                    for path, track_info, new_path in file_results:
                         wait_if_paused()
-                        if info is not None and new_path is not None:
-                            search_artist = info.album_artist or info.artist
+                        if track_info is not None and new_path is not None:
+                            search_artist = track_info.album_artist or track_info.artist
                             if (
                                 search_artist != "Unknown Artist"
-                                and info.album != "Unknown Album"
+                                and track_info.album != "Unknown Album"
                             ):
-                                album_consensus[(search_artist, info.album)] += 1
+                                album_consensus[(search_artist, track_info.album)] += 1
                             folder_renamed_paths.append(new_path)
                             if (
                                 new_path.name != path.name

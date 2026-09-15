@@ -18,7 +18,11 @@ from rich.markup import escape
 from sonora import __version__
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.key import detect_key_details
-from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.audio.metadata import (
+    get_audio_duration,
+    read_track_metadata,
+    write_track_metadata,
+)
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.cache import (
     CacheStats,
@@ -908,15 +912,15 @@ def _process_bpm_file(
 ) -> tuple[Path, float | None, bool]:
     wait_if_paused()
     try:
-        info = read_track_metadata(audio_path)
-        if not force and info.bpm is not None:
-            return audio_path, info.bpm, False
+        track_info = read_track_metadata(audio_path)
+        if not force and track_info.bpm is not None:
+            return audio_path, track_info.bpm, False
         val = calculate_bpm(audio_path)
         if val is not None and not dry_run:
-            updated = dataclasses.replace(info, bpm=val)
+            updated = dataclasses.replace(track_info, bpm=val)
             write_track_metadata(updated)
         return audio_path, val, True
-    except (OSError, ValueError, RuntimeError) as err:
+    except (OSError) as err:
         LOG.debug(f"BPM error for {audio_path}: {err}")
         return audio_path, None, False
 
@@ -954,18 +958,18 @@ def _process_key_file(
 ) -> tuple[Path, str | None, bool]:
     wait_if_paused()
     try:
-        info = read_track_metadata(audio_path)
-        if not force and info.initial_key is not None:
-            return audio_path, info.initial_key, False
+        track_info = read_track_metadata(audio_path)
+        if not force and track_info.initial_key is not None:
+            return audio_path, track_info.initial_key, False
         details = detect_key_details(audio_path)
         if details is not None:
             val, camelot, _ = details
             if not dry_run:
-                updated = dataclasses.replace(info, initial_key=val)
+                updated = dataclasses.replace(track_info, initial_key=val)
                 write_track_metadata(updated)
             return audio_path, f"{val} ({camelot})", True
         return audio_path, None, False
-    except (OSError, ValueError, RuntimeError) as err:
+    except (OSError) as err:
         LOG.debug(f"Key detection error for {audio_path}: {err}")
         return audio_path, None, False
 
@@ -1066,24 +1070,28 @@ def _process_lyrics_file(
 ) -> tuple[Path, str | None, str | None]:
     wait_if_paused()
     try:
-        info = read_track_metadata(audio_path)
+        track_info = read_track_metadata(audio_path)
         lrc_path = audio_path.with_suffix(".lrc")
         if not force and lrc_path.exists() and lrc_path.stat().st_size > 0:
             return audio_path, "existing", "existing"
+        audio_dur = get_audio_duration(audio_path)
+
         lyrics_text, tag_type = process_track_lyrics(
             audio_path,
-            info.artist,
-            info.title,
+            track_info.artist,
+            track_info.title,
             force=force,
             dry_run=dry_run,
-            isrc=info.isrc,
+            isrc=track_info.isrc,
+            album_name=track_info.album,
+            duration=audio_dur,
         )
         if lyrics_text and not dry_run:
-            with contextlib.suppress(OSError, ValueError, RuntimeError):
-                updated = dataclasses.replace(info, lyrics=lyrics_text)
+            with contextlib.suppress(OSError):
+                updated = dataclasses.replace(track_info, lyrics=lyrics_text)
                 write_track_metadata(updated)
         return audio_path, lyrics_text, tag_type
-    except (OSError, ValueError, RuntimeError) as err:
+    except (OSError) as err:
         LOG.debug(f"Lyrics error for {audio_path}: {err}")
         return audio_path, None, None
 
@@ -1094,6 +1102,7 @@ def lyrics(
     force: ForceOpt = False,
     threads: ThreadsOpt = 4,
     dry_run: DryRunOpt = False,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Fetch and save synchronized lyrics (.lrc) files and embedded lyrics.
@@ -1121,6 +1130,19 @@ def lyrics(
         ("Lyrics Unavailable", str(missing_count), "yellow" if missing_count else None),
     ]
     LOG.summary_table("Lyrics Summary", summary_rows)
+    
+    if json_report:
+        import orjson
+        report_data = {
+            "total_files": len(results),
+            "saved": saved_count,
+            "already_had": skipped_count,
+            "unavailable": missing_count,
+            "details": [{"file": str(p), "status": typ} for p, _, typ in results]
+        }
+        json_report.write_bytes(orjson.dumps(report_data, option=orjson.OPT_INDENT_2))
+        LOG.info(f"Saved lyrics JSON report to [bold cyan]{json_report}[/bold cyan]")
+
     return 130 if interrupted else 0
 
 
@@ -1413,7 +1435,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 130
     except CycloptsError:
         return 2
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError) as error:
         LOG.error(f"Error: {error}")
         return 1
 

@@ -108,7 +108,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 issues.append(
                     "FLAC audio stream MD5 checksum verification failed (corrupted FLAC)."
                 )
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError) as error:
             issues.append(f"Checksum check failed: {error}")
 
         try:
@@ -127,7 +127,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                     description
                     or "Possible fake lossless (spectral cutoff below 16kHz)."
                 )
-        except (OSError, ValueError, RuntimeError) as error:
+        except (OSError) as error:
             LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
 
     try:
@@ -218,7 +218,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"Sub-standard lossy bitrate: {round(track.bitrate / 1000)} kbps (Recommended: 320 kbps)"
             )
 
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError) as error:
         issues.append(f"Metadata read error: {error}")
 
     if not find_companion_lyrics(file_path):
@@ -244,7 +244,7 @@ def _check_single_file(
             album_artist = track_info.album_artist
         disc_number = track_info.disc_number or 1
         track_number = track_info.track_number
-    except (OSError, ValueError, RuntimeError):
+    except (OSError):
         pass
     return path, file_issues, album, album_artist, disc_number, track_number
 
@@ -269,7 +269,7 @@ def write_check_report_json(
         f"{missing_lrc} missing LRCs. Total files with issues: {issue_count}."
     )
 
-    data = {
+    report_payload = {
         "schema": "check_report_v1",
         "generator": "Sonora",
         "summary_text": summary_text,
@@ -286,7 +286,7 @@ def write_check_report_json(
     }
     output_json.write_bytes(
         orjson.dumps(
-            data,
+            report_payload,
             option=orjson.OPT_INDENT_2
             | orjson.OPT_NON_STR_KEYS
             | orjson.OPT_SERIALIZE_NUMPY,
