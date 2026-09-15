@@ -24,7 +24,6 @@ from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.key import detect_key_details, detect_musical_key
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
-from sonora.core.cache import get_cache
 from sonora.core.config import clear_config_cache, get_config
 from sonora.core.logger import (
     LOG,
@@ -1400,7 +1399,6 @@ def _resolve_album_track_position(
             return candidates[0]
         return None
 
-    # Check candidate positions with title similarity
     has_any_cand_titles = False
     for cand_pos in candidates:
         cand_artist, cand_title = track_details_getter(cand_pos)
@@ -1643,7 +1641,6 @@ def is_alien_album_track(
     if title_matches:
         return False
 
-    # Check artist match against album artist or track artists
     artist_matches = False
     if eff_artist and not _is_generic(eff_artist, "artist"):
         norm_eff_a = normalize_str(eff_artist)
@@ -1693,7 +1690,6 @@ def is_alien_album_track(
         and not _is_generic_title(eff_title)
         and not title_matches
     ):
-        # Check if this track could be a legitimate unconfirmed bonus track:
         # e.g. position is beyond known release positions or explicitly marked bonus,
         # AND its album tag matches the target album.
         known_positions: set[int] = set()
@@ -1792,7 +1788,6 @@ def process_single_track(
         ):
             _enrich_shazam(track_info, file_path, force=False)
 
-        # Check whether this track is an outlier / alien track in an album folder
         has_album_context = bool(
             album_track_mbids
             or album_mb_release_details
@@ -2067,9 +2062,6 @@ def process_single_track(
 
         return track_info
     finally:
-        cache = get_cache()
-        if cache is not None:
-            cache.close()
         LOG.stop_buffering()
 
 

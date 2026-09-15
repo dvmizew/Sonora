@@ -285,8 +285,8 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             return track_info
     except (FileNotFoundError):
         raise
-    except OSError as error:
-        raise RuntimeError(
+    except (OSError, ValueError) as error:
+        raise OSError(
             f"Failed to read metadata for {file_path}: {error}"
         ) from error
 
@@ -296,6 +296,9 @@ def write_track_metadata(
 ) -> None:
     if not track_info.file_path.exists():
         raise FileNotFoundError(f"File not found: {track_info.file_path}")
+    import os
+    if not os.access(track_info.file_path, os.W_OK):
+        raise OSError(f"Permission denied: File is read-only '{track_info.file_path}'")
 
     try:
         with taglib.File(str(track_info.file_path)) as song:
@@ -423,8 +426,8 @@ def write_track_metadata(
                 LOG.debug(f"Failed to cache track metadata by inode: {e}")
     except (FileNotFoundError):
         raise
-    except OSError as error:
-        raise RuntimeError(
+    except (OSError, ValueError) as error:
+        raise OSError(
             f"Failed to write metadata for {track_info.file_path}: {error}"
         ) from error
 

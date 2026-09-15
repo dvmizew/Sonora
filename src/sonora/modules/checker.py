@@ -189,7 +189,6 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: TITLE only)"
             )
 
-        # Check for unsplit artists (e.g. Artist A & Artist B)
         delimiters = [(" & ", "&"), (" \u00d7 ", "\u00d7"), (" / ", "/"), (" + ", "+")]
         if not is_single_group_artist(track.artist):
             for delimiter_pattern, delimiter_name in delimiters:
@@ -198,7 +197,6 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                         f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{delimiter_name}')"
                     )
 
-        # Check Title feature duplicate markers
         feat_matches = re.findall(
             rf"[\(\[]\s*({FEAT_KEYWORDS})", track.title, re.IGNORECASE
         )
@@ -207,7 +205,6 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"Duplicate featuring markers detected in TITLE ({len(feat_matches)} markers found)"
             )
 
-        # Sync check filename vs title feat
         if FEAT_PATTERN.search(file_path.name) and not FEAT_PATTERN.search(track.title):
             issues.append("Filename contains 'feat' but TITLE tag does not")
 
@@ -407,7 +404,6 @@ def check_library(
                     f"Duplicate track number {track_idx} (Disc {disc_idx}) found in files: {found_files}"
                 )
 
-        # Check for missing track numbers in sequence per disc
         discs: dict[int, set[int]] = defaultdict(set)
         for disc_idx, track_idx in tracks_found:
             discs[disc_idx].add(track_idx)
