@@ -32,43 +32,25 @@ SHAATH_MINOR: np.ndarray = np.array(
 )
 
 # Camelot wheel tonality mappings (Universal DJ harmonic mixing standard)
+_CAMELOT_TONALITIES: tuple[tuple[str, str, str], ...] = (
+    ("1", "B", "G#m/Abm"),
+    ("2", "F#/Gb", "D#m/Ebm"),
+    ("3", "C#/Db", "A#m/Bbm"),
+    ("4", "G#/Ab", "Fm"),
+    ("5", "D#/Eb", "Cm"),
+    ("6", "A#/Bb", "Gm"),
+    ("7", "F", "Dm"),
+    ("8", "C", "Am"),
+    ("9", "G", "Em"),
+    ("10", "D", "Bm"),
+    ("11", "A", "F#m/Gbm"),
+    ("12", "E", "C#m/Dbm"),
+)
 CAMELOT_MAP: dict[str, str] = {
-    # Major keys (B suffix)
-    "B": "1B",
-    "F#": "2B",
-    "Gb": "2B",
-    "C#": "3B",
-    "Db": "3B",
-    "G#": "4B",
-    "Ab": "4B",
-    "D#": "5B",
-    "Eb": "5B",
-    "A#": "6B",
-    "Bb": "6B",
-    "F": "7B",
-    "C": "8B",
-    "G": "9B",
-    "D": "10B",
-    "A": "11B",
-    "E": "12B",
-    # Minor keys (A suffix)
-    "G#m": "1A",
-    "Abm": "1A",
-    "D#m": "2A",
-    "Ebm": "2A",
-    "A#m": "3A",
-    "Bbm": "3A",
-    "Fm": "4A",
-    "Cm": "5A",
-    "Gm": "6A",
-    "Dm": "7A",
-    "Am": "8A",
-    "Em": "9A",
-    "Bm": "10A",
-    "F#m": "11A",
-    "Gbm": "11A",
-    "C#m": "12A",
-    "Dbm": "12A",
+    key: f"{code}{mode}"
+    for code, major_keys, minor_keys in _CAMELOT_TONALITIES
+    for mode, group in (("B", major_keys), ("A", minor_keys))
+    for key in group.split("/")
 }
 
 _CAMELOT_REGEX: re.Pattern[str] = re.compile(r"^(?:1[0-2]|[1-9])[ABab]$")

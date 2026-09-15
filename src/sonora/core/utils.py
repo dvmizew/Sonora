@@ -44,63 +44,43 @@ from sonora.core.constants import (
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 
-_ROMAN_MAP: dict[str, int] = {
-    "i": 1,
-    "ii": 2,
-    "iii": 3,
-    "iv": 4,
-    "v": 5,
-    "vi": 6,
-    "vii": 7,
-    "viii": 8,
-    "ix": 9,
-    "x": 10,
-    "xi": 11,
-    "xii": 12,
-    "xiii": 13,
-    "xiv": 14,
-    "xv": 15,
-    "xvi": 16,
-    "xvii": 17,
-    "xviii": 18,
-    "xix": 19,
-    "xx": 20,
-    "xxi": 21,
-    "xxii": 22,
-    "xxiii": 23,
-    "xxiv": 24,
-    "xxv": 25,
-    "xxvi": 26,
-    "xxvii": 27,
-    "xxviii": 28,
-    "xxix": 29,
-    "xxx": 30,
-    "xl": 40,
-    "l": 50,
-}
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50}
 
-_WORD_NUMBER_MAP: dict[str, int] = {
-    "one": 1,
-    "two": 2,
-    "three": 3,
-    "four": 4,
-    "five": 5,
-    "six": 6,
-    "seven": 7,
-    "eight": 8,
-    "nine": 9,
-    "ten": 10,
-    "eleven": 11,
-    "twelve": 12,
-    "thirteen": 13,
-    "fourteen": 14,
-    "fifteen": 15,
-    "sixteen": 16,
-    "seventeen": 17,
-    "eighteen": 18,
-    "nineteen": 19,
-    "twenty": 20,
-}
+
+def _parse_roman_numeral(token: str) -> int | None:
+    total, prev = 0, 0
+    for char in reversed(token):
+        val = _ROMAN_VALUES.get(char)
+        if val is None:
+            return None
+        total += val if val >= prev else -val
+        prev = val
+    return total if 1 <= total <= 50 else None
+
+
+_WORD_NUMBERS = [
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+]
+_WORD_NUMBER_MAP: dict[str, int] = {w: i for i, w in enumerate(_WORD_NUMBERS, 1)}
 
 
 class InterruptedOperationError(KeyboardInterrupt):
@@ -121,31 +101,17 @@ def extract_series_number(text: str | None) -> int | None:
 
     clean_text = ftfy.fix_text(str(text)).strip().lower()
 
-    prefix_match = re.search(
+    match = re.search(
         r"\b(?:vol(?:ume)?|pt|part|chapter|act|book)\.?\s*(\d{1,2}|[a-z]+)\b",
         clean_text,
         re.IGNORECASE,
-    )
-    if prefix_match:
-        token = prefix_match.group(1).lower()
-        if token.isdigit():
-            return int(token)
-        if token in _ROMAN_MAP:
-            return _ROMAN_MAP[token]
-        return _WORD_NUMBER_MAP.get(token)
+    ) or re.search(r"\b(\d{1,2}|[a-z]+)\s*$", clean_text, re.IGNORECASE)
 
-    trailing_match = re.search(
-        r"\b(\d{1,2}|[a-z]+)\s*$",
-        clean_text,
-        re.IGNORECASE,
-    )
-    if trailing_match:
-        token = trailing_match.group(1).lower()
+    if match:
+        token = match.group(1).lower()
         if token.isdigit():
             return int(token)
-        if token in _ROMAN_MAP:
-            return _ROMAN_MAP[token]
-        return _WORD_NUMBER_MAP.get(token)
+        return _parse_roman_numeral(token) or _WORD_NUMBER_MAP.get(token)
 
     return None
 
@@ -753,106 +719,45 @@ def normalize_date(date_value: str | None) -> str | None:
     return None
 
 
+_GENRE_GROUPS: dict[str, str] = {
+    "Hip-Hop/Rap": (
+        "hip hop, hip-hop, hip hop/rap, hip-hop/rap, rap/hip hop, rap/hip-hop, rap, trap, "
+        "trap music, trap/hip-hop, pop rap, conscious hip hop, hardcore hip hop, christian hip hop, "
+        "gangsta rap, east coast hip hop, west coast hip hop, southern hip hop, drill, uk drill, "
+        "cloud rap, boom bap, emo rap, trap latino, urbano latino"
+    ),
+    "R&B/Soul": "rnb, r&b, r&b/soul, soul, contemporary r&b, rhythm and blues, neo-soul, neo soul",
+    "Pop": (
+        "pop, dance-pop, dance pop, synth-pop, synthpop, electropop, electro-pop, french pop, "
+        "afro-pop, afropop, k-pop, j-pop, pop/rock, teen pop"
+    ),
+    "Synth-pop": "synth-pop, synthpop",
+    "Electronic": "electronic, electronica, electro, edm",
+    "Dance": "dance, club / dance, club/dance",
+    "House": "house, euro house, deep house, tech house, progressive house, electro house",
+    "Trance": "trance",
+    "Techno": "techno",
+    "Dubstep": "dubstep",
+    "Drum & Bass": "drum and bass, drum & bass, dnb, jungle/drum'n'bass",
+    "Alternative": "alternative, alternativă, alt rock, alt-rock, alternative rock, indie, indie rock, indie pop",
+    "Rock": "rock, hard rock, classic rock, punk, pop punk, pop-punk",
+    "Metal": "metal, heavy metal",
+    "Soundtrack": "soundtrack",
+    "Reggae": "reggae",
+    "Reggaeton": "reggaeton",
+    "Latin": "latin",
+    "Country": "country",
+    "Classical": "classical",
+    "Jazz": "jazz",
+    "Blues": "blues",
+    "Folk": "folk",
+    "Singer/Songwriter": "singer/songwriter",
+}
+
 _CANONICAL_GENRE_MAP: dict[str, str] = {
-    # Hip-Hop / Rap / Trap
-    "hip hop": "Hip-Hop/Rap",
-    "hip-hop": "Hip-Hop/Rap",
-    "hip hop/rap": "Hip-Hop/Rap",
-    "hip-hop/rap": "Hip-Hop/Rap",
-    "rap/hip hop": "Hip-Hop/Rap",
-    "rap/hip-hop": "Hip-Hop/Rap",
-    "rap": "Hip-Hop/Rap",
-    "trap": "Hip-Hop/Rap",
-    "trap music": "Hip-Hop/Rap",
-    "trap/hip-hop": "Hip-Hop/Rap",
-    "pop rap": "Hip-Hop/Rap",
-    "conscious hip hop": "Hip-Hop/Rap",
-    "hardcore hip hop": "Hip-Hop/Rap",
-    "christian hip hop": "Hip-Hop/Rap",
-    "gangsta rap": "Hip-Hop/Rap",
-    "east coast hip hop": "Hip-Hop/Rap",
-    "west coast hip hop": "Hip-Hop/Rap",
-    "southern hip hop": "Hip-Hop/Rap",
-    "drill": "Hip-Hop/Rap",
-    "uk drill": "Hip-Hop/Rap",
-    "cloud rap": "Hip-Hop/Rap",
-    "boom bap": "Hip-Hop/Rap",
-    "emo rap": "Hip-Hop/Rap",
-    "trap latino": "Hip-Hop/Rap",
-    "urbano latino": "Hip-Hop/Rap",
-    # R&B / Soul
-    "rnb": "R&B/Soul",
-    "r&b": "R&B/Soul",
-    "r&b/soul": "R&B/Soul",
-    "soul": "R&B/Soul",
-    "contemporary r&b": "R&B/Soul",
-    "rhythm and blues": "R&B/Soul",
-    "neo-soul": "R&B/Soul",
-    "neo soul": "R&B/Soul",
-    # Pop
-    "pop": "Pop",
-    "dance-pop": "Pop",
-    "dance pop": "Pop",
-    "synth-pop": "Synth-pop",
-    "synthpop": "Synth-pop",
-    "electropop": "Pop",
-    "electro-pop": "Pop",
-    "french pop": "Pop",
-    "afro-pop": "Pop",
-    "afropop": "Pop",
-    "k-pop": "Pop",
-    "j-pop": "Pop",
-    "pop/rock": "Pop",
-    "teen pop": "Pop",
-    # Electronic / Dance / House
-    "electronic": "Electronic",
-    "electronica": "Electronic",
-    "electro": "Electronic",
-    "edm": "Electronic",
-    "dance": "Dance",
-    "club / dance": "Dance",
-    "club/dance": "Dance",
-    "house": "House",
-    "euro house": "House",
-    "deep house": "House",
-    "tech house": "House",
-    "progressive house": "House",
-    "electro house": "House",
-    "trance": "Trance",
-    "techno": "Techno",
-    "dubstep": "Dubstep",
-    "drum and bass": "Drum & Bass",
-    "drum & bass": "Drum & Bass",
-    "dnb": "Drum & Bass",
-    "jungle/drum'n'bass": "Drum & Bass",
-    # Alternative / Rock / Metal
-    "alternative": "Alternative",
-    "alternativă": "Alternative",
-    "alt rock": "Alternative",
-    "alt-rock": "Alternative",
-    "alternative rock": "Alternative",
-    "indie": "Alternative",
-    "indie rock": "Alternative",
-    "indie pop": "Alternative",
-    "rock": "Rock",
-    "hard rock": "Rock",
-    "classic rock": "Rock",
-    "metal": "Metal",
-    "heavy metal": "Metal",
-    "punk": "Rock",
-    "pop punk": "Rock",
-    "pop-punk": "Rock",
-    # Other canonical genres
-    "soundtrack": "Soundtrack",
-    "reggae": "Reggae",
-    "reggaeton": "Reggaeton",
-    "latin": "Latin",
-    "country": "Country",
-    "classical": "Classical",
-    "jazz": "Jazz",
-    "blues": "Blues",
-    "folk": "Folk",
-    "singer/songwriter": "Singer/Songwriter",
+    alias.strip(): canonical
+    for canonical, aliases in _GENRE_GROUPS.items()
+    for alias in aliases.split(",")
 }
 
 _NOISE_GENRES: frozenset[str] = frozenset(
