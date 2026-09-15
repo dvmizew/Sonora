@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
@@ -12,7 +11,6 @@ from sonora.core.constants import RATE_LIMIT_SHAZAM
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter
 
-_T = TypeVar("_T")
 _SHAZAM_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_SHAZAM)
 
 import aiohttp
@@ -34,9 +32,7 @@ class ShazamTrackInfo:
     lyrics: str | None = None
 
 
-def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
-    """Run an async coroutine synchronously."""
-    return asyncio.run(coro)
+
 
 
 async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
@@ -92,7 +88,7 @@ def get_shazam_track_about(track_id: int) -> dict[str, Any] | None:
         return cached
 
     _SHAZAM_LIMITER.wait()
-    shazam_payload = _run_async(_track_about_async(track_id))
+    shazam_payload = asyncio.run(_track_about_async(track_id))
     if shazam_payload:
         set_cached_api(cache_key, shazam_payload)
     return shazam_payload
@@ -131,7 +127,7 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
         )
 
     _SHAZAM_LIMITER.wait()
-    raw_payload = _run_async(_recognize_async(file_path))
+    raw_payload = asyncio.run(_recognize_async(file_path))
     if not raw_payload:
         return None
 

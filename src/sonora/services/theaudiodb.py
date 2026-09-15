@@ -72,6 +72,12 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
     return None, None
 
 
+def _clean_theaudiodb_str(val: object) -> str | None:
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s and s.lower() not in ("null", "none", "") else None
+
 def fetch_theaudiodb_track_details(
     artist_name: str, track_title: str
 ) -> dict[str, object] | None:
@@ -97,21 +103,17 @@ def fetch_theaudiodb_track_details(
                 raw_track = tracks[0]
                 rating = safe_float(raw_track.get("intScore"))
 
-                def _clean_str(val: object) -> str | None:
-                    if val is None:
-                        return None
-                    s = str(val).strip()
-                    return s if s and s.lower() not in ("null", "none", "") else None
+
 
                 details: dict[str, object] = {
-                    "music_video_url": _clean_str(raw_track.get("strMusicVid")),
-                    "mood": _clean_str(raw_track.get("strMood")),
-                    "style": _clean_str(raw_track.get("strStyle")),
-                    "initial_key": _clean_str(raw_track.get("strKey"))
-                    or _clean_str(raw_track.get("strOpenKey")),
+                    "music_video_url": _clean_theaudiodb_str(raw_track.get("strMusicVid")),
+                    "mood": _clean_theaudiodb_str(raw_track.get("strMood")),
+                    "style": _clean_theaudiodb_str(raw_track.get("strStyle")),
+                    "initial_key": _clean_theaudiodb_str(raw_track.get("strKey"))
+                    or _clean_theaudiodb_str(raw_track.get("strOpenKey")),
                     "rating": rating,
-                    "description": _clean_str(raw_track.get("strDescriptionEN")),
-                    "genre": _clean_str(raw_track.get("strGenre")),
+                    "description": _clean_theaudiodb_str(raw_track.get("strDescriptionEN")),
+                    "genre": _clean_theaudiodb_str(raw_track.get("strGenre")),
                 }
                 set_cached_api(cache_key, details)
                 return details
