@@ -152,9 +152,9 @@ def interactive_pause_listener(
         nonlocal pause_start_time, original_description
         if progress is not None and task_id is not None:
             pause_start_time = progress.get_time()
-            task_obj = progress._tasks.get(task_id)
-            if task_obj:
-                original_description = task_obj.description
+            progress_task = progress._tasks.get(task_id)
+            if progress_task:
+                original_description = progress_task.description
             progress.stop_task(task_id)
             progress.update(
                 task_id,
@@ -167,11 +167,11 @@ def interactive_pause_listener(
         if progress is not None and task_id is not None:
             if pause_start_time is not None:
                 pause_duration = progress.get_time() - pause_start_time
-                task_obj = progress._tasks.get(task_id)
-                if task_obj and task_obj.start_time is not None:
-                    task_obj.start_time += pause_duration
-                if task_obj:
-                    task_obj.stop_time = None
+                progress_task = progress._tasks.get(task_id)
+                if progress_task and progress_task.start_time is not None:
+                    progress_task.start_time += pause_duration
+                if progress_task:
+                    progress_task.stop_time = None
                 pause_start_time = None
             desc = original_description or "[cyan]Processing..."
             progress.update(task_id, description=desc)
@@ -198,17 +198,7 @@ def interactive_pause_listener(
                             if on_pause:
                                 try:
                                     on_pause()
-                                except Exception as e:
-                                    if isinstance(
-                                        e,
-                                        (
-                                            TypeError,
-                                            NameError,
-                                            AttributeError,
-                                            KeyError,
-                                        ),
-                                    ):
-                                        raise
+                                except (RuntimeError, OSError, ValueError) as e:
                                     LOG.debug(f"Pause callback error: {e}")
                             else:
                                 _default_pause()
@@ -220,17 +210,7 @@ def interactive_pause_listener(
                             if on_resume:
                                 try:
                                     on_resume()
-                                except Exception as e:
-                                    if isinstance(
-                                        e,
-                                        (
-                                            TypeError,
-                                            NameError,
-                                            AttributeError,
-                                            KeyError,
-                                        ),
-                                    ):
-                                        raise
+                                except (RuntimeError, OSError, ValueError) as e:
                                     LOG.debug(f"Resume callback error: {e}")
                             else:
                                 _default_resume()

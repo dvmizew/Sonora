@@ -78,12 +78,12 @@ class TrackInfo:
 
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""
-        data: dict[str, object] = asdict(self)
-        data["file_path"] = str(self.file_path)
-        data["file_name"] = self.file_path.name
-        if not data.get("album_artist"):
-            data["album_artist"] = self.album_artist or self.artist
-        return data
+        track_dict: dict[str, object] = asdict(self)
+        track_dict["file_path"] = str(self.file_path)
+        track_dict["file_name"] = self.file_path.name
+        if not track_dict.get("album_artist"):
+            track_dict["album_artist"] = self.album_artist or self.artist
+        return track_dict
 
 
 @dataclass

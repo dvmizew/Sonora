@@ -36,7 +36,7 @@ def _measure_track_loudness(
             else 0.0
         )
         return (audio_path, track_gain, track_peak, track_loudness, duration)
-    except (ValueError, RuntimeError, OSError) as error:
+    except (ValueError, OSError) as error:
         LOG.debug(f"Failed to measure loudness for {audio_path}: {error}")
         return None
 
@@ -51,10 +51,10 @@ def calculate_track_replaygain(
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    res = _measure_track_loudness(file_path, target_lufs=target_lufs)
-    if res is None:
+    loudness_metrics = _measure_track_loudness(file_path, target_lufs=target_lufs)
+    if loudness_metrics is None:
         return None
-    _, track_gain, track_peak, _, _ = res
+    _, track_gain, track_peak, _, _ = loudness_metrics
     return float(track_gain), float(track_peak)
 
 
@@ -72,14 +72,14 @@ def _write_album_replaygain_track(
         )
         return True
     try:
-        info = read_track_metadata(file_path)
-        info.replaygain_track_gain = round(track_gain, 2)
-        info.replaygain_track_peak = round(track_peak, 6)
-        info.replaygain_album_gain = round(album_gain, 2)
-        info.replaygain_album_peak = round(max_album_peak, 6)
-        write_track_metadata(info)
+        track_info = read_track_metadata(file_path)
+        track_info.replaygain_track_gain = round(track_gain, 2)
+        track_info.replaygain_track_peak = round(track_peak, 6)
+        track_info.replaygain_album_gain = round(album_gain, 2)
+        track_info.replaygain_album_peak = round(max_album_peak, 6)
+        write_track_metadata(track_info)
         return True
-    except (OSError, ValueError, RuntimeError) as err:
+    except (OSError) as err:
         LOG.debug(f"Failed to write ReplayGain tags to {file_path}: {err}")
         return False
 
@@ -104,19 +104,18 @@ def calculate_album_replaygain(
     if not valid_files:
         return False
 
-    # 1. Check if ReplayGain is already calculated on all files
     if not force:
         already_tagged = True
         for audio_path in valid_files:
             try:
-                info = read_track_metadata(audio_path)
+                track_info = read_track_metadata(audio_path)
                 if (
-                    info.replaygain_track_gain is None
-                    or info.replaygain_album_gain is None
+                    track_info.replaygain_track_gain is None
+                    or track_info.replaygain_album_gain is None
                 ):
                     already_tagged = False
                     break
-            except (OSError, ValueError, RuntimeError):
+            except (OSError):
                 already_tagged = False
                 break
         if already_tagged:
@@ -125,7 +124,6 @@ def calculate_album_replaygain(
 
     LOG.info(f"🔊 Calculating ReplayGain for {len(valid_files)} track(s)...")
 
-    # 2. Compute individual track loudness in parallel across threads
     track_results: list[tuple[Path, float, float, float, float]] = []
     max_album_peak = 0.0
 
@@ -137,11 +135,11 @@ def calculate_album_replaygain(
             ]
             for future in futures:
                 try:
-                    res = future.result()
-                    if res is not None:
-                        track_results.append(res)
-                        max_album_peak = max(max_album_peak, res[2])
-                except (OSError, ValueError, RuntimeError) as error:
+                    loudness_metrics = future.result()
+                    if loudness_metrics is not None:
+                        track_results.append(loudness_metrics)
+                        max_album_peak = max(max_album_peak, loudness_metrics[2])
+                except (OSError) as error:
                     LOG.debug(f"Track loudness measurement failed: {error}")
         except KeyboardInterrupt:
             executor.shutdown(wait=True, cancel_futures=True)
@@ -168,12 +166,11 @@ def calculate_album_replaygain(
         album_gain = (
             target_lufs - album_loudness
             if not (np.isnan(album_loudness) or np.isinf(album_loudness))
-            else float(np.mean([result[1] for result in track_results]))
+            else float(np.mean([metrics[1] for metrics in track_results]))
         )
     else:
-        album_gain = float(np.mean([result[1] for result in track_results]))
+        album_gain = float(np.mean([metrics[1] for metrics in track_results]))
 
-    # 4. Write ReplayGain metadata tags to each file in parallel
     writer = functools.partial(
         _write_album_replaygain_track,
         album_gain=album_gain,

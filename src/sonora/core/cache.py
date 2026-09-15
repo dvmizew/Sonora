@@ -36,9 +36,9 @@ def _migrate_legacy_cache(cache_dir: Path, api_cache_dir: Path) -> None:
     for parent in (cache_dir, api_cache_dir):
         if parent.exists() and parent.is_dir():
             try:
-                for item in parent.iterdir():
-                    if item.is_dir() and re.match(r"^\d{3}$", item.name):
-                        shutil.rmtree(item, ignore_errors=True)
+                for entry_path in parent.iterdir():
+                    if entry_path.is_dir() and re.match(r"^\d{3}$", entry_path.name):
+                        shutil.rmtree(entry_path, ignore_errors=True)
             except OSError as error:
                 LOG.debug(f"Legacy shard cleanup failed: {error}")
 
@@ -47,12 +47,12 @@ def _migrate_legacy_cache(cache_dir: Path, api_cache_dir: Path) -> None:
         return
     try:
         api_cache_dir.mkdir(parents=True, exist_ok=True)
-        for item in list(cache_dir.iterdir()):
-            if item.name.startswith("library_state.db") or item.name == "api":
+        for entry_path in list(cache_dir.iterdir()):
+            if entry_path.name.startswith("library_state.db") or entry_path.name == "api":
                 continue
-            target = api_cache_dir / item.name
+            target = api_cache_dir / entry_path.name
             if not target.exists():
-                shutil.move(str(item), str(target))
+                shutil.move(str(entry_path), str(target))
     except OSError as error:
         LOG.debug(f"Legacy cache migration failed: {error}")
 
@@ -155,8 +155,7 @@ def get_cached_api(key: str) -> Any | None:
     cache = get_cache()
     if cache is not None:
         try:
-            with _CACHE_LOCK:
-                return cache.get(key)
+            return cache.get(key)
         except (
             OSError,
             ValueError,
@@ -228,9 +227,9 @@ def get_cache_stats() -> CacheStats:
 
     from sonora.core.state import get_library_state
 
-    state_mgr = get_library_state()
-    state_entries = state_mgr.get_state_count()
-    state_size = state_mgr.get_state_size()
+    library_state = get_library_state()
+    state_entries = library_state.get_state_count()
+    state_size = library_state.get_state_size()
 
     from sonora.audio.metadata import get_metadata_cache_size
 
@@ -333,9 +332,9 @@ def clear_cache(
 
             if api_cache_dir.exists() and api_cache_dir.is_dir():
                 try:
-                    for item in api_cache_dir.iterdir():
-                        if item.is_dir() and re.match(r"^\d{3}$", item.name):
-                            shutil.rmtree(item, ignore_errors=True)
+                    for entry_path in api_cache_dir.iterdir():
+                        if entry_path.is_dir() and re.match(r"^\d{3}$", entry_path.name):
+                            shutil.rmtree(entry_path, ignore_errors=True)
                 except OSError as error:
                     LOG.debug(f"Legacy shard cleanup failed: {error}")
 
@@ -359,16 +358,16 @@ def clear_cache(
     if clear_state:
         from sonora.core.state import get_library_state, reset_library_state
 
-        state_mgr = get_library_state()
-        state_entries_cleared = state_mgr.get_state_count()
-        state_bytes_before = state_mgr.get_state_size()
+        library_state = get_library_state()
+        state_entries_cleared = library_state.get_state_count()
+        state_bytes_before = library_state.get_state_size()
 
-        state_mgr.clear_state(purge=purge)
+        library_state.clear_state(purge=purge)
         if purge:
             reset_library_state()
             state_bytes_after = 0
         else:
-            state_bytes_after = state_mgr.get_state_size()
+            state_bytes_after = library_state.get_state_size()
 
         state_bytes_freed = max(0, state_bytes_before - state_bytes_after)
 

@@ -25,6 +25,16 @@ from sonora.core.utils import (
     match_score,
     resolve_artist_name,
 )
+from sonora.modules.tagger import (
+    _resolve_album_track_position,
+    is_alien_album_track,
+)
+from sonora.modules.tagger import (
+    _apply_mapping,
+    _enrich_deezer,
+    _enrich_musicbrainz,
+    _enrich_shazam,
+)
 from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.checker import (
     check_brackets_corruption,
@@ -42,13 +52,7 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
-    _apply_mapping,
-    _enrich_deezer,
-    _enrich_musicbrainz,
-    _enrich_shazam,
     _resolve_album_folder_identity,
-    _resolve_album_track_position,
-    is_alien_album_track,
     normalize_library,
     normalize_single_track,
     process_single_track,

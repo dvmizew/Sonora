@@ -178,10 +178,10 @@ def _load_user_overrides() -> dict[str, str]:
         seen_paths.add(path)
         try:
             if path.exists() and path.is_file() and path.stat().st_size > 0:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    for key, value in data.items():
-                        overrides[normalize_str(key)] = str(value).strip()
+                alias_dict = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(alias_dict, dict):
+                    for src, dest in alias_dict.items():
+                        overrides[normalize_str(src)] = str(dest).strip()
         except (OSError, ValueError) as error:
             LOG.warning(f"Failed to load user aliases from {path}: {error}")
     return overrides
@@ -271,13 +271,8 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     clean_art = clean_unicode_punct(art_name)
                     set_cached_api(cache_key, clean_art)
                     return clean_art
-    except (
-        httpx.HTTPError,
-        OSError,
-        ValueError,
-        RuntimeError,
-    ):
-        pass
+    except (httpx.HTTPError, OSError) as e:
+        LOG.debug(f"MusicBrainz API error during artist resolution: {e}")
 
     # Tier 4: Deezer Artist lookup
     try:
@@ -287,9 +282,9 @@ def resolve_artist_name(raw_name: str | None) -> str:
             timeout=5,
         )
         if response.status_code == 200:
-            data = response.json().get("data", [])
-            if data and isinstance(data, list):
-                deezer_name = str(data[0].get("name", "")).strip()
+            deezer_results = response.json().get("data", [])
+            if deezer_results and isinstance(deezer_results, list):
+                deezer_name = str(deezer_results[0].get("name", "")).strip()
                 if deezer_name and normalize_str(deezer_name) == normalized:
                     # Do not override all-caps acronyms (e.g. M.G.L) with lowercased titles
                     if (
@@ -301,8 +296,8 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     clean_deezer = clean_unicode_punct(deezer_name)
                     set_cached_api(cache_key, clean_deezer)
                     return clean_deezer
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError):
-        pass
+    except (httpx.HTTPError, OSError) as e:
+        LOG.debug(f"Deezer API error during artist resolution: {e}")
 
     clean_final = clean_unicode_punct(clean_name)
     set_cached_api(cache_key, clean_final)
@@ -510,14 +505,14 @@ def deduplicate_title_features(
             unique_artists.append(clean_tok)
 
     if not unique_artists:
-        res = base_title
+        formatted_title = base_title
     elif len(unique_artists) == 1:
-        res = f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
+        formatted_title = f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
     else:
         feat_str = ", ".join(unique_artists[:-1]) + f" & {unique_artists[-1]}"
-        res = f"{base_title} {open_char}feat. {feat_str}{close_char}"
+        formatted_title = f"{base_title} {open_char}feat. {feat_str}{close_char}"
 
-    return _COLLAPSE_SPACES_PATTERN.sub(" ", res).strip()
+    return _COLLAPSE_SPACES_PATTERN.sub(" ", formatted_title).strip()
 
 
 @lru_cache(maxsize=8192)
@@ -596,45 +591,43 @@ def match_score(
         )
         title_score = max(title_ratio, title_token_sort)
 
-        # Check match with punctuation stripped (e.g. quotes or dots in subtitles/prefixes)
-        qw = _NON_WORD_SPACES_PATTERN.sub(" ", query_title_clean).strip()
-        cw = _NON_WORD_SPACES_PATTERN.sub(" ", candidate_title_clean).strip()
-        if qw and cw and (qw != query_title_clean or cw != candidate_title_clean):
+        query_word = _NON_WORD_SPACES_PATTERN.sub(" ", query_title_clean).strip()
+        candidate_word = _NON_WORD_SPACES_PATTERN.sub(" ", candidate_title_clean).strip()
+        if query_word and candidate_word and (query_word != query_title_clean or candidate_word != candidate_title_clean):
             title_score = max(
                 title_score,
-                float(fuzz.ratio(qw, cw)),
-                float(fuzz.token_sort_ratio(qw, cw)),
+                float(fuzz.ratio(query_word, candidate_word)),
+                float(fuzz.token_sort_ratio(query_word, candidate_word)),
             )
-            q_toks = qw.split()
-            c_toks = cw.split()
+            query_tokens = query_word.split()
+            candidate_tokens = candidate_word.split()
             if (
-                min(len(q_toks), len(c_toks)) >= 3
-                and min(len(qw), len(cw)) / max(len(qw), len(cw)) >= 0.5
+                min(len(query_tokens), len(candidate_tokens)) >= 3
+                and min(len(query_word), len(candidate_word)) / max(len(query_word), len(candidate_word)) >= 0.5
             ):
-                title_score = max(title_score, float(fuzz.token_set_ratio(qw, cw)))
+                title_score = max(title_score, float(fuzz.token_set_ratio(query_word, candidate_word)))
 
-        # Check match after stripping leading articles ('the ', 'a ', 'an ')
-        q_no_art = re.sub(r"^(?:the|a|an)\s+", "", query_title_clean).strip()
-        c_no_art = re.sub(r"^(?:the|a|an)\s+", "", candidate_title_clean).strip()
+        query_no_articles = re.sub(r"^(?:the|a|an)\s+", "", query_title_clean).strip()
+        candidate_no_articles = re.sub(r"^(?:the|a|an)\s+", "", candidate_title_clean).strip()
         if (
-            q_no_art
-            and c_no_art
-            and (q_no_art != query_title_clean or c_no_art != candidate_title_clean)
+            query_no_articles
+            and candidate_no_articles
+            and (query_no_articles != query_title_clean or candidate_no_articles != candidate_title_clean)
         ):
-            art_ratio = float(fuzz.ratio(q_no_art, c_no_art))
-            art_sort = float(fuzz.token_sort_ratio(q_no_art, c_no_art))
+            art_ratio = float(fuzz.ratio(query_no_articles, candidate_no_articles))
+            art_sort = float(fuzz.token_sort_ratio(query_no_articles, candidate_no_articles))
             title_score = max(title_score, art_ratio, art_sort)
 
-    q_ver = is_version_or_remix(query_title) or is_version_or_remix(query_title_clean)
-    c_ver = is_version_or_remix(candidate_title) or is_version_or_remix(
+    query_version = is_version_or_remix(query_title) or is_version_or_remix(query_title_clean)
+    candidate_version = is_version_or_remix(candidate_title) or is_version_or_remix(
         candidate_title_clean
     )
-    if q_ver != c_ver:
+    if query_version != candidate_version:
         if query_title_clean == candidate_title_clean:
             title_score -= 15.0
         else:
             title_score -= 35.0
-    elif q_ver and c_ver:
+    elif query_version and candidate_version:
         for kw in _VERSION_OR_REMIX_KEYWORDS:
             if (kw in query_title_clean) != (kw in candidate_title_clean):
                 title_score -= 35.0
@@ -646,22 +639,22 @@ def match_score(
         if query_artist_clean == candidate_artist_clean:
             artist_score = 100.0
         else:
-            q_prim = clean_title(get_primary_artist(query_artist_clean)).lower()
-            c_prim = clean_title(get_primary_artist(candidate_artist_clean)).lower()
-            if q_prim == c_prim:
+            query_primary = clean_title(get_primary_artist(query_artist_clean)).lower()
+            candidate_primary = clean_title(get_primary_artist(candidate_artist_clean)).lower()
+            if query_primary == candidate_primary:
                 artist_score = 100.0
             else:
-                min_len = min(len(q_prim), len(c_prim))
+                min_len = min(len(query_primary), len(candidate_primary))
                 if min_len <= 3:
-                    artist_score = 100.0 if q_prim == c_prim else 0.0
+                    artist_score = 100.0 if query_primary == candidate_primary else 0.0
                 elif min_len <= 5:
-                    artist_score = float(fuzz.ratio(q_prim, c_prim))
+                    artist_score = float(fuzz.ratio(query_primary, candidate_primary))
                 else:
-                    artist_w = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
+                    artist_weight = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
                     artist_token = fuzz.token_set_ratio(
                         query_artist_clean, candidate_artist_clean
                     )
-                    artist_score = max(artist_w, artist_token)
+                    artist_score = max(artist_weight, artist_token)
 
         if title_score < 70.0 or artist_score < 70.0:
             return 0.0
@@ -798,7 +791,6 @@ def normalize_genre(genre_value: str | None) -> str | None:
     raw_genre = str(genre_value).strip()
     genre_lower = raw_genre.lower()
 
-    # Reject numeric or pure decimal tags
     if (
         raw_genre.isdigit()
         or raw_genre.replace(".", "", 1).isdigit()
@@ -806,15 +798,12 @@ def normalize_genre(genre_value: str | None) -> str | None:
     ):
         return None
 
-    # Reject spam / noise tags
     if any(noise in genre_lower for noise in _NOISE_GENRES):
         return None
 
-    # Direct canonical map
     if genre_lower in _CANONICAL_GENRE_MAP:
         return _CANONICAL_GENRE_MAP[genre_lower]
 
-    # Standard title-case formatting
     return raw_genre.title()
 
 

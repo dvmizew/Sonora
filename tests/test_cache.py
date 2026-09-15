@@ -28,7 +28,7 @@ from sonora.core.cache import (
     set_ignore_cache,
 )
 from sonora.core.constants import DIRS
-from sonora.core.state import LibraryStateManager, reset_library_state
+from sonora.core.state import LibraryStateVault, reset_library_state
 from sonora.core.utils import clear_utils_cache, format_filesize
 
 
@@ -126,7 +126,7 @@ class TestCacheArchitecture(unittest.TestCase):
     def test_library_state_manager_methods(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_file = Path(tmpdir) / "test_state.db"
-            state_mgr = LibraryStateManager(db_file)
+            state_mgr = LibraryStateVault(db_file)
             try:
                 self.assertEqual(state_mgr.get_state_count(), 0)
                 self.assertGreater(state_mgr.get_state_size(), 0)
