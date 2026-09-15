@@ -46,9 +46,7 @@ def _restore_single_track(
         elif candidate_lookup and target_path.name in candidate_lookup:
             target_path = candidate_lookup[target_path.name]
         elif candidate_lookup is None and base_dir.exists():
-            matches = list(base_dir.rglob(target_path.name))
-            if matches:
-                target_path = matches[0]
+            target_path = next(base_dir.rglob(target_path.name), target_path)
 
     if not target_path.exists():
         return False, True

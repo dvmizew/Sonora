@@ -342,32 +342,26 @@ def rename_directory_files(
                     if album_consensus:
                         top = album_consensus.most_common(1)
                         if top and top[0][1] >= len(files) / 2:
-                            top_artist, top_album = top[0][0]
+                            art_name, alb_name = top[0][0]
+                        elif len({alb for _, alb in album_consensus}) == 1:
+                            art_name, alb_name = (
+                                "Various Artists",
+                                next(iter(album_consensus))[1],
+                            )
+                        else:
+                            art_name, alb_name = None, None
+
+                        if art_name and alb_name:
                             final_folder = rename_album_folder(
-                                folder, top_artist, top_album, dry_run=dry_run
+                                folder, art_name, alb_name, dry_run=dry_run
                             )
                             if final_folder != folder:
                                 report.folders_renamed += 1
-                        else:
-                            albums_found = {
-                                album_title for (_, album_title) in album_consensus
-                            }
-                            if len(albums_found) == 1:
-                                common_album = next(iter(albums_found))
-                                final_folder = rename_album_folder(
-                                    folder,
-                                    "Various Artists",
-                                    common_album,
-                                    dry_run=dry_run,
-                                )
-                                if final_folder != folder:
-                                    report.folders_renamed += 1
 
-                    for p in folder_renamed_paths:
-                        if final_folder != folder:
-                            renamed.append(final_folder / p.name)
-                        else:
-                            renamed.append(p)
+                    renamed.extend(
+                        (final_folder / p.name if final_folder != folder else p)
+                        for p in folder_renamed_paths
+                    )
             except KeyboardInterrupt:
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(report) from None

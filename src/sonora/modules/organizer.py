@@ -52,6 +52,8 @@ def is_single_folder(folder_path: Path) -> bool:
             track_info = read_track_metadata(audio_file)
             if track_info.album and track_info.album != "Unknown Album":
                 albums.add(normalize_str(track_info.album))
+                if len(albums) > 1:
+                    return True
         except (OSError, ValueError, RuntimeError) as error:
             LOG.debug(
                 f"Failed to read metadata for singles detection on {audio_file}: {error}"
@@ -87,6 +89,36 @@ def _read_file_info(file_path: Path) -> tuple[Path, TrackInfo | None]:
     except (OSError, ValueError, RuntimeError) as err:
         LOG.warning(f"Failed to read metadata for {escape(str(file_path))}: {err}")
         return file_path, None
+
+
+def _track_fingerprints(info: TrackInfo) -> list[str]:
+    primary_key = normalize_str(get_primary_artist(info.artist))
+    title_key = normalize_str(deduplicate_title_features(info.title))
+    prints = [f"{primary_key} - {title_key}"]
+    if info.isrc:
+        prints.append(f"isrc:{info.isrc.strip().upper()}")
+    if info.musicbrainz_trackid:
+        prints.append(f"mbid:{info.musicbrainz_trackid.strip().lower()}")
+    return prints
+
+
+def _quarantine_duplicate_single(
+    path: Path,
+    key: str,
+    quarantine_dir: Path,
+    dry_run: bool = False,
+    reason: str = "",
+) -> None:
+    if not dry_run:
+        try:
+            _quarantine_file(path, quarantine_dir)
+            LOG.info(
+                f"   ∟ 📦 Quarantined duplicate single{reason}: {escape(key)} -> .duplicates/"
+            )
+        except OSError as error:
+            LOG.debug(f"Failed to quarantine duplicate single {path}: {error}")
+    else:
+        LOG.info(f"[DRY-RUN] Would quarantine duplicate single{reason}: {escape(key)}")
 
 
 def organize_library_singles(
@@ -161,21 +193,7 @@ def organize_library_singles(
                             singles_to_process.append((path, info))
                     else:
                         for _path, info in folder_track_infos:
-                            primary_artist_key = normalize_str(
-                                get_primary_artist(info.artist)
-                            )
-                            clean_t = normalize_str(
-                                deduplicate_title_features(info.title)
-                            )
-                            album_fingerprints.add(f"{primary_artist_key} - {clean_t}")
-                            if info.isrc:
-                                album_fingerprints.add(
-                                    f"isrc:{info.isrc.strip().upper()}"
-                                )
-                            if info.musicbrainz_trackid:
-                                album_fingerprints.add(
-                                    f"mbid:{info.musicbrainz_trackid.strip().lower()}"
-                                )
+                            album_fingerprints.update(_track_fingerprints(info))
             except KeyboardInterrupt:
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(moved_count) from None
@@ -191,46 +209,21 @@ def organize_library_singles(
             primary_artist_key = normalize_str(primary_artist)
             track_identity_key = f"{primary_artist_key} - {normalize_str(clean_title)}"
 
-            is_duplicate = (
-                track_identity_key in album_fingerprints
-                or track_identity_key in seen_single_fingerprints
-                or bool(
-                    track_info.isrc
-                    and f"isrc:{track_info.isrc.strip().upper()}" in album_fingerprints
-                )
-                or bool(
-                    track_info.musicbrainz_trackid
-                    and f"mbid:{track_info.musicbrainz_trackid.strip().lower()}"
-                    in album_fingerprints
-                )
+            track_fps = _track_fingerprints(track_info)
+            is_duplicate = any(
+                fp in album_fingerprints or fp in seen_single_fingerprints
+                for fp in track_fps
             )
 
             # Deduplicate: if an identical track exists inside a full album or another single, quarantine the duplicate
             if is_duplicate:
-                if not dry_run:
-                    try:
-                        _quarantine_file(path, quarantine_dir)
-                        LOG.info(
-                            f"   ∟ 📦 Quarantined duplicate single: {escape(track_identity_key)} -> .duplicates/"
-                        )
-                    except OSError as error:
-                        LOG.debug(
-                            f"Failed to quarantine duplicate single {path}: {error}"
-                        )
-                else:
-                    LOG.info(
-                        f"[DRY-RUN] Would quarantine duplicate single: {escape(track_identity_key)}"
-                    )
+                _quarantine_duplicate_single(
+                    path, track_identity_key, quarantine_dir, dry_run
+                )
                 removed_dupes += 1
                 continue
 
-            seen_single_fingerprints.add(track_identity_key)
-            if track_info.isrc:
-                seen_single_fingerprints.add(f"isrc:{track_info.isrc.strip().upper()}")
-            if track_info.musicbrainz_trackid:
-                seen_single_fingerprints.add(
-                    f"mbid:{track_info.musicbrainz_trackid.strip().lower()}"
-                )
+            seen_single_fingerprints.update(track_fps)
 
             single_folder_name = sanitize_name(f"{primary_artist} - {track_info.title}")
             primary_artist_clean = sanitize_name(primary_artist)
@@ -263,20 +256,13 @@ def organize_library_singles(
 
             # Handle destination collisions cleanly (quarantine redundant duplicate single if target already exists)
             if path.resolve() != target_file.resolve() and target_file.exists():
-                if not dry_run:
-                    try:
-                        _quarantine_file(path, quarantine_dir)
-                        LOG.info(
-                            f"   ∟ 📦 Quarantined duplicate single (target exists): {escape(track_identity_key)} -> .duplicates/"
-                        )
-                    except OSError as error:
-                        LOG.debug(
-                            f"Failed to quarantine duplicate single {path}: {error}"
-                        )
-                else:
-                    LOG.info(
-                        f"[DRY-RUN] Would quarantine duplicate single (target exists): {escape(track_identity_key)}"
-                    )
+                _quarantine_duplicate_single(
+                    path,
+                    track_identity_key,
+                    quarantine_dir,
+                    dry_run,
+                    reason=" (target exists)",
+                )
                 removed_dupes += 1
                 continue
 

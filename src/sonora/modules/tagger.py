@@ -234,6 +234,28 @@ def _is_generic_title(title: str | None) -> bool:
     )
 
 
+def _find_track_in_album_mapping(
+    tracks_by_title: Any,
+    tracks_by_pos: Any,
+    title: str | None,
+    track_number: int | None,
+) -> tuple[dict[str, Any] | None, bool]:
+    if isinstance(tracks_by_title, dict) and title and not _is_generic_title(title):
+        clean_key = normalize_str(clean_title(title))
+        if clean_key in tracks_by_title and isinstance(
+            tracks_by_title[clean_key], dict
+        ):
+            return tracks_by_title[clean_key], True
+        norm_key = normalize_str(title)
+        if norm_key in tracks_by_title and isinstance(tracks_by_title[norm_key], dict):
+            return tracks_by_title[norm_key], True
+    if isinstance(tracks_by_pos, dict) and track_number in tracks_by_pos:
+        item = tracks_by_pos[track_number]
+        if isinstance(item, dict):
+            return item, True
+    return None, False
+
+
 def _enrich_shazam(
     track_info: TrackInfo,
     file_path: Path,
@@ -417,11 +439,7 @@ def _enrich_musicbrainz(
             ):
                 track_info.musicbrainz_albumid = str(album_mbid)
         elif not is_valid_uuid(track_info.musicbrainz_albumid):
-            search_artist = (
-                track_info.album_artist
-                if track_info.album_artist
-                else track_info.artist
-            )
+            search_artist = track_info.album_artist or track_info.artist
             release = search_musicbrainz_release(
                 search_artist,
                 track_info.album,
@@ -699,23 +717,12 @@ def _enrich_itunes(
     try:
         data = None
         if album_itunes_details:
-            t_by_num = album_itunes_details.get("tracks_by_number", {})
-            t_by_title = album_itunes_details.get("tracks_by_title", {})
-            clean_track_key = normalize_str(clean_title(track_info.title))
-            if (
-                isinstance(t_by_title, dict)
-                and not _is_generic_title(track_info.title)
-                and clean_track_key in t_by_title
-            ):
-                data = t_by_title[clean_track_key]
-            elif (
-                isinstance(t_by_title, dict)
-                and not _is_generic_title(track_info.title)
-                and normalize_str(track_info.title) in t_by_title
-            ):
-                data = t_by_title[normalize_str(track_info.title)]
-            elif isinstance(t_by_num, dict) and track_info.track_number in t_by_num:
-                data = t_by_num[track_info.track_number]
+            data, _ = _find_track_in_album_mapping(
+                album_itunes_details.get("tracks_by_title"),
+                album_itunes_details.get("tracks_by_number"),
+                track_info.title,
+                track_info.track_number,
+            )
 
         if not data and (not track_info.genre or not track_info.advisory):
             data = fetch_itunes_track_metadata(track_info.artist, track_info.title)
@@ -928,25 +935,12 @@ def _enrich_deezer(
         track: dict[str, Any] | None = None
         track_is_from_album = False
         if album and isinstance(album, dict):
-            raw_pos = album.get("tracks_by_position")
-            t_by_pos: dict[Any, Any] = raw_pos if isinstance(raw_pos, dict) else {}
-            raw_title = album.get("tracks_by_title")
-            t_by_title: dict[Any, Any] = (
-                raw_title if isinstance(raw_title, dict) else {}
+            track, track_is_from_album = _find_track_in_album_mapping(
+                album.get("tracks_by_title"),
+                album.get("tracks_by_position"),
+                track_info.title,
+                track_info.track_number,
             )
-            clean_track_key = normalize_str(clean_title(track_info.title))
-            if isinstance(t_by_title, dict) and clean_track_key in t_by_title:
-                track = t_by_title[clean_track_key]
-                track_is_from_album = True
-            elif (
-                isinstance(t_by_title, dict)
-                and normalize_str(track_info.title) in t_by_title
-            ):
-                track = t_by_title[normalize_str(track_info.title)]
-                track_is_from_album = True
-            elif isinstance(t_by_pos, dict) and track_info.track_number in t_by_pos:
-                track = t_by_pos[track_info.track_number]
-                track_is_from_album = True
 
         if not track and track_info.isrc:
             track = fetch_deezer_track_by_isrc(track_info.isrc)
@@ -957,24 +951,20 @@ def _enrich_deezer(
         if not track or not isinstance(track, dict):
             return
 
-        if track.get("featured_artists") and (not track_info.featured_artists or force):
-            track_info.featured_artists = str(track["featured_artists"])
-        if track.get("producers") and (not track_info.producers or force):
-            track_info.producers = str(track["producers"])
         track_pos = safe_int(track.get("track_position"))
-        if track_pos is not None:
-            if track_is_from_album:
-                if track_info.track_number is None:
-                    track_info.track_number = track_pos
-            elif not has_album_context and track_info.track_number is None:
-                track_info.track_number = track_pos
+        if (
+            track_pos is not None
+            and track_info.track_number is None
+            and (track_is_from_album or not has_album_context)
+        ):
+            track_info.track_number = track_pos
         disk_num = safe_int(track.get("disk_number"))
-        if disk_num is not None:
-            if track_is_from_album:
-                if track_info.disc_number is None:
-                    track_info.disc_number = disk_num
-            elif not has_album_context and track_info.disc_number is None:
-                track_info.disc_number = disk_num
+        if (
+            disk_num is not None
+            and track_info.disc_number is None
+            and (track_is_from_album or not has_album_context)
+        ):
+            track_info.disc_number = disk_num
         if track.get("explicit_lyrics"):
             track_info.advisory = "Explicit"
         elif not track_info.advisory and track.get("explicit_lyrics") is False:
@@ -983,6 +973,8 @@ def _enrich_deezer(
             "isrc": "isrc",
             "composer": "composer",
             "lyricist": "lyricist",
+            "featured_artists": "featured_artists",
+            "producers": "producers",
         }
         if not track_info.date:
             deezer_track_map["release_date"] = "date"
@@ -1016,17 +1008,12 @@ def _enrich_genius(
         )
         if not genius_details:
             return
-        if genius_details.get("description") and (not track_info.comment or force):
-            track_info.comment = str(genius_details["description"])
-        if genius_details.get("featured_artists") and (
-            not track_info.featured_artists or force
-        ):
-            track_info.featured_artists = str(genius_details["featured_artists"])
-        if genius_details.get("producers") and (not track_info.producers or force):
-            track_info.producers = str(genius_details["producers"])
         genius_map = {
             "genius_song_id": "genius_song_id",
             "writers": "composer",
+            "description": "comment",
+            "featured_artists": "featured_artists",
+            "producers": "producers",
         }
         if not track_info.date:
             genius_map["release_date"] = "date"
@@ -1063,15 +1050,12 @@ def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
             rating_val = safe_float(tadb_details.get("rating"))
             if rating_val is not None:
                 track_info.rating = rating_val
-        if tadb_details.get("description") and (not track_info.comment or force):
-            desc_str = str(tadb_details["description"]).strip()
-            if desc_str and desc_str.lower() not in ("none", "null"):
-                track_info.comment = desc_str
         tadb_map = {
             "music_video_url": "music_video_url",
             "mood": "mood",
             "style": "style",
             "initial_key": "initial_key",
+            "description": "comment",
         }
         if not track_info.genre:
             tadb_map["genre"] = "genre"

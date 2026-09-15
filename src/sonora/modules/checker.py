@@ -137,47 +137,39 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
         if track.genre and not normalize_genre(track.genre):
             issues.append(f"Blacklisted genre tag: '{track.genre}'")
-        if track.artist == "Unknown Artist":
-            issues.append("Missing ARTIST tag.")
-        if track.title == "Unknown Title":
-            issues.append("Missing TITLE tag.")
-        if track.album == "Unknown Album":
-            issues.append("Missing ALBUM tag.")
-        if not track.album_artist:
-            issues.append("Missing ALBUMARTIST tag (Risk of Split Album).")
-        if track.track_number is None:
-            issues.append("Missing TRACKNUMBER tag.")
-        if not track.date:
-            issues.append("Missing DATE (Year) tag.")
-        if track.bpm is None:
-            issues.append("Missing BPM tag.")
-        if track.replaygain_track_gain is None:
-            issues.append("Missing REPLAYGAIN_TRACK_GAIN tag.")
-        if track.replaygain_track_peak is None:
-            issues.append("Missing REPLAYGAIN_TRACK_PEAK tag.")
+        missing_checks = [
+            (track.artist == "Unknown Artist", "Missing ARTIST tag."),
+            (track.title == "Unknown Title", "Missing TITLE tag."),
+            (track.album == "Unknown Album", "Missing ALBUM tag."),
+            (not track.album_artist, "Missing ALBUMARTIST tag (Risk of Split Album)."),
+            (track.track_number is None, "Missing TRACKNUMBER tag."),
+            (not track.date, "Missing DATE (Year) tag."),
+            (track.bpm is None, "Missing BPM tag."),
+            (track.replaygain_track_gain is None, "Missing REPLAYGAIN_TRACK_GAIN tag."),
+            (track.replaygain_track_peak is None, "Missing REPLAYGAIN_TRACK_PEAK tag."),
+        ]
+        for condition, msg in missing_checks:
+            if condition:
+                issues.append(msg)
+
         if track.initial_key:
             from sonora.audio.key import key_to_camelot
 
             if key_to_camelot(track.initial_key) is None:
                 issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
-        for field_name, tag_label in [
-            ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID"),
-            ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID"),
-        ]:
-            val = getattr(track, field_name)
-            if not val:
-                issues.append(f"Missing {tag_label} tag.")
-            elif not is_valid_uuid(val, allow_multivalue=True):
-                issues.append(f"Invalid UUID format in {tag_label}: '{val}'")
 
-        for field_name, tag_label in [
-            ("musicbrainz_artistid", "MUSICBRAINZ_ARTISTID"),
-            ("musicbrainz_albumartistid", "MUSICBRAINZ_ALBUMARTISTID"),
-            ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID"),
-            ("musicbrainz_workid", "MUSICBRAINZ_WORKID"),
+        for field_name, tag_label, required in [
+            ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID", True),
+            ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID", True),
+            ("musicbrainz_artistid", "MUSICBRAINZ_ARTISTID", False),
+            ("musicbrainz_albumartistid", "MUSICBRAINZ_ALBUMARTISTID", False),
+            ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID", False),
+            ("musicbrainz_workid", "MUSICBRAINZ_WORKID", False),
         ]:
             val = getattr(track, field_name)
-            if val and not is_valid_uuid(val, allow_multivalue=True):
+            if not val and required:
+                issues.append(f"Missing {tag_label} tag.")
+            elif val and not is_valid_uuid(val, allow_multivalue=True):
                 issues.append(f"Invalid UUID format in {tag_label}: '{val}'")
 
         if track.art_width and (
@@ -198,7 +190,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             )
 
         # Check for unsplit artists (e.g. Artist A & Artist B)
-        delimiters = [(" & ", "&"), (" × ", "×"), (" / ", "/"), (" + ", "+")]
+        delimiters = [(" & ", "&"), (" \u00d7 ", "\u00d7"), (" / ", "/"), (" + ", "+")]
         if not is_single_group_artist(track.artist):
             for delimiter_pattern, delimiter_name in delimiters:
                 if delimiter_pattern in f" {track.artist} ":
@@ -370,25 +362,25 @@ def check_library(
                         LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
                         for issue in file_issues:
                             LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
+                        norm_issues = [normalize_str(issue) for issue in file_issues]
                         if any(
-                            "corrupt" in normalize_str(issue)
-                            or "checksum" in normalize_str(issue)
-                            or "0-byte" in normalize_str(issue)
-                            or "fake lossless" in normalize_str(issue)
-                            for issue in file_issues
+                            any(
+                                k in ni
+                                for k in (
+                                    "corrupt",
+                                    "checksum",
+                                    "0-byte",
+                                    "fake lossless",
+                                )
+                            )
+                            for ni in norm_issues
                         ):
                             report.corrupt_files += 1
                         if any(
-                            "missing" in normalize_str(issue)
-                            and "lrc" not in normalize_str(issue)
-                            for issue in file_issues
+                            "missing" in ni and "lrc" not in ni for ni in norm_issues
                         ):
                             report.missing_metadata += 1
-                        if any(
-                            "missing" in normalize_str(issue)
-                            and "lrc" in normalize_str(issue)
-                            for issue in file_issues
-                        ):
+                        if any("missing" in ni and "lrc" in ni for ni in norm_issues):
                             report.missing_lrc += 1
 
                     progress.advance(task)
@@ -416,17 +408,13 @@ def check_library(
                 )
 
         # Check for missing track numbers in sequence per disc
-        discs: dict[int, list[int]] = defaultdict(list)
+        discs: dict[int, set[int]] = defaultdict(set)
         for disc_idx, track_idx in tracks_found:
-            discs[disc_idx].append(track_idx)
-        for disc_idx, track_numbers in discs.items():
-            track_numbers.sort()
-            if track_numbers:
-                max_track = max(track_numbers)
+            discs[disc_idx].add(track_idx)
+        for disc_idx, track_nums in discs.items():
+            if track_nums:
                 missing = [
-                    expected_track_number
-                    for expected_track_number in range(1, max_track + 1)
-                    if expected_track_number not in track_numbers
+                    i for i in range(1, max(track_nums) + 1) if i not in track_nums
                 ]
                 if missing:
                     folder_issues.append(

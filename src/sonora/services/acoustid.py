@@ -109,7 +109,7 @@ def lookup_acoustid(
                     best_mbid = str(recording_id)
 
         set_cached_api(cache_key, best_mbid)
-        return best_mbid if best_mbid else None
+        return best_mbid or None
     except (
         acoustid.AcoustidError,
         acoustid.WebServiceError,
