@@ -32,9 +32,6 @@ class ShazamTrackInfo:
     lyrics: str | None = None
 
 
-
-
-
 async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
     """Execute asynchronous acoustic recognition against the Shazam API."""
     try:
@@ -181,7 +178,9 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
     shazam_images_payload = track.get("images")
     cover_art_url: str | None = None
     if isinstance(shazam_images_payload, dict):
-        cover_art_url = shazam_images_payload.get("coverarthq") or shazam_images_payload.get("coverart")
+        cover_art_url = shazam_images_payload.get(
+            "coverarthq"
+        ) or shazam_images_payload.get("coverart")
 
     apple_id: str | None = None
     hub = track.get("hub")

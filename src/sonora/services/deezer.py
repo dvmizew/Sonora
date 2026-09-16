@@ -39,14 +39,20 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
             return None
 
         deezer_payload = response.json()
-        items = deezer_payload.get("data", []) if isinstance(deezer_payload, dict) else []
+        items = (
+            deezer_payload.get("data", []) if isinstance(deezer_payload, dict) else []
+        )
         if not items:
             query2 = f"{artist} {clean_album}"
             url2 = f"https://api.deezer.com/search/album?q={urllib.parse.quote(query2)}"
             fallback_response = SESSION.get(url2, timeout=6)
             if fallback_response.status_code == 200:
                 fallback_payload = fallback_response.json()
-                items = fallback_payload.get("data", []) if isinstance(fallback_payload, dict) else []
+                items = (
+                    fallback_payload.get("data", [])
+                    if isinstance(fallback_payload, dict)
+                    else []
+                )
 
         best_cover_url = None
         best_score = 0.0
@@ -56,7 +62,9 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
                 continue
             item_artist = str(track_candidate.get("artist", {}).get("name", ""))
             item_album = str(track_candidate.get("title", ""))
-            cover_xl = str(track_candidate.get("cover_xl", "")) or str(track_candidate.get("cover_big", ""))
+            cover_xl = str(track_candidate.get("cover_xl", "")) or str(
+                track_candidate.get("cover_big", "")
+            )
 
             if not cover_xl:
                 continue
@@ -151,7 +159,9 @@ def fetch_deezer_album_details(
             return None
 
         album_deezer_payload = detail_response.json()
-        if not isinstance(album_deezer_payload, dict) or album_deezer_payload.get("error"):
+        if not isinstance(album_deezer_payload, dict) or album_deezer_payload.get(
+            "error"
+        ):
             return None
         genres = [
             genre_item["name"]
@@ -210,7 +220,8 @@ def fetch_deezer_album_details(
             "barcode": album_deezer_payload.get("upc"),
             "release_date": album_deezer_payload.get("release_date"),
             "explicit_lyrics": album_deezer_payload.get("explicit_lyrics"),
-            "cover_url": album_deezer_payload.get("cover_xl") or album_deezer_payload.get("cover_big"),
+            "cover_url": album_deezer_payload.get("cover_xl")
+            or album_deezer_payload.get("cover_big"),
             "genre": genres[0] if genres else None,
             "tracks_by_position": tracks_by_position,
             "tracks_by_title": tracks_by_title,
@@ -377,7 +388,9 @@ def fetch_deezer_track_details(
             return None
 
         track_deezer_payload = detail_response.json()
-        if not isinstance(track_deezer_payload, dict) or track_deezer_payload.get("error"):
+        if not isinstance(track_deezer_payload, dict) or track_deezer_payload.get(
+            "error"
+        ):
             return None
 
         result = _parse_deezer_track_payload(track_deezer_payload)

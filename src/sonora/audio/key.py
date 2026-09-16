@@ -275,7 +275,7 @@ def detect_key_details(
             return None
 
         return detect_key_from_chroma(chroma)
-    except (OSError) as error:
+    except OSError as error:
         LOG.debug(f"Key detection failed for {file_path}: {error}")
         return None
 

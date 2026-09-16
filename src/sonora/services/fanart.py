@@ -43,7 +43,9 @@ def _extract_image_urls(raw_items: Any) -> list[str]:
     sorted_items = sorted(
         raw_items,
         key=lambda image_entry: (
-            safe_int(image_entry.get("likes")) or 0 if isinstance(image_entry, dict) else 0
+            safe_int(image_entry.get("likes")) or 0
+            if isinstance(image_entry, dict)
+            else 0
         ),
         reverse=True,
     )
@@ -115,9 +117,9 @@ def fetch_fanart_artist(
         if not isinstance(fanart_payload, dict):
             return None
 
-        logos = _extract_image_urls(fanart_payload.get("hdmusiclogo")) + _extract_image_urls(
-            fanart_payload.get("musiclogo")
-        )
+        logos = _extract_image_urls(
+            fanart_payload.get("hdmusiclogo")
+        ) + _extract_image_urls(fanart_payload.get("musiclogo"))
         backgrounds = _extract_image_urls(fanart_payload.get("artistbackground"))
         banners = _extract_image_urls(fanart_payload.get("musicbanner"))
         thumbs = _extract_image_urls(fanart_payload.get("artistthumb"))

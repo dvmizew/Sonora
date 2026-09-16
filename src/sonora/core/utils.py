@@ -507,7 +507,9 @@ def deduplicate_title_features(
     if not unique_artists:
         formatted_title = base_title
     elif len(unique_artists) == 1:
-        formatted_title = f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
+        formatted_title = (
+            f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
+        )
     else:
         feat_str = ", ".join(unique_artists[:-1]) + f" & {unique_artists[-1]}"
         formatted_title = f"{base_title} {open_char}feat. {feat_str}{close_char}"
@@ -592,8 +594,17 @@ def match_score(
         title_score = max(title_ratio, title_token_sort)
 
         query_word = _NON_WORD_SPACES_PATTERN.sub(" ", query_title_clean).strip()
-        candidate_word = _NON_WORD_SPACES_PATTERN.sub(" ", candidate_title_clean).strip()
-        if query_word and candidate_word and (query_word != query_title_clean or candidate_word != candidate_title_clean):
+        candidate_word = _NON_WORD_SPACES_PATTERN.sub(
+            " ", candidate_title_clean
+        ).strip()
+        if (
+            query_word
+            and candidate_word
+            and (
+                query_word != query_title_clean
+                or candidate_word != candidate_title_clean
+            )
+        ):
             title_score = max(
                 title_score,
                 float(fuzz.ratio(query_word, candidate_word)),
@@ -603,22 +614,35 @@ def match_score(
             candidate_tokens = candidate_word.split()
             if (
                 min(len(query_tokens), len(candidate_tokens)) >= 3
-                and min(len(query_word), len(candidate_word)) / max(len(query_word), len(candidate_word)) >= 0.5
+                and min(len(query_word), len(candidate_word))
+                / max(len(query_word), len(candidate_word))
+                >= 0.5
             ):
-                title_score = max(title_score, float(fuzz.token_set_ratio(query_word, candidate_word)))
+                title_score = max(
+                    title_score, float(fuzz.token_set_ratio(query_word, candidate_word))
+                )
 
         query_no_articles = re.sub(r"^(?:the|a|an)\s+", "", query_title_clean).strip()
-        candidate_no_articles = re.sub(r"^(?:the|a|an)\s+", "", candidate_title_clean).strip()
+        candidate_no_articles = re.sub(
+            r"^(?:the|a|an)\s+", "", candidate_title_clean
+        ).strip()
         if (
             query_no_articles
             and candidate_no_articles
-            and (query_no_articles != query_title_clean or candidate_no_articles != candidate_title_clean)
+            and (
+                query_no_articles != query_title_clean
+                or candidate_no_articles != candidate_title_clean
+            )
         ):
             art_ratio = float(fuzz.ratio(query_no_articles, candidate_no_articles))
-            art_sort = float(fuzz.token_sort_ratio(query_no_articles, candidate_no_articles))
+            art_sort = float(
+                fuzz.token_sort_ratio(query_no_articles, candidate_no_articles)
+            )
             title_score = max(title_score, art_ratio, art_sort)
 
-    query_version = is_version_or_remix(query_title) or is_version_or_remix(query_title_clean)
+    query_version = is_version_or_remix(query_title) or is_version_or_remix(
+        query_title_clean
+    )
     candidate_version = is_version_or_remix(candidate_title) or is_version_or_remix(
         candidate_title_clean
     )
@@ -640,7 +664,9 @@ def match_score(
             artist_score = 100.0
         else:
             query_primary = clean_title(get_primary_artist(query_artist_clean)).lower()
-            candidate_primary = clean_title(get_primary_artist(candidate_artist_clean)).lower()
+            candidate_primary = clean_title(
+                get_primary_artist(candidate_artist_clean)
+            ).lower()
             if query_primary == candidate_primary:
                 artist_score = 100.0
             else:
@@ -650,7 +676,9 @@ def match_score(
                 elif min_len <= 5:
                     artist_score = float(fuzz.ratio(query_primary, candidate_primary))
                 else:
-                    artist_weight = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
+                    artist_weight = fuzz.WRatio(
+                        query_artist_clean, candidate_artist_clean
+                    )
                     artist_token = fuzz.token_set_ratio(
                         query_artist_clean, candidate_artist_clean
                     )

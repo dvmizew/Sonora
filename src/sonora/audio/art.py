@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 
 import httpx
@@ -61,18 +62,23 @@ def check_image_similarity(
     if threshold is not None:
         max_distance = round((1.0 - threshold) * 64)
 
+    first_image: Image.Image | None = None
+    second_image: Image.Image | None = None
     try:
         first_image = _load_normalized_image(first_image_bytes)
         second_image = _load_normalized_image(second_image_bytes)
 
         first_hash = imagehash.phash(first_image)
         second_hash = imagehash.phash(second_image)
-        first_image.close()
-        second_image.close()
         return bool((first_hash - second_hash) <= max_distance)
     except (OSError, ValueError, UnidentifiedImageError) as error:
         LOG.debug(f"Perceptual image comparison failed: {error}")
         return True
+    finally:
+        if first_image is not None:
+            first_image.close()
+        if second_image is not None:
+            second_image.close()
 
 
 def process_album_cover_art(
@@ -104,6 +110,12 @@ def process_album_cover_art(
     )
 
     if not artwork_already_present:
+        if not dry_run and not os.access(target_dir, os.W_OK):
+            LOG.debug(
+                f"Target album directory is read-only, skipping cover download: {target_dir}"
+            )
+            return cover_image_path if cover_image_path.exists() else None
+
         artwork_url = None
         if musicbrainz_album_id:
             artwork_url = fetch_cover_art_archive_url(musicbrainz_album_id)
@@ -209,10 +221,19 @@ def process_artist_artwork(
     dry_run: bool = False,
 ) -> None:
     """Ensure artist.jpg, banner.jpg, and optional fanart.tv logo.png exist in the artist root."""
-    if not artist_name or artist_name.lower() in {"various artists", "unknown artist", "unknown"}:
+    if not artist_name or artist_name.lower() in {
+        "various artists",
+        "unknown artist",
+        "unknown",
+    }:
         return
 
     artist_dir = _find_artist_directory(folder_path, artist_name)
+    if not dry_run and not os.access(artist_dir, os.W_OK):
+        LOG.debug(
+            f"Artist directory is read-only, skipping artist artwork: {artist_dir}"
+        )
+        return
 
     has_artist_image = any(
         (artist_dir / filename).exists()

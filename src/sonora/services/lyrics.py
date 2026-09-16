@@ -60,7 +60,9 @@ def init_musixmatch_token(token_str: str | None = None) -> bool:
             )
         elif decoded.startswith("{") and "token" in decoded:
             lyrics_payload = json.loads(decoded)
-            extracted_token = lyrics_payload.get("token") or lyrics_payload.get("user_token")
+            extracted_token = lyrics_payload.get("token") or lyrics_payload.get(
+                "user_token"
+            )
         else:
             extracted_token = decoded
     except ValueError:
@@ -207,7 +209,14 @@ def _query_lrclib(
                 params["album_name"] = album_name
             if duration is not None:
                 params["duration"] = int(duration)
-            response = SESSION.get(url, params=params, timeout=5.0, headers={"User-Agent": "Sonora/1.0 (https://github.com/dvmizew/Sonora)"})
+            response = SESSION.get(
+                url,
+                params=params,
+                timeout=5.0,
+                headers={
+                    "User-Agent": "Sonora/1.0 (https://github.com/dvmizew/Sonora)"
+                },
+            )
             if response.status_code == 200:
                 lyrics_response_payload = response.json()
                 if isinstance(lyrics_response_payload, dict):
@@ -271,7 +280,11 @@ def _query_syncedlyrics(
     # 1. High-speed direct HTTP/2 LRCLIB fast-path when not restricted to other providers
     if (not providers or "Lrclib" in providers) and not lang:
         lrclib_result = _query_lrclib(
-            query_str, plain_only=plain_only, synced_only=synced_only, album_name=album_name, duration=duration
+            query_str,
+            plain_only=plain_only,
+            synced_only=synced_only,
+            album_name=album_name,
+            duration=duration,
         )
         if lrclib_result:
             return lrclib_result
@@ -329,7 +342,9 @@ def fetch_synced_lyrics(
         # Standard query format (matches unit tests)
         default_query = f"{artist.lower()} - {title.lower()}".strip()
         try:
-            lyrics_content = _query_syncedlyrics(default_query, *search_args, album_name=album_name, duration=duration)
+            lyrics_content = _query_syncedlyrics(
+                default_query, *search_args, album_name=album_name, duration=duration
+            )
         except (
             httpx.HTTPError,
             OSError,
@@ -345,7 +360,9 @@ def fetch_synced_lyrics(
         primary_artist = get_primary_artist(artist)
         query = f"{cleaned_track_title} {primary_artist}".strip()
         try:
-            lyrics_content = _query_syncedlyrics(query, *search_args, album_name=album_name, duration=duration)
+            lyrics_content = _query_syncedlyrics(
+                query, *search_args, album_name=album_name, duration=duration
+            )
         except (
             httpx.HTTPError,
             OSError,
@@ -404,7 +421,14 @@ def process_track_lyrics(
 
     # Attempt to fetch higher quality lyrics online
     try:
-        lyrics_text = fetch_synced_lyrics(artist, title, enhanced=True, isrc=isrc, album_name=album_name, duration=duration)
+        lyrics_text = fetch_synced_lyrics(
+            artist,
+            title,
+            enhanced=True,
+            isrc=isrc,
+            album_name=album_name,
+            duration=duration,
+        )
     except (
         httpx.HTTPError,
         OSError,

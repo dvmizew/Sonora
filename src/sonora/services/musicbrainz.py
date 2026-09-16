@@ -32,7 +32,7 @@ def init_musicbrainz(
     try:
         musicbrainzngs.set_useragent(app_name, version, contact)
         musicbrainzngs.set_rate_limit(limit_or_interval=1.0, new_requests=1)
-    except (ValueError) as error:
+    except ValueError as error:
         LOG.debug(f"MusicBrainz User-Agent initialization failed: {error}")
 
 
@@ -385,7 +385,11 @@ def fetch_musicbrainz_recording_details(
                 "tags",
             ],
         )
-        recording_dict = musicbrainz_payload.get("recording", {}) if isinstance(musicbrainz_payload, dict) else {}
+        recording_dict = (
+            musicbrainz_payload.get("recording", {})
+            if isinstance(musicbrainz_payload, dict)
+            else {}
+        )
         if not recording_dict:
             return None
 
@@ -475,7 +479,11 @@ def fetch_musicbrainz_release_details(
                 "tags",
             ],
         )
-        release_dict = musicbrainz_payload.get("release", {}) if isinstance(musicbrainz_payload, dict) else {}
+        release_dict = (
+            musicbrainz_payload.get("release", {})
+            if isinstance(musicbrainz_payload, dict)
+            else {}
+        )
         if not release_dict:
             return None
 
@@ -659,7 +667,9 @@ def search_musicbrainz_artists(query: str, limit: int = 5) -> list[dict[str, Any
     init_musicbrainz()
     _MB_LIMITER.wait()
     try:
-        artist_search_payload: Any = musicbrainzngs.search_artists(query=query, limit=limit)
+        artist_search_payload: Any = musicbrainzngs.search_artists(
+            query=query, limit=limit
+        )
         if isinstance(artist_search_payload, dict):
             raw_list = artist_search_payload.get("artist-list", [])
             if isinstance(raw_list, list):

@@ -52,6 +52,6 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
 
         return False, ratio, None
 
-    except (OSError) as error:
+    except OSError as error:
         LOG.debug(f"Spectral analysis skipped for {file_path}: {error}")
         return False, 1.0, None

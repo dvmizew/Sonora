@@ -79,7 +79,7 @@ def _write_album_replaygain_track(
         track_info.replaygain_album_peak = round(max_album_peak, 6)
         write_track_metadata(track_info)
         return True
-    except (OSError) as err:
+    except OSError as err:
         LOG.debug(f"Failed to write ReplayGain tags to {file_path}: {err}")
         return False
 
@@ -115,7 +115,7 @@ def calculate_album_replaygain(
                 ):
                     already_tagged = False
                     break
-            except (OSError):
+            except OSError:
                 already_tagged = False
                 break
         if already_tagged:
@@ -139,7 +139,7 @@ def calculate_album_replaygain(
                     if loudness_metrics is not None:
                         track_results.append(loudness_metrics)
                         max_album_peak = max(max_album_peak, loudness_metrics[2])
-                except (OSError) as error:
+                except OSError as error:
                     LOG.debug(f"Track loudness measurement failed: {error}")
         except KeyboardInterrupt:
             executor.shutdown(wait=True, cancel_futures=True)

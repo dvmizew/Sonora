@@ -724,7 +724,9 @@ def _enrich_itunes(
             )
 
         if not api_payload and (not track_info.genre or not track_info.advisory):
-            api_payload = fetch_itunes_track_metadata(track_info.artist, track_info.title)
+            api_payload = fetch_itunes_track_metadata(
+                track_info.artist, track_info.title
+            )
 
         if api_payload and isinstance(api_payload, dict):
             itunes_map = {
@@ -738,9 +740,9 @@ def _enrich_itunes(
             }
             if not track_info.date:
                 itunes_map["date"] = "date"
-            if (not track_info.title or track_info.title == "Untitled") and api_payload.get(
-                "trackName"
-            ):
+            if (
+                not track_info.title or track_info.title == "Untitled"
+            ) and api_payload.get("trackName"):
                 itunes_map["trackName"] = "title"
             _apply_mapping(
                 track_info,
@@ -1093,7 +1095,7 @@ def _enrich_bpm(
             if bpm is not None:
                 track_info.bpm = bpm
                 LOG.info(f"   ∟ 🎵 BPM Calculated: [green]{bpm}[/]")
-        except (OSError) as error:
+        except OSError as error:
             LOG.debug(f"BPM calculation failed for {track_info.title}: {error}")
 
 
@@ -1112,7 +1114,7 @@ def _enrich_key(
                 LOG.info(
                     f"   ∟ 🎵 Musical Key: [green]{escape(key_name)}[/] ({escape(camelot)})"
                 )
-        except (OSError) as error:
+        except OSError as error:
             LOG.debug(f"Key calculation failed for {track_info.title}: {error}")
 
 
@@ -2108,7 +2110,7 @@ def _resolve_album_folder_identity(
             art = m.album_artist or m.artist
             if art and not get_config().is_generic_container(art):
                 artist_counts[art] = artist_counts.get(art, 0) + 1
-        except (OSError):
+        except OSError:
             pass
 
     consensus_album = (
@@ -2473,7 +2475,7 @@ def normalize_single_track(
 
     try:
         current_info = read_track_metadata(file_path)
-    except (OSError) as error:
+    except OSError as error:
         LOG.debug(f"Failed to read metadata for {file_path}: {error}")
         return None
 
@@ -2510,7 +2512,7 @@ def normalize_single_track(
             calculated = calculate_bpm(file_path)
             if calculated is not None:
                 updated_bpm = calculated
-        except (OSError) as error:
+        except OSError as error:
             LOG.debug(f"BPM calculation failed for {file_path}: {error}")
 
     updated_key = current_info.initial_key
@@ -2519,7 +2521,7 @@ def normalize_single_track(
             calculated_key = detect_musical_key(file_path)
             if calculated_key is not None:
                 updated_key = calculated_key
-        except (OSError) as error:
+        except OSError as error:
             LOG.debug(f"Key calculation failed for {file_path}: {error}")
 
     updated_info = dataclasses.replace(
@@ -2542,7 +2544,7 @@ def normalize_single_track(
         try:
             write_track_metadata(updated_info)
             get_library_state().record_track_state(file_path, "TAGGED_OK")
-        except (OSError) as error:
+        except OSError as error:
             LOG.warning(
                 f"Failed to save normalized tags for {escape(file_path.name)}: {error}"
             )

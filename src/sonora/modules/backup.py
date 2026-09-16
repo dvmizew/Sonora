@@ -24,7 +24,7 @@ def _read_track_for_backup(audio_file: Path) -> tuple[str, dict[str, Any] | None
     try:
         track_info = read_track_metadata(audio_file)
         return str(audio_file), track_info.to_dict()
-    except (OSError) as error:
+    except OSError as error:
         LOG.debug(f"Error reading {audio_file} for backup: {error}")
         return str(audio_file), None
 
@@ -60,7 +60,7 @@ def _restore_single_track(
             }
             write_track_metadata(TrackInfo(file_path=target_path, **clean_tags))
             return True, False
-    except (OSError) as error:
+    except OSError as error:
         LOG.debug(f"Failed to restore {target_path}: {error}")
     return False, False
 

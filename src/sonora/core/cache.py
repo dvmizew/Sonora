@@ -48,7 +48,10 @@ def _migrate_legacy_cache(cache_dir: Path, api_cache_dir: Path) -> None:
     try:
         api_cache_dir.mkdir(parents=True, exist_ok=True)
         for entry_path in list(cache_dir.iterdir()):
-            if entry_path.name.startswith("library_state.db") or entry_path.name == "api":
+            if (
+                entry_path.name.startswith("library_state.db")
+                or entry_path.name == "api"
+            ):
                 continue
             target = api_cache_dir / entry_path.name
             if not target.exists():
@@ -333,7 +336,9 @@ def clear_cache(
             if api_cache_dir.exists() and api_cache_dir.is_dir():
                 try:
                     for entry_path in api_cache_dir.iterdir():
-                        if entry_path.is_dir() and re.match(r"^\d{3}$", entry_path.name):
+                        if entry_path.is_dir() and re.match(
+                            r"^\d{3}$", entry_path.name
+                        ):
                             shutil.rmtree(entry_path, ignore_errors=True)
                 except OSError as error:
                     LOG.debug(f"Legacy shard cleanup failed: {error}")

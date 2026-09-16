@@ -215,7 +215,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                     try:
                         with Image.open(io.BytesIO(first_picture.data)) as img:
                             art_width, art_height = img.size
-                    except (OSError) as e:
+                    except OSError as e:
                         LOG.debug(f"Failed to read image dimensions: {e}")
 
             mapped_fields: dict[str, Any] = {
@@ -241,7 +241,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 is_lossless = False
             elif file_ext in {".m4a", ".mp4"}:
                 try:
-                    mp4_audio = __import__("typing").cast(__import__("typing").Any, mutagen.mp4.MP4)(file_path)
+                    mp4_audio = __import__("typing").cast(
+                        __import__("typing").Any, mutagen.mp4.MP4
+                    )(file_path)
                     is_lossless = (
                         str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
                     )
@@ -283,12 +285,10 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                     _METADATA_CACHE.clear()
                 _METADATA_CACHE[cache_key] = dataclasses.replace(track_info)
             return track_info
-    except (FileNotFoundError):
+    except FileNotFoundError:
         raise
     except (OSError, ValueError) as error:
-        raise OSError(
-            f"Failed to read metadata for {file_path}: {error}"
-        ) from error
+        raise OSError(f"Failed to read metadata for {file_path}: {error}") from error
 
 
 def write_track_metadata(
@@ -297,6 +297,7 @@ def write_track_metadata(
     if not track_info.file_path.exists():
         raise FileNotFoundError(f"File not found: {track_info.file_path}")
     import os
+
     if not os.access(track_info.file_path, os.W_OK):
         raise OSError(f"Permission denied: File is read-only '{track_info.file_path}'")
 
@@ -424,7 +425,7 @@ def write_track_metadata(
                     _METADATA_CACHE[new_key] = dataclasses.replace(track_info)
             except OSError as e:
                 LOG.debug(f"Failed to cache track metadata by inode: {e}")
-    except (FileNotFoundError):
+    except FileNotFoundError:
         raise
     except (OSError, ValueError) as error:
         raise OSError(
@@ -445,9 +446,11 @@ def get_metadata_cache_size() -> int:
     with _METADATA_CACHE_LOCK:
         return len(_METADATA_CACHE)
 
+
 def get_audio_duration(file_path: Path) -> float | None:
     try:
         import mutagen
+
         m_file = cast(Any, mutagen).File(file_path)
         if m_file and getattr(m_file, "info", None):
             return float(m_file.info.length)

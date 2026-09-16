@@ -108,7 +108,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 issues.append(
                     "FLAC audio stream MD5 checksum verification failed (corrupted FLAC)."
                 )
-        except (OSError) as error:
+        except OSError as error:
             issues.append(f"Checksum check failed: {error}")
 
         try:
@@ -127,7 +127,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                     description
                     or "Possible fake lossless (spectral cutoff below 16kHz)."
                 )
-        except (OSError) as error:
+        except OSError as error:
             LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
 
     try:
@@ -215,7 +215,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"Sub-standard lossy bitrate: {round(track.bitrate / 1000)} kbps (Recommended: 320 kbps)"
             )
 
-    except (OSError) as error:
+    except OSError as error:
         issues.append(f"Metadata read error: {error}")
 
     if not find_companion_lyrics(file_path):
@@ -241,7 +241,7 @@ def _check_single_file(
             album_artist = track_info.album_artist
         disc_number = track_info.disc_number or 1
         track_number = track_info.track_number
-    except (OSError):
+    except OSError:
         pass
     return path, file_issues, album, album_artist, disc_number, track_number
 

@@ -41,7 +41,11 @@ def search_itunes(
         response = SESSION.get(ITUNES_SEARCH_URL, params=params, timeout=10)
         response.raise_for_status()
         itunes_payload = response.json()
-        raw_results = itunes_payload.get("results", []) if isinstance(itunes_payload, dict) else []
+        raw_results = (
+            itunes_payload.get("results", [])
+            if isinstance(itunes_payload, dict)
+            else []
+        )
         results: list[dict[str, object]] = [
             track_entry for track_entry in raw_results if isinstance(track_entry, dict)
         ]
@@ -274,7 +278,11 @@ def fetch_itunes_album_details(
         response = SESSION.get(url, params=params, timeout=10)
         response.raise_for_status()
         itunes_payload = response.json()
-        raw_items = itunes_payload.get("results", []) if isinstance(itunes_payload, dict) else []
+        raw_items = (
+            itunes_payload.get("results", [])
+            if isinstance(itunes_payload, dict)
+            else []
+        )
 
         tracks_by_number: dict[int, dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
@@ -294,7 +302,10 @@ def fetch_itunes_album_details(
         }
 
         for track_entry in raw_items:
-            if not isinstance(track_entry, dict) or track_entry.get("wrapperType") != "track":
+            if (
+                not isinstance(track_entry, dict)
+                or track_entry.get("wrapperType") != "track"
+            ):
                 continue
             t_num = track_entry.get("trackNumber")
             t_name = str(track_entry.get("trackName", ""))
@@ -307,7 +318,9 @@ def fetch_itunes_album_details(
                 else None
             )
             r_date = (
-                str(track_entry.get("releaseDate"))[:10] if track_entry.get("releaseDate") else None
+                str(track_entry.get("releaseDate"))[:10]
+                if track_entry.get("releaseDate")
+                else None
             )
 
             t_info: dict[str, object] = {
@@ -315,7 +328,9 @@ def fetch_itunes_album_details(
                 "artist": track_entry.get("artistName"),
                 "genre": track_entry.get("primaryGenreName"),
                 "advisory": advisory,
-                "itunes_trackid": str(track_entry["trackId"]) if track_entry.get("trackId") else None,
+                "itunes_trackid": str(track_entry["trackId"])
+                if track_entry.get("trackId")
+                else None,
                 "itunes_collectionid": str(collection_id),
                 "itunes_artistid": str(track_entry.get("artistId"))
                 if track_entry.get("artistId")

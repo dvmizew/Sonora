@@ -920,7 +920,7 @@ def _process_bpm_file(
             updated = dataclasses.replace(track_info, bpm=val)
             write_track_metadata(updated)
         return audio_path, val, True
-    except (OSError) as err:
+    except OSError as err:
         LOG.debug(f"BPM error for {audio_path}: {err}")
         return audio_path, None, False
 
@@ -969,7 +969,7 @@ def _process_key_file(
                 write_track_metadata(updated)
             return audio_path, f"{val} ({camelot})", True
         return audio_path, None, False
-    except (OSError) as err:
+    except OSError as err:
         LOG.debug(f"Key detection error for {audio_path}: {err}")
         return audio_path, None, False
 
@@ -1091,7 +1091,7 @@ def _process_lyrics_file(
                 updated = dataclasses.replace(track_info, lyrics=lyrics_text)
                 write_track_metadata(updated)
         return audio_path, lyrics_text, tag_type
-    except (OSError) as err:
+    except OSError as err:
         LOG.debug(f"Lyrics error for {audio_path}: {err}")
         return audio_path, None, None
 
@@ -1130,15 +1130,16 @@ def lyrics(
         ("Lyrics Unavailable", str(missing_count), "yellow" if missing_count else None),
     ]
     LOG.summary_table("Lyrics Summary", summary_rows)
-    
+
     if json_report:
         import orjson
+
         report_data = {
             "total_files": len(results),
             "saved": saved_count,
             "already_had": skipped_count,
             "unavailable": missing_count,
-            "details": [{"file": str(p), "status": typ} for p, _, typ in results]
+            "details": [{"file": str(p), "status": typ} for p, _, typ in results],
         }
         json_report.write_bytes(orjson.dumps(report_data, option=orjson.OPT_INDENT_2))
         LOG.info(f"Saved lyrics JSON report to [bold cyan]{json_report}[/bold cyan]")
@@ -1435,7 +1436,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 130
     except CycloptsError:
         return 2
-    except (OSError) as error:
+    except OSError as error:
         LOG.error(f"Error: {error}")
         return 1
 

@@ -217,7 +217,9 @@ def fetch_discogs_release_details(
         return None
 
 
-def _score_discogs_candidate(track_candidate: dict[str, Any], artist: str, album: str) -> float:
+def _score_discogs_candidate(
+    track_candidate: dict[str, Any], artist: str, album: str
+) -> float:
     item_title = str(track_candidate.get("title", ""))
     if " - " in item_title:
         cand_artist, cand_album = item_title.split(" - ", 1)
@@ -301,7 +303,11 @@ def search_discogs_release(
         if response.status_code != 200:
             return None
         discogs_payload = response.json()
-        results = discogs_payload.get("results", []) if isinstance(discogs_payload, dict) else []
+        results = (
+            discogs_payload.get("results", [])
+            if isinstance(discogs_payload, dict)
+            else []
+        )
         if not results:
             return None
 

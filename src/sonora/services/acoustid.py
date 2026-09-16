@@ -1,3 +1,4 @@
+import subprocess
 import threading
 from pathlib import Path
 
@@ -10,6 +11,32 @@ from sonora.core.utils import RateLimiter, is_valid_uuid, match_score, normalize
 
 _ACOUSTID_CACHE: dict[tuple[str, int, int], tuple[float, str]] = {}
 _ACOUSTID_LOCK = threading.RLock()
+
+
+def _fingerprint_file_with_timeout(
+    file_path: Path, timeout: float = 20.0
+) -> tuple[float, str]:
+    """Execute fpcalc with an explicit timeout to prevent thread hangs on corrupt files."""
+    command = ["fpcalc", "-length", "120", str(file_path.resolve())]
+    try:
+        process_result = subprocess.run(
+            command, capture_output=True, check=True, timeout=timeout
+        )
+        duration: float | None = None
+        fingerprint: str | None = None
+        for line in process_result.stdout.splitlines():
+            if line.startswith(b"DURATION="):
+                duration = float(line.split(b"=", 1)[1])
+            elif line.startswith(b"FINGERPRINT="):
+                fingerprint = line.split(b"=", 1)[1].decode("ascii")
+        if duration is not None and fingerprint is not None:
+            return float(duration), str(fingerprint)
+    except (subprocess.SubprocessError, OSError, ValueError) as error:
+        LOG.debug(f"Direct fpcalc execution with timeout failed: {error}")
+
+    # Fallback to standard acoustid library call if direct invocation fails
+    duration_val, fp_val = acoustid.fingerprint_file(str(file_path.resolve()))
+    return float(duration_val), str(fp_val)
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
@@ -28,12 +55,17 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
             if cache_key in _ACOUSTID_CACHE:
                 return _ACOUSTID_CACHE[cache_key]
 
-        duration, fingerprint = acoustid.fingerprint_file(str(file_path.resolve()))
+        duration, fingerprint = _fingerprint_file_with_timeout(file_path)
         result = (float(duration), str(fingerprint))
         with _ACOUSTID_LOCK:
             _ACOUSTID_CACHE[cache_key] = result
         return result
-    except (acoustid.AcoustidError, acoustid.WebServiceError, OSError) as error:
+    except (
+        acoustid.AcoustidError,
+        acoustid.WebServiceError,
+        OSError,
+        subprocess.SubprocessError,
+    ) as error:
         raise RuntimeError(
             f"Chromaprint fingerprinting failed for {file_path}: {error}"
         ) from error
