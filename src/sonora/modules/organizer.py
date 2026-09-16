@@ -15,6 +15,7 @@ from sonora.core.logger import (
 )
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    InterruptedOperationError,
     deduplicate_title_features,
     find_audio_files,
     find_companion_lyrics,
@@ -51,7 +52,9 @@ def is_single_folder(folder_path: Path) -> bool:
             track_info = read_track_metadata(audio_file)
             if track_info.album and track_info.album != "Unknown Album":
                 albums.add(normalize_str(track_info.album))
-        except (OSError, ValueError, RuntimeError) as error:
+                if len(albums) > 1:
+                    return True
+        except OSError as error:
             LOG.debug(
                 f"Failed to read metadata for singles detection on {audio_file}: {error}"
             )
@@ -80,11 +83,42 @@ def _quarantine_file(file_path: Path, quarantine_dir: Path) -> Path:
     return target
 
 
-LAST_ORGANIZED_COUNT: int = 0
+def _read_file_info(file_path: Path) -> tuple[Path, TrackInfo | None]:
+    try:
+        return file_path, read_track_metadata(file_path)
+    except OSError as err:
+        LOG.warning(f"Failed to read metadata for {escape(str(file_path))}: {err}")
+        return file_path, None
 
 
-def get_last_organized_count() -> int:
-    return LAST_ORGANIZED_COUNT
+def _track_fingerprints(info: TrackInfo) -> list[str]:
+    primary_key = normalize_str(get_primary_artist(info.artist))
+    title_key = normalize_str(deduplicate_title_features(info.title))
+    prints = [f"{primary_key} - {title_key}"]
+    if info.isrc:
+        prints.append(f"isrc:{info.isrc.strip().upper()}")
+    if info.musicbrainz_trackid:
+        prints.append(f"mbid:{info.musicbrainz_trackid.strip().lower()}")
+    return prints
+
+
+def _quarantine_duplicate_single(
+    path: Path,
+    key: str,
+    quarantine_dir: Path,
+    dry_run: bool = False,
+    reason: str = "",
+) -> None:
+    if not dry_run:
+        try:
+            _quarantine_file(path, quarantine_dir)
+            LOG.info(
+                f"   ∟ 📦 Quarantined duplicate single{reason}: {escape(key)} -> .duplicates/"
+            )
+        except OSError as error:
+            LOG.debug(f"Failed to quarantine duplicate single {path}: {error}")
+    else:
+        LOG.info(f"[DRY-RUN] Would quarantine duplicate single{reason}: {escape(key)}")
 
 
 def organize_library_singles(
@@ -98,9 +132,6 @@ def organize_library_singles(
     organized as target_singles_dir / Primary Artist / Artist - Title.ext.
     Returns the count of moved tracks.
     """
-    global LAST_ORGANIZED_COUNT
-    LAST_ORGANIZED_COUNT = 0
-
     if not source_dir.exists():
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
 
@@ -117,19 +148,14 @@ def organize_library_singles(
     album_fingerprints: set[str] = set()
     singles_to_process: list[tuple[Path, TrackInfo]] = []
 
-    def _read_file_info(f_path: Path) -> tuple[Path, TrackInfo | None]:
-        try:
-            return f_path, read_track_metadata(f_path)
-        except (OSError, ValueError, RuntimeError) as err:
-            LOG.warning(f"Failed to read metadata for {escape(str(f_path))}: {err}")
-            return f_path, None
-
     with create_progress() as progress:
         task = progress.add_task(
             "[cyan]Organizing single tracks...", total=len(all_audio_files)
         )
-        with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=max_threads)
+        with (
+            interactive_pause_listener(progress, task),
+            ThreadPoolExecutor(max_workers=max_threads) as executor,
+        ):
             try:
                 for folder, files in folder_files.items():
                     wait_if_paused()
@@ -139,29 +165,25 @@ def organize_library_singles(
                     folder_track_infos: list[tuple[Path, TrackInfo]] = []
                     albums_in_folder: set[str] = set()
 
-                    if max_threads > 1 and len(files) > 1:
-                        futures = [executor.submit(_read_file_info, p) for p in files]
-                        for fut in as_completed(futures):
-                            wait_if_paused()
-                            p, info = fut.result()
-                            if info is not None:
-                                folder_track_infos.append((p, info))
-                                if info.album and not get_config().is_generic_container(
-                                    info.album
-                                ):
-                                    albums_in_folder.add(normalize_str(info.album))
-                            progress.advance(task)
-                    else:
-                        for path in files:
-                            wait_if_paused()
-                            p, info = _read_file_info(path)
-                            if info is not None:
-                                folder_track_infos.append((p, info))
-                                if info.album and not get_config().is_generic_container(
-                                    info.album
-                                ):
-                                    albums_in_folder.add(normalize_str(info.album))
-                            progress.advance(task)
+                    file_results = (
+                        (
+                            fut.result()
+                            for fut in as_completed(
+                                [executor.submit(_read_file_info, p) for p in files]
+                            )
+                        )
+                        if max_threads > 1 and len(files) > 1
+                        else (_read_file_info(p) for p in files)
+                    )
+                    for p, info in file_results:
+                        wait_if_paused()
+                        if info is not None:
+                            folder_track_infos.append((p, info))
+                            if info.album and not get_config().is_generic_container(
+                                info.album
+                            ):
+                                albums_in_folder.add(normalize_str(info.album))
+                        progress.advance(task)
 
                     if not is_single and len(albums_in_folder) > 1:
                         is_single = True
@@ -171,143 +193,104 @@ def organize_library_singles(
                             singles_to_process.append((path, info))
                     else:
                         for _path, info in folder_track_infos:
-                            primary_artist_key = normalize_str(
-                                get_primary_artist(info.artist)
-                            )
-                            clean_t = normalize_str(
-                                deduplicate_title_features(info.title)
-                            )
-                            album_fingerprints.add(f"{primary_artist_key} - {clean_t}")
-                            if info.isrc:
-                                album_fingerprints.add(
-                                    f"isrc:{info.isrc.strip().upper()}"
-                                )
-                            if info.musicbrainz_trackid:
-                                album_fingerprints.add(
-                                    f"mbid:{info.musicbrainz_trackid.strip().lower()}"
-                                )
-            finally:
-                executor.shutdown(wait=False)
+                            album_fingerprints.update(_track_fingerprints(info))
+            except KeyboardInterrupt:
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise InterruptedOperationError(moved_count) from None
 
     seen_single_fingerprints: set[str] = set()
     quarantine_dir = (target_singles_dir or (source_dir / "Singles")) / ".duplicates"
 
     # Process and move collected singles (with safe quarantining against album tracks and duplicate singles)
-    for path, track_info in singles_to_process:
-        primary_artist = get_primary_artist(track_info.artist)
-        clean_title = deduplicate_title_features(track_info.title)
-        primary_artist_key = normalize_str(primary_artist)
-        track_identity_key = f"{primary_artist_key} - {normalize_str(clean_title)}"
+    try:
+        for path, track_info in singles_to_process:
+            primary_artist = get_primary_artist(track_info.artist)
+            clean_title = deduplicate_title_features(track_info.title)
+            primary_artist_key = normalize_str(primary_artist)
+            track_identity_key = f"{primary_artist_key} - {normalize_str(clean_title)}"
 
-        is_duplicate = (
-            track_identity_key in album_fingerprints
-            or track_identity_key in seen_single_fingerprints
-            or bool(
-                track_info.isrc
-                and f"isrc:{track_info.isrc.strip().upper()}" in album_fingerprints
+            track_fps = _track_fingerprints(track_info)
+            is_duplicate = any(
+                fp in album_fingerprints or fp in seen_single_fingerprints
+                for fp in track_fps
             )
-            or bool(
-                track_info.musicbrainz_trackid
-                and f"mbid:{track_info.musicbrainz_trackid.strip().lower()}"
-                in album_fingerprints
-            )
-        )
 
-        # Deduplicate: if an identical track exists inside a full album or another single, quarantine the duplicate
-        if is_duplicate:
-            if not dry_run:
-                try:
-                    _quarantine_file(path, quarantine_dir)
-                    LOG.info(
-                        f"   ∟ 📦 Quarantined duplicate single: {escape(track_identity_key)} -> .duplicates/"
-                    )
-                except OSError as error:
-                    LOG.debug(f"Failed to quarantine duplicate single {path}: {error}")
-            else:
-                LOG.info(
-                    f"[DRY-RUN] Would quarantine duplicate single: {escape(track_identity_key)}"
+            # Deduplicate: if an identical track exists inside a full album or another single, quarantine the duplicate
+            if is_duplicate:
+                _quarantine_duplicate_single(
+                    path, track_identity_key, quarantine_dir, dry_run
                 )
-            removed_dupes += 1
-            continue
+                removed_dupes += 1
+                continue
 
-        seen_single_fingerprints.add(track_identity_key)
-        if track_info.isrc:
-            seen_single_fingerprints.add(f"isrc:{track_info.isrc.strip().upper()}")
-        if track_info.musicbrainz_trackid:
-            seen_single_fingerprints.add(
-                f"mbid:{track_info.musicbrainz_trackid.strip().lower()}"
-            )
+            seen_single_fingerprints.update(track_fps)
 
-        single_folder_name = sanitize_name(f"{primary_artist} - {track_info.title}")
-        primary_artist_clean = sanitize_name(primary_artist)
+            single_folder_name = sanitize_name(f"{primary_artist} - {track_info.title}")
+            primary_artist_clean = sanitize_name(primary_artist)
 
-        if target_singles_dir and target_singles_dir != source_dir / "Singles":
-            base_parent = target_singles_dir
-        elif source_dir.name.lower() == primary_artist_clean.lower():
-            base_parent = source_dir / "Singles"
-        else:
-            try:
-                subdirs = [
-                    p
-                    for p in source_dir.iterdir()
-                    if p.is_dir() and not p.name.startswith(".")
-                ]
-                if len(subdirs) > 5 and any(" - " not in p.name for p in subdirs):
-                    base_parent = source_dir / primary_artist_clean / "Singles"
-                else:
-                    base_parent = source_dir / "Singles"
-            except OSError:
+            if target_singles_dir and target_singles_dir != source_dir / "Singles":
+                base_parent = target_singles_dir
+            elif source_dir.name.lower() == primary_artist_clean.lower():
                 base_parent = source_dir / "Singles"
-
-        single_folder = base_parent / single_folder_name
-        if not dry_run:
-            single_folder.mkdir(parents=True, exist_ok=True)
-
-        target_file = (
-            single_folder / f"01 - {sanitize_name(track_info.title)}{path.suffix}"
-        )
-
-        # Handle destination collisions cleanly (quarantine redundant duplicate single if target already exists)
-        if path.resolve() != target_file.resolve() and target_file.exists():
-            if not dry_run:
-                try:
-                    _quarantine_file(path, quarantine_dir)
-                    LOG.info(
-                        f"   ∟ 📦 Quarantined duplicate single (target exists): {escape(track_identity_key)} -> .duplicates/"
-                    )
-                except OSError as error:
-                    LOG.debug(f"Failed to quarantine duplicate single {path}: {error}")
             else:
-                LOG.info(
-                    f"[DRY-RUN] Would quarantine duplicate single (target exists): {escape(track_identity_key)}"
-                )
-            removed_dupes += 1
-            continue
+                try:
+                    subdirs = [
+                        p
+                        for p in source_dir.iterdir()
+                        if p.is_dir() and not p.name.startswith(".")
+                    ]
+                    if len(subdirs) > 5 and any(" - " not in p.name for p in subdirs):
+                        base_parent = source_dir / primary_artist_clean / "Singles"
+                    else:
+                        base_parent = source_dir / "Singles"
+                except OSError:
+                    base_parent = source_dir / "Singles"
 
-        if not dry_run:
-            # Also move companion artwork from old single folder if changing folders
-            if path.parent != single_folder:
-                for art_name in [
-                    "cover.jpg",
-                    "cover.png",
-                    "folder.jpg",
-                    "front.jpg",
-                ]:
-                    old_art = path.parent / art_name
-                    new_art = single_folder / art_name
-                    if old_art.exists() and not new_art.exists():
-                        with contextlib.suppress(OSError):
-                            shutil.move(str(old_art), str(new_art))
-            shutil.move(str(path), str(target_file))
-        else:
-            LOG.info(
-                f"[DRY-RUN] Would move {escape(path.name)} -> {escape(str(target_file))}"
+            single_folder = base_parent / single_folder_name
+            if not dry_run:
+                single_folder.mkdir(parents=True, exist_ok=True)
+
+            target_file = (
+                single_folder / f"01 - {sanitize_name(track_info.title)}{path.suffix}"
             )
 
-        relocate_companion_lyrics(path, target_file, dry_run=dry_run)
+            # Handle destination collisions cleanly (quarantine redundant duplicate single if target already exists)
+            if path.resolve() != target_file.resolve() and target_file.exists():
+                _quarantine_duplicate_single(
+                    path,
+                    track_identity_key,
+                    quarantine_dir,
+                    dry_run,
+                    reason=" (target exists)",
+                )
+                removed_dupes += 1
+                continue
 
-        moved_count += 1
-        LAST_ORGANIZED_COUNT = moved_count
+            if not dry_run:
+                # Also move companion artwork from old single folder if changing folders
+                if path.parent != single_folder:
+                    for art_name in [
+                        "cover.jpg",
+                        "cover.png",
+                        "folder.jpg",
+                        "front.jpg",
+                    ]:
+                        old_art = path.parent / art_name
+                        new_art = single_folder / art_name
+                        if old_art.exists() and not new_art.exists():
+                            with contextlib.suppress(OSError):
+                                shutil.move(str(old_art), str(new_art))
+                shutil.move(str(path), str(target_file))
+            else:
+                LOG.info(
+                    f"[DRY-RUN] Would move {escape(path.name)} -> {escape(str(target_file))}"
+                )
+
+            relocate_companion_lyrics(path, target_file, dry_run=dry_run)
+
+            moved_count += 1
+    except KeyboardInterrupt:
+        raise InterruptedOperationError(moved_count) from None
 
     if removed_dupes > 0:
         LOG.info(f"🗑️ Removed {removed_dupes} duplicate single(s).")

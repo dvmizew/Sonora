@@ -51,19 +51,21 @@ def init_musixmatch_token(token_str: str | None = None) -> bool:
     try:
         decoded = urllib.parse.unquote(raw.strip())
         if decoded.startswith("{") and "tokens" in decoded:
-            data = json.loads(decoded)
-            tokens = data.get("tokens", {})
+            lyrics_payload = json.loads(decoded)
+            tokens = lyrics_payload.get("tokens", {})
             extracted_token = (
                 tokens.get("web-desktop-app-v1.0")
                 or tokens.get("mxm-account-v1.0")
                 or tokens.get("user_token")
             )
         elif decoded.startswith("{") and "token" in decoded:
-            data = json.loads(decoded)
-            extracted_token = data.get("token") or data.get("user_token")
+            lyrics_payload = json.loads(decoded)
+            extracted_token = lyrics_payload.get("token") or lyrics_payload.get(
+                "user_token"
+            )
         else:
             extracted_token = decoded
-    except (ValueError, KeyError):
+    except ValueError:
         extracted_token = raw.strip()
 
     if extracted_token:
@@ -72,11 +74,11 @@ def init_musixmatch_token(token_str: str | None = None) -> bool:
 
             token_path = get_cache_path("syncedlyrics", False) / "musixmatch_token.json"
             token_path.parent.mkdir(parents=True, exist_ok=True)
-            token_data = {
+            lyrics_token_payload = {
                 "token": extracted_token,
                 "expiration_time": int(time.time()) + 31536000,  # 1 year
             }
-            token_path.write_text(json.dumps(token_data), encoding="utf-8")
+            token_path.write_text(json.dumps(lyrics_token_payload), encoding="utf-8")
             return True
         except (OSError, ValueError):
             pass
@@ -191,22 +193,35 @@ def _query_lrclib(
     query_str: str,
     plain_only: bool = False,
     synced_only: bool = False,
+    album_name: str | None = None,
+    duration: float | None = None,
 ) -> str | None:
     try:
         _LRCLIB_LIMITER.wait()
         if " - " in query_str:
             parts = query_str.split(" - ", 1)
             url = "https://lrclib.net/api/get"
-            params = {
+            params: dict[str, str | int | float] = {
                 "artist_name": parts[0].strip(),
                 "track_name": parts[1].strip(),
             }
-            response = SESSION.get(url, params=params, timeout=5.0)
+            if album_name:
+                params["album_name"] = album_name
+            if duration is not None:
+                params["duration"] = int(duration)
+            response = SESSION.get(
+                url,
+                params=params,
+                timeout=5.0,
+                headers={
+                    "User-Agent": "Sonora/1.0 (https://github.com/dvmizew/Sonora)"
+                },
+            )
             if response.status_code == 200:
-                data = response.json()
-                if isinstance(data, dict):
-                    synced = data.get("syncedLyrics")
-                    plain = data.get("plainLyrics")
+                lyrics_response_payload = response.json()
+                if isinstance(lyrics_response_payload, dict):
+                    synced = lyrics_response_payload.get("syncedLyrics")
+                    plain = lyrics_response_payload.get("plainLyrics")
                     if (
                         synced
                         and not plain_only
@@ -227,9 +242,9 @@ def _query_lrclib(
         search_url = "https://lrclib.net/api/search"
         response = SESSION.get(search_url, params={"q": query_str}, timeout=5.0)
         if response.status_code == 200:
-            results = response.json()
-            if isinstance(results, list) and results:
-                first = results[0]
+            lrclib_search_payload = response.json()
+            if isinstance(lrclib_search_payload, list) and lrclib_search_payload:
+                first = lrclib_search_payload[0]
                 if isinstance(first, dict):
                     synced = first.get("syncedLyrics")
                     plain = first.get("plainLyrics")
@@ -247,7 +262,7 @@ def _query_lrclib(
                         and plain.strip()
                     ):
                         return clean_lyrics_text(plain.strip())
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError):
+    except (httpx.HTTPError, OSError):
         pass
     return None
 
@@ -259,11 +274,17 @@ def _query_syncedlyrics(
     enhanced: bool,
     providers: list[str] | None,
     lang: str | None,
+    album_name: str | None = None,
+    duration: float | None = None,
 ) -> str | None:
     # 1. High-speed direct HTTP/2 LRCLIB fast-path when not restricted to other providers
-    if not enhanced and (not providers or "Lrclib" in providers) and not lang:
+    if (not providers or "Lrclib" in providers) and not lang:
         lrclib_result = _query_lrclib(
-            query_str, plain_only=plain_only, synced_only=synced_only
+            query_str,
+            plain_only=plain_only,
+            synced_only=synced_only,
+            album_name=album_name,
+            duration=duration,
         )
         if lrclib_result:
             return lrclib_result
@@ -295,6 +316,8 @@ def fetch_synced_lyrics(
     enhanced: bool = False,
     providers: list[str] | None = None,
     lang: str | None = None,
+    album_name: str | None = None,
+    duration: float | None = None,
 ) -> str | None:
     """
     Search and fetch LRC lyrics for a track using syncedlyrics.
@@ -314,36 +337,19 @@ def fetch_synced_lyrics(
     last_exception: Exception | None = None
     lyrics_content = None
 
-    # ATTEMPT 1: ISRC LOOKUP
-    if isrc:
-        try:
-            lyrics_content = _query_syncedlyrics(isrc, *search_args)
-        except (
-            httpx.HTTPError,
-            OSError,
-            ValueError,
-            KeyError,
-            RuntimeError,
-            TypeError,
-            AttributeError,
-            TimeoutError,
-        ) as error:
-            last_exception = error
-
     # ATTEMPT 2: Standard/Surgical Query
     if not lyrics_content:
         # Standard query format (matches unit tests)
         default_query = f"{artist.lower()} - {title.lower()}".strip()
         try:
-            lyrics_content = _query_syncedlyrics(default_query, *search_args)
+            lyrics_content = _query_syncedlyrics(
+                default_query, *search_args, album_name=album_name, duration=duration
+            )
         except (
             httpx.HTTPError,
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
-            AttributeError,
             TimeoutError,
         ) as error:
             last_exception = error
@@ -354,15 +360,14 @@ def fetch_synced_lyrics(
         primary_artist = get_primary_artist(artist)
         query = f"{cleaned_track_title} {primary_artist}".strip()
         try:
-            lyrics_content = _query_syncedlyrics(query, *search_args)
+            lyrics_content = _query_syncedlyrics(
+                query, *search_args, album_name=album_name, duration=duration
+            )
         except (
             httpx.HTTPError,
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
-            AttributeError,
             TimeoutError,
         ) as error:
             last_exception = error
@@ -386,6 +391,8 @@ def process_track_lyrics(
     force: bool = False,
     dry_run: bool = False,
     isrc: str | None = None,
+    album_name: str | None = None,
+    duration: float | None = None,
 ) -> tuple[str | None, str | None]:
     """
     Fetches, cleans, and saves track lyrics to an accompanying .lrc file.
@@ -414,15 +421,19 @@ def process_track_lyrics(
 
     # Attempt to fetch higher quality lyrics online
     try:
-        lyrics_text = fetch_synced_lyrics(artist, title, enhanced=True, isrc=isrc)
+        lyrics_text = fetch_synced_lyrics(
+            artist,
+            title,
+            enhanced=True,
+            isrc=isrc,
+            album_name=album_name,
+            duration=duration,
+        )
     except (
         httpx.HTTPError,
         OSError,
         ValueError,
-        KeyError,
         RuntimeError,
-        TypeError,
-        AttributeError,
         TimeoutError,
     ) as error:
         LOG.debug(f"Lyrics lookup error for {title}: {error}")

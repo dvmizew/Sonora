@@ -2,14 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sonora.core.state import LibraryStateManager
+from sonora.core.state import LibraryStateVault
 
 
 class TestLibraryState(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test_state.db"
-        self.state_mgr = LibraryStateManager(db_path=self.db_path)
+        self.state_mgr = LibraryStateVault(db_path=self.db_path)
 
         self.test_file1 = Path(self.temp_dir.name) / "song1.flac"
         self.test_file2 = Path(self.temp_dir.name) / "song2.flac"

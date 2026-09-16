@@ -15,10 +15,10 @@ def _get_default_db_path() -> Path:
 
 
 _STATE_LOCK = threading.RLock()
-_STATE_INSTANCE: "LibraryStateManager | None" = None
+_STATE_INSTANCE: "LibraryStateVault | None" = None
 
 
-class LibraryStateManager:
+class LibraryStateVault:
     """Persistent SQLite-backed state tracker for library files."""
 
     def __init__(self, db_path: Path | None = None) -> None:
@@ -288,17 +288,17 @@ class LibraryStateManager:
                 self._conn = None
 
 
-def get_library_state() -> LibraryStateManager:
+def get_library_state() -> LibraryStateVault:
     global _STATE_INSTANCE
     if _STATE_INSTANCE is None:
         with _STATE_LOCK:
             if _STATE_INSTANCE is None:
-                _STATE_INSTANCE = LibraryStateManager()
+                _STATE_INSTANCE = LibraryStateVault()
     return _STATE_INSTANCE
 
 
 def reset_library_state() -> None:
-    """Reset the singleton instance of LibraryStateManager."""
+    """Reset the singleton instance of LibraryStateVault."""
     global _STATE_INSTANCE
     with _STATE_LOCK:
         if _STATE_INSTANCE is not None:

@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 
 import httpx
@@ -61,18 +62,23 @@ def check_image_similarity(
     if threshold is not None:
         max_distance = round((1.0 - threshold) * 64)
 
+    first_image: Image.Image | None = None
+    second_image: Image.Image | None = None
     try:
         first_image = _load_normalized_image(first_image_bytes)
         second_image = _load_normalized_image(second_image_bytes)
 
         first_hash = imagehash.phash(first_image)
         second_hash = imagehash.phash(second_image)
-        first_image.close()
-        second_image.close()
         return bool((first_hash - second_hash) <= max_distance)
     except (OSError, ValueError, UnidentifiedImageError) as error:
         LOG.debug(f"Perceptual image comparison failed: {error}")
         return True
+    finally:
+        if first_image is not None:
+            first_image.close()
+        if second_image is not None:
+            second_image.close()
 
 
 def process_album_cover_art(
@@ -104,6 +110,12 @@ def process_album_cover_art(
     )
 
     if not artwork_already_present:
+        if not dry_run and not os.access(target_dir, os.W_OK):
+            LOG.debug(
+                f"Target album directory is read-only, skipping cover download: {target_dir}"
+            )
+            return cover_image_path if cover_image_path.exists() else None
+
         artwork_url = None
         if musicbrainz_album_id:
             artwork_url = fetch_cover_art_archive_url(musicbrainz_album_id)
@@ -146,7 +158,7 @@ def process_album_cover_art(
                     LOG.info(
                         f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
                     )
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+            except (httpx.HTTPError, OSError) as error:
                 LOG.debug(f"Cover art download failed: {error}")
 
     if musicbrainz_album_id and get_config().fanart_api_key:
@@ -161,7 +173,7 @@ def process_album_cover_art(
                     if cdart_bytes:
                         cdart_path.write_bytes(cdart_bytes)
                         LOG.info("   ∟ 💿 Downloaded CD disc art -> cdart.png")
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+            except (httpx.HTTPError, OSError) as error:
                 LOG.debug(f"CD art download failed: {error}")
 
     if cover_image_path.exists() and cover_image_path.stat().st_size > 0:
@@ -183,12 +195,10 @@ def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
             break
         current = current.parent
 
-    # 1. Prioritize exact match anywhere in the ancestor hierarchy
     for cand in candidates:
         if normalize_str(cand.name) == clean_artist:
             return cand
 
-    # 2. Check for close variation (excluding generic folder names like singles, flac, mp3)
     for cand in candidates:
         if (
             not get_config().is_generic_container(cand.name)
@@ -211,10 +221,19 @@ def process_artist_artwork(
     dry_run: bool = False,
 ) -> None:
     """Ensure artist.jpg, banner.jpg, and optional fanart.tv logo.png exist in the artist root."""
-    if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
+    if not artist_name or artist_name.lower() in {
+        "various artists",
+        "unknown artist",
+        "unknown",
+    }:
         return
 
     artist_dir = _find_artist_directory(folder_path, artist_name)
+    if not dry_run and not os.access(artist_dir, os.W_OK):
+        LOG.debug(
+            f"Artist directory is read-only, skipping artist artwork: {artist_dir}"
+        )
+        return
 
     has_artist_image = any(
         (artist_dir / filename).exists()
@@ -267,7 +286,7 @@ def process_artist_artwork(
                         LOG.info(
                             f"   ∟ 🎨 Downloaded artist banner: {escape(artist_name)} -> banner.jpg"
                         )
-        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+        except (httpx.HTTPError, OSError) as error:
             LOG.debug(f"Fanart artist fetch failed: {error}")
 
     if has_artist_image and has_banner_image:
@@ -275,7 +294,7 @@ def process_artist_artwork(
 
     try:
         thumbnail_bytes, banner_bytes = fetch_artist_images(artist_name)
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Failed to fetch artist artwork for {artist_name}: {error}")
         return
 
@@ -320,5 +339,5 @@ def process_label_artwork(
                 label_path.write_bytes(logo_bytes)
                 name_display = escape(label_name) if label_name else "Record Label"
                 LOG.info(f"   ∟ 🏷️  Downloaded label logo: {name_display} -> label.png")
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Record label logo download failed for {label_mbid}: {error}")

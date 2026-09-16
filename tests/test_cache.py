@@ -5,6 +5,7 @@ Unit tests for Sonora caching layer, XDG Base Directory compliance, and CLI cach
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ from sonora.core.cache import (
     ClearResult,
     clear_cache,
     close_cache,
+    get_cache,
     get_cache_dir,
     get_cache_stats,
     get_cached_api,
@@ -26,7 +28,7 @@ from sonora.core.cache import (
     set_ignore_cache,
 )
 from sonora.core.constants import DIRS
-from sonora.core.state import LibraryStateManager, reset_library_state
+from sonora.core.state import LibraryStateVault, reset_library_state
 from sonora.core.utils import clear_utils_cache, format_filesize
 
 
@@ -124,39 +126,41 @@ class TestCacheArchitecture(unittest.TestCase):
     def test_library_state_manager_methods(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_file = Path(tmpdir) / "test_state.db"
-            state_mgr = LibraryStateManager(db_file)
+            state_mgr = LibraryStateVault(db_file)
+            try:
+                self.assertEqual(state_mgr.get_state_count(), 0)
+                self.assertGreater(state_mgr.get_state_size(), 0)
 
-            self.assertEqual(state_mgr.get_state_count(), 0)
-            self.assertGreater(state_mgr.get_state_size(), 0)
+                # Record a dummy track
+                dummy_track = Path(tmpdir) / "song.mp3"
+                dummy_track.write_text("dummy audio")
+                state_mgr.record_track_state(dummy_track, status="TAGGED_OK")
 
-            # Record a dummy track
-            dummy_track = Path(tmpdir) / "song.mp3"
-            dummy_track.write_text("dummy audio")
-            state_mgr.record_track_state(dummy_track, status="TAGGED_OK")
+                self.assertEqual(state_mgr.get_state_count(), 1)
+                self.assertTrue(state_mgr.is_track_up_to_date(dummy_track))
 
-            self.assertEqual(state_mgr.get_state_count(), 1)
-            self.assertTrue(state_mgr.is_track_up_to_date(dummy_track))
+                # Filter outdated tracks
+                outdated = state_mgr.filter_outdated_tracks([dummy_track])
+                self.assertEqual(len(outdated), 0)
 
-            # Filter outdated tracks
-            outdated = state_mgr.filter_outdated_tracks([dummy_track])
-            self.assertEqual(len(outdated), 0)
+                # Clear state (truncate rows)
+                cleared_count = state_mgr.clear_state(purge=False)
+                self.assertEqual(cleared_count, 1)
+                self.assertEqual(state_mgr.get_state_count(), 0)
+                self.assertTrue(db_file.exists())
 
-            # Clear state (truncate rows)
-            cleared_count = state_mgr.clear_state(purge=False)
-            self.assertEqual(cleared_count, 1)
-            self.assertEqual(state_mgr.get_state_count(), 0)
-            self.assertTrue(db_file.exists())
+                # Re-record and purge
+                state_mgr.record_track_state(dummy_track, status="TAGGED_OK")
+                purged_count = state_mgr.clear_state(purge=True)
+                self.assertEqual(purged_count, 1)
+                self.assertFalse(db_file.exists())
 
-            # Re-record and purge
-            state_mgr.record_track_state(dummy_track, status="TAGGED_OK")
-            purged_count = state_mgr.clear_state(purge=True)
-            self.assertEqual(purged_count, 1)
-            self.assertFalse(db_file.exists())
-
-            # Re-record after purge on the same instance (verifying auto-schema healing)
-            state_mgr.record_track_state(dummy_track, status="TAGGED_OK")
-            self.assertEqual(state_mgr.get_state_count(), 1)
-            self.assertTrue(state_mgr.is_track_up_to_date(dummy_track))
+                # Re-record after purge on the same instance (verifying auto-schema healing)
+                state_mgr.record_track_state(dummy_track, status="TAGGED_OK")
+                self.assertEqual(state_mgr.get_state_count(), 1)
+                self.assertTrue(state_mgr.is_track_up_to_date(dummy_track))
+            finally:
+                state_mgr.close()
 
     def test_clear_cache_with_isolated_env(self) -> None:
         with (
@@ -233,6 +237,34 @@ class TestCacheArchitecture(unittest.TestCase):
 
             close_cache()
             reset_library_state()
+
+    def test_multithreaded_cache_access_and_close(self) -> None:
+        """Worker threads can concurrently read/write cached API responses and close cleanly."""
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(os.environ, {"XDG_CACHE_HOME": tmpdir}),
+        ):
+            close_cache()
+
+            def worker(k: str, v: str) -> None:
+                try:
+                    set_cached_api(k, v)
+                    self.assertEqual(get_cached_api(k), v)
+                finally:
+                    cache = get_cache()
+                    if cache is not None:
+                        cache.close()
+
+            threads = [
+                threading.Thread(target=worker, args=(f"k{i}", f"v{i}"))
+                for i in range(4)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            close_cache()
 
 
 if __name__ == "__main__":

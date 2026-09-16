@@ -10,7 +10,7 @@ from music_metadata_filter.functions import (
     youtube,
 )
 from mutagen._util import MutagenError
-from mutagen.flac import FLAC, FLACNoHeaderError
+from mutagen.flac import FLAC
 from rich.markup import escape
 
 from sonora.audio.checksum import verify_flac_checksum
@@ -26,6 +26,7 @@ from sonora.core.logger import (
 )
 from sonora.core.models import CheckReport
 from sonora.core.utils import (
+    InterruptedOperationError,
     find_audio_files,
     find_companion_lyrics,
     is_single_group_artist,
@@ -107,7 +108,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 issues.append(
                     "FLAC audio stream MD5 checksum verification failed (corrupted FLAC)."
                 )
-        except (OSError, ValueError, RuntimeError) as error:
+        except OSError as error:
             issues.append(f"Checksum check failed: {error}")
 
         try:
@@ -115,16 +116,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             for index, picture in enumerate(audio_flac.pictures):
                 if len(picture.data) == 0:
                     issues.append(f"Corrupt 0-byte picture block at index {index}.")
-        except (
-            OSError,
-            ValueError,
-            RuntimeError,
-            AttributeError,
-            KeyError,
-            TypeError,
-            FLACNoHeaderError,
-            MutagenError,
-        ) as error:
+        except (MutagenError, OSError) as error:
             LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
 
     if check_spectral:
@@ -135,7 +127,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                     description
                     or "Possible fake lossless (spectral cutoff below 16kHz)."
                 )
-        except (OSError, ValueError, RuntimeError) as error:
+        except OSError as error:
             LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
 
     try:
@@ -145,47 +137,39 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
 
         if track.genre and not normalize_genre(track.genre):
             issues.append(f"Blacklisted genre tag: '{track.genre}'")
-        if track.artist == "Unknown Artist":
-            issues.append("Missing ARTIST tag.")
-        if track.title == "Unknown Title":
-            issues.append("Missing TITLE tag.")
-        if track.album == "Unknown Album":
-            issues.append("Missing ALBUM tag.")
-        if not track.album_artist:
-            issues.append("Missing ALBUMARTIST tag (Risk of Split Album).")
-        if track.track_number is None:
-            issues.append("Missing TRACKNUMBER tag.")
-        if not track.date:
-            issues.append("Missing DATE (Year) tag.")
-        if track.bpm is None:
-            issues.append("Missing BPM tag.")
-        if track.replaygain_track_gain is None:
-            issues.append("Missing REPLAYGAIN_TRACK_GAIN tag.")
-        if track.replaygain_track_peak is None:
-            issues.append("Missing REPLAYGAIN_TRACK_PEAK tag.")
+        missing_checks = [
+            (track.artist == "Unknown Artist", "Missing ARTIST tag."),
+            (track.title == "Unknown Title", "Missing TITLE tag."),
+            (track.album == "Unknown Album", "Missing ALBUM tag."),
+            (not track.album_artist, "Missing ALBUMARTIST tag (Risk of Split Album)."),
+            (track.track_number is None, "Missing TRACKNUMBER tag."),
+            (not track.date, "Missing DATE (Year) tag."),
+            (track.bpm is None, "Missing BPM tag."),
+            (track.replaygain_track_gain is None, "Missing REPLAYGAIN_TRACK_GAIN tag."),
+            (track.replaygain_track_peak is None, "Missing REPLAYGAIN_TRACK_PEAK tag."),
+        ]
+        for condition, msg in missing_checks:
+            if condition:
+                issues.append(msg)
+
         if track.initial_key:
             from sonora.audio.key import key_to_camelot
 
             if key_to_camelot(track.initial_key) is None:
                 issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
-        for field_name, tag_label in [
-            ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID"),
-            ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID"),
-        ]:
-            val = getattr(track, field_name)
-            if not val:
-                issues.append(f"Missing {tag_label} tag.")
-            elif not is_valid_uuid(val, allow_multivalue=True):
-                issues.append(f"Invalid UUID format in {tag_label}: '{val}'")
 
-        for field_name, tag_label in [
-            ("musicbrainz_artistid", "MUSICBRAINZ_ARTISTID"),
-            ("musicbrainz_albumartistid", "MUSICBRAINZ_ALBUMARTISTID"),
-            ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID"),
-            ("musicbrainz_workid", "MUSICBRAINZ_WORKID"),
+        for field_name, tag_label, required in [
+            ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID", True),
+            ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID", True),
+            ("musicbrainz_artistid", "MUSICBRAINZ_ARTISTID", False),
+            ("musicbrainz_albumartistid", "MUSICBRAINZ_ALBUMARTISTID", False),
+            ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID", False),
+            ("musicbrainz_workid", "MUSICBRAINZ_WORKID", False),
         ]:
             val = getattr(track, field_name)
-            if val and not is_valid_uuid(val, allow_multivalue=True):
+            if not val and required:
+                issues.append(f"Missing {tag_label} tag.")
+            elif val and not is_valid_uuid(val, allow_multivalue=True):
                 issues.append(f"Invalid UUID format in {tag_label}: '{val}'")
 
         if track.art_width and (
@@ -205,8 +189,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: TITLE only)"
             )
 
-        # Check for unsplit artists (e.g. Artist A & Artist B)
-        delimiters = [(" & ", "&"), (" × ", "×"), (" / ", "/"), (" + ", "+")]
+        delimiters = [(" & ", "&"), (" \u00d7 ", "\u00d7"), (" / ", "/"), (" + ", "+")]
         if not is_single_group_artist(track.artist):
             for delimiter_pattern, delimiter_name in delimiters:
                 if delimiter_pattern in f" {track.artist} ":
@@ -214,7 +197,6 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                         f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{delimiter_name}')"
                     )
 
-        # Check Title feature duplicate markers
         feat_matches = re.findall(
             rf"[\(\[]\s*({FEAT_KEYWORDS})", track.title, re.IGNORECASE
         )
@@ -223,7 +205,6 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"Duplicate featuring markers detected in TITLE ({len(feat_matches)} markers found)"
             )
 
-        # Sync check filename vs title feat
         if FEAT_PATTERN.search(file_path.name) and not FEAT_PATTERN.search(track.title):
             issues.append("Filename contains 'feat' but TITLE tag does not")
 
@@ -234,7 +215,7 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"Sub-standard lossy bitrate: {round(track.bitrate / 1000)} kbps (Recommended: 320 kbps)"
             )
 
-    except (OSError, ValueError, RuntimeError) as error:
+    except OSError as error:
         issues.append(f"Metadata read error: {error}")
 
     if not find_companion_lyrics(file_path):
@@ -260,17 +241,9 @@ def _check_single_file(
             album_artist = track_info.album_artist
         disc_number = track_info.disc_number or 1
         track_number = track_info.track_number
-    except (OSError, ValueError, RuntimeError):
+    except OSError:
         pass
     return path, file_issues, album, album_artist, disc_number, track_number
-
-
-LAST_CHECK_REPORT: CheckReport | None = None
-
-
-def get_last_check_report() -> CheckReport | None:
-    """Return the most recent or partially completed check report."""
-    return LAST_CHECK_REPORT
 
 
 def write_check_report_json(
@@ -293,7 +266,7 @@ def write_check_report_json(
         f"{missing_lrc} missing LRCs. Total files with issues: {issue_count}."
     )
 
-    data = {
+    report_payload = {
         "schema": "check_report_v1",
         "generator": "Sonora",
         "summary_text": summary_text,
@@ -310,7 +283,7 @@ def write_check_report_json(
     }
     output_json.write_bytes(
         orjson.dumps(
-            data,
+            report_payload,
             option=orjson.OPT_INDENT_2
             | orjson.OPT_NON_STR_KEYS
             | orjson.OPT_SERIALIZE_NUMPY,
@@ -323,15 +296,15 @@ def check_library(
     output_json: Path | None = None,
     check_spectral: bool = False,
     max_threads: int = 8,
+    report: CheckReport | None = None,
 ) -> CheckReport:
     if not folder_path.exists():
         raise FileNotFoundError(f"Directory not found: {folder_path}")
 
-    global LAST_CHECK_REPORT
-    report = CheckReport(
-        total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
-    )
-    LAST_CHECK_REPORT = report
+    if report is None:
+        report = CheckReport(
+            total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
+        )
 
     files_to_process = find_audio_files(folder_path, recursive=True)
 
@@ -342,18 +315,19 @@ def check_library(
         lambda: defaultdict(list)
     )
 
-    executor = ThreadPoolExecutor(max_workers=max_threads)
-    try:
+    with (
+        create_progress() as progress,
+        ThreadPoolExecutor(max_workers=max_threads) as executor,
+    ):
         future_to_path = {
             executor.submit(_check_single_file, path, check_spectral): path
             for path in files_to_process
         }
-
-        with create_progress() as progress:
-            task = progress.add_task(
-                "[cyan]Checking library...", total=len(files_to_process)
-            )
-            with interactive_pause_listener(progress, task):
+        task = progress.add_task(
+            "[cyan]Checking library...", total=len(files_to_process)
+        )
+        with interactive_pause_listener(progress, task):
+            try:
                 for future in as_completed(future_to_path):
                     (
                         path,
@@ -385,33 +359,31 @@ def check_library(
                         LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
                         for issue in file_issues:
                             LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
+                        norm_issues = [normalize_str(issue) for issue in file_issues]
                         if any(
-                            "corrupt" in normalize_str(issue)
-                            or "checksum" in normalize_str(issue)
-                            or "0-byte" in normalize_str(issue)
-                            or "fake lossless" in normalize_str(issue)
-                            for issue in file_issues
+                            any(
+                                k in ni
+                                for k in (
+                                    "corrupt",
+                                    "checksum",
+                                    "0-byte",
+                                    "fake lossless",
+                                )
+                            )
+                            for ni in norm_issues
                         ):
                             report.corrupt_files += 1
                         if any(
-                            "missing" in normalize_str(issue)
-                            and "lrc" not in normalize_str(issue)
-                            for issue in file_issues
+                            "missing" in ni and "lrc" not in ni for ni in norm_issues
                         ):
                             report.missing_metadata += 1
-                        if any(
-                            "missing" in normalize_str(issue)
-                            and "lrc" in normalize_str(issue)
-                            for issue in file_issues
-                        ):
+                        if any("missing" in ni and "lrc" in ni for ni in norm_issues):
                             report.missing_lrc += 1
 
                     progress.advance(task)
-    except KeyboardInterrupt:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise InterruptedOperationError(report) from None
 
     # Folder-level checks after file checking completes
     for folder, albums in folder_albums.items():
@@ -432,18 +404,13 @@ def check_library(
                     f"Duplicate track number {track_idx} (Disc {disc_idx}) found in files: {found_files}"
                 )
 
-        # Check for missing track numbers in sequence per disc
-        discs: dict[int, list[int]] = defaultdict(list)
+        discs: dict[int, set[int]] = defaultdict(set)
         for disc_idx, track_idx in tracks_found:
-            discs[disc_idx].append(track_idx)
-        for disc_idx, track_numbers in discs.items():
-            track_numbers.sort()
-            if track_numbers:
-                max_track = max(track_numbers)
+            discs[disc_idx].add(track_idx)
+        for disc_idx, track_nums in discs.items():
+            if track_nums:
                 missing = [
-                    expected_track_number
-                    for expected_track_number in range(1, max_track + 1)
-                    if expected_track_number not in track_numbers
+                    i for i in range(1, max(track_nums) + 1) if i not in track_nums
                 ]
                 if missing:
                     folder_issues.append(

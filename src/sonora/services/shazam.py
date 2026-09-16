@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
-from collections.abc import Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
@@ -13,9 +11,10 @@ from sonora.core.constants import RATE_LIMIT_SHAZAM
 from sonora.core.logger import LOG
 from sonora.core.utils import RateLimiter
 
-_T = TypeVar("_T")
 _SHAZAM_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_SHAZAM)
 
+import aiohttp
+from shazamio.exceptions import BadParseData, FailedDecodeJson
 from shazamio_core.shazamio_core import SignatureError
 
 
@@ -33,19 +32,6 @@ class ShazamTrackInfo:
     lyrics: str | None = None
 
 
-def _run_async(coro: Coroutine[Any, Any, _T]) -> _T:
-    """Run an async coroutine synchronously, safely handling running event loops in any thread."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop is not None and loop.is_running():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-    return asyncio.run(coro)
-
-
 async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
     """Execute asynchronous acoustic recognition against the Shazam API."""
     try:
@@ -56,13 +42,13 @@ async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
         return raw_result if isinstance(raw_result, dict) else None
     except (
         ImportError,
+        aiohttp.ClientError,
         OSError,
         ValueError,
         RuntimeError,
-        TypeError,
-        KeyError,
-        AttributeError,
         SignatureError,
+        BadParseData,
+        FailedDecodeJson,
     ) as error:
         LOG.debug(f"Shazam recognition error for {file_path.name}: {error}")
         return None
@@ -78,12 +64,12 @@ async def _track_about_async(track_id: int) -> dict[str, Any] | None:
         return raw_result if isinstance(raw_result, dict) else None
     except (
         ImportError,
+        aiohttp.ClientError,
         OSError,
         ValueError,
         RuntimeError,
-        TypeError,
-        KeyError,
-        AttributeError,
+        BadParseData,
+        FailedDecodeJson,
     ) as error:
         LOG.debug(f"Shazam track_about error for {track_id}: {error}")
         return None
@@ -99,10 +85,10 @@ def get_shazam_track_about(track_id: int) -> dict[str, Any] | None:
         return cached
 
     _SHAZAM_LIMITER.wait()
-    data = _run_async(_track_about_async(track_id))
-    if data:
-        set_cached_api(cache_key, data)
-    return data
+    shazam_payload = asyncio.run(_track_about_async(track_id))
+    if shazam_payload:
+        set_cached_api(cache_key, shazam_payload)
+    return shazam_payload
 
 
 def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
@@ -138,7 +124,7 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
         )
 
     _SHAZAM_LIMITER.wait()
-    raw_payload = _run_async(_recognize_async(file_path))
+    raw_payload = asyncio.run(_recognize_async(file_path))
     if not raw_payload:
         return None
 
@@ -185,14 +171,16 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
                             lyrics_text = "\n".join(valid_lines)
 
     genre_name: str | None = None
-    genres_data = track.get("genres")
-    if isinstance(genres_data, dict):
-        genre_name = genres_data.get("primary")
+    shazam_genres_payload = track.get("genres")
+    if isinstance(shazam_genres_payload, dict):
+        genre_name = shazam_genres_payload.get("primary")
 
-    images_data = track.get("images")
+    shazam_images_payload = track.get("images")
     cover_art_url: str | None = None
-    if isinstance(images_data, dict):
-        cover_art_url = images_data.get("coverarthq") or images_data.get("coverart")
+    if isinstance(shazam_images_payload, dict):
+        cover_art_url = shazam_images_payload.get(
+            "coverarthq"
+        ) or shazam_images_payload.get("coverart")
 
     apple_id: str | None = None
     hub = track.get("hub")

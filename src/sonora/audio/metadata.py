@@ -1,11 +1,12 @@
 import dataclasses
 import io
 import threading
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import mutagen.mp4
 import taglib
+from mutagen._util import MutagenError
 from PIL import Image
 
 from sonora.core.constants import SUPPORTED_EXTS
@@ -214,8 +215,8 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                     try:
                         with Image.open(io.BytesIO(first_picture.data)) as img:
                             art_width, art_height = img.size
-                    except (OSError, ValueError, RuntimeError):
-                        pass
+                    except OSError as e:
+                        LOG.debug(f"Failed to read image dimensions: {e}")
 
             mapped_fields: dict[str, Any] = {
                 field: _get_tag(tags, *tag_keys)
@@ -240,14 +241,13 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 is_lossless = False
             elif file_ext in {".m4a", ".mp4"}:
                 try:
-                    import mutagen.mp4
-
-                    mp4_loader: Callable[..., Any] = mutagen.mp4.MP4
-                    mp4_audio: Any = mp4_loader(str(file_path))
+                    mp4_audio = __import__("typing").cast(
+                        __import__("typing").Any, mutagen.mp4.MP4
+                    )(file_path)
                     is_lossless = (
                         str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
                     )
-                except (OSError, ValueError, RuntimeError, AttributeError, KeyError):
+                except (MutagenError, OSError):
                     is_lossless = False
             else:
                 is_lossless = True
@@ -285,12 +285,10 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                     _METADATA_CACHE.clear()
                 _METADATA_CACHE[cache_key] = dataclasses.replace(track_info)
             return track_info
-    except (RuntimeError, ValueError, FileNotFoundError):
+    except FileNotFoundError:
         raise
-    except (OSError, KeyError) as error:
-        raise RuntimeError(
-            f"Failed to read metadata for {file_path}: {error}"
-        ) from error
+    except (OSError, ValueError) as error:
+        raise OSError(f"Failed to read metadata for {file_path}: {error}") from error
 
 
 def write_track_metadata(
@@ -298,6 +296,10 @@ def write_track_metadata(
 ) -> None:
     if not track_info.file_path.exists():
         raise FileNotFoundError(f"File not found: {track_info.file_path}")
+    import os
+
+    if not os.access(track_info.file_path, os.W_OK):
+        raise OSError(f"Permission denied: File is read-only '{track_info.file_path}'")
 
     try:
         with taglib.File(str(track_info.file_path)) as song:
@@ -372,14 +374,14 @@ def write_track_metadata(
 
             # Declarative schema write
             for field, tag_keys in _TAG_SCHEMA.items():
-                val = getattr(track_info, field, None)
-                if val:
+                tag_value = getattr(track_info, field, None)
+                if tag_value:
                     if field in _UUID_FIELDS and not is_valid_uuid(
-                        val, allow_multivalue=True
+                        tag_value, allow_multivalue=True
                     ):
                         continue
                     if field == "advisory":
-                        norm_adv = str(val).strip().capitalize()
+                        norm_adv = str(tag_value).strip().capitalize()
                         if norm_adv == "Explicit":
                             song.tags["ITUNESADVISORY"] = ["1"]
                             song.tags["ADVISORY"] = ["Explicit"]
@@ -387,7 +389,7 @@ def write_track_metadata(
                             song.tags["ITUNESADVISORY"] = ["2"]
                             song.tags["ADVISORY"] = ["Clean"]
                         continue
-                    song.tags[tag_keys[0]] = [str(val)]
+                    song.tags[tag_keys[0]] = [str(tag_value)]
 
             # Front cover
             if cover_art_path and cover_art_path.exists():
@@ -421,12 +423,12 @@ def write_track_metadata(
                     if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
                         _METADATA_CACHE.clear()
                     _METADATA_CACHE[new_key] = dataclasses.replace(track_info)
-            except OSError:
-                pass
-    except (RuntimeError, ValueError, FileNotFoundError):
+            except OSError as e:
+                LOG.debug(f"Failed to cache track metadata by inode: {e}")
+    except FileNotFoundError:
         raise
-    except (OSError, KeyError) as error:
-        raise RuntimeError(
+    except (OSError, ValueError) as error:
+        raise OSError(
             f"Failed to write metadata for {track_info.file_path}: {error}"
         ) from error
 
@@ -443,3 +445,15 @@ def get_metadata_cache_size() -> int:
     """Return the number of entries currently cached in memory."""
     with _METADATA_CACHE_LOCK:
         return len(_METADATA_CACHE)
+
+
+def get_audio_duration(file_path: Path) -> float | None:
+    try:
+        import mutagen
+
+        m_file = cast(Any, mutagen).File(file_path)
+        if m_file and getattr(m_file, "info", None):
+            return float(m_file.info.length)
+    except (OSError, MutagenError):
+        pass
+    return None

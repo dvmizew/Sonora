@@ -56,23 +56,22 @@ def parse_cuesheet(cue_path: Path) -> list[dict[str, str | int]]:
 
         command = tokens[0].upper()
 
-        # Handle REM metadata (DATE, GENRE, DISCNUMBER, TOTALDISCS)
         if command == "REM" and len(tokens) >= 3:
-            key, val = tokens[1].upper(), " ".join(tokens[2:])
-            if key in ("DATE", "YEAR"):
+            rem_key, rem_value = tokens[1].upper(), " ".join(tokens[2:])
+            if rem_key in ("DATE", "YEAR"):
                 if current_track:
-                    current_track["date"] = val
+                    current_track["date"] = rem_value
                 else:
-                    globals_meta["date"] = val
-            elif key == "GENRE":
+                    globals_meta["date"] = rem_value
+            elif rem_key == "GENRE":
                 if current_track:
-                    current_track["genre"] = val
+                    current_track["genre"] = rem_value
                 else:
-                    globals_meta["genre"] = val
-            elif key in ("DISCNUMBER", "DISC") and val.isdigit():
-                globals_meta["disc_number"] = int(val)
-            elif key in ("TOTALDISCS", "DISCTOTAL") and val.isdigit():
-                globals_meta["total_discs"] = int(val)
+                    globals_meta["genre"] = rem_value
+            elif rem_key in ("DISCNUMBER", "DISC") and rem_value.isdigit():
+                globals_meta["disc_number"] = int(rem_value)
+            elif rem_key in ("TOTALDISCS", "DISCTOTAL") and rem_value.isdigit():
+                globals_meta["total_discs"] = int(rem_value)
             continue
 
         if command == "TRACK" and len(tokens) >= 2:

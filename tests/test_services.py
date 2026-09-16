@@ -24,7 +24,10 @@ from sonora.services.fanart import (
     fetch_fanart_label,
 )
 from sonora.services.genius import fetch_genius_description
-from sonora.services.itunes import fetch_itunes_cover_art_url
+from sonora.services.itunes import (
+    fetch_itunes_album_details,
+    fetch_itunes_cover_art_url,
+)
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import (
     clean_lyrics_text,
@@ -401,6 +404,91 @@ class TestServicesEngine(unittest.TestCase):
             self.assertEqual(release_result["label"], "Universal Music")
             self.assertEqual(release_result["barcode"], "123456789012")
             self.assertEqual(release_result["genre"], "Hip Hop")
+
+    @patch("sonora.services.deezer.SESSION.get")
+    def test_fetch_deezer_album_details_prefers_expected_tracks(
+        self, mock_get: MagicMock
+    ) -> None:
+        mock_search = MagicMock()
+        mock_search.status_code = 200
+        mock_search.json.return_value = {
+            "data": [
+                {
+                    "id": 111,
+                    "title": "Revenge",
+                    "artist": {"name": "XXXTENTACION"},
+                    "nb_tracks": 1,
+                    "record_type": "single",
+                },
+                {
+                    "id": 777,
+                    "title": "Revenge",
+                    "artist": {"name": "XXXTENTACION"},
+                    "nb_tracks": 7,
+                    "record_type": "album",
+                },
+            ]
+        }
+
+        mock_album = MagicMock()
+        mock_album.status_code = 200
+        mock_album.json.return_value = {
+            "title": "Revenge",
+            "tracks": {
+                "data": [
+                    {"id": 1, "title": "Track 1", "track_position": 1, "disk_number": 1}
+                ]
+            },
+        }
+        mock_get.side_effect = [mock_search, mock_album]
+
+        res = fetch_deezer_album_details(
+            "XXXTENTACION", "Revenge", expected_track_count=7
+        )
+        self.assertIsNotNone(res)
+        # Verify it requested album ID 777, not the 1-track single 111
+        mock_get.assert_called_with("https://api.deezer.com/album/777", timeout=6)
+
+    @patch("sonora.services.itunes.SESSION.get")
+    @patch("sonora.services.itunes.search_itunes")
+    def test_fetch_itunes_album_details_prefers_expected_tracks(
+        self, mock_search: MagicMock, mock_get: MagicMock
+    ) -> None:
+        mock_search.return_value = [
+            {
+                "collectionId": 111,
+                "collectionName": "Revenge",
+                "artistName": "XXXTENTACION",
+                "trackCount": 1,
+            },
+            {
+                "collectionId": 777,
+                "collectionName": "Revenge",
+                "artistName": "XXXTENTACION",
+                "trackCount": 7,
+            },
+        ]
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "results": [
+                {
+                    "wrapperType": "collection",
+                    "collectionId": 777,
+                    "collectionName": "Revenge",
+                    "artistName": "XXXTENTACION",
+                    "trackCount": 7,
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        res = fetch_itunes_album_details(
+            "XXXTENTACION", "Revenge", expected_track_count=7
+        )
+        self.assertIsNotNone(res)
+        if res:
+            self.assertEqual(res["itunes_collectionid"], "777")
 
     @patch("sonora.services.deezer.SESSION.get")
     def test_fetch_deezer_track_details(self, mock_get: MagicMock) -> None:

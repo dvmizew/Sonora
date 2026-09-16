@@ -1,13 +1,14 @@
 import contextlib
 import dataclasses
 import datetime
+import functools
 import signal
 import socket
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, TypeVar
 
 import orjson
 from cyclopts import App, Parameter
@@ -17,7 +18,11 @@ from rich.markup import escape
 from sonora import __version__
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.key import detect_key_details
-from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.audio.metadata import (
+    get_audio_duration,
+    read_track_metadata,
+    write_track_metadata,
+)
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.cache import (
     CacheStats,
@@ -38,31 +43,26 @@ from sonora.core.logger import (
     interactive_pause_listener,
     wait_if_paused,
 )
-from sonora.core.models import CheckReport, TrackInfo
+from sonora.core.models import CheckReport, RenameReport, TrackInfo
 from sonora.core.utils import (
+    InterruptedOperationError,
     find_audio_files,
     format_filesize,
     group_files_by_parent,
 )
 from sonora.modules.backup import (
     backup_library_tags,
-    get_last_restored_count,
     restore_library_tags,
 )
 from sonora.modules.checker import (
     check_library,
-    get_last_check_report,
     write_check_report_json,
 )
 from sonora.modules.organizer import (
-    get_last_organized_count,
     organize_library_singles,
 )
-from sonora.modules.renamer import get_last_rename_report, rename_directory_files
+from sonora.modules.renamer import rename_directory_files
 from sonora.modules.tagger import (
-    get_last_normalized_count,
-    get_last_tagged_tracks,
-    get_last_tagging_failures,
     normalize_library,
     tag_album_folder,
 )
@@ -73,7 +73,7 @@ load_app_environment()
 socket.setdefaulttimeout(15)
 
 if hasattr(signal, "SIGCONT"):
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(ValueError, OSError):
         signal.signal(
             signal.SIGCONT,
             lambda *_: LOG.info("▶️ [green]Resumed execution.[/]"),
@@ -88,88 +88,267 @@ app = App(
     result_action="return_value",
 )
 
+T = TypeVar("T")
+
+PathArg = Annotated[Path, Parameter(help="Directory containing audio files")]
+ThreadsOpt = Annotated[
+    int, Parameter(name=["-t", "--threads"], help="Number of parallel threads")
+]
+DryRunOpt = Annotated[
+    bool,
+    Parameter(negative="", help="Simulate actions without modifying files on disk"),
+]
+ForceOpt = Annotated[
+    bool, Parameter(negative="", help="Force reprocessing even if valid")
+]
+JsonReportOpt = Annotated[
+    Path | None, Parameter(name=["-j", "--json"], help="Save report to JSON file")
+]
+BpmOpt = Annotated[bool, Parameter(name=["--bpm"], help="Calculate audio tempo (BPM)")]
+KeyOpt = Annotated[
+    bool,
+    Parameter(name=["--key"], help="Detect musical key and Camelot wheel tonality"),
+]
+ReplayGainOpt = Annotated[
+    bool,
+    Parameter(
+        name=["--replaygain"], help="Calculate ReplayGain loudness normalization tags"
+    ),
+]
+LyricsOpt = Annotated[
+    bool, Parameter(name=["--lyrics"], help="Fetch synchronized (.lrc) lyrics")
+]
+ArtOpt = Annotated[
+    bool,
+    Parameter(name=["--art"], help="Download high-resolution album and artist artwork"),
+]
+ShazamOpt = Annotated[
+    bool,
+    Parameter(
+        name=["--shazam"],
+        help="Enable acoustic recognition via Shazam for untagged tracks",
+    ),
+]
+
+
+def _write_json_report(
+    json_report: Path,
+    report_data: dict[str, Any],
+    label: str = "report",
+) -> None:
+    json_report.write_bytes(
+        orjson.dumps(
+            report_data,
+            option=orjson.OPT_INDENT_2
+            | orjson.OPT_NON_STR_KEYS
+            | orjson.OPT_SERIALIZE_DATACLASS,
+        )
+    )
+    LOG.info(f"Saved {label} JSON report to [bold]{json_report}[/bold]")
+
+
+def _emit_tag_summary_and_report(
+    tagged_tracks: list[TrackInfo],
+    failures: list[dict[str, str]],
+    interrupted: bool,
+    path: Path,
+    threads: int,
+    json_report: Path | None,
+) -> None:
+    total_tracks = len(tagged_tracks)
+    counts = {
+        "mb": sum(1 for t in tagged_tracks if t.musicbrainz_trackid is not None),
+        "genre": sum(1 for t in tagged_tracks if t.genre is not None),
+        "lyrics": sum(
+            1
+            for t in tagged_tracks
+            if t.lyrics is not None or t.synced_lyrics is not None
+        ),
+        "isrc": sum(1 for t in tagged_tracks if t.isrc is not None),
+        "bpm": sum(1 for t in tagged_tracks if t.bpm is not None),
+        "rg": sum(1 for t in tagged_tracks if t.replaygain_track_gain is not None),
+        "key": sum(1 for t in tagged_tracks if t.initial_key is not None),
+        "composer": sum(1 for t in tagged_tracks if t.composer is not None),
+        "producers": sum(1 for t in tagged_tracks if t.producers is not None),
+        "advisory": sum(1 for t in tagged_tracks if t.advisory is not None),
+        "discogs": sum(1 for t in tagged_tracks if t.discogs_release_id is not None),
+        "genius": sum(
+            1
+            for t in tagged_tracks
+            if t.genius_song_id is not None or t.comment is not None
+        ),
+        "theaudiodb": sum(
+            1
+            for t in tagged_tracks
+            if t.initial_key is not None
+            or t.music_video_url is not None
+            or t.mood is not None
+        ),
+        "lossless": sum(1 for t in tagged_tracks if t.is_lossless),
+    }
+    lossy_count = total_tracks - counts["lossless"]
+    pcts = {
+        k: (v / total_tracks * 100) if total_tracks > 0 else 0.0
+        for k, v in counts.items()
+    }
+
+    tag_summary_rows = [
+        ("Total Tracks Processed", str(total_tracks), None),
+        (
+            "MusicBrainz Matched",
+            f"{counts['mb']}/{total_tracks} ({pcts['mb']:.0f}%)",
+            None,
+        ),
+        (
+            "Genre & Styles Tagged",
+            f"{counts['genre']}/{total_tracks} ({pcts['genre']:.0f}%)",
+            None,
+        ),
+        (
+            "Lyrics Attached (.lrc)",
+            f"{counts['lyrics']}/{total_tracks} ({pcts['lyrics']:.0f}%)",
+            None,
+        ),
+        (
+            "ISRC Registered",
+            f"{counts['isrc']}/{total_tracks} ({pcts['isrc']:.0f}%)",
+            None,
+        ),
+        (
+            "Tempo / BPM Calculated",
+            f"{counts['bpm']}/{total_tracks} ({pcts['bpm']:.0f}%)",
+            None,
+        ),
+        (
+            "ReplayGain Loudness",
+            f"{counts['rg']}/{total_tracks} ({pcts['rg']:.0f}%)",
+            None,
+        ),
+        (
+            "Musical Key / Tonality",
+            f"{counts['key']}/{total_tracks} ({pcts['key']:.0f}%)",
+            None,
+        ),
+        (
+            "Composers & Writers",
+            f"{counts['composer']}/{total_tracks} ({pcts['composer']:.0f}%)",
+            None,
+        ),
+        (
+            "Producers & Studio Credits",
+            f"{counts['producers']}/{total_tracks} ({pcts['producers']:.0f}%)",
+            None,
+        ),
+        (
+            "Song Stories & Annotations",
+            f"{counts['genius']}/{total_tracks} ({pcts['genius']:.0f}%)",
+            None,
+        ),
+        (
+            "Parental Advisory",
+            f"{counts['advisory']}/{total_tracks} ({pcts['advisory']:.0f}%)",
+            None,
+        ),
+        (
+            "Audio Quality Breakdown",
+            f"{counts['lossless']} Lossless / {lossy_count} Lossy",
+            None,
+        ),
+    ]
+    LOG.summary_table("Tagging Summary", tag_summary_rows)
+
+    if json_report:
+        summary_text = (
+            f"Processed {total_tracks} tracks ({len(failures)} failures). "
+            f"MusicBrainz {counts['mb']}/{total_tracks} ({pcts['mb']:.0f}%), "
+            f"Genre {counts['genre']}/{total_tracks} ({pcts['genre']:.0f}%), "
+            f"Lyrics {counts['lyrics']}/{total_tracks} ({pcts['lyrics']:.0f}%), "
+            f"BPM {counts['bpm']}/{total_tracks} ({pcts['bpm']:.0f}%), "
+            f"ReplayGain {counts['rg']}/{total_tracks} ({pcts['rg']:.0f}%)."
+        )
+        report_data = {
+            "schema": "tag_report_v1",
+            "generator": "Sonora",
+            "version": __version__,
+            "summary_text": summary_text,
+            "aborted_by_user": interrupted,
+            "execution": {
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "target_path": str(path.resolve()),
+                "threads_used": threads,
+            },
+            "statistics": {
+                "total_tracks": total_tracks,
+                "total_failures": len(failures),
+                "enrichment": {
+                    "musicbrainz_matched_count": counts["mb"],
+                    "musicbrainz_percentage": round(pcts["mb"], 1),
+                    "genre_tagged_count": counts["genre"],
+                    "genre_percentage": round(pcts["genre"], 1),
+                    "lyrics_tagged_count": counts["lyrics"],
+                    "lyrics_percentage": round(pcts["lyrics"], 1),
+                    "isrc_tagged_count": counts["isrc"],
+                    "isrc_percentage": round(pcts["isrc"], 1),
+                    "bpm_calculated_count": counts["bpm"],
+                    "bpm_percentage": round(pcts["bpm"], 1),
+                    "replaygain_calculated_count": counts["rg"],
+                    "replaygain_percentage": round(pcts["rg"], 1),
+                    "initial_key_count": counts["key"],
+                    "initial_key_percentage": round(pcts["key"], 1),
+                    "composer_tagged_count": counts["composer"],
+                    "composer_percentage": round(pcts["composer"], 1),
+                    "producers_tagged_count": counts["producers"],
+                    "producers_percentage": round(pcts["producers"], 1),
+                    "advisory_tagged_count": counts["advisory"],
+                    "advisory_percentage": round(pcts["advisory"], 1),
+                    "discogs_matched_count": counts["discogs"],
+                    "discogs_percentage": round(pcts["discogs"], 1),
+                    "genius_matched_count": counts["genius"],
+                    "genius_percentage": round(pcts["genius"], 1),
+                    "theaudiodb_matched_count": counts["theaudiodb"],
+                    "theaudiodb_percentage": round(pcts["theaudiodb"], 1),
+                },
+                "audio_formats": {
+                    "lossless_tracks": counts["lossless"],
+                    "lossy_tracks": lossy_count,
+                },
+            },
+            "failures": failures,
+            "tracks": [track.to_dict() for track in tagged_tracks],
+        }
+        _write_json_report(json_report, report_data, "tagging")
+
 
 @app.command
 def tag(
-    path: Annotated[
-        Path,
-        Parameter(help="Directory containing audio files to tag"),
-    ],
-    fetch_bpm: Annotated[
-        bool,
-        Parameter(
-            name=["--bpm"],
-            help="Calculate audio tempo (BPM)",
-        ),
-    ] = True,
-    fetch_key: Annotated[
-        bool,
-        Parameter(
-            name=["--key"],
-            help="Detect musical key and Camelot wheel tonality",
-        ),
-    ] = True,
-    fetch_replaygain: Annotated[
-        bool,
-        Parameter(
-            name=["--replaygain"],
-            help="Calculate ReplayGain loudness normalization tags",
-        ),
-    ] = True,
-    fetch_lyrics: Annotated[
-        bool,
-        Parameter(
-            name=["--lyrics"],
-            help="Fetch synchronized (.lrc) lyrics",
-        ),
-    ] = True,
-    fetch_artwork: Annotated[
-        bool,
-        Parameter(
-            name=["--art"],
-            help="Download high-resolution album and artist artwork",
-        ),
-    ] = True,
-    json_report: Annotated[
-        Path | None,
-        Parameter(
-            name=["--json"],
-            help="Output path to save tagging JSON report with statistics",
-        ),
-    ] = None,
-    force: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Force retagging by ignoring cache and existing MusicBrainz IDs",
-        ),
-    ] = False,
+    path: PathArg,
+    fetch_bpm: BpmOpt = True,
+    fetch_key: KeyOpt = True,
+    fetch_replaygain: ReplayGainOpt = True,
+    fetch_lyrics: LyricsOpt = True,
+    fetch_artwork: ArtOpt = True,
+    json_report: JsonReportOpt = None,
+    force: ForceOpt = False,
     lastfm_api_key: Annotated[
         str | None,
         Parameter(
-            name=["--lastfm-key"],
-            help="Last.fm API key for genre and mood lookup",
+            name=["--lastfm-key"], help="Last.fm API key for genre and mood lookup"
         ),
     ] = None,
     acoustid_api_key: Annotated[
         str | None,
         Parameter(
-            name=["--acoustid-key"],
-            help="AcoustID API key for acoustic fingerprinting",
+            name=["--acoustid-key"], help="AcoustID API key for acoustic fingerprinting"
         ),
     ] = None,
     discogs_user_token: Annotated[
         str | None,
-        Parameter(
-            name=["--discogs-token"],
-            help="Discogs personal user token",
-        ),
+        Parameter(name=["--discogs-token"], help="Discogs personal user token"),
     ] = None,
     genius_api_token: Annotated[
         str | None,
         Parameter(
-            name=["--genius-token"],
-            help="Genius API token for song descriptions",
+            name=["--genius-token"], help="Genius API token for song descriptions"
         ),
     ] = None,
     fanart_api_key: Annotated[
@@ -186,27 +365,9 @@ def tag(
             help="Fanart.tv personal VIP client key for immediate image updates",
         ),
     ] = None,
-    enable_shazam: Annotated[
-        bool,
-        Parameter(
-            name=["--shazam"],
-            help="Enable acoustic recognition via Shazam for untagged tracks",
-        ),
-    ] = True,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 4,
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Simulate actions without modifying files on disk",
-        ),
-    ] = False,
+    enable_shazam: ShazamOpt = True,
+    threads: ThreadsOpt = 4,
+    dry_run: DryRunOpt = False,
 ) -> int:
     """
     Tag audio files and albums automatically with all metadata, artwork, BPM, ReplayGain & lyrics.
@@ -250,8 +411,9 @@ def tag(
         )
 
     LOG.info(f"Tagging album directory: [bold]{escape(str(path))}[/bold]")
-    tagged_tracks: list[TrackInfo] = []
     interrupted = False
+    failures: list[dict[str, str]] = []
+    tagged_tracks: list[TrackInfo] = []
     try:
         tagged_tracks = tag_album_folder(
             path,
@@ -270,10 +432,14 @@ def tag(
             enable_shazam=enable_shazam,
             force=force,
             dry_run=dry_run,
+            failures=failures,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        tagged_tracks = get_last_tagged_tracks()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, list
+        ):
+            tagged_tracks = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Tagging stopped by user (Ctrl+C). Generating summary for processed tracks..."
         )
@@ -285,206 +451,9 @@ def tag(
             f"Partially processed {len(tagged_tracks)} tracks before interruption."
         )
 
-    total_tracks = len(tagged_tracks)
-    bpm_count = sum(1 for track in tagged_tracks if track.bpm is not None)
-    replaygain_count = sum(
-        1 for track in tagged_tracks if track.replaygain_track_gain is not None
+    _emit_tag_summary_and_report(
+        tagged_tracks, failures, interrupted, path, threads, json_report
     )
-    musicbrainz_count = sum(
-        1 for track in tagged_tracks if track.musicbrainz_trackid is not None
-    )
-    genre_count = sum(1 for track in tagged_tracks if track.genre is not None)
-    lyrics_count = sum(
-        1
-        for track in tagged_tracks
-        if track.lyrics is not None or track.synced_lyrics is not None
-    )
-    isrc_count = sum(1 for track in tagged_tracks if track.isrc is not None)
-    discogs_count = sum(
-        1 for track in tagged_tracks if track.discogs_release_id is not None
-    )
-    genius_count = sum(
-        1
-        for track in tagged_tracks
-        if track.genius_song_id is not None or track.comment is not None
-    )
-    theaudiodb_count = sum(
-        1
-        for track in tagged_tracks
-        if track.initial_key is not None
-        or track.music_video_url is not None
-        or track.mood is not None
-    )
-    key_count = sum(1 for track in tagged_tracks if track.initial_key is not None)
-    composer_count = sum(1 for track in tagged_tracks if track.composer is not None)
-    producers_count = sum(1 for track in tagged_tracks if track.producers is not None)
-    advisory_count = sum(1 for track in tagged_tracks if track.advisory is not None)
-    lossless_count = sum(1 for track in tagged_tracks if track.is_lossless)
-    lossy_count = total_tracks - lossless_count
-
-    bpm_percentage = (bpm_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    replaygain_percentage = (
-        (replaygain_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    )
-    musicbrainz_percentage = (
-        (musicbrainz_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    )
-    genre_percentage = (genre_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    lyrics_percentage = (lyrics_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    isrc_percentage = (isrc_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    key_percentage = (key_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    composer_percentage = (
-        (composer_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    )
-    producers_percentage = (
-        (producers_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    )
-    advisory_percentage = (
-        (advisory_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    )
-    discogs_percentage = (
-        (discogs_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    )
-    genius_percentage = (genius_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    theaudiodb_percentage = (
-        (theaudiodb_count / total_tracks * 100) if total_tracks > 0 else 0.0
-    )
-
-    tag_summary_rows = [
-        ("Total Tracks Processed", str(total_tracks), None),
-        (
-            "MusicBrainz Matched",
-            f"{musicbrainz_count}/{total_tracks} ({musicbrainz_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Genre & Styles Tagged",
-            f"{genre_count}/{total_tracks} ({genre_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Lyrics Attached (.lrc)",
-            f"{lyrics_count}/{total_tracks} ({lyrics_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "ISRC Registered",
-            f"{isrc_count}/{total_tracks} ({isrc_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Tempo / BPM Calculated",
-            f"{bpm_count}/{total_tracks} ({bpm_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "ReplayGain Loudness",
-            f"{replaygain_count}/{total_tracks} ({replaygain_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Musical Key / Tonality",
-            f"{key_count}/{total_tracks} ({key_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Composers & Writers",
-            f"{composer_count}/{total_tracks} ({composer_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Producers & Studio Credits",
-            f"{producers_count}/{total_tracks} ({producers_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Song Stories & Annotations",
-            f"{genius_count}/{total_tracks} ({genius_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Parental Advisory",
-            f"{advisory_count}/{total_tracks} ({advisory_percentage:.0f}%)",
-            None,
-        ),
-        (
-            "Audio Quality Breakdown",
-            f"{lossless_count} Lossless / {lossy_count} Lossy",
-            None,
-        ),
-    ]
-    LOG.summary_table("Tagging Summary", tag_summary_rows)
-
-    if json_report:
-        failures = get_last_tagging_failures()
-        summary_text = (
-            f"Processed {total_tracks} tracks ({len(failures)} failures). "
-            f"MusicBrainz {musicbrainz_count}/{total_tracks} ({musicbrainz_percentage:.0f}%), "
-            f"Genre {genre_count}/{total_tracks} ({genre_percentage:.0f}%), "
-            f"Lyrics {lyrics_count}/{total_tracks} ({lyrics_percentage:.0f}%), "
-            f"BPM {bpm_count}/{total_tracks} ({bpm_percentage:.0f}%), "
-            f"ReplayGain {replaygain_count}/{total_tracks} ({replaygain_percentage:.0f}%)."
-        )
-        report_data = {
-            "schema": "tag_report_v1",
-            "generator": "Sonora",
-            "version": __version__,
-            "summary_text": summary_text,
-            "aborted_by_user": interrupted,
-            "execution": {
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "target_path": str(path.resolve()),
-                "threads_used": threads,
-            },
-            "statistics": {
-                "total_tracks": total_tracks,
-                "total_failures": len(failures),
-                "enrichment": {
-                    "musicbrainz_matched_count": musicbrainz_count,
-                    "musicbrainz_percentage": round(musicbrainz_percentage, 1),
-                    "genre_tagged_count": genre_count,
-                    "genre_percentage": round(genre_percentage, 1),
-                    "lyrics_tagged_count": lyrics_count,
-                    "lyrics_percentage": round(lyrics_percentage, 1),
-                    "isrc_tagged_count": isrc_count,
-                    "isrc_percentage": round(isrc_percentage, 1),
-                    "bpm_calculated_count": bpm_count,
-                    "bpm_percentage": round(bpm_percentage, 1),
-                    "replaygain_calculated_count": replaygain_count,
-                    "replaygain_percentage": round(replaygain_percentage, 1),
-                    "initial_key_count": key_count,
-                    "initial_key_percentage": round(key_percentage, 1),
-                    "composer_tagged_count": composer_count,
-                    "composer_percentage": round(composer_percentage, 1),
-                    "producers_tagged_count": producers_count,
-                    "producers_percentage": round(producers_percentage, 1),
-                    "advisory_tagged_count": advisory_count,
-                    "advisory_percentage": round(advisory_percentage, 1),
-                    "discogs_matched_count": discogs_count,
-                    "discogs_percentage": round(discogs_percentage, 1),
-                    "genius_matched_count": genius_count,
-                    "genius_percentage": round(genius_percentage, 1),
-                    "theaudiodb_matched_count": theaudiodb_count,
-                    "theaudiodb_percentage": round(theaudiodb_percentage, 1),
-                },
-                "audio_formats": {
-                    "lossless_tracks": lossless_count,
-                    "lossy_tracks": lossy_count,
-                },
-            },
-            "failures": failures,
-            "tracks": [track.to_dict() for track in tagged_tracks],
-        }
-        json_report.write_bytes(
-            orjson.dumps(
-                report_data,
-                option=orjson.OPT_INDENT_2
-                | orjson.OPT_NON_STR_KEYS
-                | orjson.OPT_SERIALIZE_DATACLASS,
-            )
-        )
-        LOG.info(f"Saved tagging JSON report to [bold]{json_report}[/bold]")
-
     if interrupted:
         return 130
     return 0
@@ -492,17 +461,8 @@ def tag(
 
 @app.command
 def check(
-    path: Annotated[
-        Path,
-        Parameter(help="Directory containing music library to check"),
-    ],
-    json_report: Annotated[
-        Path | None,
-        Parameter(
-            name=["--json"],
-            help="Output path to save check JSON report",
-        ),
-    ] = None,
+    path: PathArg,
+    json_report: JsonReportOpt = None,
     spectral_analysis: Annotated[
         bool,
         Parameter(
@@ -511,31 +471,30 @@ def check(
             help="Enable deep spectral cutoff analysis for fake lossless detection (slow)",
         ),
     ] = False,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 8,
+    threads: ThreadsOpt = 8,
 ) -> int:
     """
     Check music library for FLAC integrity, bracket corruption & missing LRCs.
     """
     LOG.info(f"Checking music library: [bold]{path}[/bold]")
     interrupted = False
+    check_report = CheckReport(
+        total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
+    )
     try:
         check_report = check_library(
             path,
             output_json=json_report,
             check_spectral=spectral_analysis,
             max_threads=threads,
+            report=check_report,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        check_report = get_last_check_report() or CheckReport(
-            total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
-        )
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, CheckReport
+        ):
+            check_report = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Check stopped by user (Ctrl+C). Generating summary for scanned files..."
         )
@@ -605,43 +564,27 @@ def check(
 
 @app.command
 def rename(
-    path: Annotated[
-        Path,
-        Parameter(help="Directory containing audio files to rename"),
-    ],
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of threads for parallel processing",
-        ),
-    ] = 4,
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Simulate actions without modifying files on disk",
-        ),
-    ] = False,
-    json_report: Annotated[
-        Path | None,
-        Parameter(
-            name=["-j", "--json"],
-            help="Save renaming report to JSON file",
-        ),
-    ] = None,
+    path: PathArg,
+    threads: ThreadsOpt = 4,
+    dry_run: DryRunOpt = False,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Rename audio files and sync .lrc metadata headers.
     """
     LOG.info(f"Renaming files in directory: [bold]{path}[/bold]")
     interrupted = False
+    report = RenameReport()
     try:
-        rename_directory_files(path, dry_run=dry_run, max_threads=threads)
-        report = get_last_rename_report()
-    except KeyboardInterrupt:
+        rename_directory_files(
+            path, dry_run=dry_run, max_threads=threads, report=report
+        )
+    except KeyboardInterrupt as exc:
         interrupted = True
-        report = get_last_rename_report()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, RenameReport
+        ):
+            report = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Renaming stopped by user (Ctrl+C). Generating summary..."
         )
@@ -676,23 +619,23 @@ def rename(
     LOG.summary_table("Renaming Summary", renaming_summary_rows)
 
     if json_report:
-        rename_json_data = {
-            "schema": "rename_report_v1",
-            "generator": "Sonora",
-            "aborted_by_user": interrupted,
-            "target_path": str(path.resolve()),
-            "summary": {
-                "total_scanned": report.total_files,
-                "files_renamed": report.files_renamed,
-                "folders_renamed": report.folders_renamed,
-                "lrc_synced": report.lrc_synced,
-                "unchanged_files": report.unchanged_files,
+        _write_json_report(
+            json_report,
+            {
+                "schema": "rename_report_v1",
+                "generator": "Sonora",
+                "aborted_by_user": interrupted,
+                "target_path": str(path.resolve()),
+                "summary": {
+                    "total_scanned": report.total_files,
+                    "files_renamed": report.files_renamed,
+                    "folders_renamed": report.folders_renamed,
+                    "lrc_synced": report.lrc_synced,
+                    "unchanged_files": report.unchanged_files,
+                },
             },
-        }
-        json_report.write_bytes(
-            orjson.dumps(rename_json_data, option=orjson.OPT_INDENT_2)
+            "renaming",
         )
-        LOG.info(f"Saved renaming JSON report to [bold]{json_report}[/bold]")
     if interrupted:
         return 130
     return 0
@@ -700,10 +643,7 @@ def rename(
 
 @app.command
 def organize(
-    path: Annotated[
-        Path,
-        Parameter(help="Source music directory"),
-    ],
+    path: PathArg,
     target_singles: Annotated[
         Path | None,
         Parameter(
@@ -711,27 +651,9 @@ def organize(
             help="Destination directory for single tracks (default: <path>/Singles)",
         ),
     ] = None,
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Simulate actions without modifying files on disk",
-        ),
-    ] = False,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of worker threads (default: 4)",
-        ),
-    ] = 4,
-    json_report: Annotated[
-        Path | None,
-        Parameter(
-            name=["-j", "--json"],
-            help="Save organization report to JSON file",
-        ),
-    ] = None,
+    dry_run: DryRunOpt = False,
+    threads: ThreadsOpt = 4,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Organize single tracks into a Singles directory structure.
@@ -741,13 +663,17 @@ def organize(
         f"Organizing single tracks from {escape(str(path))} to {escape(str(destination_directory))}"
     )
     interrupted = False
+    organized_count = 0
     try:
         organized_count = organize_library_singles(
             path, destination_directory, dry_run=dry_run, max_threads=threads
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        organized_count = get_last_organized_count()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, int
+        ):
+            organized_count = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Organization stopped by user (Ctrl+C). Generating summary..."
         )
@@ -771,20 +697,20 @@ def organize(
     LOG.summary_table("Organization Summary", organization_summary_rows)
 
     if json_report:
-        organize_json_data = {
-            "schema": "organize_report_v1",
-            "generator": "Sonora",
-            "aborted_by_user": interrupted,
-            "source_path": str(path.resolve()),
-            "target_singles_path": str(destination_directory.resolve()),
-            "summary": {
-                "single_tracks_organized": organized_count,
+        _write_json_report(
+            json_report,
+            {
+                "schema": "organize_report_v1",
+                "generator": "Sonora",
+                "aborted_by_user": interrupted,
+                "source_path": str(path.resolve()),
+                "target_singles_path": str(destination_directory.resolve()),
+                "summary": {
+                    "single_tracks_organized": organized_count,
+                },
             },
-        }
-        json_report.write_bytes(
-            orjson.dumps(organize_json_data, option=orjson.OPT_INDENT_2)
+            "organization",
         )
-        LOG.info(f"Saved organization JSON report to [bold]{json_report}[/bold]")
 
     if interrupted:
         return 130
@@ -793,10 +719,7 @@ def organize(
 
 @app.command
 def backup(
-    path: Annotated[
-        Path,
-        Parameter(help="Music directory to back up"),
-    ],
+    path: PathArg,
     output_file: Annotated[
         Path | None,
         Parameter(
@@ -804,13 +727,7 @@ def backup(
             help="Output JSON backup file path",
         ),
     ] = None,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 4,
+    threads: ThreadsOpt = 4,
 ) -> int:
     """
     Create JSON backup of audio tags.
@@ -840,30 +757,22 @@ def restore(
         Path,
         Parameter(help="Path to JSON backup file"),
     ],
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 4,
-    json_report: Annotated[
-        Path | None,
-        Parameter(
-            name=["-j", "--json"],
-            help="Save restoration report to JSON file",
-        ),
-    ] = None,
+    threads: ThreadsOpt = 4,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Restore audio tags from JSON backup file.
     """
     interrupted = False
+    restored_count = 0
     try:
         restored_count = restore_library_tags(backup_file, max_threads=threads)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        restored_count = get_last_restored_count()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, int
+        ):
+            restored_count = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Restoration stopped by user (Ctrl+C). Generating summary for restored files..."
         )
@@ -884,19 +793,19 @@ def restore(
     LOG.summary_table("Restoration Summary", restore_summary_rows)
 
     if json_report:
-        restore_json_data = {
-            "schema": "restore_report_v1",
-            "generator": "Sonora",
-            "aborted_by_user": interrupted,
-            "backup_file": str(backup_file.resolve()),
-            "summary": {
-                "tracks_restored": restored_count,
+        _write_json_report(
+            json_report,
+            {
+                "schema": "restore_report_v1",
+                "generator": "Sonora",
+                "aborted_by_user": interrupted,
+                "backup_file": str(backup_file.resolve()),
+                "summary": {
+                    "tracks_restored": restored_count,
+                },
             },
-        }
-        json_report.write_bytes(
-            orjson.dumps(restore_json_data, option=orjson.OPT_INDENT_2)
+            "restoration",
         )
-        LOG.info(f"Saved restoration JSON report to [bold]{json_report}[/bold]")
 
     if interrupted:
         return 130
@@ -905,58 +814,20 @@ def restore(
 
 @app.command
 def normalize(
-    path: Annotated[
-        Path,
-        Parameter(help="Directory containing audio files to normalize"),
-    ],
-    fetch_bpm: Annotated[
-        bool,
-        Parameter(
-            name=["--bpm"],
-            help="Calculate audio tempo (BPM) locally",
-        ),
-    ] = True,
-    fetch_key: Annotated[
-        bool,
-        Parameter(
-            name=["--key"],
-            help="Detect musical key and Camelot wheel tonality locally",
-        ),
-    ] = True,
-    fetch_replaygain: Annotated[
-        bool,
-        Parameter(
-            name=["--replaygain"],
-            help="Calculate ReplayGain loudness normalization locally",
-        ),
-    ] = True,
-    force: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Force re-normalization and recalculation of all files",
-        ),
-    ] = False,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 4,
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Simulate actions without modifying files on disk",
-        ),
-    ] = False,
+    path: PathArg,
+    fetch_bpm: BpmOpt = True,
+    fetch_key: KeyOpt = True,
+    fetch_replaygain: ReplayGainOpt = True,
+    force: ForceOpt = False,
+    threads: ThreadsOpt = 4,
+    dry_run: DryRunOpt = False,
 ) -> int:
     """
     Locally clean tags, remove bracket noise, and calculate BPM/Key/ReplayGain (100% offline).
     """
     LOG.info(f"Normalizing audio tags in [bold]{path}[/bold] (offline mode)...")
     interrupted = False
+    count = 0
     try:
         results = normalize_library(
             path,
@@ -968,9 +839,12 @@ def normalize(
             max_threads=threads,
         )
         count = len(results)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         interrupted = True
-        count = get_last_normalized_count()
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, list
+        ):
+            count = len(exc.partial_result)
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Normalization stopped by user (Ctrl+C)."
         )
@@ -993,226 +867,147 @@ def normalize(
     return 0
 
 
+def _run_parallel_audio_task(
+    path: Path,
+    description: str,
+    worker: Callable[[Path], T],
+    threads: int,
+) -> tuple[list[T], bool]:
+    if not path.exists():
+        raise FileNotFoundError(f"Path not found: {path}")
+
+    audio_files = find_audio_files(path, recursive=True)
+    if not audio_files:
+        LOG.warning("No audio files found.")
+        return [], False
+
+    LOG.info(f"{description} for {len(audio_files)} files in [bold]{path}[/bold]...")
+    results: list[T] = []
+    interrupted = False
+
+    with create_progress() as progress:
+        task = progress.add_task(f"[cyan]{description}...", total=len(audio_files))
+        with (
+            interactive_pause_listener(progress, task),
+            ThreadPoolExecutor(max_workers=threads) as executor,
+        ):
+            try:
+                futures = [executor.submit(worker, f) for f in audio_files]
+                for future in as_completed(futures):
+                    wait_if_paused()
+                    results.append(future.result())
+                    progress.advance(task)
+            except KeyboardInterrupt:
+                executor.shutdown(wait=True, cancel_futures=True)
+                interrupted = True
+                LOG.warning(
+                    f"\n⏹️  [bold yellow]INTERRUPTED[/] - {description} stopped by user (Ctrl+C)."
+                )
+
+    return results, interrupted
+
+
+def _process_bpm_file(
+    audio_path: Path, force: bool, dry_run: bool
+) -> tuple[Path, float | None, bool]:
+    wait_if_paused()
+    try:
+        track_info = read_track_metadata(audio_path)
+        if not force and track_info.bpm is not None:
+            return audio_path, track_info.bpm, False
+        val = calculate_bpm(audio_path)
+        if val is not None and not dry_run:
+            updated = dataclasses.replace(track_info, bpm=val)
+            write_track_metadata(updated)
+        return audio_path, val, True
+    except OSError as err:
+        LOG.debug(f"BPM error for {audio_path}: {err}")
+        return audio_path, None, False
+
+
 @app.command
 def bpm(
-    path: Annotated[
-        Path,
-        Parameter(help="Directory containing audio files to calculate BPM for"),
-    ],
-    force: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Force recalculation even if BPM tag exists",
-        ),
-    ] = False,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 4,
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Simulate actions without modifying files on disk",
-        ),
-    ] = False,
+    path: PathArg,
+    force: ForceOpt = False,
+    threads: ThreadsOpt = 4,
+    dry_run: DryRunOpt = False,
 ) -> int:
     """
     Calculate and embed audio tempo (BPM) tags locally.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
-
-    audio_files = find_audio_files(path, recursive=True)
-    if not audio_files:
-        LOG.warning("No audio files found.")
+    worker = functools.partial(_process_bpm_file, force=force, dry_run=dry_run)
+    results, interrupted = _run_parallel_audio_task(
+        path, "Calculating BPM", worker, threads
+    )
+    if not results and not interrupted:
         return 0
 
-    LOG.info(f"Calculating BPM for {len(audio_files)} files in [bold]{path}[/bold]...")
-    computed = 0
-    skipped = 0
-    interrupted = False
-
-    def _process_bpm(audio_path: Path) -> tuple[Path, float | None, bool]:
-        wait_if_paused()
-        try:
-            info = read_track_metadata(audio_path)
-            if not force and info.bpm is not None:
-                return audio_path, info.bpm, False
-            val = calculate_bpm(audio_path)
-            if val is not None and not dry_run:
-                updated = dataclasses.replace(info, bpm=val)
-                write_track_metadata(updated)
-            return audio_path, val, True
-        except (OSError, ValueError, RuntimeError) as err:
-            LOG.debug(f"BPM error for {audio_path}: {err}")
-            return audio_path, None, False
-
-    with create_progress() as progress:
-        task = progress.add_task("[cyan]Calculating BPM...", total=len(audio_files))
-        with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=threads)
-            try:
-                futures = [executor.submit(_process_bpm, f) for f in audio_files]
-                for future in as_completed(futures):
-                    wait_if_paused()
-                    _, bpm_val, modified = future.result()
-                    if modified and bpm_val is not None:
-                        computed += 1
-                    else:
-                        skipped += 1
-                    progress.advance(task)
-            except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
-                interrupted = True
-                LOG.warning(
-                    "\n⏹️  [bold yellow]INTERRUPTED[/] - BPM calculation stopped by user (Ctrl+C)."
-                )
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
-
+    computed = sum(1 for _, val, mod in results if mod and val is not None)
+    skipped = len(results) - computed
     summary_rows = [
-        ("Total Files Scanned", str(len(audio_files)), None),
+        ("Total Files Scanned", str(len(results)), None),
         ("BPM Calculated & Tagged", str(computed), "green" if computed else "white"),
         ("Already Tagged / Skipped", str(skipped), None),
     ]
     LOG.summary_table("BPM Summary", summary_rows)
-    if interrupted:
-        return 130
-    return 0
+    return 130 if interrupted else 0
+
+
+def _process_key_file(
+    audio_path: Path, force: bool, dry_run: bool
+) -> tuple[Path, str | None, bool]:
+    wait_if_paused()
+    try:
+        track_info = read_track_metadata(audio_path)
+        if not force and track_info.initial_key is not None:
+            return audio_path, track_info.initial_key, False
+        details = detect_key_details(audio_path)
+        if details is not None:
+            val, camelot, _ = details
+            if not dry_run:
+                updated = dataclasses.replace(track_info, initial_key=val)
+                write_track_metadata(updated)
+            return audio_path, f"{val} ({camelot})", True
+        return audio_path, None, False
+    except OSError as err:
+        LOG.debug(f"Key detection error for {audio_path}: {err}")
+        return audio_path, None, False
 
 
 @app.command
 def key(
-    path: Annotated[
-        Path,
-        Parameter(help="Directory containing audio files to detect musical key for"),
-    ],
-    force: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Force recalculation even if musical key tag exists",
-        ),
-    ] = False,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 4,
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Simulate actions without modifying files on disk",
-        ),
-    ] = False,
+    path: PathArg,
+    force: ForceOpt = False,
+    threads: ThreadsOpt = 4,
+    dry_run: DryRunOpt = False,
 ) -> int:
     """
     Detect and embed musical key (INITIALKEY) and Camelot wheel tags locally.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
-
-    audio_files = find_audio_files(path, recursive=True)
-    if not audio_files:
-        LOG.warning("No audio files found.")
+    worker = functools.partial(_process_key_file, force=force, dry_run=dry_run)
+    results, interrupted = _run_parallel_audio_task(
+        path, "Detecting musical key", worker, threads
+    )
+    if not results and not interrupted:
         return 0
 
-    LOG.info(
-        f"Detecting musical key for {len(audio_files)} files in [bold]{path}[/bold]..."
-    )
-    computed = 0
-    skipped = 0
-    interrupted = False
-
-    def _process_key(audio_path: Path) -> tuple[Path, str | None, bool]:
-        wait_if_paused()
-        try:
-            info = read_track_metadata(audio_path)
-            if not force and info.initial_key is not None:
-                return audio_path, info.initial_key, False
-            details = detect_key_details(audio_path)
-            if details is not None:
-                val, camelot, _ = details
-                if not dry_run:
-                    updated = dataclasses.replace(info, initial_key=val)
-                    write_track_metadata(updated)
-                return audio_path, f"{val} ({camelot})", True
-            return audio_path, None, False
-        except (OSError, ValueError, RuntimeError) as err:
-            LOG.debug(f"Key detection error for {audio_path}: {err}")
-            return audio_path, None, False
-
-    with create_progress() as progress:
-        task = progress.add_task(
-            "[cyan]Detecting musical key...", total=len(audio_files)
-        )
-        with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=threads)
-            try:
-                futures = [executor.submit(_process_key, f) for f in audio_files]
-                for future in as_completed(futures):
-                    wait_if_paused()
-                    _, key_val, modified = future.result()
-                    if modified and key_val is not None:
-                        computed += 1
-                    else:
-                        skipped += 1
-                    progress.advance(task)
-            except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
-                interrupted = True
-                LOG.warning(
-                    "\n⏹️  [bold yellow]INTERRUPTED[/] - Key detection stopped by user (Ctrl+C)."
-                )
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
-
+    computed = sum(1 for _, val, mod in results if mod and val is not None)
+    skipped = len(results) - computed
     summary_rows = [
-        ("Total Files Scanned", str(len(audio_files)), None),
+        ("Total Files Scanned", str(len(results)), None),
         ("Key Detected & Tagged", str(computed), "green" if computed else "white"),
         ("Already Tagged / Skipped", str(skipped), None),
     ]
     LOG.summary_table("Musical Key Summary", summary_rows)
-    if interrupted:
-        return 130
-    return 0
+    return 130 if interrupted else 0
 
 
 @app.command
 def replaygain(
-    path: Annotated[
-        Path,
-        Parameter(help="Directory containing audio files to calculate ReplayGain for"),
-    ],
-    force: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Force recalculation even if ReplayGain tags exist",
-        ),
-    ] = False,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 4,
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Simulate actions without modifying files on disk",
-        ),
-    ] = False,
+    path: PathArg,
+    force: ForceOpt = False,
+    threads: ThreadsOpt = 4,
+    dry_run: DryRunOpt = False,
 ) -> int:
     """
     Calculate and embed ReplayGain loudness normalization tags (Track & Album mode).
@@ -1270,107 +1065,62 @@ def replaygain(
     return 0
 
 
+def _process_lyrics_file(
+    audio_path: Path, force: bool, dry_run: bool
+) -> tuple[Path, str | None, str | None]:
+    wait_if_paused()
+    try:
+        track_info = read_track_metadata(audio_path)
+        lrc_path = audio_path.with_suffix(".lrc")
+        if not force and lrc_path.exists() and lrc_path.stat().st_size > 0:
+            return audio_path, "existing", "existing"
+        audio_dur = get_audio_duration(audio_path)
+
+        lyrics_text, tag_type = process_track_lyrics(
+            audio_path,
+            track_info.artist,
+            track_info.title,
+            force=force,
+            dry_run=dry_run,
+            isrc=track_info.isrc,
+            album_name=track_info.album,
+            duration=audio_dur,
+        )
+        if lyrics_text and not dry_run:
+            with contextlib.suppress(OSError):
+                updated = dataclasses.replace(track_info, lyrics=lyrics_text)
+                write_track_metadata(updated)
+        return audio_path, lyrics_text, tag_type
+    except OSError as err:
+        LOG.debug(f"Lyrics error for {audio_path}: {err}")
+        return audio_path, None, None
+
+
 @app.command
 def lyrics(
-    path: Annotated[
-        Path,
-        Parameter(help="Directory containing audio files to fetch lyrics for"),
-    ],
-    force: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Force re-fetching even if lyrics exist",
-        ),
-    ] = False,
-    threads: Annotated[
-        int,
-        Parameter(
-            name=["-t", "--threads"],
-            help="Number of parallel threads",
-        ),
-    ] = 4,
-    dry_run: Annotated[
-        bool,
-        Parameter(
-            negative="",
-            help="Simulate actions without modifying files on disk",
-        ),
-    ] = False,
+    path: PathArg,
+    force: ForceOpt = False,
+    threads: ThreadsOpt = 4,
+    dry_run: DryRunOpt = False,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Fetch and save synchronized lyrics (.lrc) files and embedded lyrics.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Path not found: {path}")
-
     init_musixmatch_token()
-    audio_files = find_audio_files(path, recursive=True)
-    if not audio_files:
-        LOG.warning("No audio files found.")
+    worker = functools.partial(_process_lyrics_file, force=force, dry_run=dry_run)
+    results, interrupted = _run_parallel_audio_task(
+        path, "Fetching synchronized lyrics", worker, threads
+    )
+    if not results and not interrupted:
         return 0
 
-    LOG.info(
-        f"Fetching synchronized lyrics for {len(audio_files)} files in [bold]{path}[/bold]..."
-    )
-    saved_count = 0
-    skipped_count = 0
-    missing_count = 0
-    interrupted = False
-
-    def _process_lyrics(audio_path: Path) -> tuple[Path, str | None, str | None]:
-        wait_if_paused()
-        try:
-            info = read_track_metadata(audio_path)
-            lrc_path = audio_path.with_suffix(".lrc")
-            if not force and lrc_path.exists() and lrc_path.stat().st_size > 0:
-                return audio_path, "existing", "existing"
-            lyrics_text, tag_type = process_track_lyrics(
-                audio_path,
-                info.artist,
-                info.title,
-                force=force,
-                dry_run=dry_run,
-                isrc=info.isrc,
-            )
-            if lyrics_text and not dry_run:
-                try:
-                    updated = dataclasses.replace(info, lyrics=lyrics_text)
-                    write_track_metadata(updated)
-                except (OSError, ValueError, RuntimeError):
-                    pass
-            return audio_path, lyrics_text, tag_type
-        except (OSError, ValueError, RuntimeError) as err:
-            LOG.debug(f"Lyrics error for {audio_path}: {err}")
-            return audio_path, None, None
-
-    with create_progress() as progress:
-        task = progress.add_task("[cyan]Fetching lyrics...", total=len(audio_files))
-        with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=threads)
-            try:
-                futures = [executor.submit(_process_lyrics, f) for f in audio_files]
-                for future in as_completed(futures):
-                    wait_if_paused()
-                    _, lyr_content, lyr_type = future.result()
-                    if lyr_type == "existing":
-                        skipped_count += 1
-                    elif lyr_content:
-                        saved_count += 1
-                    else:
-                        missing_count += 1
-                    progress.advance(task)
-            except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
-                interrupted = True
-                LOG.warning(
-                    "\n⏹️  [bold yellow]INTERRUPTED[/] - Lyrics fetch stopped by user (Ctrl+C)."
-                )
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+    saved_count = sum(1 for _, content, typ in results if typ != "existing" and content)
+    skipped_count = sum(1 for _, _, typ in results if typ == "existing")
+    missing_count = len(results) - saved_count - skipped_count
 
     summary_rows = [
-        ("Total Files Scanned", str(len(audio_files)), None),
+        ("Total Files Scanned", str(len(results)), None),
         (
             "Lyrics Saved / Updated",
             str(saved_count),
@@ -1380,9 +1130,21 @@ def lyrics(
         ("Lyrics Unavailable", str(missing_count), "yellow" if missing_count else None),
     ]
     LOG.summary_table("Lyrics Summary", summary_rows)
-    if interrupted:
-        return 130
-    return 0
+
+    if json_report:
+        import orjson
+
+        report_data = {
+            "total_files": len(results),
+            "saved": saved_count,
+            "already_had": skipped_count,
+            "unavailable": missing_count,
+            "details": [{"file": str(p), "status": typ} for p, _, typ in results],
+        }
+        json_report.write_bytes(orjson.dumps(report_data, option=orjson.OPT_INDENT_2))
+        LOG.info(f"Saved lyrics JSON report to [bold cyan]{json_report}[/bold cyan]")
+
+    return 130 if interrupted else 0
 
 
 cache_app = App(
@@ -1674,15 +1436,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         return 130
     except CycloptsError:
         return 2
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        RuntimeError,
-        KeyError,
-        IndexError,
-        AttributeError,
-    ) as error:
+    except OSError as error:
         LOG.error(f"Error: {error}")
         return 1
 
