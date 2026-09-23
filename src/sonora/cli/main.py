@@ -366,6 +366,20 @@ def tag(
         ),
     ] = None,
     enable_shazam: ShazamOpt = True,
+    no_dsp: Annotated[
+        bool,
+        Parameter(
+            name=["--no-dsp"],
+            help="Disable all heavy audio DSP analysis (BPM, Musical Key, and ReplayGain) for fast metadata tagging",
+        ),
+    ] = False,
+    ignore_cache: Annotated[
+        bool,
+        Parameter(
+            name=["--ignore-cache"],
+            help="Bypass local API metadata cache and force re-fetching from remote services",
+        ),
+    ] = False,
     threads: ThreadsOpt = 4,
     dry_run: DryRunOpt = False,
 ) -> int:
@@ -377,7 +391,12 @@ def tag(
     init_musicbrainz()
     init_musixmatch_token()
 
-    if force:
+    if no_dsp:
+        fetch_bpm = False
+        fetch_key = False
+        fetch_replaygain = False
+
+    if ignore_cache:
         set_ignore_cache(True)
 
     cfg = get_config()

@@ -114,19 +114,19 @@ def _parse_config_data(path: Path) -> dict[str, Any]:
         suffix = path.suffix.lower()
         if suffix == ".toml":
             with path.open("rb") as config_file:
-                data = tomllib.load(config_file)
-            if isinstance(data, dict):
-                sub = data.get("sonora")
-                if isinstance(sub, dict):
-                    return {str(k): v for k, v in sub.items()}
-                return {str(k): v for k, v in data.items()}
+                parsed_config_data = tomllib.load(config_file)
+            if isinstance(parsed_config_data, dict):
+                sonora_section = parsed_config_data.get("sonora")
+                if isinstance(sonora_section, dict):
+                    return {str(k): v for k, v in sonora_section.items()}
+                return {str(k): v for k, v in parsed_config_data.items()}
         if suffix == ".json":
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                sub = data.get("sonora")
-                if isinstance(sub, dict):
-                    return {str(k): v for k, v in sub.items()}
-                return {str(k): v for k, v in data.items()}
+            parsed_config_data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed_config_data, dict):
+                sonora_section = parsed_config_data.get("sonora")
+                if isinstance(sonora_section, dict):
+                    return {str(k): v for k, v in sonora_section.items()}
+                return {str(k): v for k, v in parsed_config_data.items()}
     except (OSError, ValueError) as error:
         LOG.warning(f"Failed to parse configuration file {path}: {error}")
     return {}

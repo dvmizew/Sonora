@@ -132,7 +132,7 @@ def backup_library_tags(
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files could not be read")
         return output_path
-    except (OSError, TypeError) as error:
+    except OSError as error:
         LOG.error(f"Failed to save backup: {error}")
         raise
 
@@ -160,7 +160,7 @@ def restore_library_tags(
         backup_dict: dict[str, Any] = orjson.loads(content)
         if not isinstance(backup_dict, dict):
             raise TypeError("Backup file is not a valid JSON object")
-    except (orjson.JSONDecodeError, OSError, TypeError, ValueError) as error:
+    except (orjson.JSONDecodeError, OSError, TypeError) as error:
         LOG.error(f"Failed to read backup file: {error}")
         raise
 

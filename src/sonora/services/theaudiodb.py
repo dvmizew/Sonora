@@ -92,7 +92,7 @@ def fetch_theaudiodb_track_details(
     )
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
-        return cached
+        return cached if cached else None
 
     _THEAUDIODB_LIMITER.wait()
     try:
@@ -120,6 +120,7 @@ def fetch_theaudiodb_track_details(
                 }
                 set_cached_api(cache_key, details)
                 return details
+            set_cached_api(cache_key, {})
     except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(
             f"TheAudioDB track lookup failed for {artist_name} - {track_title}: {error}"

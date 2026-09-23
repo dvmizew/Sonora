@@ -7,7 +7,13 @@ import acoustid
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_ACOUSTID
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, is_valid_uuid, match_score, normalize_str
+from sonora.core.utils import (
+    RateLimiter,
+    is_valid_uuid,
+    match_score,
+    normalize_str,
+    safe_float,
+)
 
 _ACOUSTID_CACHE: dict[tuple[str, int, int], tuple[float, str]] = {}
 _ACOUSTID_LOCK = threading.RLock()
@@ -26,12 +32,14 @@ def _fingerprint_file_with_timeout(
         fingerprint: str | None = None
         for line in process_result.stdout.splitlines():
             if line.startswith(b"DURATION="):
-                duration = float(line.split(b"=", 1)[1])
+                duration = safe_float(
+                    line.split(b"=", 1)[1].decode("ascii", errors="replace")
+                )
             elif line.startswith(b"FINGERPRINT="):
                 fingerprint = line.split(b"=", 1)[1].decode("ascii")
         if duration is not None and fingerprint is not None:
-            return float(duration), str(fingerprint)
-    except (subprocess.SubprocessError, OSError, ValueError) as error:
+            return duration, str(fingerprint)
+    except (subprocess.SubprocessError, OSError) as error:
         LOG.debug(f"Direct fpcalc execution with timeout failed: {error}")
 
     # Fallback to standard acoustid library call if direct invocation fails

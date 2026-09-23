@@ -345,13 +345,14 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
                         position = track.get("position")
                         recording_id = track.get("recording", {}).get("id")
                         if position and recording_id:
-                            mapping[int(position)] = str(recording_id)
+                            pos_int = safe_int(position)
+                            if pos_int is not None:
+                                mapping[pos_int] = str(recording_id)
         set_cached_api(cache_key, mapping)
         return mapping
     except (
         MusicBrainzError,
         OSError,
-        ValueError,
     ) as error:
         LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {error}")
         return {}

@@ -112,8 +112,11 @@ class TestCoreModules(unittest.TestCase):
         reset_library_state()
         close_cache()
 
+    @patch("sonora.core.utils.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
-    def test_resolve_artist_name(self, mock_search: MagicMock) -> None:
+    def test_resolve_artist_name(
+        self, mock_search: MagicMock, mock_get_cache: MagicMock
+    ) -> None:
         resolve_artist_name.cache_clear()
         mock_search.return_value = [
             {

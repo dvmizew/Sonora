@@ -330,7 +330,7 @@ def fetch_synced_lyrics(
     cache_key = f"lyrics:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
-        return cached
+        return cached if cached else None
 
     search_args = (plain_only, synced_only, enhanced, providers, lang)
 
@@ -381,6 +381,7 @@ def fetch_synced_lyrics(
             f"Lyrics fetch failed for '{title}': {last_exception}"
         ) from last_exception
 
+    set_cached_api(cache_key, "")
     return None
 
 

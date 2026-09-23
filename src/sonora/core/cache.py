@@ -4,6 +4,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,7 @@ def get_cache() -> Any:
                     OSError,
                     ValueError,
                     RuntimeError,
+                    sqlite3.Error,
                 ) as error:
                     LOG.debug(f"Cache initialization failed: {error}")
                     _CACHE_INSTANCE = None
@@ -163,6 +165,9 @@ def get_cached_api(key: str) -> Any | None:
             OSError,
             ValueError,
             RuntimeError,
+            sqlite3.Error,
+            diskcache.core.pickle.PickleError,
+            EOFError,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Cache fetch failed for key '{key}': {error}")
@@ -178,12 +183,12 @@ def set_cached_api(
     cache = get_cache()
     if cache is not None:
         try:
-            with _CACHE_LOCK:
-                cache.set(key, value, expire=expire_seconds)
+            cache.set(key, value, expire=expire_seconds)
         except (
             OSError,
             ValueError,
             RuntimeError,
+            sqlite3.Error,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Cache store failed for key '{key}': {error}")
@@ -216,12 +221,12 @@ def get_cache_stats() -> CacheStats:
     cache = get_cache()
     if cache is not None:
         try:
-            with _CACHE_LOCK:
-                api_entries = len(cache)
+            api_entries = len(cache)
         except (
             OSError,
             ValueError,
             RuntimeError,
+            sqlite3.Error,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Failed to get cache length: {error}")
@@ -302,12 +307,12 @@ def clear_cache(
         cache = get_cache()
         if cache is not None:
             try:
-                with _CACHE_LOCK:
-                    api_entries_cleared = len(cache)
+                api_entries_cleared = len(cache)
             except (
                 OSError,
                 ValueError,
                 RuntimeError,
+                sqlite3.Error,
                 diskcache.Timeout,
             ) as error:
                 LOG.debug(f"Failed to read cache entries before clearing: {error}")
@@ -324,11 +329,13 @@ def clear_cache(
                 try:
                     with _CACHE_LOCK:
                         cache.clear(retry=True)
-                        cache.check(fix=True, retry=True)
+                        with warnings.catch_warnings(action="always"):
+                            cache.check(fix=True, retry=True)
                 except (
                     OSError,
                     ValueError,
                     RuntimeError,
+                    sqlite3.Error,
                     diskcache.Timeout,
                 ) as error:
                     LOG.debug(f"Cache clear/check failed: {error}")
@@ -407,6 +414,7 @@ def close_cache() -> None:
                 OSError,
                 ValueError,
                 RuntimeError,
+                sqlite3.Error,
                 diskcache.Timeout,
             ) as error:
                 LOG.debug(f"Cache close failed: {error}")

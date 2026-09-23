@@ -2,7 +2,6 @@ import dataclasses
 import functools
 import os
 import re
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -43,6 +42,7 @@ from sonora.core.utils import (
     find_audio_files,
     get_primary_artist,
     group_files_by_parent,
+    is_noise_genre,
     is_valid_uuid,
     match_score,
     normalize_country_name,
@@ -51,6 +51,7 @@ from sonora.core.utils import (
     normalize_language_name,
     normalize_script_name,
     normalize_str,
+    preserve_unicode_repertoire,
     resolve_artist_name,
     safe_float,
     safe_int,
@@ -109,14 +110,6 @@ _SKIP_DIFF_FIELDS: frozenset[str] = frozenset(
 )
 
 
-def _has_diacritics(text: str | None) -> bool:
-    if not text:
-        return False
-    return any(
-        unicodedata.combining(c) for c in unicodedata.normalize("NFD", str(text))
-    )
-
-
 def _apply_mapping(
     track_info: TrackInfo,
     metadata_dict: dict[str, Any],
@@ -144,12 +137,9 @@ def _apply_mapping(
         elif target_attr == "title":
             val_str = clean_unicode_punct(val_str)
             existing_title = getattr(track_info, "title", None)
-            if (
-                existing_title
-                and _has_diacritics(str(existing_title))
-                and not _has_diacritics(val_str)
-            ):
-                continue
+            val_str = preserve_unicode_repertoire(
+                str(existing_title) if existing_title else None, val_str
+            )
             val_str = (
                 deduplicate_title_features(val_str, primary_artist=track_info.artist)
                 or val_str
@@ -157,12 +147,9 @@ def _apply_mapping(
         elif target_attr in ("artist", "album", "album_artist"):
             val_str = clean_unicode_punct(val_str)
             existing_val = getattr(track_info, target_attr, None)
-            if (
-                existing_val
-                and _has_diacritics(str(existing_val))
-                and not _has_diacritics(val_str)
-            ):
-                continue
+            val_str = preserve_unicode_repertoire(
+                str(existing_val) if existing_val else None, val_str
+            )
         elif (
             target_attr == "advisory"
             and getattr(track_info, "advisory", None) == "Explicit"
@@ -299,7 +286,9 @@ def _enrich_shazam(
 
         if has_album_context:
             if is_missing_metadata:
-                track_info.title = shazam_match.title
+                track_info.title = preserve_unicode_repertoire(
+                    track_info.title, shazam_match.title
+                )
                 if not target_album_artist or _is_generic(
                     target_album_artist, "artist"
                 ):
@@ -311,15 +300,21 @@ def _enrich_shazam(
             elif not track_info.album or _is_generic(track_info.album, "album"):
                 resolved_album = shazam_match.album or target_album_title
                 if resolved_album:
-                    track_info.album = resolved_album
+                    track_info.album = preserve_unicode_repertoire(
+                        track_info.album, resolved_album
+                    )
         else:
             if is_missing_metadata or force:
-                track_info.title = shazam_match.title
+                track_info.title = preserve_unicode_repertoire(
+                    track_info.title, shazam_match.title
+                )
                 track_info.artist = resolve_artist_name(shazam_match.artist)
             if shazam_match.album and (
                 not track_info.album or _is_generic(track_info.album, "album") or force
             ):
-                track_info.album = shazam_match.album
+                track_info.album = preserve_unicode_repertoire(
+                    track_info.album, shazam_match.album
+                )
         if shazam_match.genre and not track_info.genre:
             track_info.genre = shazam_match.genre
         if shazam_match.apple_music_id and not track_info.itunes_trackid:
@@ -373,7 +368,9 @@ def _enrich_musicbrainz(
                             f"   ∟ 🩹 [Healer] Track {track_info.track_number} verified by ISRC match. "
                             f"Healing corrupted title '{escape(str(track_info.title))}' -> '{escape(str(rec_title))}'"
                         )
-                        track_info.title = str(rec_title)
+                        track_info.title = preserve_unicode_repertoire(
+                            track_info.title, str(rec_title)
+                        )
 
         candidate_mbid: str | None = None
         if (
@@ -582,7 +579,28 @@ def _enrich_musicbrainz(
             )
             rec_artist = mb_rec.get("artist")
             if rec_artist and isinstance(rec_artist, str):
-                cleaned_artist = clean_unicode_punct(resolve_artist_name(rec_artist))
+                cleaned_artist = preserve_unicode_repertoire(
+                    track_info.artist,
+                    clean_unicode_punct(resolve_artist_name(rec_artist)),
+                )
+                cur_primary = re.sub(
+                    r"^(?:the|a|an)\s+",
+                    "",
+                    clean_title(get_primary_artist(track_info.artist or "")).lower(),
+                ).strip()
+                cand_primary = re.sub(
+                    r"^(?:the|a|an)\s+",
+                    "",
+                    clean_title(get_primary_artist(cleaned_artist)).lower(),
+                ).strip()
+                primary_matches = bool(
+                    cur_primary
+                    and cand_primary
+                    and (
+                        cur_primary == cand_primary
+                        or fuzz.ratio(cur_primary, cand_primary) >= 80.0
+                    )
+                )
                 should_update_artist = (
                     has_corrupt_identity
                     or not track_info.artist
@@ -594,6 +612,7 @@ def _enrich_musicbrainz(
                     or track_info.is_alien
                     or (
                         force
+                        and primary_matches
                         and match_score(
                             track_info.artist,
                             track_info.title,
@@ -619,18 +638,16 @@ def _enrich_musicbrainz(
             if mb_rel:
                 rel_art = str(mb_rel.get("album_artist") or mb_rel.get("artist") or "")
                 cmp_art = track_info.artist or ""
-                if (
-                    rel_art
-                    and cmp_art
-                    and not _is_generic(cmp_art, "artist")
-                    and fuzz.ratio(normalize_str(rel_art), normalize_str(cmp_art)) < 55
-                    and fuzz.token_set_ratio(
-                        normalize_str(rel_art), normalize_str(cmp_art)
-                    )
-                    < 60
-                ):
-                    track_info.musicbrainz_albumid = None
-                    mb_rel = None
+                if rel_art and cmp_art and not _is_generic(cmp_art, "artist"):
+                    rel_norm = normalize_str(rel_art)
+                    cmp_norm = normalize_str(cmp_art)
+                    rel_core = re.sub(r"^(?:the|a|an)\s+", "", rel_norm).strip()
+                    cmp_core = re.sub(r"^(?:the|a|an)\s+", "", cmp_norm).strip()
+                    art_ratio = fuzz.ratio(rel_core, cmp_core)
+                    art_token = fuzz.token_set_ratio(rel_core, cmp_core)
+                    if art_ratio < 65 and art_token < 70:
+                        track_info.musicbrainz_albumid = None
+                        mb_rel = None
                 elif (
                     album_mb_release_details is None
                     and track_info.album
@@ -677,7 +694,9 @@ def _enrich_musicbrainz(
                     or not track_info.album
                     or track_info.album.lower() in ("unknown", "unknown album")
                 ):
-                    track_info.album = clean_unicode_punct(str(mb_rel["title"]))
+                    track_info.album = preserve_unicode_repertoire(
+                        track_info.album, clean_unicode_punct(str(mb_rel["title"]))
+                    )
                 if mb_rel.get("album_artist") and (
                     (
                         album_mb_release_details is not None
@@ -689,15 +708,21 @@ def _enrich_musicbrainz(
                     or not track_info.album_artist
                     or track_info.album_artist.lower() in ("unknown", "unknown artist")
                 ):
-                    track_info.album_artist = clean_unicode_punct(
-                        resolve_artist_name(str(mb_rel["album_artist"]))
+                    track_info.album_artist = preserve_unicode_repertoire(
+                        track_info.album_artist,
+                        clean_unicode_punct(
+                            resolve_artist_name(str(mb_rel["album_artist"]))
+                        ),
                     )
                 if album_mb_release_details is not None and (
                     force or not track_info.total_tracks
                 ):
                     total_tracks = safe_int(mb_rel.get("total_tracks"))
                     if total_tracks is not None:
-                        track_info.total_tracks = total_tracks
+                        cur_tot = track_info.total_tracks or 0
+                        cur_num = track_info.track_number or 0
+                        if total_tracks >= cur_tot and total_tracks >= cur_num:
+                            track_info.total_tracks = total_tracks
                 if album_mb_release_details is not None and (
                     force or not track_info.total_discs
                 ):
@@ -812,16 +837,21 @@ def _enrich_discogs(
     track_info: TrackInfo,
     discogs_user_token: str | None,
     album_discogs_release: dict[str, object] | None,
+    has_album_context: bool = False,
     force: bool = False,
 ) -> None:
     if not discogs_user_token:
         return
     try:
-        release = album_discogs_release or search_discogs_release(
-            track_info.artist,
-            track_info.album,
-            user_token=discogs_user_token,
-            expected_track_count=track_info.total_tracks,
+        release = album_discogs_release or (
+            search_discogs_release(
+                track_info.artist,
+                track_info.album,
+                user_token=discogs_user_token,
+                expected_track_count=track_info.total_tracks,
+            )
+            if not has_album_context
+            else None
         )
         if not release:
             return
@@ -923,7 +953,9 @@ def _enrich_deezer(
                     or track_info.album != album.get("title")
                 )
             ):
-                track_info.album = clean_unicode_punct(str(album["title"]))
+                track_info.album = preserve_unicode_repertoire(
+                    track_info.album, clean_unicode_punct(str(album["title"]))
+                )
             if (
                 album_deezer_details is not None
                 and not is_valid_uuid(track_info.musicbrainz_albumid)
@@ -931,7 +963,10 @@ def _enrich_deezer(
             ):
                 nb_tracks = safe_int(album.get("nb_tracks"))
                 if nb_tracks is not None:
-                    track_info.total_tracks = nb_tracks
+                    cur_tot = track_info.total_tracks or 0
+                    cur_num = track_info.track_number or 0
+                    if nb_tracks >= cur_tot and nb_tracks >= cur_num:
+                        track_info.total_tracks = nb_tracks
 
         track: dict[str, Any] | None = None
         track_is_from_album = False
@@ -1850,7 +1885,9 @@ def process_single_track(
                 and not _is_generic(target_album_artist, "artist")
                 and (not track_info.album_artist or force)
             ):
-                track_info.album_artist = target_album_artist
+                track_info.album_artist = preserve_unicode_repertoire(
+                    track_info.album_artist, target_album_artist
+                )
 
             # Harmonize collaborative/featured track artists with the root album artist,
             # but preserve genuine featured artists if they are explicitly credited on this album release.
@@ -1913,7 +1950,9 @@ def process_single_track(
                     LOG.info(
                         f"   ∟ 🩹 [Healer] Healing corrupted artist '[bold red]{escape(track_info.artist)}[/]' -> '[bold green]{escape(target_album_artist)}[/]'"
                     )
-                    track_info.artist = target_album_artist
+                    track_info.artist = preserve_unicode_repertoire(
+                        track_info.artist, target_album_artist
+                    )
             if (
                 target_album_title
                 and not _is_generic(target_album_title, "album")
@@ -1923,7 +1962,9 @@ def process_single_track(
                     or force
                 )
             ):
-                track_info.album = target_album_title
+                track_info.album = preserve_unicode_repertoire(
+                    track_info.album, target_album_title
+                )
 
         LOG.info(f"🎧 Processing track: [white]{escape(file_path.name)}[/]")
 
@@ -1963,6 +2004,7 @@ def process_single_track(
             track_info,
             discogs_user_token,
             album_discogs_release,
+            has_album_context=has_album_context,
             force=force,
         )
         _enrich_deezer(
@@ -2102,14 +2144,22 @@ def _resolve_album_folder_identity(
     album_counts: dict[str, int] = {}
     artist_counts: dict[str, int] = {}
 
-    for af in audio_files[:10]:
+    for audio_file in audio_files[:10]:
         try:
-            m = read_track_metadata(af)
-            if m.album and not get_config().is_generic_container(m.album):
-                album_counts[m.album] = album_counts.get(m.album, 0) + 1
-            art = m.album_artist or m.artist
-            if art and not get_config().is_generic_container(art):
-                artist_counts[art] = artist_counts.get(art, 0) + 1
+            track_metadata = read_track_metadata(audio_file)
+            if track_metadata.album and not get_config().is_generic_container(
+                track_metadata.album
+            ):
+                album_counts[track_metadata.album] = (
+                    album_counts.get(track_metadata.album, 0) + 1
+                )
+            candidate_artist = track_metadata.album_artist or track_metadata.artist
+            if candidate_artist and not get_config().is_generic_container(
+                candidate_artist
+            ):
+                artist_counts[candidate_artist] = (
+                    artist_counts.get(candidate_artist, 0) + 1
+                )
         except OSError:
             pass
 
@@ -2120,8 +2170,17 @@ def _resolve_album_folder_identity(
         max(artist_counts, key=lambda k: artist_counts[k]) if artist_counts else None
     )
 
-    resolved_artist = folder_artist or consensus_artist
-    resolved_album = folder_album or consensus_album
+    resolved_artist: str | None
+    if folder_artist and consensus_artist:
+        resolved_artist = preserve_unicode_repertoire(consensus_artist, folder_artist)
+    else:
+        resolved_artist = folder_artist or consensus_artist
+
+    resolved_album: str | None
+    if folder_album and consensus_album:
+        resolved_album = preserve_unicode_repertoire(consensus_album, folder_album)
+    else:
+        resolved_album = folder_album or consensus_album
 
     return resolved_artist, resolved_album
 
@@ -2223,14 +2282,26 @@ def tag_album_folder(
                             )
                             if release_info and release_info.get("id"):
                                 album_musicbrainz_id = str(release_info["id"])
-                                album_track_mbids = fetch_album_track_mbids(
-                                    album_musicbrainz_id
-                                )
                                 album_mb_release_details = (
                                     fetch_musicbrainz_release_details(
                                         album_musicbrainz_id
                                     )
                                 )
+                                if album_mb_release_details:
+                                    raw_tracks = album_mb_release_details.get(
+                                        "tracks_by_position"
+                                    )
+                                    if isinstance(raw_tracks, dict):
+                                        album_track_mbids = {
+                                            pos: str(rec["recording_mbid"])
+                                            for pos, rec in raw_tracks.items()
+                                            if isinstance(rec, dict)
+                                            and rec.get("recording_mbid")
+                                        }
+                                if not album_track_mbids:
+                                    album_track_mbids = fetch_album_track_mbids(
+                                        album_musicbrainz_id
+                                    )
                             deezer_info = fetch_deezer_album_details(
                                 sample_artist,
                                 sample_album,
@@ -2332,13 +2403,7 @@ def tag_album_folder(
 
                         genre_counts: dict[str, int] = {}
                         for vt in valid_tracks:
-                            if vt.genre and vt.genre.lower() not in (
-                                "instrumental",
-                                "karaoke",
-                                "unknown",
-                                "other",
-                                "audio",
-                            ):
+                            if vt.genre and not is_noise_genre(vt.genre):
                                 genre_counts[vt.genre] = (
                                     genre_counts.get(vt.genre, 0) + 1
                                 )
@@ -2353,21 +2418,8 @@ def tag_album_folder(
 
                         if dominant_genre:
                             for vt in valid_tracks:
-                                is_noise_or_missing = (
-                                    not vt.genre
-                                    or vt.genre.lower()
-                                    in (
-                                        "instrumental",
-                                        "karaoke",
-                                        "unknown",
-                                        "other",
-                                        "audio",
-                                    )
-                                    or (
-                                        dominant_genre
-                                        and vt.genre.lower() == "mpb"
-                                        and dominant_genre.lower() != "mpb"
-                                    )
+                                is_noise_or_missing = not vt.genre or is_noise_genre(
+                                    vt.genre
                                 )
                                 if is_noise_or_missing and vt.genre != dominant_genre:
                                     LOG.info(

@@ -328,7 +328,7 @@ def process_label_artwork(
         return
 
     label_path = folder_path / "label.png"
-    if label_path.exists():
+    if label_path.exists() or not os.access(folder_path, os.W_OK):
         return
 
     try:

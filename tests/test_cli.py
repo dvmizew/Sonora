@@ -5,7 +5,7 @@ Unit tests for Sonora CLI main entrypoint and subcommands.
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # Guarantee src/ is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -56,6 +56,30 @@ class TestCLIInterface(unittest.TestCase):
             _, kwargs = mock_tag_album_folder.call_args
             self.assertEqual(kwargs.get("fanart_api_key"), "test_fanart_key")
             self.assertFalse(kwargs.get("enable_shazam"))
+
+    @patch("sonora.cli.main.set_ignore_cache")
+    def test_handle_tag_subcommand_with_no_dsp_and_ignore_cache(
+        self, mock_set_ignore_cache: MagicMock
+    ) -> None:
+        with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:
+            mock_tag_album_folder.return_value = [
+                TrackInfo(file_path=Path("dummy.flac"))
+            ]
+            exit_code = main(
+                [
+                    "tag",
+                    str(self.temporary_path),
+                    "--no-dsp",
+                    "--ignore-cache",
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            mock_tag_album_folder.assert_called_once()
+            _, kwargs = mock_tag_album_folder.call_args
+            self.assertFalse(kwargs.get("fetch_bpm"))
+            self.assertFalse(kwargs.get("fetch_key"))
+            self.assertFalse(kwargs.get("fetch_replaygain"))
+            mock_set_ignore_cache.assert_called_once_with(True)
 
     def test_handle_tag_subcommand_with_json_report(self) -> None:
         with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:

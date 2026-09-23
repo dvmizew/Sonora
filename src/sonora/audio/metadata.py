@@ -241,9 +241,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 is_lossless = False
             elif file_ext in {".m4a", ".mp4"}:
                 try:
-                    mp4_audio = __import__("typing").cast(
-                        __import__("typing").Any, mutagen.mp4.MP4
-                    )(file_path)
+                    mp4_audio = cast(Any, mutagen.mp4.MP4)(file_path)
                     is_lossless = (
                         str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
                     )
@@ -453,7 +451,7 @@ def get_audio_duration(file_path: Path) -> float | None:
 
         m_file = cast(Any, mutagen).File(file_path)
         if m_file and getattr(m_file, "info", None):
-            return float(m_file.info.length)
+            return safe_float(m_file.info.length)
     except (OSError, MutagenError):
         pass
     return None

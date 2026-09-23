@@ -40,6 +40,7 @@ from sonora.services.musicbrainz import (
     search_musicbrainz_release,
 )
 from sonora.services.shazam import get_shazam_track_about, recognize_audio_track
+from sonora.services.theaudiodb import fetch_theaudiodb_track_details
 
 
 class TestServicesEngine(unittest.TestCase):
@@ -125,6 +126,43 @@ class TestServicesEngine(unittest.TestCase):
         mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
         with self.assertRaises(RuntimeError):
             fetch_synced_lyrics("FailArtist", "FailTitle")
+
+    @patch("sonora.services.lyrics.set_cached_api")
+    @patch("sonora.services.lyrics.get_cached_api", return_value=None)
+    @patch("sonora.services.lyrics.syncedlyrics")
+    def test_fetch_synced_lyrics_negative_caching(
+        self,
+        mock_syncedlyrics: MagicMock,
+        mock_get_cache: MagicMock,
+        mock_set_cache: MagicMock,
+    ) -> None:
+        mock_syncedlyrics.search.return_value = None
+        result = fetch_synced_lyrics("Artist Without Lyrics", "Instrumental Track")
+        self.assertIsNone(result)
+        # Verify negative cache sentinel was persisted
+        mock_set_cache.assert_called_with(
+            "lyrics:artist without lyrics:instrumental track:", ""
+        )
+
+    @patch("sonora.services.theaudiodb.set_cached_api")
+    @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
+    @patch("sonora.services.theaudiodb.SESSION.get")
+    def test_fetch_theaudiodb_track_details_negative_caching(
+        self,
+        mock_get: MagicMock,
+        mock_get_cache: MagicMock,
+        mock_set_cache: MagicMock,
+    ) -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"track": None}
+        mock_get.return_value = mock_resp
+
+        result = fetch_theaudiodb_track_details("Unknown Artist", "Unknown Track")
+        self.assertIsNone(result)
+        mock_set_cache.assert_called_with(
+            "theaudiodb_track:unknown artist:unknown track", {}
+        )
 
     def test_synced_lyrics_empty_query_returns_none(self) -> None:
         self.assertIsNone(fetch_synced_lyrics("", ""))

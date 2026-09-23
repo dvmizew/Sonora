@@ -224,7 +224,7 @@ def rename_album_folder(
 
     expected_name = sanitize_name(f"{artist} - {album}")
 
-    if normalize_str(folder_now) != normalize_str(expected_name):
+    if folder_now != expected_name:
         if is_in_singles:
             base_album = album.split("(")[0].split("-")[0].strip()
             if normalize_str(artist) in normalize_str(folder_now) and normalize_str(
