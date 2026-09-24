@@ -31,7 +31,11 @@ from sonora.services.itunes import (
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import (
     clean_lyrics_text,
+    detect_lrc_quality,
+    extract_max_timestamp,
     fetch_synced_lyrics,
+    get_lyrics_quality,
+    is_lyrics_duration_valid,
     process_track_lyrics,
 )
 from sonora.services.musicbrainz import (
@@ -678,6 +682,69 @@ class TestServicesEngine(unittest.TestCase):
             )
             self.assertEqual(lyrics, "<00:01.00> Word enhanced lyrics")
             self.assertEqual(tag_type, "enhanced")
+
+            # 4. Downgrade protection: force=True with remote Plain text does NOT overwrite Synced
+            mock_fetch.return_value = "Just plain text fallback from remote"
+            lyrics, tag_type = process_track_lyrics(
+                audio_file, "Artist", "Title", force=True
+            )
+            self.assertEqual(lyrics, "<00:01.00> Word enhanced lyrics")
+            self.assertEqual(tag_type, "enhanced")
+
+    def test_clean_lyrics_extended_junk_and_watermarks(self) -> None:
+        raw_dirty = (
+            "[re:www.megalobiz.com/lrc/maker]\n"
+            "[ve:v1.2.3]\n"
+            "[00:00.00-1] 作词 : Pierre Bourne\n"
+            "[00:00.00-1] 作曲 : Shayaa Joseph\n"
+            "[00:05.86]가사 제작: megalobiz\n"
+            "[00:10.00]\n"
+            "[00:12.34] Valid lyric line\n"
+            "This song is called test song\n"
+            "[00:15.00] Second valid line\n"
+            "[00:20.00]Instrumental"
+        )
+        cleaned = clean_lyrics_text(raw_dirty)
+        self.assertEqual(
+            cleaned,
+            "[00:12.34] Valid lyric line\n[00:15.00] Second valid line",
+        )
+
+    def test_lyrics_duration_validation_and_mismatch(self) -> None:
+        lrc_text = (
+            "[00:10.00] First line\n[01:30.50] Middle line\n[03:15.20] Final line\n"
+        )
+        max_ts = extract_max_timestamp(lrc_text)
+        self.assertIsNotNone(max_ts)
+        assert max_ts is not None
+        self.assertAlmostEqual(max_ts, 195.2, places=1)
+
+        # Song of 141s (Azteca) rejected against 195s lyrics (tolerance 15s)
+        self.assertFalse(is_lyrics_duration_valid(lrc_text, 141.0))
+        # Song of 190s accepted (195.2 <= 190.0 + 15.0 = 205.0)
+        self.assertTrue(is_lyrics_duration_valid(lrc_text, 190.0))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_audio = Path(tmp_dir) / "track.flac"
+            test_audio.write_bytes(b"dummy")
+            test_lrc = Path(tmp_dir) / "track.lrc"
+            test_lrc.write_text(lrc_text, encoding="utf-8")
+            # Mismatched duration triggers quality 0
+            self.assertEqual(detect_lrc_quality(test_audio, audio_duration=120.0), 0)
+            # Matching duration returns quality 2 (synced)
+            self.assertEqual(detect_lrc_quality(test_audio, audio_duration=200.0), 2)
+
+    def test_get_lyrics_quality_filters_empty_headers(self) -> None:
+        header_only = "[ar:Artist]\n[ti:Title]\n[al:Album]"
+        self.assertEqual(get_lyrics_quality(header_only), 0)
+
+        chinese_credits_only = (
+            "[00:00.00-1] 作词 : Writer\n[00:00.00-1] 作曲 : Composer"
+        )
+        self.assertEqual(get_lyrics_quality(chinese_credits_only), 0)
+
+        placeholder_only = "This song is called placeholder"
+        self.assertEqual(get_lyrics_quality(placeholder_only), 0)
 
     @patch("sonora.services.acoustid.acoustid.fingerprint_file")
     def test_fingerprint_in_memory_cache(self, mock_fp: MagicMock) -> None:

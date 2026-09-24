@@ -12,6 +12,7 @@ import ftfy
 import httpx
 import syncedlyrics
 
+from sonora.audio.metadata import get_audio_duration
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_LRCLIB, RATE_LIMIT_LYRICS
 from sonora.core.http import SESSION
@@ -86,8 +87,9 @@ def init_musixmatch_token(token_str: str | None = None) -> bool:
 
 
 _LYRICS_TIMESTAMP_REGEX = re.compile(
-    r"^(?:\[\d{1,2}:\d{2}[\.:]\d{2,3}\]|<\d{1,2}:\d{2}[\.:]\d{2,3}>)\s*(.*)$"
+    r"^(?:\[\d{1,2}:\d{2}(?:[\.:]\d{2,3})?(?:[+-]\d+)?\]|<\d{1,2}:\d{2}(?:[\.:]\d{2,3})?>)\s*(.*)$"
 )
+_LYRICS_EXTRACT_TS_REGEX = re.compile(r"\[(\d{1,2}):(\d{2})(?:[\.:](\d{2,3}))?\]")
 _LYRICS_JUNK_PATTERNS = [
     re.compile(r"^\d+\s*(?:Contributor|Translation|Embed)s?$", re.IGNORECASE),
     re.compile(r"^You might also like$", re.IGNORECASE),
@@ -101,13 +103,18 @@ _LYRICS_JUNK_PATTERNS = [
         r"^\[?(?:Producer|Writer|Composer|Arranger|Engineer|Mixer|Release Date|Recording Date|Studio|Label)s?\s*:.*\]?$",
         re.IGNORECASE,
     ),
+    re.compile(r"^\[?(?:re|ve|by|length|offset)\s*:.*\]?$", re.IGNORECASE),
+    re.compile(r".*megalobiz.*", re.IGNORECASE),
+    re.compile(r"^(?:作词|作曲|编曲|制作人)\s*:.*$", re.IGNORECASE),
+    re.compile(r"^This song is called\b.*$", re.IGNORECASE),
+    re.compile(r"^\[?Instrumental\]?$", re.IGNORECASE),
     re.compile(r"^Lyrics (?:powered|licensed|provided) by.*$", re.IGNORECASE),
     re.compile(r"^Paroles de la chanson .* par .*$", re.IGNORECASE),
     re.compile(r"^Commercial use is strictly forbidden.*$", re.IGNORECASE),
     re.compile(r"^https?://\S+$", re.IGNORECASE),
     re.compile(r"^www\.\S+$", re.IGNORECASE),
     re.compile(
-        r"^(?:Synced|Created|Uploaded|Encoded|Downloaded|LRC)\s*(?:by|from|using|with)?\s+.*$",
+        r"^(?:Synced|Created|Uploaded|Encoded|Downloaded|LRC)\s*(?:by|from|using|with|via|:)\s+.*$",
         re.IGNORECASE,
     ),
     re.compile(r"<!--.*?-->", re.IGNORECASE),
@@ -139,6 +146,10 @@ def clean_lyrics_text(text: str | None) -> str | None:
         ts_match = _LYRICS_TIMESTAMP_REGEX.match(stripped_line)
         content_to_check = ts_match.group(1).strip() if ts_match else stripped_line
 
+        # Discard timestamp-only lines with zero text (e.g. [00:00.00])
+        if ts_match and not content_to_check:
+            continue
+
         if any(pat.search(content_to_check) for pat in _LYRICS_JUNK_PATTERNS):
             continue
 
@@ -157,33 +168,88 @@ def clean_lyrics_text(text: str | None) -> str | None:
     return "\n".join(cleaned).strip()
 
 
+def extract_max_timestamp(lyrics_text: str | None) -> float | None:
+    """Extract the maximum timestamp in seconds from LRC lyrics text."""
+    if not lyrics_text:
+        return None
+    timestamps: list[float] = []
+    for match in _LYRICS_EXTRACT_TS_REGEX.finditer(lyrics_text):
+        minutes = int(match.group(1))
+        seconds = int(match.group(2))
+        fraction_str = match.group(3)
+        total_seconds = minutes * 60.0 + seconds
+        if fraction_str:
+            total_seconds += float(f"0.{fraction_str}")
+        timestamps.append(total_seconds)
+    return max(timestamps) if timestamps else None
+
+
+def is_lyrics_duration_valid(
+    lyrics_text: str | None,
+    audio_duration: float | None,
+    tolerance_seconds: float = 15.0,
+) -> bool:
+    """
+    Validates that lyrics timestamps do not significantly exceed audio duration.
+    Prevents cross-song collisions (e.g. short tracks matching longer songs).
+    """
+    if not lyrics_text or audio_duration is None or audio_duration <= 0:
+        return True
+    max_timestamp = extract_max_timestamp(lyrics_text)
+    if max_timestamp is None:
+        return True
+    return max_timestamp <= (audio_duration + tolerance_seconds)
+
+
 def get_lyrics_quality(lyrics_text: str | None) -> int:
     """
     Determines quality tier of LRC lyrics string:
       3: Enhanced / Word-level synced (<00:01.23> word timestamps)
       2: Synced / Line-level synced ([00:01.23] line timestamps)
       1: Plain text (no timestamps)
-      0: None or empty
+      0: None or empty / invalid
     """
-    if not lyrics_text or not lyrics_text.strip():
+    cleaned = clean_lyrics_text(lyrics_text)
+    if not cleaned:
         return 0
-    if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", lyrics_text):
+
+    non_header_lines = [
+        line.strip()
+        for line in cleaned.splitlines()
+        if line.strip()
+        and not re.match(
+            r"^\[(?:ar|ti|al|by|re|ve|length|offset):",
+            line.strip(),
+            re.IGNORECASE,
+        )
+    ]
+    if not non_header_lines:
+        return 0
+
+    if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", cleaned):
         return 3
-    if re.search(r"^\[\d{1,2}:\d{2}[\.:]\d{2,3}\]", lyrics_text, re.MULTILINE):
+    if re.search(r"^\[\d{1,2}:\d{2}[\.:]\d{2,3}\]", cleaned, re.MULTILINE):
         return 2
     return 1
 
 
-def detect_lrc_quality(audio_path: Path) -> int:
+def detect_lrc_quality(audio_path: Path, audio_duration: float | None = None) -> int:
     """
     Check the quality of existing .lrc lyrics alongside an audio file.
-    Returns 3 for enhanced, 2 for synced, 1 for plain, 0 for missing.
+    Returns 3 for enhanced, 2 for synced, 1 for plain, 0 for missing or invalid.
     """
     lrc_path = audio_path.with_suffix(".lrc")
     if not lrc_path.exists() or lrc_path.stat().st_size == 0:
         return 0
     try:
         content = lrc_path.read_text(encoding="utf-8", errors="ignore")
+        resolved_duration = (
+            audio_duration
+            if audio_duration is not None
+            else get_audio_duration(audio_path)
+        )
+        if not is_lyrics_duration_valid(content, resolved_duration):
+            return 0
         return get_lyrics_quality(content)
     except (OSError, ValueError):
         return 0
@@ -228,14 +294,20 @@ def _query_lrclib(
                         and isinstance(synced, str)
                         and synced.strip()
                     ):
-                        return clean_lyrics_text(synced.strip())
+                        cleaned_synced = clean_lyrics_text(synced.strip())
+                        if cleaned_synced and is_lyrics_duration_valid(
+                            cleaned_synced, duration
+                        ):
+                            return cleaned_synced
                     if (
                         plain
                         and not synced_only
                         and isinstance(plain, str)
                         and plain.strip()
                     ):
-                        return clean_lyrics_text(plain.strip())
+                        cleaned_plain = clean_lyrics_text(plain.strip())
+                        if cleaned_plain:
+                            return cleaned_plain
             return None
 
         # Fallback to /api/search for non-standard or single-token queries
@@ -254,14 +326,20 @@ def _query_lrclib(
                         and isinstance(synced, str)
                         and synced.strip()
                     ):
-                        return clean_lyrics_text(synced.strip())
+                        cleaned_synced = clean_lyrics_text(synced.strip())
+                        if cleaned_synced and is_lyrics_duration_valid(
+                            cleaned_synced, duration
+                        ):
+                            return cleaned_synced
                     if (
                         plain
                         and not synced_only
                         and isinstance(plain, str)
                         and plain.strip()
                     ):
-                        return clean_lyrics_text(plain.strip())
+                        cleaned_plain = clean_lyrics_text(plain.strip())
+                        if cleaned_plain:
+                            return cleaned_plain
     except (httpx.HTTPError, OSError):
         pass
     return None
@@ -303,7 +381,9 @@ def _query_syncedlyrics(
     _LYRICS_LIMITER.wait()
     result = syncedlyrics.search(query_str, **kwargs)
     if isinstance(result, str) and result.strip():
-        return clean_lyrics_text(result.strip())
+        cleaned_lyrics = clean_lyrics_text(result.strip())
+        if cleaned_lyrics and is_lyrics_duration_valid(cleaned_lyrics, duration):
+            return cleaned_lyrics
     return None
 
 
@@ -405,7 +485,10 @@ def process_track_lyrics(
     Returns (lyrics_text, quality_tag) or (None, None).
     """
     lrc_path = file_path.with_suffix(".lrc")
-    current_quality = detect_lrc_quality(file_path)
+    resolved_duration = (
+        duration if duration is not None else get_audio_duration(file_path)
+    )
+    current_quality = detect_lrc_quality(file_path, audio_duration=resolved_duration)
     existing_content: str | None = None
 
     if lrc_path.exists() and lrc_path.stat().st_size > 0:
@@ -428,7 +511,7 @@ def process_track_lyrics(
             enhanced=True,
             isrc=isrc,
             album_name=album_name,
-            duration=duration,
+            duration=resolved_duration,
         )
     except (
         httpx.HTTPError,
@@ -440,8 +523,16 @@ def process_track_lyrics(
         LOG.debug(f"Lyrics lookup error for {title}: {error}")
         lyrics_text = None
 
+    # Validate returned lyrics against audio duration
+    if lyrics_text and not is_lyrics_duration_valid(lyrics_text, resolved_duration):
+        LOG.warning(
+            f"   ∟ ⚠️  Rejected mismatched lyrics for {title}: "
+            f"lyrics duration exceeds audio length ({int(resolved_duration or 0)}s)."
+        )
+        lyrics_text = None
+
     if not lyrics_text:
-        # Remote search returned nothing: preserve existing local lyrics if any
+        # Remote search returned nothing: preserve valid existing local lyrics if any
         if existing_content and current_quality > 0:
             tag_type = (
                 "enhanced"
@@ -449,9 +540,19 @@ def process_track_lyrics(
                 else ("synced" if current_quality == 2 else "plain")
             )
             return existing_content, tag_type
+        # If existing local lyrics were invalid (corrupted/mismatched) and force is active, remove invalid file
+        if force and existing_content and current_quality == 0 and not dry_run:
+            lrc_path.unlink(missing_ok=True)
         return None, None
 
     new_quality = get_lyrics_quality(lyrics_text)
+
+    # Downgrade protection: NEVER overwrite synced or enhanced lyrics with plain text
+    if current_quality >= 2 and new_quality < current_quality:
+        if existing_content:
+            tag_type = "enhanced" if current_quality == 3 else "synced"
+            return existing_content, tag_type
+        return None, None
 
     # If not forcing and remote lyrics are not better than existing local lyrics, keep existing
     if not force and current_quality > 0 and new_quality <= current_quality:

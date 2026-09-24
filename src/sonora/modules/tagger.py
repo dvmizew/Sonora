@@ -21,7 +21,11 @@ from sonora.audio.art import (
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.key import detect_key_details, detect_musical_key
-from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.audio.metadata import (
+    get_audio_duration,
+    read_track_metadata,
+    write_track_metadata,
+)
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.config import clear_config_cache, get_config
 from sonora.core.logger import (
@@ -1188,6 +1192,7 @@ def _enrich_lyrics(
     try:
         lrc_path = file_path.with_suffix(".lrc")
         had_lrc = lrc_path.exists() and lrc_path.stat().st_size > 0
+        resolved_duration = get_audio_duration(file_path)
         lyrics_text, tag_type = process_track_lyrics(
             file_path,
             track_info.artist,
@@ -1195,6 +1200,8 @@ def _enrich_lyrics(
             force=force,
             dry_run=dry_run,
             isrc=track_info.isrc,
+            album_name=track_info.album,
+            duration=resolved_duration,
         )
         if lyrics_text and tag_type:
             track_info.lyrics = lyrics_text

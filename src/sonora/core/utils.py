@@ -361,6 +361,11 @@ def is_single_group_artist(raw_name: str | None) -> bool:
             score = safe_int(artist.get("ext:score")) or 0
             artist_type = artist.get("type")
             if name_match and (score >= 90 or artist_type == "Group"):
+                canonical_name = clean_unicode_punct(
+                    str(artist.get("name", "")).strip()
+                )
+                if canonical_name:
+                    set_cached_api(f"canonical_artist:{normalized}", canonical_name)
                 set_cached_api(cache_key, True)
                 return True
         set_cached_api(cache_key, False)
@@ -384,9 +389,10 @@ def get_primary_artist(artist_name: str | None, allow_network: bool = False) -> 
         return "Unknown"
 
     raw_artist_name = str(artist_name).strip()
+    formatted_artist_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", raw_artist_name).strip()
     if is_single_group_artist(raw_artist_name):
         return sanitize_name(
-            resolve_artist_name(raw_artist_name, allow_network=allow_network)
+            resolve_artist_name(formatted_artist_name, allow_network=allow_network)
         )
 
     parts = get_artist_split_pattern().split(raw_artist_name, maxsplit=1)
