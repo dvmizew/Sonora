@@ -220,7 +220,6 @@ def search_musicbrainz_release(
         return target_release
     except (
         MusicBrainzError,
-        httpx.HTTPError,
         OSError,
         ValueError,
         RuntimeError,
@@ -277,7 +276,6 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         return best_mbid
     except (
         MusicBrainzError,
-        httpx.HTTPError,
         OSError,
         ValueError,
         RuntimeError,
@@ -382,6 +380,7 @@ def fetch_musicbrainz_recording_details(
                 "releases",
                 "isrcs",
                 "work-rels",
+                "work-level-rels",
                 "artist-rels",
                 "tags",
             ],
@@ -678,7 +677,6 @@ def search_musicbrainz_artists(query: str, limit: int = 5) -> list[dict[str, Any
         return []
     except (
         MusicBrainzError,
-        httpx.HTTPError,
         OSError,
         ValueError,
         RuntimeError,

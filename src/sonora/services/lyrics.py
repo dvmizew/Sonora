@@ -340,7 +340,7 @@ def _query_lrclib(
                         cleaned_plain = clean_lyrics_text(plain.strip())
                         if cleaned_plain:
                             return cleaned_plain
-    except (httpx.HTTPError, OSError):
+    except (httpx.HTTPError, OSError, ValueError):
         pass
     return None
 

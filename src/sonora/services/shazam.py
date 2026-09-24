@@ -54,43 +54,6 @@ async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
         return None
 
 
-async def _track_about_async(track_id: int) -> dict[str, Any] | None:
-    """Fetch extended track details by track ID from Shazam."""
-    try:
-        from shazamio import Shazam
-
-        shazam_client = Shazam()
-        raw_result = await shazam_client.track_about(track_id)
-        return raw_result if isinstance(raw_result, dict) else None
-    except (
-        ImportError,
-        aiohttp.ClientError,
-        OSError,
-        ValueError,
-        RuntimeError,
-        BadParseData,
-        FailedDecodeJson,
-    ) as error:
-        LOG.debug(f"Shazam track_about error for {track_id}: {error}")
-        return None
-
-
-def get_shazam_track_about(track_id: int) -> dict[str, Any] | None:
-    """Query extended track metadata directly from Shazam by track ID."""
-    if track_id <= 0:
-        return None
-    cache_key = f"shazam_about:{track_id}"
-    cached = get_cached_api(cache_key)
-    if isinstance(cached, dict):
-        return cached
-
-    _SHAZAM_LIMITER.wait()
-    shazam_payload = asyncio.run(_track_about_async(track_id))
-    if shazam_payload:
-        set_cached_api(cache_key, shazam_payload)
-    return shazam_payload
-
-
 def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
     """
     Recognize an audio track via acoustic fingerprinting against the Shazam catalog.

@@ -23,7 +23,6 @@ from sonora.cli.main import main
 from sonora.core.cache import (
     CacheStats,
     ClearResult,
-    _migrate_legacy_cache,
     clear_cache,
     close_cache,
     get_api_cache_dir,
@@ -647,81 +646,6 @@ class TestClearCachePermutations(unittest.TestCase):
             finally:
                 close_cache()
                 reset_library_state()
-
-
-class TestLegacyCacheMigration(unittest.TestCase):
-    def test_migrate_legacy_cache_no_legacy_db(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache_dir = Path(tmpdir) / "cache_root"
-            api_cache_dir = cache_dir / "api"
-            cache_dir.mkdir()
-            # No cache.db exists
-            _migrate_legacy_cache(cache_dir, api_cache_dir)
-            self.assertFalse(api_cache_dir.exists())
-
-    def test_migrate_legacy_cache_moves_files_and_preserves_state(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache_dir = Path(tmpdir) / "cache_root"
-            api_cache_dir = cache_dir / "api"
-            cache_dir.mkdir()
-
-            # Create legacy cache.db and ancillary cache files
-            legacy_db = cache_dir / "cache.db"
-            legacy_db.write_text("legacy-sqlite-content")
-            legacy_wal = cache_dir / "cache.db-wal"
-            legacy_wal.write_text("wal-data")
-            legacy_val = cache_dir / "item.val"
-            legacy_val.write_text("val-data")
-
-            # Create library state file in cache_dir that must NOT be moved
-            state_db = cache_dir / "library_state.db"
-            state_db.write_text("state-sqlite-content")
-
-            _migrate_legacy_cache(cache_dir, api_cache_dir)
-
-            self.assertTrue((api_cache_dir / "cache.db").exists())
-            self.assertTrue((api_cache_dir / "cache.db-wal").exists())
-            self.assertTrue((api_cache_dir / "item.val").exists())
-            self.assertFalse(legacy_db.exists())
-
-            # library_state.db must remain untouched at cache root
-            self.assertTrue(state_db.exists())
-            self.assertFalse((api_cache_dir / "library_state.db").exists())
-
-    def test_migrate_legacy_cache_cleans_numeric_shards(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache_dir = Path(tmpdir) / "cache_root"
-            api_cache_dir = cache_dir / "api"
-            cache_dir.mkdir()
-            api_cache_dir.mkdir()
-
-            # Create legacy fanout numeric shards
-            shard_000 = cache_dir / "000"
-            shard_000.mkdir()
-            (shard_000 / "dummy.txt").write_text("shard")
-            shard_api_001 = api_cache_dir / "001"
-            shard_api_001.mkdir()
-
-            # Non-numeric dir must be preserved
-            other_dir = cache_dir / "other_folder"
-            other_dir.mkdir()
-
-            _migrate_legacy_cache(cache_dir, api_cache_dir)
-
-            self.assertFalse(shard_000.exists())
-            self.assertFalse(shard_api_001.exists())
-            self.assertTrue(other_dir.exists())
-
-    def test_migrate_legacy_cache_oserror_handled(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cache_dir = Path(tmpdir) / "cache_root"
-            api_cache_dir = cache_dir / "api"
-            cache_dir.mkdir()
-            (cache_dir / "cache.db").write_text("dummy")
-
-            with patch("shutil.move", side_effect=OSError("Permission denied")):
-                # Should not raise exception
-                _migrate_legacy_cache(cache_dir, api_cache_dir)
 
 
 class TestSqliteVacuumAndCheckpoint(unittest.TestCase):

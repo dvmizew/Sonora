@@ -88,20 +88,13 @@ class TrackInfo:
 
 @dataclass
 class CheckReport:
-    """Represents the validation/check results for a track or directory."""
+    """Represents the aggregate validation/check results for an audio directory."""
 
-    file_path: Path | None = None
     total_files: int = 0
     corrupt_files: int = 0
     missing_metadata: int = 0
     missing_lrc: int = 0
     issues: dict[str, list[str]] = field(default_factory=dict)
-    is_valid: bool = True
-    missing_tags: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    is_fake_lossless: bool = False
-    md5_verified: bool = False
 
 
 @dataclass

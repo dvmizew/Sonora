@@ -46,6 +46,7 @@ from sonora.core.utils import (
     find_audio_files,
     get_primary_artist,
     group_files_by_parent,
+    is_interruption,
     is_noise_genre,
     is_valid_uuid,
     match_score,
@@ -92,8 +93,6 @@ _NETWORK_EXCEPTIONS = (
     acoustid.WebServiceError,
     httpx.HTTPError,
     OSError,
-    ValueError,
-    RuntimeError,
     TimeoutError,
 )
 
@@ -514,21 +513,43 @@ def _enrich_musicbrainz(
                     and str(track_info.isrc).strip().upper()
                     == str(rec_isrc).strip().upper()
                 )
-                title_sim = match_score(
-                    track_info.artist,
-                    track_info.title,
-                    str(fetched_rec.get("artist") or ""),
-                    str(fetched_rec.get("title") or ""),
+                rec_artist = str(fetched_rec.get("artist") or "")
+                rec_title = str(fetched_rec.get("title") or "")
+
+                cand_artists = [track_info.artist]
+                if track_info.album_artist:
+                    cand_artists.append(track_info.album_artist)
+                if track_info.featured_artists:
+                    cand_artists.append(track_info.featured_artists)
+
+                title_sim = max(
+                    (
+                        match_score(
+                            a,
+                            track_info.title,
+                            rec_artist,
+                            rec_title,
+                        )
+                        for a in cand_artists
+                        if a
+                    ),
+                    default=0.0,
                 )
                 if isrc_matches or title_sim >= 70.0:
                     mb_rec = fetched_rec
                 elif force:
                     LOG.debug(
-                        f"Discarding mismatched pre-existing MBID {track_info.musicbrainz_trackid} "
-                        f"('{fetched_rec.get('artist')} - {fetched_rec.get('title')}') "
-                        f"for track '{track_info.artist} - {track_info.title}'"
+                        f"Discarding mismatched pre-existing MBID {escape(str(track_info.musicbrainz_trackid))} "
+                        f"('{escape(str(rec_artist))} - {escape(str(rec_title))}') "
+                        f"for track '{escape(str(track_info.artist))} - {escape(str(track_info.title))}'"
                     )
                     track_info.musicbrainz_trackid = None
+                    new_mbid = fetch_track_mbid(track_info.artist, track_info.title)
+                    if is_valid_uuid(new_mbid):
+                        track_info.musicbrainz_trackid = new_mbid
+                        fresh_rec = fetch_musicbrainz_recording_details(new_mbid)
+                        if fresh_rec and isinstance(fresh_rec, dict):
+                            mb_rec = fresh_rec
 
         if mb_rec and isinstance(mb_rec, dict):
             mb_map = {
@@ -581,11 +602,11 @@ def _enrich_musicbrainz(
                 mb_map,
                 force=force or has_corrupt_identity,
             )
-            rec_artist = mb_rec.get("artist")
-            if rec_artist and isinstance(rec_artist, str):
+            mb_artist_val = mb_rec.get("artist")
+            if mb_artist_val and isinstance(mb_artist_val, str):
                 cleaned_artist = preserve_unicode_repertoire(
                     track_info.artist,
-                    clean_unicode_punct(resolve_artist_name(rec_artist)),
+                    clean_unicode_punct(resolve_artist_name(mb_artist_val)),
                 )
                 cur_primary = re.sub(
                     r"^(?:the|a|an)\s+",
@@ -1022,11 +1043,15 @@ def _enrich_deezer(
             "title"
         ):
             deezer_track_map["title"] = "title"
+
+        has_authoritative_mb = is_valid_uuid(
+            track_info.musicbrainz_trackid
+        ) or is_valid_uuid(track_info.musicbrainz_albumid)
         _apply_mapping(
             track_info,
             track,
             deezer_track_map,
-            force=force,
+            force=False if has_authoritative_mb else force,
         )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Deezer enrichment failed for {track_info.title}: {error}")
@@ -1450,21 +1475,19 @@ def _resolve_album_track_position(
             has_any_cand_titles = True
             clean_cand = clean_title(cand_title).lower()
             clean_eff = clean_title(track_info.title).lower()
-            if (
-                clean_cand == clean_eff
-                or match_score(
+            min_len = min(len(clean_eff), len(clean_cand))
+            req_thresh = 95.0 if min_len < 8 else 85.0
+            score = max(
+                match_score(
                     track_info.artist,
                     track_info.title,
                     str(cand_artist or ""),
                     cand_title,
-                )
-                >= 70.0
-                or max(
-                    fuzz.ratio(clean_eff, clean_cand),
-                    fuzz.token_sort_ratio(clean_eff, clean_cand),
-                )
-                >= 75.0
-            ):
+                ),
+                float(fuzz.ratio(clean_eff, clean_cand)),
+                float(fuzz.token_sort_ratio(clean_eff, clean_cand)),
+            )
+            if clean_cand == clean_eff or score >= req_thresh:
                 return cand_pos
 
     # If the album metadata has no track titles available (e.g. minimal MBID mapping),
@@ -1508,11 +1531,13 @@ def _resolve_album_track_position(
                 float(fuzz.ratio(clean_eff, clean_cand)),
                 float(fuzz.token_sort_ratio(clean_eff, clean_cand)),
             )
-            if score > best_score:
+            min_len = min(len(clean_eff), len(clean_cand))
+            req_thresh = 95.0 if min_len < 8 else 85.0
+            if score >= req_thresh and score > best_score:
                 best_score = score
                 best_pos = pos
 
-    if best_score >= 70.0 and best_pos is not None:
+    if best_pos is not None:
         return best_pos
 
     return None
@@ -1678,7 +1703,9 @@ def is_alien_album_track(
                     fuzz.ratio(clean_eff_t, clean_kt),
                     fuzz.token_sort_ratio(clean_eff_t, clean_kt),
                 )
-                if sim >= 70:
+                min_len = min(len(clean_eff_t), len(clean_kt))
+                req_thresh = 95.0 if min_len < 8 else 85.0
+                if sim >= req_thresh:
                     title_matches = True
                     break
 
@@ -1854,9 +1881,11 @@ def process_single_track(
                 if target_album_artist and target_album_title
                 else (target_album_title or target_album_artist or "Album")
             )
+            disp_artist = str(track_info.artist or "Unknown Artist")
+            disp_title = str(track_info.title or file_path.stem)
             LOG.warning(
                 f"⚠️  [bold yellow]Alien track detected in album folder:[/] [white]{escape(file_path.name)}[/]\n"
-                f"   ∟ Found '[bold]{escape(track_info.artist)} - {escape(track_info.title)}'[/] inside '[bold]{escape(album_desc)}[/]'.\n"
+                f"   ∟ Found '[bold]{escape(disp_artist)} - {escape(disp_title)}'[/] inside '[bold]{escape(album_desc)}[/]'.\n"
                 f"   ∟ [cyan]Shielding track from album metadata poisoning. Tagging independently as standalone track.[/]"
             )
             album_mbid = None
@@ -2238,7 +2267,6 @@ def tag_album_folder(
             )
             return [read_track_metadata(f) for f in all_audio_files]
 
-    # Group tracks by album folder (parent directory)
     album_groups = group_files_by_parent(all_audio_files)
 
     results: list[TrackInfo] = []
@@ -2420,7 +2448,7 @@ def tag_album_folder(
                             top_genre, top_count = max(
                                 genre_counts.items(), key=lambda x: x[1]
                             )
-                            if top_count >= max(2, len(valid_tracks) // 2):
+                            if top_count * 2 >= len(valid_tracks):
                                 dominant_genre = top_genre
 
                         if dominant_genre:
@@ -2436,11 +2464,7 @@ def tag_album_folder(
                                     if not dry_run:
                                         try:
                                             write_track_metadata(vt)
-                                        except (
-                                            OSError,
-                                            ValueError,
-                                            RuntimeError,
-                                        ) as err:
+                                        except OSError as err:
                                             LOG.debug(
                                                 f"Failed to save harmonized genre: {err}"
                                             )
@@ -2504,7 +2528,9 @@ def tag_album_folder(
                     results.extend(current_album_results)
                     current_album_results = []
                     future_to_file.clear()
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
                 executor.shutdown(wait=True, cancel_futures=True)
                 results.extend(current_album_results)
                 raise InterruptedOperationError(results) from None
@@ -2624,7 +2650,7 @@ def normalize_library(
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")
 
-    LOG.info(f"Scanning for audio files in {directory}...")
+    LOG.info(f"Scanning for audio files in {escape(str(directory))}...")
     audio_files = find_audio_files(directory, recursive=True)
     if not audio_files:
         LOG.warning("No audio files found to normalize.")
@@ -2671,7 +2697,9 @@ def normalize_library(
                             max_threads=max_threads,
                         )
                     futures.clear()
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(results) from None
 

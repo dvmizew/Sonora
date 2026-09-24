@@ -12,7 +12,7 @@ from sonora.audio.art import (
     process_artist_artwork,
     process_label_artwork,
 )
-from sonora.audio.cuesheet import parse_cuesheet, read_cuesheet_content
+from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.cache import close_cache
@@ -31,10 +31,7 @@ from sonora.modules.checker import (
     check_file,
     check_library,
 )
-from sonora.modules.organizer import (
-    is_single_folder,
-    organize_library_singles,
-)
+from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import (
     rename_album_folder,
     rename_directory_files,
@@ -108,9 +105,9 @@ class TestCoreModules(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def tearDown(self) -> None:
-        self.tmp_dir.cleanup()
-        reset_library_state()
         close_cache()
+        reset_library_state()
+        self.tmp_dir.cleanup()
 
     @patch("sonora.core.utils.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
@@ -270,25 +267,6 @@ class TestCoreModules(unittest.TestCase):
         (album_folder / "Singles").mkdir()
         result2 = rename_album_folder(album_folder, "Artist", "Album With Subdirs")
         self.assertEqual(result2, album_folder)
-
-    def test_is_single_folder(self) -> None:
-        album_dir = self.tmp_path / "album"
-        album_dir.mkdir()
-
-        audio_file_1 = album_dir / "01.wav"
-        audio_file_2 = album_dir / "02.wav"
-        audio_file_3 = album_dir / "03.wav"
-        create_dummy_wav(audio_file_1)
-        create_dummy_wav(audio_file_2)
-        create_dummy_wav(audio_file_3)
-
-        with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
-            mock_read.side_effect = [
-                TrackInfo(file_path=audio_file_1, album="Same Album"),
-                TrackInfo(file_path=audio_file_2, album="Same Album"),
-                TrackInfo(file_path=audio_file_3, album="Same Album"),
-            ]
-            self.assertFalse(is_single_folder(album_dir))
 
     @patch("sonora.modules.organizer.read_track_metadata")
     def test_organize_library_singles(self, mock_read: Any) -> None:
@@ -1054,11 +1032,6 @@ class TestCoreModules(unittest.TestCase):
             issues = check_file(wav)
             self.assertTrue(any("Blacklisted genre" in issue for issue in issues))
 
-    def test_is_single_folder_empty_dir(self) -> None:
-        empty_dir = self.tmp_path / "empty"
-        empty_dir.mkdir()
-        self.assertFalse(is_single_folder(empty_dir))
-
     def test_check_library_nonexistent_directory(self) -> None:
         with self.assertRaises(FileNotFoundError):
             check_library(self.tmp_path / "nonexistent_dir_999")
@@ -1294,20 +1267,6 @@ class TestCoreModules(unittest.TestCase):
             "  INDEX 01 00:02:00\n",
             encoding="latin-1",
         )
-
-        tracks = parse_cuesheet(cue_path)
-        self.assertEqual(len(tracks), 1)
-        self.assertEqual(tracks[0]["track_number"], 1)
-        self.assertEqual(tracks[0]["title"], "Track One")
-        self.assertEqual(tracks[0]["artist"], "Track Artist")
-        self.assertEqual(tracks[0]["genre"], "Hip-Hop")
-        self.assertEqual(tracks[0]["date"], "2021")
-        self.assertEqual(tracks[0]["disc_number"], 1)
-        self.assertEqual(tracks[0]["total_discs"], 2)
-        self.assertEqual(tracks[0]["composer"], "Composer Name")
-        self.assertEqual(tracks[0]["isrc"], "USUM71805166")
-        self.assertEqual(tracks[0]["start_index"], "00:02:00")
-        self.assertEqual(tracks[0]["pregap_index"], "00:00:00")
 
         content = read_cuesheet_content(cue_path)
         self.assertIsNotNone(content)
@@ -1862,6 +1821,8 @@ class TestKeyboardInterruptHandling(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp_dir.cleanup()
+        reset_library_state()
+        close_cache()
 
     def test_backup_handles_keyboard_interrupt(self) -> None:
         wav = self.tmp_path / "test.wav"

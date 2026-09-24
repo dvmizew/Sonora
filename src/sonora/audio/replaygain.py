@@ -5,11 +5,13 @@ from pathlib import Path
 
 import numpy as np
 import pyloudnorm
+from rich.markup import escape
 
 from sonora.audio.bpm import load_audio
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG
+from sonora.core.utils import is_interruption
 
 
 def _measure_track_loudness(
@@ -41,23 +43,6 @@ def _measure_track_loudness(
         return None
 
 
-def calculate_track_replaygain(
-    file_path: Path, target_lufs: float = -18.0
-) -> tuple[float, float] | None:
-    """
-    Calculate ReplayGain for a single track.
-    Returns (gain_db, peak_amplitude) or None if measurement fails.
-    """
-    if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    loudness_metrics = _measure_track_loudness(file_path, target_lufs=target_lufs)
-    if loudness_metrics is None:
-        return None
-    _, track_gain, track_peak, _, _ = loudness_metrics
-    return float(track_gain), float(track_peak)
-
-
 def _write_album_replaygain_track(
     entry: tuple[Path, float, float, float, float],
     album_gain: float,
@@ -67,7 +52,7 @@ def _write_album_replaygain_track(
     file_path, track_gain, track_peak, _, _ = entry
     if dry_run:
         LOG.info(
-            f"[DRY-RUN] Would tag {file_path.name}: Track Gain={track_gain:+.2f} dB, "
+            f"[DRY-RUN] Would tag {escape(file_path.name)}: Track Gain={track_gain:+.2f} dB, "
             f"Album Gain={album_gain:+.2f} dB, Track Peak={track_peak:.6f}, Album Peak={max_album_peak:.6f}"
         )
         return True
@@ -141,7 +126,9 @@ def calculate_album_replaygain(
                         max_album_peak = max(max_album_peak, loudness_metrics[2])
                 except OSError as error:
                     LOG.debug(f"Track loudness measurement failed: {error}")
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, RuntimeError) as exc:
+            if not is_interruption(exc):
+                raise
             executor.shutdown(wait=True, cancel_futures=True)
             raise
 
@@ -180,7 +167,9 @@ def calculate_album_replaygain(
     with ThreadPoolExecutor(max_workers=max_threads) as executor_write:
         try:
             write_results = list(executor_write.map(writer, track_results))
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, RuntimeError) as exc:
+            if not is_interruption(exc):
+                raise
             executor_write.shutdown(wait=True, cancel_futures=True)
             raise
 

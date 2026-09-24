@@ -56,27 +56,19 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    try:
-        stat = file_path.stat()
-        cache_key = (str(file_path.resolve()), stat.st_mtime_ns, stat.st_size)
-        with _ACOUSTID_LOCK:
-            if cache_key in _ACOUSTID_CACHE:
-                return _ACOUSTID_CACHE[cache_key]
+    stat = file_path.stat()
+    cache_key = (str(file_path.resolve()), stat.st_mtime_ns, stat.st_size)
+    with _ACOUSTID_LOCK:
+        if cache_key in _ACOUSTID_CACHE:
+            return _ACOUSTID_CACHE[cache_key]
 
-        duration, fingerprint = _fingerprint_file_with_timeout(file_path)
-        result = (float(duration), str(fingerprint))
-        with _ACOUSTID_LOCK:
-            _ACOUSTID_CACHE[cache_key] = result
-        return result
-    except (
-        acoustid.AcoustidError,
-        acoustid.WebServiceError,
-        OSError,
-        subprocess.SubprocessError,
-    ) as error:
-        raise RuntimeError(
-            f"Chromaprint fingerprinting failed for {file_path}: {error}"
-        ) from error
+    duration, fingerprint = _fingerprint_file_with_timeout(file_path)
+    result = (float(duration), str(fingerprint))
+    with _ACOUSTID_LOCK:
+        if len(_ACOUSTID_CACHE) >= 1024:
+            _ACOUSTID_CACHE.clear()
+        _ACOUSTID_CACHE[cache_key] = result
+    return result
 
 
 _ACOUSTID_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_ACOUSTID)

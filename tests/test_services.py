@@ -23,7 +23,7 @@ from sonora.services.fanart import (
     fetch_fanart_artist,
     fetch_fanart_label,
 )
-from sonora.services.genius import fetch_genius_description
+from sonora.services.genius import fetch_genius_song_details
 from sonora.services.itunes import (
     fetch_itunes_album_details,
     fetch_itunes_cover_art_url,
@@ -43,7 +43,7 @@ from sonora.services.musicbrainz import (
     fetch_track_mbid,
     search_musicbrainz_release,
 )
-from sonora.services.shazam import get_shazam_track_about, recognize_audio_track
+from sonora.services.shazam import recognize_audio_track
 from sonora.services.theaudiodb import fetch_theaudiodb_track_details
 
 
@@ -329,10 +329,14 @@ class TestServicesEngine(unittest.TestCase):
         }
         mock_get.side_effect = [mock_search_response, mock_song_response]
 
-        song_description = fetch_genius_description(
+        song_details = fetch_genius_song_details(
             "Artist", "Title", api_token="dummy_genius_token"
         )
-        self.assertEqual(song_description, "Song story description")
+        self.assertIsNotNone(song_details)
+        if song_details:
+            self.assertEqual(song_details["description"], "Song story description")
+            self.assertEqual(song_details["producers"], "Producer 1")
+            self.assertEqual(song_details["writers"], "Writer 1")
 
     @patch("sonora.services.genius.get_cached_api")
     def test_fetch_genius_song_details_cached(self, mock_cache: MagicMock) -> None:
@@ -344,8 +348,10 @@ class TestServicesEngine(unittest.TestCase):
             "writers": None,
             "release_date": None,
         }
-        details = fetch_genius_description("Artist", "Title", api_token="dummy_token")
-        self.assertEqual(details, "Cached story")
+        details = fetch_genius_song_details("Artist", "Title", api_token="dummy_token")
+        self.assertIsNotNone(details)
+        if details:
+            self.assertEqual(details["description"], "Cached story")
 
     def test_acoustid_no_api_key_returns_none(self) -> None:
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key=""))
@@ -367,7 +373,17 @@ class TestServicesEngine(unittest.TestCase):
     def test_genius_rejects_lyrics_unavailable_text(self, mock_get: MagicMock) -> None:
         mock_search_response = MagicMock()
         mock_search_response.json.return_value = {
-            "response": {"hits": [{"result": {"api_path": "/songs/1"}}]}
+            "response": {
+                "hits": [
+                    {
+                        "result": {
+                            "api_path": "/songs/1",
+                            "title": "Title",
+                            "primary_artist": {"name": "Artist"},
+                        }
+                    }
+                ]
+            }
         }
         mock_song_response = MagicMock()
         mock_song_response.json.return_value = {
@@ -379,9 +395,10 @@ class TestServicesEngine(unittest.TestCase):
         }
         mock_get.side_effect = [mock_search_response, mock_song_response]
 
-        self.assertIsNone(
-            fetch_genius_description("Artist", "Title", api_token="token")
-        )
+        details = fetch_genius_song_details("Artist", "Title", api_token="token")
+        self.assertIsNotNone(details)
+        assert details is not None
+        self.assertIsNone(details["description"])
 
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_error_handling(self, mock_mb: MagicMock) -> None:
@@ -959,14 +976,6 @@ class TestServicesEngine(unittest.TestCase):
             with patch("sonora.services.shazam.get_config") as mock_cfg:
                 mock_cfg.return_value = MagicMock(enable_shazam=False)
                 self.assertIsNone(recognize_audio_track(audio_file))
-
-    @patch("sonora.services.shazam._track_about_async")
-    def test_get_shazam_track_about(self, mock_about_async: MagicMock) -> None:
-        mock_about_async.return_value = {"id": 123456, "title": "Starboy"}
-        res = get_shazam_track_about(123456)
-        self.assertEqual(res, {"id": 123456, "title": "Starboy"})
-        self.assertIsNone(get_shazam_track_about(0))
-        self.assertIsNone(get_shazam_track_about(-1))
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from sonora.modules.checker import (
     check_file,
     check_library,
 )
-from sonora.modules.organizer import is_single_folder, organize_library_singles
+from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import (
     rename_directory_files,
     rename_track_file,
@@ -20,7 +20,6 @@ __all__ = [
     "check_brackets_corruption",
     "check_file",
     "check_library",
-    "is_single_folder",
     "organize_library_singles",
     "process_single_track",
     "rename_directory_files",

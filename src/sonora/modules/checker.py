@@ -14,6 +14,7 @@ from mutagen.flac import FLAC
 from rich.markup import escape
 
 from sonora.audio.checksum import verify_flac_checksum
+from sonora.audio.key import key_to_camelot
 from sonora.audio.metadata import read_track_metadata
 from sonora.audio.spectral import detect_fake_lossless
 from sonora.core.config import get_config
@@ -29,6 +30,7 @@ from sonora.core.utils import (
     InterruptedOperationError,
     find_audio_files,
     find_companion_lyrics,
+    is_interruption,
     is_single_group_artist,
     is_valid_uuid,
     is_version_or_remix,
@@ -38,7 +40,7 @@ from sonora.core.utils import (
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
 
-# [text], (text), {text}
+# Matches balanced delimiters: square brackets, parentheses, and curly braces
 _BRACKET_PATTERN = re.compile(r"[\(\[\{][^\(\)\[\]\{\}]+[\)\]\}]")
 
 
@@ -152,11 +154,8 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
             if condition:
                 issues.append(msg)
 
-        if track.initial_key:
-            from sonora.audio.key import key_to_camelot
-
-            if key_to_camelot(track.initial_key) is None:
-                issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
+        if track.initial_key and key_to_camelot(track.initial_key) is None:
+            issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
 
         for field_name, tag_label, required in [
             ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID", True),
@@ -218,8 +217,11 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
     except OSError as error:
         issues.append(f"Metadata read error: {error}")
 
-    if not find_companion_lyrics(file_path):
+    companion_lrcs = find_companion_lyrics(file_path)
+    if not companion_lrcs:
         issues.append("Missing synchronized lyrics (.lrc) file.")
+    elif any(lrc.stat().st_size == 0 for lrc in companion_lrcs):
+        issues.append("Corrupt 0-byte synchronized lyrics (.lrc) file.")
 
     return issues
 
@@ -302,13 +304,10 @@ def check_library(
         raise FileNotFoundError(f"Directory not found: {folder_path}")
 
     if report is None:
-        report = CheckReport(
-            total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
-        )
+        report = CheckReport()
 
     files_to_process = find_audio_files(folder_path, recursive=True)
 
-    # Map for folder-level checks
     folder_albums: dict[Path, set[str]] = defaultdict(set)
     folder_album_artists: dict[Path, set[str]] = defaultdict(set)
     folder_tracks_found: dict[Path, dict[tuple[int, int], list[str]]] = defaultdict(
@@ -364,7 +363,7 @@ def check_library(
                             any(
                                 k in ni
                                 for k in (
-                                    "corrupt",
+                                    "corrupted flac",
                                     "checksum",
                                     "0-byte",
                                     "fake lossless",
@@ -381,12 +380,15 @@ def check_library(
                             report.missing_lrc += 1
 
                     progress.advance(task)
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(report) from None
 
-    # Folder-level checks after file checking completes
     for folder, albums in folder_albums.items():
+        if get_config().is_generic_container(folder.name):
+            continue
         folder_issues = []
         if len(albums) > 1:
             folder_issues.append(f"Inconsistent ALBUM name in folder: {albums}")

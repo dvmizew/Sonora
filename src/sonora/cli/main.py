@@ -49,6 +49,7 @@ from sonora.core.utils import (
     find_audio_files,
     format_filesize,
     group_files_by_parent,
+    is_interruption,
 )
 from sonora.modules.backup import (
     backup_library_tags,
@@ -144,7 +145,7 @@ def _write_json_report(
             | orjson.OPT_SERIALIZE_DATACLASS,
         )
     )
-    LOG.info(f"Saved {label} JSON report to [bold]{json_report}[/bold]")
+    LOG.info(f"Saved {label} JSON report to [bold]{escape(str(json_report))}[/bold]")
 
 
 def _emit_tag_summary_and_report(
@@ -453,7 +454,9 @@ def tag(
             dry_run=dry_run,
             failures=failures,
         )
-    except KeyboardInterrupt as exc:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         interrupted = True
         if isinstance(exc, InterruptedOperationError) and isinstance(
             exc.partial_result, list
@@ -495,7 +498,7 @@ def check(
     """
     Check music library for FLAC integrity, bracket corruption & missing LRCs.
     """
-    LOG.info(f"Checking music library: [bold]{path}[/bold]")
+    LOG.info(f"Checking music library: [bold]{escape(str(path))}[/bold]")
     interrupted = False
     check_report = CheckReport(
         total_files=0, corrupt_files=0, missing_metadata=0, missing_lrc=0
@@ -508,7 +511,9 @@ def check(
             max_threads=threads,
             report=check_report,
         )
-    except KeyboardInterrupt as exc:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         interrupted = True
         if isinstance(exc, InterruptedOperationError) and isinstance(
             exc.partial_result, CheckReport
@@ -573,7 +578,7 @@ def check(
             check_report, path, json_report, aborted_by_user=interrupted
         )
         LOG.info(
-            f"Saved validation JSON report with all {issue_count} issue(s) to [bold]{json_report}[/bold]"
+            f"Saved validation JSON report with all {issue_count} issue(s) to [bold]{escape(str(json_report))}[/bold]"
         )
 
     if interrupted:
@@ -591,14 +596,16 @@ def rename(
     """
     Rename audio files and sync .lrc metadata headers.
     """
-    LOG.info(f"Renaming files in directory: [bold]{path}[/bold]")
+    LOG.info(f"Renaming files in directory: [bold]{escape(str(path))}[/bold]")
     interrupted = False
     report = RenameReport()
     try:
         rename_directory_files(
             path, dry_run=dry_run, max_threads=threads, report=report
         )
-    except KeyboardInterrupt as exc:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         interrupted = True
         if isinstance(exc, InterruptedOperationError) and isinstance(
             exc.partial_result, RenameReport
@@ -687,7 +694,9 @@ def organize(
         organized_count = organize_library_singles(
             path, destination_directory, dry_run=dry_run, max_threads=threads
         )
-    except KeyboardInterrupt as exc:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         interrupted = True
         if isinstance(exc, InterruptedOperationError) and isinstance(
             exc.partial_result, int
@@ -755,13 +764,15 @@ def backup(
         backup_path = backup_library_tags(
             path, output_file=output_file, max_threads=threads
         )
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Backup stopped by user (Ctrl+C)."
         )
         return 130
 
-    LOG.success(f"Backup created at: [bold]{backup_path}[/bold]")
+    LOG.success(f"Backup created at: [bold]{escape(str(backup_path))}[/bold]")
     backup_summary_rows = [
         ("Source Directory", str(path.resolve()), None),
         ("Backup Archive", str(backup_path), "green"),
@@ -786,7 +797,9 @@ def restore(
     restored_count = 0
     try:
         restored_count = restore_library_tags(backup_file, max_threads=threads)
-    except KeyboardInterrupt as exc:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         interrupted = True
         if isinstance(exc, InterruptedOperationError) and isinstance(
             exc.partial_result, int
@@ -844,7 +857,9 @@ def normalize(
     """
     Locally clean tags, remove bracket noise, and calculate BPM/Key/ReplayGain (100% offline).
     """
-    LOG.info(f"Normalizing audio tags in [bold]{path}[/bold] (offline mode)...")
+    LOG.info(
+        f"Normalizing audio tags in [bold]{escape(str(path))}[/bold] (offline mode)..."
+    )
     interrupted = False
     count = 0
     try:
@@ -858,7 +873,9 @@ def normalize(
             max_threads=threads,
         )
         count = len(results)
-    except KeyboardInterrupt as exc:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         interrupted = True
         if isinstance(exc, InterruptedOperationError) and isinstance(
             exc.partial_result, list
@@ -900,7 +917,9 @@ def _run_parallel_audio_task(
         LOG.warning("No audio files found.")
         return [], False
 
-    LOG.info(f"{description} for {len(audio_files)} files in [bold]{path}[/bold]...")
+    LOG.info(
+        f"{description} for {len(audio_files)} files in [bold]{escape(str(path))}[/bold]..."
+    )
     results: list[T] = []
     interrupted = False
 
@@ -916,7 +935,9 @@ def _run_parallel_audio_task(
                     wait_if_paused()
                     results.append(future.result())
                     progress.advance(task)
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
                 executor.shutdown(wait=True, cancel_futures=True)
                 interrupted = True
                 LOG.warning(
@@ -1063,7 +1084,9 @@ def replaygain(
                     if success:
                         albums_processed += 1
                     progress.advance(task)
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
                 interrupted = True
                 LOG.warning(
                     "\n⏹️  [bold yellow]INTERRUPTED[/] - ReplayGain stopped by user (Ctrl+C)."
@@ -1090,9 +1113,6 @@ def _process_lyrics_file(
     wait_if_paused()
     try:
         track_info = read_track_metadata(audio_path)
-        lrc_path = audio_path.with_suffix(".lrc")
-        if not force and lrc_path.exists() and lrc_path.stat().st_size > 0:
-            return audio_path, "existing", "existing"
         audio_dur = get_audio_duration(audio_path)
 
         lyrics_text, tag_type = process_track_lyrics(
@@ -1106,9 +1126,13 @@ def _process_lyrics_file(
             duration=audio_dur,
         )
         if lyrics_text and not dry_run:
-            with contextlib.suppress(OSError):
+            try:
                 updated = dataclasses.replace(track_info, lyrics=lyrics_text)
                 write_track_metadata(updated)
+            except OSError as write_err:
+                LOG.warning(
+                    f"Failed to embed lyrics for {escape(str(audio_path))}: {write_err}"
+                )
         return audio_path, lyrics_text, tag_type
     except OSError as err:
         LOG.debug(f"Lyrics error for {audio_path}: {err}")
@@ -1161,7 +1185,9 @@ def lyrics(
             "details": [{"file": str(p), "status": typ} for p, _, typ in results],
         }
         json_report.write_bytes(orjson.dumps(report_data, option=orjson.OPT_INDENT_2))
-        LOG.info(f"Saved lyrics JSON report to [bold cyan]{json_report}[/bold cyan]")
+        LOG.info(
+            f"Saved lyrics JSON report to [bold cyan]{escape(str(json_report))}[/bold cyan]"
+        )
 
     return 130 if interrupted else 0
 
@@ -1233,6 +1259,7 @@ def cache_stats(
     """
     Display current cache statistics and disk usage.
     """
+    _ = all_layers
     stats = get_cache_stats()
     if json_output:
         print(orjson.dumps(stats.to_dict(), option=orjson.OPT_INDENT_2).decode("utf-8"))
@@ -1450,7 +1477,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
         if isinstance(result, int):
             return result
         return 0
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         LOG.warning("Aborted by user. Shutting down gracefully...")
         return 130
     except CycloptsError:

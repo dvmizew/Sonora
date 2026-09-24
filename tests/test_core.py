@@ -20,6 +20,7 @@ from sonora.core.config import (
 )
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    InterruptedOperationError,
     clean_disambiguation,
     clean_title,
     clean_unicode_punct,
@@ -27,6 +28,7 @@ from sonora.core.utils import (
     extract_version_modifier,
     get_primary_artist,
     group_files_by_parent,
+    is_interruption,
     is_single_group_artist,
     is_valid_uuid,
     match_score,
@@ -36,7 +38,6 @@ from sonora.core.utils import (
     normalize_language_name,
     normalize_script_name,
     normalize_str,
-    prefer_diacritics,
     preserve_unicode_repertoire,
     relocate_companion_lyrics,
     safe_case_rename,
@@ -723,7 +724,7 @@ class TestSonoraConfig(unittest.TestCase):
         self.assertIsNone(extract_version_modifier("Standard Title"))
         self.assertIsNone(extract_version_modifier("Title (feat. Someone)"))
 
-    def test_prefer_diacritics(self) -> None:
+    def test_preserve_unicode_repertoire(self) -> None:
         self.assertEqual(
             preserve_unicode_repertoire("Bombe în rai", "Bombe in rai"),
             "Bombe în rai",
@@ -765,11 +766,6 @@ class TestSonoraConfig(unittest.TestCase):
         self.assertEqual(preserve_unicode_repertoire(None, "Candidate"), "Candidate")
         self.assertEqual(preserve_unicode_repertoire("Current", None), "Current")
         self.assertEqual(preserve_unicode_repertoire("Title A", "Title B"), "Title B")
-        # prefer_diacritics alias backward compatibility
-        self.assertEqual(
-            prefer_diacritics("Bombe în rai", "Bombe in rai"),
-            "Bombe în rai",
-        )
 
     def test_match_score_penalties_and_remixes(self) -> None:
         # Stopword immunity: "The" in band names must not produce high match scores
@@ -827,6 +823,19 @@ class TestSonoraConfig(unittest.TestCase):
             ),
             95.0,
         )
+
+    def test_is_interruption(self) -> None:
+        self.assertTrue(is_interruption(KeyboardInterrupt()))
+        self.assertTrue(is_interruption(InterruptedOperationError()))
+        self.assertTrue(is_interruption(RuntimeError("release unlocked lock")))
+
+        nested_exc = RuntimeError("wrapper error")
+        nested_exc.__context__ = KeyboardInterrupt()
+        self.assertTrue(is_interruption(nested_exc))
+
+        self.assertFalse(is_interruption(RuntimeError("unrelated database error")))
+        self.assertFalse(is_interruption(ValueError("invalid value")))
+        self.assertFalse(is_interruption(OSError("file not found")))
 
 
 if __name__ == "__main__":

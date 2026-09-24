@@ -141,7 +141,7 @@ def fetch_fanart_artist(
             },
         )
         return artwork
-    except (httpx.HTTPError, OSError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Fanart.tv artist fetch failed for {artist_mbid}: {error}")
         return None
 
@@ -196,7 +196,7 @@ def fetch_fanart_label(
             {"label_urls": list(artwork.label_urls)},
         )
         return artwork
-    except (httpx.HTTPError, OSError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Fanart.tv label fetch failed for {label_mbid}: {error}")
         return None
 
@@ -277,6 +277,6 @@ def fetch_fanart_album(
             },
         )
         return artwork
-    except (httpx.HTTPError, OSError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Fanart.tv album fetch failed for {release_group_mbid}: {error}")
         return None

@@ -21,44 +21,11 @@ from sonora.core.utils import (
     find_companion_lyrics,
     get_primary_artist,
     group_files_by_parent,
+    is_interruption,
     normalize_str,
     relocate_companion_lyrics,
     sanitize_name,
 )
-
-
-def is_single_folder(folder_path: Path) -> bool:
-    """
-    Determine if a folder contains standalone single tracks vs a full album.
-    A folder is treated as a Single folder if it is in Singles, has <= 2 audio files,
-    or if audio files come from different albums.
-    """
-    if not folder_path.exists() or not folder_path.is_dir():
-        return False
-
-    if any(get_config().is_generic_container(p) for p in folder_path.parts):
-        return True
-
-    audio_files = find_audio_files(folder_path, recursive=False)
-    if not audio_files:
-        return False
-
-    if len(audio_files) <= 2:
-        return True
-
-    albums: set[str] = set()
-    for audio_file in audio_files:
-        try:
-            track_info = read_track_metadata(audio_file)
-            if track_info.album and track_info.album != "Unknown Album":
-                albums.add(normalize_str(track_info.album))
-                if len(albums) > 1:
-                    return True
-        except OSError as error:
-            LOG.debug(
-                f"Failed to read metadata for singles detection on {audio_file}: {error}"
-            )
-    return len(albums) > 1
 
 
 def _quarantine_file(file_path: Path, quarantine_dir: Path) -> Path:
@@ -91,14 +58,14 @@ def _read_file_info(file_path: Path) -> tuple[Path, TrackInfo | None]:
         return file_path, None
 
 
-def _track_fingerprints(info: TrackInfo) -> list[str]:
-    primary_key = normalize_str(get_primary_artist(info.artist))
-    title_key = normalize_str(deduplicate_title_features(info.title))
+def _track_fingerprints(track_info: TrackInfo) -> list[str]:
+    primary_key = normalize_str(get_primary_artist(track_info.artist))
+    title_key = normalize_str(deduplicate_title_features(track_info.title))
     prints = [f"{primary_key} - {title_key}"]
-    if info.isrc:
-        prints.append(f"isrc:{info.isrc.strip().upper()}")
-    if info.musicbrainz_trackid:
-        prints.append(f"mbid:{info.musicbrainz_trackid.strip().lower()}")
+    if track_info.isrc:
+        prints.append(f"isrc:{track_info.isrc.strip().upper()}")
+    if track_info.musicbrainz_trackid:
+        prints.append(f"mbid:{track_info.musicbrainz_trackid.strip().lower()}")
     return prints
 
 
@@ -175,26 +142,31 @@ def organize_library_singles(
                         if max_threads > 1 and len(files) > 1
                         else (_read_file_info(p) for p in files)
                     )
-                    for p, info in file_results:
+                    for file_path, track_info in file_results:
                         wait_if_paused()
-                        if info is not None:
-                            folder_track_infos.append((p, info))
-                            if info.album and not get_config().is_generic_container(
-                                info.album
+                        if track_info is not None:
+                            folder_track_infos.append((file_path, track_info))
+                            if (
+                                track_info.album
+                                and not get_config().is_generic_container(
+                                    track_info.album
+                                )
                             ):
-                                albums_in_folder.add(normalize_str(info.album))
+                                albums_in_folder.add(normalize_str(track_info.album))
                         progress.advance(task)
 
                     if not is_single and len(albums_in_folder) > 1:
                         is_single = True
 
                     if is_single:
-                        for path, info in folder_track_infos:
-                            singles_to_process.append((path, info))
+                        for path, track_info in folder_track_infos:
+                            singles_to_process.append((path, track_info))
                     else:
-                        for _path, info in folder_track_infos:
-                            album_fingerprints.update(_track_fingerprints(info))
-            except KeyboardInterrupt:
+                        for _path, track_info in folder_track_infos:
+                            album_fingerprints.update(_track_fingerprints(track_info))
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(moved_count) from None
 
@@ -289,13 +261,14 @@ def organize_library_singles(
             relocate_companion_lyrics(path, target_file, dry_run=dry_run)
 
             moved_count += 1
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, RuntimeError) as exc:
+        if not is_interruption(exc):
+            raise
         raise InterruptedOperationError(moved_count) from None
 
     if removed_dupes > 0:
         LOG.info(f"🗑️ Removed {removed_dupes} duplicate single(s).")
 
-    # Cleanup empty/orphaned directories
     if not dry_run:
         cleanup_empty_dirs(source_dir)
 

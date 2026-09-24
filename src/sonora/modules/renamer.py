@@ -20,6 +20,7 @@ from sonora.core.utils import (
     find_audio_files,
     find_companion_lyrics,
     group_files_by_parent,
+    is_interruption,
     normalize_str,
     relocate_companion_lyrics,
     safe_case_rename,
@@ -106,6 +107,7 @@ def rename_track_file(
     format_pattern: str | None = None,
     track_info: TrackInfo | None = None,
     dry_run: bool = False,
+    relocated_lrc_collector: list[Path] | None = None,
 ) -> Path:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -146,21 +148,19 @@ def rename_track_file(
     companion_lyrics = find_companion_lyrics(file_path)
 
     # Fallback search by track number prefix if no exact stem match
-    if not companion_lyrics and track_info.track_number:
-        track_clean = "".join(
-            filter(str.isdigit, str(track_info.track_number).split("/")[0])
-        )
-        if track_clean:
-            prefix = f"{int(track_clean):02d}"
+    if not companion_lyrics and track_info.track_number is not None:
+        parsed_track = safe_int(track_info.track_number)
+        if parsed_track is not None:
+            prefix = f"{parsed_track:02d}"
+            prefix_unpadded = str(parsed_track)
             for candidate in folder.iterdir():
                 if candidate.suffix.lower() == ".lrc" and (
                     candidate.name.startswith(prefix)
-                    or candidate.name.startswith(str(int(track_clean)))
+                    or candidate.name.startswith(prefix_unpadded)
                 ):
                     companion_lyrics.append(candidate)
                     break
 
-    # Sync LRC metadata headers
     for companion in companion_lyrics:
         if companion.suffix.lower() == ".lrc" and not dry_run:
             sync_lrc_metadata(companion, track_info.artist, track_info.title)
@@ -186,7 +186,11 @@ def rename_track_file(
                 LOG.info(
                     f"   ∟ 🎵 [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
                 )
-                relocate_companion_lyrics(file_path, new_path, dry_run=False)
+                relocated = relocate_companion_lyrics(
+                    file_path, new_path, dry_run=False
+                )
+                if relocated_lrc_collector is not None:
+                    relocated_lrc_collector.extend(relocated)
             except OSError as error:
                 LOG.warning(f"Failed to rename file {escape(file_path.name)}: {error}")
         else:
@@ -259,16 +263,20 @@ def rename_album_folder(
 
 def _rename_single_worker(
     path: Path, dry_run: bool
-) -> tuple[Path, TrackInfo | None, Path | None]:
+) -> tuple[Path, TrackInfo | None, Path | None, int]:
     try:
         extracted_track_info = read_track_metadata(path)
+        relocated_lrcs: list[Path] = []
         new_path = rename_track_file(
-            path, track_info=extracted_track_info, dry_run=dry_run
+            path,
+            track_info=extracted_track_info,
+            dry_run=dry_run,
+            relocated_lrc_collector=relocated_lrcs,
         )
-        return path, extracted_track_info, new_path
+        return path, extracted_track_info, new_path, len(relocated_lrcs)
     except OSError as error:
         LOG.warning(f"Failed to rename file {escape(str(path))}: {error}")
-        return path, None, None
+        return path, None, None, 0
 
 
 def rename_directory_files(
@@ -320,8 +328,9 @@ def rename_directory_files(
                         if max_threads > 1 and len(files) > 1
                         else (_rename_single_worker(p, dry_run) for p in files)
                     )
-                    for path, track_info, new_path in file_results:
+                    for path, track_info, new_path, lrc_count in file_results:
                         wait_if_paused()
+                        report.lrc_synced += lrc_count
                         if track_info is not None and new_path is not None:
                             search_artist = track_info.album_artist or track_info.artist
                             if (
@@ -339,7 +348,6 @@ def rename_directory_files(
                                 report.unchanged_files += 1
                         progress.advance(task)
 
-                    # Rename album folder based on consensus for this folder
                     final_folder = folder
                     if album_consensus:
                         top = album_consensus.most_common(1)
@@ -364,7 +372,9 @@ def rename_directory_files(
                         (final_folder / p.name if final_folder != folder else p)
                         for p in folder_renamed_paths
                     )
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(report) from None
 

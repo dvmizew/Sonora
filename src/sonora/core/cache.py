@@ -1,6 +1,5 @@
 import atexit
 import dataclasses
-import re
 import shutil
 import sqlite3
 import threading
@@ -30,35 +29,6 @@ def get_cache_dir() -> Path:
 def get_api_cache_dir() -> Path:
     """Return dedicated directory for diskcache API cache files."""
     return get_cache_dir() / "api"
-
-
-def _migrate_legacy_cache(cache_dir: Path, api_cache_dir: Path) -> None:
-    """Migrate legacy cache files from cache root and clean up obsolete FanoutCache shards."""
-    for parent in (cache_dir, api_cache_dir):
-        if parent.exists() and parent.is_dir():
-            try:
-                for entry_path in parent.iterdir():
-                    if entry_path.is_dir() and re.match(r"^\d{3}$", entry_path.name):
-                        shutil.rmtree(entry_path, ignore_errors=True)
-            except OSError as error:
-                LOG.debug(f"Legacy shard cleanup failed: {error}")
-
-    legacy_db = cache_dir / "cache.db"
-    if not legacy_db.exists():
-        return
-    try:
-        api_cache_dir.mkdir(parents=True, exist_ok=True)
-        for entry_path in list(cache_dir.iterdir()):
-            if (
-                entry_path.name.startswith("library_state.db")
-                or entry_path.name == "api"
-            ):
-                continue
-            target = api_cache_dir / entry_path.name
-            if not target.exists():
-                shutil.move(str(entry_path), str(target))
-    except OSError as error:
-        LOG.debug(f"Legacy cache migration failed: {error}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -135,8 +105,6 @@ def get_cache() -> Any:
         with _CACHE_LOCK:
             if _CACHE_INSTANCE is None:
                 try:
-                    cache_dir = get_cache_dir()
-                    _migrate_legacy_cache(cache_dir, api_cache_dir)
                     api_cache_dir.mkdir(parents=True, exist_ok=True)
                     _CACHE_INSTANCE = diskcache.Cache(
                         str(api_cache_dir),
@@ -339,16 +307,6 @@ def clear_cache(
                     diskcache.Timeout,
                 ) as error:
                     LOG.debug(f"Cache clear/check failed: {error}")
-
-            if api_cache_dir.exists() and api_cache_dir.is_dir():
-                try:
-                    for entry_path in api_cache_dir.iterdir():
-                        if entry_path.is_dir() and re.match(
-                            r"^\d{3}$", entry_path.name
-                        ):
-                            shutil.rmtree(entry_path, ignore_errors=True)
-                except OSError as error:
-                    LOG.debug(f"Legacy shard cleanup failed: {error}")
 
             db_path = api_cache_dir / "cache.db"
             if db_path.exists():

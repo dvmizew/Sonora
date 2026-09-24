@@ -6,6 +6,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -92,6 +93,17 @@ class InterruptedOperationError(KeyboardInterrupt):
         self.partial_result = partial_result
 
 
+def is_interruption(exc: BaseException) -> bool:
+    """Return True if an exception represents a SIGINT/Ctrl+C user cancellation,
+    including threading Condition lock release errors triggered during signal interrupts."""
+    if isinstance(exc, (KeyboardInterrupt, InterruptedOperationError)):
+        return True
+    if isinstance(exc, RuntimeError) and "release unlocked lock" in str(exc):
+        return True
+    context = getattr(exc, "__context__", None)
+    return bool(context and isinstance(context, KeyboardInterrupt))
+
+
 def extract_series_number(text: str | None) -> int | None:
     """
     Extract album or track series/volume number (e.g. 'Savage Mode II' -> 2, 'Pt. 2' -> 2, 'Vol. 3' -> 3).
@@ -139,14 +151,13 @@ def safe_float(value: object) -> float | None:
 
 
 _UNICODE_HYPHENS_PATTERN = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2015]")
-_ZERO_WIDTH_PATTERN = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
 _SPACES_BEFORE_COMMA_PATTERN = re.compile(r"\s+,")
 
 
 def clean_unicode_punct(text: str | None) -> str:
     if not text:
         return ""
-    cleaned = _ZERO_WIDTH_PATTERN.sub("", str(text))
+    cleaned = remove_zero_width(str(text))
     cleaned = _UNICODE_HYPHENS_PATTERN.sub("-", cleaned)
     return _SPACES_BEFORE_COMMA_PATTERN.sub(",", cleaned)
 
@@ -625,10 +636,6 @@ def preserve_unicode_repertoire(current: str | None, candidate: str | None) -> s
     return candidate
 
 
-# Alias for backward compatibility
-prefer_diacritics = preserve_unicode_repertoire
-
-
 _NON_WORD_SPACES_PATTERN = re.compile(r"[^\w\s]")
 
 
@@ -769,11 +776,18 @@ def match_score(
                         core_sort = float(fuzz.token_sort_ratio(q_core, c_core))
                         artist_score = max(core_ratio, core_sort)
 
-        if title_score < 70.0 or artist_score < 70.0:
+        min_title_len = min(len(query_title_clean), len(candidate_title_clean))
+        title_thresh = 95.0 if min_title_len < 8 else 85.0
+
+        if title_score < title_thresh or artist_score < 85.0:
             return 0.0
 
         return (title_score * 0.6) + (artist_score * 0.4)
 
+    min_title_len = min(len(query_title_clean), len(candidate_title_clean))
+    title_thresh = 95.0 if min_title_len < 8 else 85.0
+    if title_score < title_thresh:
+        return 0.0
     return float(title_score)
 
 
@@ -810,16 +824,17 @@ def normalize_date(date_value: str | None) -> str | None:
     date_str = str(date_value).strip()
     if date_str in ("0", "0000", "None", "null", ""):
         return None
+    max_year = datetime.now(tz=timezone.utc).year + 1
     match = _DATE_ISO_PATTERN.search(date_str)
     if match:
         year = int(match.group(1)[:4])
-        if 1900 <= year <= 2030:
+        if 1900 <= year <= max_year:
             return match.group(1)
         return None
     match = _DATE_YEAR_PATTERN.search(date_str)
     if match:
         year = int(match.group(1))
-        if 1900 <= year <= 2030:
+        if 1900 <= year <= max_year:
             return match.group(1)
         return None
     return None
@@ -889,6 +904,7 @@ _NOISE_GENRES: frozenset[str] = frozenset(
         "miscellaneous",
         "instrumental",
         "karaoke",
+        "mpb",
         "other",
         "audio",
         "sound",

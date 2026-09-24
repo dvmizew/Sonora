@@ -24,11 +24,31 @@ class LibraryStateVault:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path if db_path is not None else _get_default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn: sqlite3.Connection | None = None
+        self._local = threading.local()
+        self._all_connections: set[sqlite3.Connection] = set()
+        self._connections_lock = threading.Lock()
         self._init_db()
 
+    def _create_tables(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS track_state (
+                file_path TEXT PRIMARY KEY,
+                mtime_ns INTEGER NOT NULL,
+                file_size INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                last_tagged_timestamp REAL NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_track_path ON track_state(file_path);"
+        )
+        conn.commit()
+
     def _get_connection(self) -> sqlite3.Connection:
-        if self._conn is None:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
             needs_init = not self.db_path.exists()
             conn = sqlite3.connect(
                 str(self.db_path), timeout=30.0, check_same_thread=False
@@ -37,23 +57,11 @@ class LibraryStateVault:
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA temp_store=MEMORY;")
             if needs_init:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS track_state (
-                        file_path TEXT PRIMARY KEY,
-                        mtime_ns INTEGER NOT NULL,
-                        file_size INTEGER NOT NULL,
-                        status TEXT NOT NULL,
-                        last_tagged_timestamp REAL NOT NULL
-                    );
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_track_path ON track_state(file_path);"
-                )
-                conn.commit()
-            self._conn = conn
-        return self._conn
+                self._create_tables(conn)
+            self._local.conn = conn
+            with self._connections_lock:
+                self._all_connections.add(conn)
+        return conn
 
     @contextlib.contextmanager
     def _connection(self) -> Generator[sqlite3.Connection, None, None]:
@@ -66,8 +74,14 @@ class LibraryStateVault:
             raise
 
     def _init_db(self) -> None:
-        with _STATE_LOCK, self._connection():
-            pass
+        init_conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        try:
+            init_conn.execute("PRAGMA journal_mode=WAL;")
+            init_conn.execute("PRAGMA synchronous=NORMAL;")
+            init_conn.execute("PRAGMA temp_store=MEMORY;")
+            self._create_tables(init_conn)
+        finally:
+            init_conn.close()
 
     def is_track_up_to_date(self, file_path: Path) -> bool:
         """Check if file on disk has not changed since it was last successfully tagged."""
@@ -77,7 +91,7 @@ class LibraryStateVault:
             current_size = stat.st_size
             path_str = str(file_path.resolve())
 
-            with _STATE_LOCK, self._connection() as conn:
+            with self._connection() as conn:
                 cursor = conn.execute(
                     "SELECT mtime_ns, file_size, status FROM track_state WHERE file_path = ?;",
                     (path_str,),
@@ -120,7 +134,7 @@ class LibraryStateVault:
             return outdated
 
         try:
-            with _STATE_LOCK, self._connection() as conn:
+            with self._connection() as conn:
                 resolved_keys = [(k,) for k in path_to_stat]
                 state_map: dict[str, tuple[int, int, str]] = {}
 
@@ -163,7 +177,7 @@ class LibraryStateVault:
             stat = file_path.stat()
             path_str = str(file_path.resolve())
             now = time.time()
-            with _STATE_LOCK, self._connection() as conn:
+            with self._connection() as conn:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO track_state (file_path, mtime_ns, file_size, status, last_tagged_timestamp)
@@ -201,7 +215,7 @@ class LibraryStateVault:
             return
 
         try:
-            with _STATE_LOCK, self._connection() as conn:
+            with self._connection() as conn:
                 conn.executemany(
                     """
                     INSERT OR REPLACE INTO track_state (file_path, mtime_ns, file_size, status, last_tagged_timestamp)
@@ -217,7 +231,7 @@ class LibraryStateVault:
         if not self.db_path.exists():
             return 0
         try:
-            with _STATE_LOCK, self._connection() as conn:
+            with self._connection() as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM track_state;")
                 row = cursor.fetchone()
                 return int(row[0]) if row else 0
@@ -278,14 +292,14 @@ class LibraryStateVault:
                     return 0
 
     def close(self) -> None:
-        """Cleanly close resources if needed."""
-        with _STATE_LOCK:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except (sqlite3.Error, OSError):
-                    pass
-                self._conn = None
+        """Cleanly close all connections opened by this vault across all threads."""
+        with self._connections_lock:
+            open_connections = list(self._all_connections)
+            self._all_connections.clear()
+        for open_conn in open_connections:
+            with contextlib.suppress(sqlite3.Error, OSError):
+                open_conn.close()
+        self._local.conn = None
 
 
 def get_library_state() -> LibraryStateVault:
