@@ -186,26 +186,37 @@ def get_cache_stats() -> CacheStats:
     cache_dir = get_cache_dir()
     api_cache_dir = get_api_cache_dir()
     api_entries = 0
-    cache = get_cache()
-    if cache is not None:
-        try:
-            api_entries = len(cache)
-        except (
-            OSError,
-            ValueError,
-            RuntimeError,
-            sqlite3.Error,
-            diskcache.Timeout,
-        ) as error:
-            LOG.debug(f"Failed to get cache length: {error}")
-
     api_size = _get_api_cache_size(api_cache_dir)
 
-    from sonora.core.state import get_library_state
+    if _CACHE_INSTANCE is not None or (
+        api_cache_dir.exists() and (api_cache_dir / "cache.db").exists()
+    ):
+        cache = get_cache()
+        if cache is not None:
+            try:
+                api_entries = len(cache)
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                sqlite3.Error,
+                diskcache.Timeout,
+            ) as error:
+                LOG.debug(f"Failed to get cache length: {error}")
 
-    library_state = get_library_state()
-    state_entries = library_state.get_state_count()
-    state_size = library_state.get_state_size()
+    from sonora.core.state import (
+        _STATE_INSTANCE,
+        _get_default_db_path,
+        get_library_state,
+    )
+
+    state_entries = 0
+    state_size = 0
+    default_state_path = _get_default_db_path()
+    if _STATE_INSTANCE is not None or default_state_path.exists():
+        library_state = get_library_state()
+        state_entries = library_state.get_state_count()
+        state_size = library_state.get_state_size()
 
     from sonora.audio.metadata import get_metadata_cache_size
 

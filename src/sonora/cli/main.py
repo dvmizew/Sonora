@@ -1336,7 +1336,7 @@ def cache_clear_cmd(
         do_memory = True
     elif not (api or state or memory):
         do_api = True
-        do_state = False
+        do_state = purge
         do_memory = True
     else:
         do_api = api
