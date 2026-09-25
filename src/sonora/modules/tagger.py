@@ -662,30 +662,52 @@ def _enrich_musicbrainz(
             )
             if mb_rel:
                 rel_art = str(mb_rel.get("album_artist") or mb_rel.get("artist") or "")
-                cmp_art = track_info.artist or ""
+                cmp_art = track_info.album_artist or track_info.artist or ""
                 if rel_art and cmp_art and not _is_generic(cmp_art, "artist"):
-                    rel_norm = normalize_str(rel_art)
-                    cmp_norm = normalize_str(cmp_art)
-                    rel_core = re.sub(r"^(?:the|a|an)\s+", "", rel_norm).strip()
-                    cmp_core = re.sub(r"^(?:the|a|an)\s+", "", cmp_norm).strip()
-                    art_ratio = fuzz.ratio(rel_core, cmp_core)
-                    art_token = fuzz.token_set_ratio(rel_core, cmp_core)
-                    if art_ratio < 65 and art_token < 70:
+                    rel_primary = (
+                        re.sub(
+                            r"^(?:the|a|an)\s+",
+                            "",
+                            clean_title(get_primary_artist(rel_art)),
+                        )
+                        .strip()
+                        .lower()
+                    )
+                    cmp_primary = (
+                        re.sub(
+                            r"^(?:the|a|an)\s+",
+                            "",
+                            clean_title(get_primary_artist(cmp_art)),
+                        )
+                        .strip()
+                        .lower()
+                    )
+                    art_score = max(
+                        fuzz.ratio(rel_primary, cmp_primary),
+                        fuzz.token_sort_ratio(rel_primary, cmp_primary),
+                    )
+                    if art_score < 75.0:
                         track_info.musicbrainz_albumid = None
+                        track_info.musicbrainz_releasegroupid = None
                         mb_rel = None
-                elif (
-                    album_mb_release_details is None
+
+                if (
+                    mb_rel
                     and track_info.album
                     and not _is_generic(track_info.album, "album")
                 ):
                     rel_title = str(mb_rel.get("title") or "").strip()
-                    if (
-                        rel_title
-                        and clean_title(rel_title).lower()
-                        != clean_title(track_info.album).lower()
-                    ):
-                        track_info.musicbrainz_albumid = None
-                        mb_rel = None
+                    if rel_title:
+                        norm_rel = clean_title(rel_title).lower()
+                        norm_alb = clean_title(track_info.album).lower()
+                        title_ratio = fuzz.ratio(norm_rel, norm_alb)
+                        title_sort = fuzz.token_sort_ratio(norm_rel, norm_alb)
+                        min_len = min(len(norm_rel), len(norm_alb))
+                        thresh = 95.0 if min_len < 8 else 75.0
+                        if max(title_ratio, title_sort) < thresh:
+                            track_info.musicbrainz_albumid = None
+                            track_info.musicbrainz_releasegroupid = None
+                            mb_rel = None
 
             if mb_rel:
                 mb_rel_map = {
@@ -788,7 +810,9 @@ def _enrich_itunes(
                 "itunes_artistid": "itunes_artistid",
                 "release_country": "release_country",
             }
-            if not track_info.date:
+            if not track_info.date or (
+                force and not is_valid_uuid(track_info.musicbrainz_albumid)
+            ):
                 itunes_map["date"] = "date"
             if (
                 not track_info.title or track_info.title == "Untitled"
@@ -901,7 +925,9 @@ def _enrich_discogs(
             "producers": "producers",
             "remixer": "remixer",
         }
-        if not track_info.date:
+        if not track_info.date or (
+            force and not is_valid_uuid(track_info.musicbrainz_albumid)
+        ):
             discogs_rel_map["released"] = "date"
             discogs_rel_map["year"] = "date"
         _apply_mapping(
@@ -959,7 +985,9 @@ def _enrich_deezer(
                 "label": "label",
                 "barcode": "barcode",
             }
-            if not track_info.date:
+            if not track_info.date or (
+                force and not is_valid_uuid(track_info.musicbrainz_albumid)
+            ):
                 deezer_album_map["release_date"] = "date"
             _apply_mapping(
                 track_info,
@@ -2099,27 +2127,46 @@ def process_single_track(
             track_info.album_artist = clean_unicode_punct(track_info.album_artist)
 
         # Sanitize sort names: ensure sort names do not contradict the actual artist identity
-        if (
-            track_info.artist_sort
-            and track_info.artist
-            and fuzz.token_set_ratio(
-                normalize_str(track_info.artist_sort),
-                normalize_str(track_info.artist),
+        if track_info.artist_sort and track_info.artist:
+            sort_norm = normalize_str(track_info.artist_sort)
+            art_candidates = [normalize_str(track_info.artist)]
+            primary_artist_val = get_primary_artist(track_info.artist)
+            if primary_artist_val:
+                art_candidates.append(normalize_str(primary_artist_val))
+            sort_score = max(
+                (
+                    max(
+                        fuzz.ratio(sort_norm, cand),
+                        fuzz.token_sort_ratio(sort_norm, cand),
+                    )
+                    for cand in art_candidates
+                    if cand
+                ),
+                default=0.0,
             )
-            < 50
-        ):
-            track_info.artist_sort = None
+            if sort_score < 75.0:
+                track_info.artist_sort = None
+
         cmp_sort_art = track_info.album_artist or track_info.artist or ""
-        if (
-            track_info.album_artist_sort
-            and cmp_sort_art
-            and fuzz.token_set_ratio(
-                normalize_str(track_info.album_artist_sort),
-                normalize_str(cmp_sort_art),
+        if track_info.album_artist_sort and cmp_sort_art:
+            sort_norm = normalize_str(track_info.album_artist_sort)
+            art_candidates = [normalize_str(cmp_sort_art)]
+            primary_album_art = get_primary_artist(cmp_sort_art)
+            if primary_album_art:
+                art_candidates.append(normalize_str(primary_album_art))
+            sort_score = max(
+                (
+                    max(
+                        fuzz.ratio(sort_norm, cand),
+                        fuzz.token_sort_ratio(sort_norm, cand),
+                    )
+                    for cand in art_candidates
+                    if cand
+                ),
+                default=0.0,
             )
-            < 50
-        ):
-            track_info.album_artist_sort = None
+            if sort_score < 75.0:
+                track_info.album_artist_sort = None
 
         # 4. Compute tag diffs and persist metadata
         diff_lines = _render_tag_diffs(orig_info, track_info)

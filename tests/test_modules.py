@@ -1945,6 +1945,116 @@ class TestKeyboardInterruptHandling(unittest.TestCase):
                 fetch_itunes_art=False,
             )
 
+    def test_process_single_track_rejects_mismatched_release_title_and_artist_sort(
+        self,
+    ) -> None:
+        wav = self.tmp_path / "decebal.wav"
+        create_dummy_wav(wav)
+        info = read_track_metadata(wav)
+        info.artist = "RAVA"
+        info.album = "LUCIFER"
+        info.musicbrainz_albumid = "a48c628f-1b6e-4b73-b155-1ccb4cfdb7cd"
+        write_track_metadata(info)
+
+        fake_release = {
+            "title": "Katcharpari",
+            "artist": "Rava",
+            "artist_sort": "Rava, Enrico",
+            "date": "1973-01-10",
+            "release_country": "Italy",
+            "musicbrainz_releasegroupid": "f7b54840-2826-4a25-a821-945a9ee09669",
+        }
+        with patch(
+            "sonora.modules.tagger.fetch_musicbrainz_release_details",
+            return_value=fake_release,
+        ):
+            processed = process_single_track(
+                wav,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+                force=True,
+                dry_run=True,
+                target_album_title="LUCIFER",
+                target_album_artist="RAVA",
+            )
+            self.assertIsNone(processed.musicbrainz_albumid)
+            self.assertIsNone(processed.musicbrainz_releasegroupid)
+            self.assertIsNone(processed.artist_sort)
+            self.assertNotEqual(processed.date, "1973-01-10")
+
+    def test_process_single_track_rejects_foreign_artist_sort_containment(self) -> None:
+        wav = self.tmp_path / "fratemius.wav"
+        create_dummy_wav(wav)
+        info = read_track_metadata(wav)
+        info.artist = "Samurai"
+        info.album = "Fratemius High"
+        info.musicbrainz_albumid = "fc48d2ff-667d-468a-a5e2-760f8f5a1bcf"
+        write_track_metadata(info)
+
+        fake_release = {
+            "title": "Fly High",
+            "artist": "A Samurai In Tokyo",
+            "artist_sort": "A Samurai In Tokyo",
+            "date": "2023-02-22",
+            "musicbrainz_releasegroupid": "d0078d28-0a2a-4025-a3a9-81ee90685e6a",
+        }
+        with patch(
+            "sonora.modules.tagger.fetch_musicbrainz_release_details",
+            return_value=fake_release,
+        ):
+            processed = process_single_track(
+                wav,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+                force=True,
+                dry_run=True,
+                target_album_title="Fratemius High",
+                target_album_artist="Samurai",
+            )
+            self.assertIsNone(processed.musicbrainz_albumid)
+            self.assertIsNone(processed.musicbrainz_releasegroupid)
+            self.assertIsNone(processed.artist_sort)
+
+    def test_process_single_track_preserves_valid_inverted_artist_sort(self) -> None:
+        wav = self.tmp_path / "posty.wav"
+        create_dummy_wav(wav)
+        info = read_track_metadata(wav)
+        info.artist = "Post Malone"
+        info.album = "Hollywood's Bleeding"
+        info.musicbrainz_albumid = "11111111-2222-3333-4444-555555555555"
+        write_track_metadata(info)
+
+        fake_release = {
+            "title": "Hollywood's Bleeding",
+            "artist": "Post Malone",
+            "artist_sort": "Malone, Post",
+            "date": "2019-09-06",
+            "musicbrainz_releasegroupid": "66666666-7777-8888-9999-000000000000",
+        }
+        with patch(
+            "sonora.modules.tagger.fetch_musicbrainz_release_details",
+            return_value=fake_release,
+        ):
+            processed = process_single_track(
+                wav,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+                force=True,
+                dry_run=True,
+                target_album_title="Hollywood's Bleeding",
+                target_album_artist="Post Malone",
+            )
+            self.assertEqual(
+                processed.musicbrainz_albumid, "11111111-2222-3333-4444-555555555555"
+            )
+            self.assertEqual(processed.artist_sort, "Malone, Post")
+
 
 if __name__ == "__main__":
     unittest.main()
