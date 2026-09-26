@@ -93,6 +93,32 @@ class TestServicesEngine(unittest.TestCase):
             url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg"
         )
 
+    @patch("sonora.core.http.SESSION.get")
+    def test_fetch_itunes_cover_art_url_primary_artist_fallback(
+        self, mock_get: MagicMock
+    ) -> None:
+        empty_response = MagicMock()
+        empty_response.json.return_value = {"results": []}
+
+        success_response = MagicMock()
+        success_response.json.return_value = {
+            "results": [
+                {
+                    "artistName": "21 Savage",
+                    "collectionName": "Savage Mode II",
+                    "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/100x100-75.jpg",
+                }
+            ]
+        }
+        mock_get.side_effect = [empty_response, success_response]
+
+        url = fetch_itunes_cover_art_url(
+            "21 Savage & Metro Boomin", "Savage Mode II", resolution=1400
+        )
+        self.assertEqual(
+            url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg"
+        )
+
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics(self, mock_syncedlyrics: MagicMock) -> None:
         # 1. Basic search

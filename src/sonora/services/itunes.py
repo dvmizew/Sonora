@@ -1,3 +1,5 @@
+import re
+
 import httpx
 from rapidfuzz import fuzz
 
@@ -8,6 +10,7 @@ from sonora.core.logger import LOG
 from sonora.core.utils import (
     RateLimiter,
     extract_series_number,
+    get_primary_artist,
     match_score,
     normalize_country_name,
     normalize_str,
@@ -66,19 +69,30 @@ def fetch_itunes_cover_art_url(
     """
     results = search_itunes(artist=artist, term=album, entity="album")
     if not results:
+        primary_artist = get_primary_artist(artist)
+        if primary_artist and primary_artist.lower() != artist.lower():
+            results = search_itunes(artist=primary_artist, term=album, entity="album")
+    if not results:
         return None
 
     normalized_target = normalize_str(album)
     best_result: dict[str, object] | None = None
+    primary_orig = get_primary_artist(artist)
 
     # Step 1: Look for exact normalized title match
     for result in results:
         collection_name = str(result.get("collectionName", ""))
         cand_artist = str(result.get("artistName", ""))
+        primary_cand = get_primary_artist(cand_artist)
         if (
             artist
             and cand_artist
             and match_score(artist, album, cand_artist, collection_name) < 60.0
+            and (
+                not primary_orig
+                or match_score(primary_orig, album, primary_cand, collection_name)
+                < 60.0
+            )
         ):
             continue
         if normalize_str(collection_name) == normalized_target:
@@ -91,10 +105,16 @@ def fetch_itunes_cover_art_url(
         for result in results:
             collection_name = str(result.get("collectionName", ""))
             cand_artist = str(result.get("artistName", ""))
+            primary_cand = get_primary_artist(cand_artist)
             if (
                 artist
                 and cand_artist
                 and match_score(artist, album, cand_artist, collection_name) < 60.0
+                and (
+                    not primary_orig
+                    or match_score(primary_orig, album, primary_cand, collection_name)
+                    < 60.0
+                )
             ):
                 continue
             normalized_collection = normalize_str(collection_name)
@@ -118,7 +138,14 @@ def fetch_itunes_cover_art_url(
     if best_result is not None:
         artwork_url = best_result.get("artworkUrl100")
         if isinstance(artwork_url, str):
-            return artwork_url.replace("100x100bb", f"{resolution}x{resolution}bb")
+            if "100x100bb" in artwork_url:
+                return artwork_url.replace("100x100bb", f"{resolution}x{resolution}bb")
+            upgraded_url = re.sub(
+                r"\b\d+x\d+(?:bb)?(?:-\d+)?\b",
+                f"{resolution}x{resolution}bb",
+                artwork_url,
+            )
+            return upgraded_url
 
     return None
 

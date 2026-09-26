@@ -105,8 +105,24 @@ def process_album_cover_art(
         target_dir = folder_path.parent
 
     cover_image_path = target_dir / "cover.jpg"
+    is_low_res = False
+    existing_bytes: bytes | None = None
+    existing_dim: tuple[int, int] | None = None
+    if cover_image_path.exists() and cover_image_path.stat().st_size > 0:
+        try:
+            existing_bytes = cover_image_path.read_bytes()
+            with Image.open(io.BytesIO(existing_bytes)) as cur_img:
+                existing_dim = cur_img.size
+                if cur_img.width < 500 or cur_img.height < 500:
+                    is_low_res = True
+        except (OSError, UnidentifiedImageError):
+            pass
+
     artwork_already_present = (
-        cover_image_path.exists() and cover_image_path.stat().st_size > 0 and not force
+        cover_image_path.exists()
+        and cover_image_path.stat().st_size > 0
+        and not force
+        and not is_low_res
     )
 
     if not artwork_already_present:
@@ -131,29 +147,49 @@ def process_album_cover_art(
                 new_artwork_bytes = response.content
 
                 if not dry_run:
-                    existing_bytes = (
-                        cover_image_path.read_bytes()
-                        if (
-                            cover_image_path.exists()
-                            and cover_image_path.stat().st_size > 0
-                        )
-                        else None
-                    )
+                    new_dim: tuple[int, int] | None = None
+                    try:
+                        with Image.open(io.BytesIO(new_artwork_bytes)) as n_img:
+                            new_dim = n_img.size
+                    except (OSError, UnidentifiedImageError):
+                        pass
+
+                    # Quality Downgrade Protection (GEMINI.md Rule 9)
                     if (
+                        existing_dim
+                        and new_dim
+                        and existing_dim[0] >= 500
+                        and existing_dim[1] >= 500
+                        and (existing_dim[0] * existing_dim[1])
+                        > (new_dim[0] * new_dim[1])
+                    ):
+                        LOG.info(
+                            f"   ∟ 🛡️  [Quality Shield] Preserved higher-resolution cover ({existing_dim[0]}x{existing_dim[1]} > {new_dim[0]}x{new_dim[1]})"
+                        )
+                    elif (
                         existing_bytes
                         and not force
+                        and not is_low_res
                         and not check_image_similarity(
                             existing_bytes, new_artwork_bytes
                         )
                     ):
-                        LOG.info(
-                            "   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch"
-                        )
+                        LOG.info("   ∟ 🖼️  Skipped cover upgrade: visual mismatch")
                     else:
                         temp_path = cover_image_path.with_suffix(".tmp")
                         temp_path.write_bytes(new_artwork_bytes)
                         temp_path.replace(cover_image_path)
-                        LOG.info("   ∟ 🖼️  Downloaded Cover Art")
+                        if (
+                            existing_dim
+                            and new_dim
+                            and (new_dim[0] * new_dim[1])
+                            > (existing_dim[0] * existing_dim[1])
+                        ):
+                            LOG.info(
+                                f"   ∟ 🖼️  Upgraded Cover Art ({existing_dim[0]}x{existing_dim[1]} -> {new_dim[0]}x{new_dim[1]})"
+                            )
+                        else:
+                            LOG.info("   ∟ 🖼️  Downloaded Cover Art")
                 else:
                     LOG.info(
                         f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
