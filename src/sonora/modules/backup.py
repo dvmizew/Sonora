@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.logger import (
@@ -14,7 +15,11 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import TrackInfo
-from sonora.core.utils import find_audio_files
+from sonora.core.utils import (
+    InterruptedOperationError,
+    find_audio_files,
+    is_interruption,
+)
 
 _GZIP_MAGIC_HEADER = b"\x1f\x8b"
 
@@ -24,7 +29,7 @@ def _read_track_for_backup(audio_file: Path) -> tuple[str, dict[str, Any] | None
     try:
         track_info = read_track_metadata(audio_file)
         return str(audio_file), track_info.to_dict()
-    except (OSError, ValueError, RuntimeError) as error:
+    except OSError as error:
         LOG.debug(f"Error reading {audio_file} for backup: {error}")
         return str(audio_file), None
 
@@ -46,9 +51,7 @@ def _restore_single_track(
         elif candidate_lookup and target_path.name in candidate_lookup:
             target_path = candidate_lookup[target_path.name]
         elif candidate_lookup is None and base_dir.exists():
-            matches = list(base_dir.rglob(target_path.name))
-            if matches:
-                target_path = matches[0]
+            target_path = next(base_dir.rglob(target_path.name), target_path)
 
     if not target_path.exists():
         return False, True
@@ -62,7 +65,7 @@ def _restore_single_track(
             }
             write_track_metadata(TrackInfo(file_path=target_path, **clean_tags))
             return True, False
-    except (OSError, ValueError, RuntimeError) as error:
+    except OSError as error:
         LOG.debug(f"Failed to restore {target_path}: {error}")
     return False, False
 
@@ -73,7 +76,7 @@ def backup_library_tags(
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")
 
-    LOG.info(f"🔄 Scanning for files in {directory}...")
+    LOG.info(f"🔄 Scanning for files in {escape(str(directory))}...")
     audio_files = find_audio_files(directory, recursive=True)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -89,35 +92,37 @@ def backup_library_tags(
     LOG.info(
         f"🔄 Creating full backup for {len(audio_files)} files (threads={max_threads})..."
     )
-    backup_data: dict[str, Any] = {}
+    backup_manifest: dict[str, Any] = {}
     failed = 0
 
-    with create_progress() as progress:
+    with (
+        create_progress() as progress,
+        ThreadPoolExecutor(max_workers=max_threads) as executor,
+    ):
         task = progress.add_task(
             "[cyan]Backing up audio tags...", total=len(audio_files)
         )
+        futures = [
+            executor.submit(_read_track_for_backup, file_path)
+            for file_path in audio_files
+        ]
         with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
-                futures = [
-                    executor.submit(_read_track_for_backup, file_path)
-                    for file_path in audio_files
-                ]
                 for future in as_completed(futures):
-                    path_str, data = future.result()
-                    if data is not None:
-                        backup_data[path_str] = data
+                    path_str, tag_dict = future.result()
+                    if tag_dict is not None:
+                        backup_manifest[path_str] = tag_dict
                     else:
                         failed += 1
                     progress.advance(task)
-            except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
+                executor.shutdown(wait=True, cancel_futures=True)
                 raise
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
 
     try:
-        raw_json_bytes = orjson.dumps(backup_data, option=orjson.OPT_INDENT_2)
+        raw_json_bytes = orjson.dumps(backup_manifest, option=orjson.OPT_INDENT_2)
         payload = (
             gzip.compress(raw_json_bytes, compresslevel=6)
             if output_path.name.endswith(".gz")
@@ -129,22 +134,14 @@ def backup_library_tags(
         temp_output.replace(output_path)
 
         LOG.info(
-            f"✅ Successfully backed up {len(backup_data)}/{len(audio_files)} files to {output_path}"
+            f"✅ Successfully backed up {len(backup_manifest)}/{len(audio_files)} files to {escape(str(output_path))}"
         )
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files could not be read")
         return output_path
-    except (OSError, TypeError) as error:
+    except OSError as error:
         LOG.error(f"Failed to save backup: {error}")
         raise
-
-
-LAST_RESTORED_COUNT: int = 0
-
-
-def get_last_restored_count() -> int:
-    """Return the number of files restored during the most recent or interrupted restore run."""
-    return LAST_RESTORED_COUNT
 
 
 def restore_library_tags(
@@ -159,23 +156,24 @@ def restore_library_tags(
     if not backup_file.exists():
         raise FileNotFoundError(f"Backup file not found: {backup_file}")
 
-    global LAST_RESTORED_COUNT
-    LAST_RESTORED_COUNT = 0
-
     LOG.info(
-        f"🔄 Starting tag restoration from {backup_file} (threads={max_threads})..."
+        f"🔄 Starting tag restoration from {escape(str(backup_file))} (threads={max_threads})..."
     )
     try:
         content = backup_file.read_bytes()
         if content.startswith(_GZIP_MAGIC_HEADER) or backup_file.name.endswith(".gz"):
             content = gzip.decompress(content)
 
-        backup_dict: dict[str, Any] = orjson.loads(content)
-        if not isinstance(backup_dict, dict):
-            raise TypeError("Backup file is not a valid JSON object")
-    except (orjson.JSONDecodeError, OSError, ValueError) as error:
+        backup_payload: Any = orjson.loads(content)
+    except (orjson.JSONDecodeError, OSError) as error:
         LOG.error(f"Failed to read backup file: {error}")
         raise
+
+    if not isinstance(backup_payload, dict):
+        error_msg = "Backup file is not a valid JSON object"
+        LOG.error(f"Failed to read backup file: {error_msg}")
+        raise TypeError(error_msg)
+    backup_dict: dict[str, Any] = backup_payload
 
     count = 0
     failed = 0
@@ -183,41 +181,42 @@ def restore_library_tags(
     search_base_dir = target_directory or backup_file.parent
     candidate_lookup: dict[str, Path] = {}
     if search_base_dir.exists():
-        for p in find_audio_files(search_base_dir, recursive=True):
-            candidate_lookup.setdefault(p.name, p)
+        for audio_file_path in find_audio_files(search_base_dir, recursive=True):
+            candidate_lookup.setdefault(audio_file_path.name, audio_file_path)
 
-    with create_progress() as progress:
+    with (
+        create_progress() as progress,
+        ThreadPoolExecutor(max_workers=max_threads) as executor,
+    ):
         task = progress.add_task(
             "[cyan]Restoring audio tags...", total=len(backup_dict)
         )
+        futures = [
+            executor.submit(
+                _restore_single_track,
+                file_str,
+                tags,
+                search_base_dir,
+                candidate_lookup,
+            )
+            for file_str, tags in backup_dict.items()
+        ]
         with interactive_pause_listener(progress, task):
-            executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
-                futures = [
-                    executor.submit(
-                        _restore_single_track,
-                        file_str,
-                        tags,
-                        search_base_dir,
-                        candidate_lookup,
-                    )
-                    for file_str, tags in backup_dict.items()
-                ]
                 for future in as_completed(futures):
                     success, is_missing = future.result()
                     if success:
                         count += 1
-                        LAST_RESTORED_COUNT = count
                     elif is_missing:
                         missing += 1
                     else:
                         failed += 1
                     progress.advance(task)
-            except KeyboardInterrupt:
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+            except (KeyboardInterrupt, RuntimeError) as exc:
+                if not is_interruption(exc):
+                    raise
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise InterruptedOperationError(count) from None
 
     LOG.info(f"✅ Successfully restored {count} files")
     if missing > 0:

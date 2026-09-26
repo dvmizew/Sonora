@@ -1,13 +1,15 @@
 import json
+import os
 import re
 import threading
 import time
 import unicodedata
 import uuid
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 import anyascii
 import ftfy
@@ -23,7 +25,6 @@ from music_metadata_filter.functions import (
     remove_remastered,
     remove_zero_width,
     replace_nbsp,
-    youtube,
 )
 from pathvalidate import sanitize_filename
 from rapidfuzz import fuzz
@@ -45,63 +46,62 @@ from sonora.core.constants import (
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 
-_ROMAN_MAP: dict[str, int] = {
-    "i": 1,
-    "ii": 2,
-    "iii": 3,
-    "iv": 4,
-    "v": 5,
-    "vi": 6,
-    "vii": 7,
-    "viii": 8,
-    "ix": 9,
-    "x": 10,
-    "xi": 11,
-    "xii": 12,
-    "xiii": 13,
-    "xiv": 14,
-    "xv": 15,
-    "xvi": 16,
-    "xvii": 17,
-    "xviii": 18,
-    "xix": 19,
-    "xx": 20,
-    "xxi": 21,
-    "xxii": 22,
-    "xxiii": 23,
-    "xxiv": 24,
-    "xxv": 25,
-    "xxvi": 26,
-    "xxvii": 27,
-    "xxviii": 28,
-    "xxix": 29,
-    "xxx": 30,
-    "xl": 40,
-    "l": 50,
-}
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50}
 
-_WORD_NUMBER_MAP: dict[str, int] = {
-    "one": 1,
-    "two": 2,
-    "three": 3,
-    "four": 4,
-    "five": 5,
-    "six": 6,
-    "seven": 7,
-    "eight": 8,
-    "nine": 9,
-    "ten": 10,
-    "eleven": 11,
-    "twelve": 12,
-    "thirteen": 13,
-    "fourteen": 14,
-    "fifteen": 15,
-    "sixteen": 16,
-    "seventeen": 17,
-    "eighteen": 18,
-    "nineteen": 19,
-    "twenty": 20,
-}
+
+def _parse_roman_numeral(token: str) -> int | None:
+    total, prev = 0, 0
+    for char in reversed(token):
+        val = _ROMAN_VALUES.get(char)
+        if val is None:
+            return None
+        total += val if val >= prev else -val
+        prev = val
+    return total if 1 <= total <= 50 else None
+
+
+_WORD_NUMBERS = [
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+]
+_WORD_NUMBER_MAP: dict[str, int] = {w: i for i, w in enumerate(_WORD_NUMBERS, 1)}
+
+
+class InterruptedOperationError(KeyboardInterrupt):
+    """Raised when an operation is cancelled via SIGINT / KeyboardInterrupt, carrying partial progress."""
+
+    def __init__(self, partial_result: Any = None) -> None:
+        super().__init__()
+        self.partial_result = partial_result
+
+
+def is_interruption(exc: BaseException) -> bool:
+    """Return True if an exception represents a SIGINT/Ctrl+C user cancellation,
+    including threading Condition lock release errors triggered during signal interrupts."""
+    if isinstance(exc, (KeyboardInterrupt, InterruptedOperationError)):
+        return True
+    if isinstance(exc, RuntimeError) and "release unlocked lock" in str(exc):
+        return True
+    context = getattr(exc, "__context__", None)
+    return bool(context and isinstance(context, KeyboardInterrupt))
 
 
 def extract_series_number(text: str | None) -> int | None:
@@ -114,31 +114,17 @@ def extract_series_number(text: str | None) -> int | None:
 
     clean_text = ftfy.fix_text(str(text)).strip().lower()
 
-    prefix_match = re.search(
+    match = re.search(
         r"\b(?:vol(?:ume)?|pt|part|chapter|act|book)\.?\s*(\d{1,2}|[a-z]+)\b",
         clean_text,
         re.IGNORECASE,
-    )
-    if prefix_match:
-        token = prefix_match.group(1).lower()
-        if token.isdigit():
-            return int(token)
-        if token in _ROMAN_MAP:
-            return _ROMAN_MAP[token]
-        return _WORD_NUMBER_MAP.get(token)
+    ) or re.search(r"\b(\d{1,2}|[a-z]+)\s*$", clean_text, re.IGNORECASE)
 
-    trailing_match = re.search(
-        r"\b(\d{1,2}|[a-z]+)\s*$",
-        clean_text,
-        re.IGNORECASE,
-    )
-    if trailing_match:
-        token = trailing_match.group(1).lower()
+    if match:
+        token = match.group(1).lower()
         if token.isdigit():
             return int(token)
-        if token in _ROMAN_MAP:
-            return _ROMAN_MAP[token]
-        return _WORD_NUMBER_MAP.get(token)
+        return _parse_roman_numeral(token) or _WORD_NUMBER_MAP.get(token)
 
     return None
 
@@ -165,14 +151,15 @@ def safe_float(value: object) -> float | None:
 
 
 _UNICODE_HYPHENS_PATTERN = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2015]")
-_ZERO_WIDTH_PATTERN = re.compile(r"[\u200B\u200C\u200D\uFEFF]")
+_SPACES_BEFORE_COMMA_PATTERN = re.compile(r"\s+,")
 
 
 def clean_unicode_punct(text: str | None) -> str:
     if not text:
         return ""
-    cleaned = _ZERO_WIDTH_PATTERN.sub("", str(text))
-    return _UNICODE_HYPHENS_PATTERN.sub("-", cleaned)
+    cleaned = remove_zero_width(str(text))
+    cleaned = _UNICODE_HYPHENS_PATTERN.sub("-", cleaned)
+    return _SPACES_BEFORE_COMMA_PATTERN.sub(",", cleaned)
 
 
 _COLLAPSE_SPACES_PATTERN = re.compile(r"\s+")
@@ -205,17 +192,17 @@ def _load_user_overrides() -> dict[str, str]:
         seen_paths.add(path)
         try:
             if path.exists() and path.is_file() and path.stat().st_size > 0:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    for key, value in data.items():
-                        overrides[normalize_str(key)] = str(value).strip()
+                alias_dict = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(alias_dict, dict):
+                    for src, dest in alias_dict.items():
+                        overrides[normalize_str(src)] = str(dest).strip()
         except (OSError, ValueError) as error:
             LOG.warning(f"Failed to load user aliases from {path}: {error}")
     return overrides
 
 
 @lru_cache(maxsize=4096)
-def resolve_artist_name(raw_name: str | None) -> str:
+def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str:
     """
     Resolve legal names, aliases, or variations to canonical stage names.
     Returns the resolved canonical name or the cleaned input if not an alias.
@@ -237,7 +224,16 @@ def resolve_artist_name(raw_name: str | None) -> str:
     cache_key = f"canonical_artist:{normalized}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
-        return clean_unicode_punct(cached)
+        is_cached_acronym = (
+            len(cached.replace(".", "")) <= 3
+            or "." in cached
+            or bool(re.search(r"\d", cached))
+        )
+        if not (cached.isupper() and not is_cached_acronym):
+            return clean_unicode_punct(cached)
+
+    if not allow_network:
+        return clean_unicode_punct(clean_name)
 
     # Tier 3: MusicBrainz Alias / Legal Name lookup
     try:
@@ -253,9 +249,14 @@ def resolve_artist_name(raw_name: str | None) -> str:
             if not art_name:
                 continue
             if art_name.lower() == clean_name.lower():
+                is_acronym_or_initialism = (
+                    len(clean_name.replace(".", "")) <= 3
+                    or "." in clean_name
+                    or bool(re.search(r"\d", clean_name))
+                )
                 if (
                     clean_name.isupper()
-                    and len(clean_name.replace(".", "")) <= 5
+                    and is_acronym_or_initialism
                     and not art_name.isupper()
                 ):
                     res_name = clean_name
@@ -298,13 +299,8 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     clean_art = clean_unicode_punct(art_name)
                     set_cached_api(cache_key, clean_art)
                     return clean_art
-    except (
-        httpx.HTTPError,
-        OSError,
-        ValueError,
-        RuntimeError,
-    ):
-        pass
+    except (httpx.HTTPError, OSError) as e:
+        LOG.debug(f"MusicBrainz API error during artist resolution: {e}")
 
     # Tier 4: Deezer Artist lookup
     try:
@@ -314,9 +310,9 @@ def resolve_artist_name(raw_name: str | None) -> str:
             timeout=5,
         )
         if response.status_code == 200:
-            data = response.json().get("data", [])
-            if data and isinstance(data, list):
-                deezer_name = str(data[0].get("name", "")).strip()
+            deezer_results = response.json().get("data", [])
+            if deezer_results and isinstance(deezer_results, list):
+                deezer_name = str(deezer_results[0].get("name", "")).strip()
                 if deezer_name and normalize_str(deezer_name) == normalized:
                     # Do not override all-caps acronyms (e.g. M.G.L) with lowercased titles
                     if (
@@ -328,8 +324,8 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     clean_deezer = clean_unicode_punct(deezer_name)
                     set_cached_api(cache_key, clean_deezer)
                     return clean_deezer
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError):
-        pass
+    except (httpx.HTTPError, OSError) as e:
+        LOG.debug(f"Deezer API error during artist resolution: {e}")
 
     clean_final = clean_unicode_punct(clean_name)
     set_cached_api(cache_key, clean_final)
@@ -351,10 +347,17 @@ def is_single_group_artist(raw_name: str | None) -> bool:
     if not normalized:
         return False
 
-    if not any(
-        char in clean_name.lower()
-        for char in ("&", "+", ",", " și ", " si ", " with ", " / ")
-    ):
+    delimiters = ("&", "+", ",", "/")
+    has_delimiter = any(delim in clean_name for delim in delimiters)
+    has_conjunction = False
+    if not has_delimiter:
+        from sonora.core.config import get_config
+
+        name_lower = f" {clean_name.lower()} "
+        has_conjunction = any(
+            f" {conj} " in name_lower for conj in get_config().featuring_conjunctions
+        )
+    if not (has_delimiter or has_conjunction):
         return False
 
     user_overrides = _load_user_overrides()
@@ -380,6 +383,11 @@ def is_single_group_artist(raw_name: str | None) -> bool:
             score = safe_int(artist.get("ext:score")) or 0
             artist_type = artist.get("type")
             if name_match and (score >= 90 or artist_type == "Group"):
+                canonical_name = clean_unicode_punct(
+                    str(artist.get("name", "")).strip()
+                )
+                if canonical_name:
+                    set_cached_api(f"canonical_artist:{normalized}", canonical_name)
                 set_cached_api(cache_key, True)
                 return True
         set_cached_api(cache_key, False)
@@ -393,7 +401,7 @@ def is_single_group_artist(raw_name: str | None) -> bool:
         return False
 
 
-def get_primary_artist(artist_name: str | None) -> str:
+def get_primary_artist(artist_name: str | None, allow_network: bool = False) -> str:
     """
     Extract primary artist from raw artist string by resolving aliases and stripping
     transient featured artists/delimiters, while preserving single group/band entities
@@ -403,12 +411,17 @@ def get_primary_artist(artist_name: str | None) -> str:
         return "Unknown"
 
     raw_artist_name = str(artist_name).strip()
+    formatted_artist_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", raw_artist_name).strip()
     if is_single_group_artist(raw_artist_name):
-        return sanitize_name(resolve_artist_name(raw_artist_name))
+        return sanitize_name(
+            resolve_artist_name(formatted_artist_name, allow_network=allow_network)
+        )
 
     parts = get_artist_split_pattern().split(raw_artist_name, maxsplit=1)
     primary = parts[0].strip() if parts else raw_artist_name
-    return sanitize_name(resolve_artist_name(primary) or "Unknown")
+    return sanitize_name(
+        resolve_artist_name(primary, allow_network=allow_network) or "Unknown"
+    )
 
 
 _METADATA_FILTER = MetadataFilter(
@@ -416,7 +429,6 @@ _METADATA_FILTER = MetadataFilter(
         "track": (
             remove_zero_width,
             replace_nbsp,
-            youtube,
             remove_clean_explicit,
             remove_reissue,
             remove_remastered,
@@ -440,7 +452,7 @@ _METADATA_FILTER = MetadataFilter(
 )
 
 _TITLE_EDITION_PATTERN = re.compile(
-    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd|album\s+version).*?[\)\]\}]",
+    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd|album\s+version|clean\s+version|explicit\s+version|parody|official\s+(?:music\s+)?video|official\s+audio).*?[\)\]\}]",
     re.IGNORECASE,
 )
 
@@ -485,8 +497,6 @@ def extract_balanced_features(
                     if c == "[":
                         open_char, close_char = "[", "]"
                     last_end = end
-            else:
-                pass
         else:
             i += 1
 
@@ -538,14 +548,16 @@ def deduplicate_title_features(
             unique_artists.append(clean_tok)
 
     if not unique_artists:
-        res = base_title
+        formatted_title = base_title
     elif len(unique_artists) == 1:
-        res = f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
+        formatted_title = (
+            f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
+        )
     else:
         feat_str = ", ".join(unique_artists[:-1]) + f" & {unique_artists[-1]}"
-        res = f"{base_title} {open_char}feat. {feat_str}{close_char}"
+        formatted_title = f"{base_title} {open_char}feat. {feat_str}{close_char}"
 
-    return _COLLAPSE_SPACES_PATTERN.sub(" ", res).strip()
+    return _COLLAPSE_SPACES_PATTERN.sub(" ", formatted_title).strip()
 
 
 @lru_cache(maxsize=8192)
@@ -579,9 +591,63 @@ _VERSION_OR_REMIX_KEYWORDS = frozenset(
 )
 
 
+_REMIX_MODIFIER_PATTERN = re.compile(
+    r"[\(\[\{]([^\)\]\}]+?(?:remix|rework|edit|mix|version|dub|flip|vip|bootleg|demo|live|acoustic|instrumental))[\]\)\}]",
+    re.IGNORECASE,
+)
+
+
+def extract_version_modifier(title: str) -> str | None:
+    match = _REMIX_MODIFIER_PATTERN.search(title)
+    if match:
+        return match.group(1).lower().strip()
+    return None
+
+
 def is_version_or_remix(text: str) -> bool:
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in _VERSION_OR_REMIX_KEYWORDS)
+
+
+def count_unicode_accents(text: str) -> int:
+    """
+    Count combining diacritical marks and accented characters universally
+    across all Unicode scripts (Latin, Cyrillic, Greek, Vietnamese, etc.)
+    using standard Unicode canonical decomposition (NFD).
+    """
+    decomposed = unicodedata.normalize("NFD", text)
+    return sum(1 for char in decomposed if unicodedata.category(char).startswith("M"))
+
+
+@lru_cache(maxsize=8192)
+def preserve_unicode_repertoire(current: str | None, candidate: str | None) -> str:
+    """
+    Reconcile two representations of the same text, preserving authentic Unicode characters
+    when remote metadata databases return lossy ASCII-7 or unaccented Romanized transliterations
+    (e.g., 'Bombe în rai' vs 'Bombe in rai', 'Andreea Bănică' vs 'Andreea Banica', 'Sigur Rós' vs 'Sigur Ros').
+    Operates universally across all languages and scripts without language-specific hardcoding.
+    """
+    if not current:
+        return candidate or ""
+    if not candidate:
+        return current
+    if current == candidate:
+        return current
+
+    if normalize_str(current) == normalize_str(candidate):
+        current_accents = count_unicode_accents(current)
+        candidate_accents = count_unicode_accents(candidate)
+
+        if current_accents > candidate_accents:
+            return current
+        if candidate_accents > current_accents:
+            return candidate
+        return current if current_accents > 0 else candidate
+
+    return candidate
+
+
+_NON_WORD_SPACES_PATTERN = re.compile(r"[^\w\s]")
 
 
 def match_score(
@@ -592,7 +658,7 @@ def match_score(
 ) -> float:
     """
     Calculate a combined 0-100 similarity score between query (artist, title)
-    and candidate (artist, title) using RapidFuzz WRatio and ratio with version and series penalties.
+    and candidate (artist, title) using RapidFuzz ratio with version, remix modifier, and series penalties.
     """
     if not query_title or not candidate_title:
         return 0.0
@@ -621,62 +687,121 @@ def match_score(
         )
         title_score = max(title_ratio, title_token_sort)
 
-        # Check match after stripping leading articles ('the ', 'a ', 'an ')
-        q_no_art = re.sub(r"^(?:the|a|an)\s+", "", query_title_clean).strip()
-        c_no_art = re.sub(r"^(?:the|a|an)\s+", "", candidate_title_clean).strip()
+        query_word = _NON_WORD_SPACES_PATTERN.sub(" ", query_title_clean).strip()
+        candidate_word = _NON_WORD_SPACES_PATTERN.sub(
+            " ", candidate_title_clean
+        ).strip()
         if (
-            q_no_art
-            and c_no_art
-            and (q_no_art != query_title_clean or c_no_art != candidate_title_clean)
+            query_word
+            and candidate_word
+            and (
+                query_word != query_title_clean
+                or candidate_word != candidate_title_clean
+            )
         ):
-            art_ratio = float(fuzz.ratio(q_no_art, c_no_art))
-            art_sort = float(fuzz.token_sort_ratio(q_no_art, c_no_art))
+            title_score = max(
+                title_score,
+                float(fuzz.ratio(query_word, candidate_word)),
+                float(fuzz.token_sort_ratio(query_word, candidate_word)),
+            )
+            query_tokens = query_word.split()
+            candidate_tokens = candidate_word.split()
+            if (
+                min(len(query_tokens), len(candidate_tokens)) >= 3
+                and min(len(query_word), len(candidate_word))
+                / max(len(query_word), len(candidate_word))
+                >= 0.5
+            ):
+                title_score = max(
+                    title_score, float(fuzz.token_set_ratio(query_word, candidate_word))
+                )
+
+        query_no_articles = re.sub(r"^(?:the|a|an)\s+", "", query_title_clean).strip()
+        candidate_no_articles = re.sub(
+            r"^(?:the|a|an)\s+", "", candidate_title_clean
+        ).strip()
+        if (
+            query_no_articles
+            and candidate_no_articles
+            and (
+                query_no_articles != query_title_clean
+                or candidate_no_articles != candidate_title_clean
+            )
+        ):
+            art_ratio = float(fuzz.ratio(query_no_articles, candidate_no_articles))
+            art_sort = float(
+                fuzz.token_sort_ratio(query_no_articles, candidate_no_articles)
+            )
             title_score = max(title_score, art_ratio, art_sort)
 
-    q_ver = is_version_or_remix(query_title) or is_version_or_remix(query_title_clean)
-    c_ver = is_version_or_remix(candidate_title) or is_version_or_remix(
+    query_version = is_version_or_remix(query_title) or is_version_or_remix(
+        query_title_clean
+    )
+    candidate_version = is_version_or_remix(candidate_title) or is_version_or_remix(
         candidate_title_clean
     )
-    if q_ver != c_ver:
-        title_score -= 35.0
-    elif q_ver and c_ver:
-        for kw in _VERSION_OR_REMIX_KEYWORDS:
-            if (kw in query_title_clean) != (kw in candidate_title_clean):
-                title_score -= 35.0
-                break
+    if query_version != candidate_version:
+        if query_title_clean == candidate_title_clean:
+            title_score -= 15.0
+        else:
+            title_score -= 35.0
+    elif query_version and candidate_version:
+        q_mod = extract_version_modifier(query_title)
+        c_mod = extract_version_modifier(candidate_title)
+        if q_mod and c_mod:
+            mod_ratio = float(fuzz.ratio(q_mod, c_mod))
+            mod_sort = float(fuzz.token_sort_ratio(q_mod, c_mod))
+            if max(mod_ratio, mod_sort) < 70.0:
+                title_score -= 60.0
+        else:
+            for kw in _VERSION_OR_REMIX_KEYWORDS:
+                if (kw in query_title_clean) != (kw in candidate_title_clean):
+                    title_score -= 35.0
+                    break
 
     title_score = max(0.0, min(100.0, title_score))
 
-    if query_artist_clean and candidate_artist_clean:
-        if query_artist_clean == candidate_artist_clean:
+    if query_artist_clean:
+        if not candidate_artist_clean:
+            artist_score = 50.0
+        elif query_artist_clean == candidate_artist_clean:
             artist_score = 100.0
         else:
-            q_prim = clean_title(get_primary_artist(query_artist_clean)).lower()
-            c_prim = clean_title(get_primary_artist(candidate_artist_clean)).lower()
-            if q_prim == c_prim:
+            query_primary = clean_title(get_primary_artist(query_artist_clean)).lower()
+            candidate_primary = clean_title(
+                get_primary_artist(candidate_artist_clean)
+            ).lower()
+            if query_primary == candidate_primary:
                 artist_score = 100.0
             else:
-                min_len = min(len(q_prim), len(c_prim))
-                if min_len <= 3:
-                    artist_score = 100.0 if q_prim == c_prim else 0.0
-                elif min_len <= 5:
-                    artist_score = float(fuzz.ratio(q_prim, c_prim))
+                q_core = re.sub(r"^(?:the|a|an)\s+", "", query_primary).strip()
+                c_core = re.sub(r"^(?:the|a|an)\s+", "", candidate_primary).strip()
+                if q_core == c_core:
+                    artist_score = 100.0
                 else:
-                    artist_w = fuzz.WRatio(query_artist_clean, candidate_artist_clean)
-                    artist_token = fuzz.token_set_ratio(
-                        query_artist_clean, candidate_artist_clean
-                    )
-                    artist_score = max(artist_w, artist_token)
+                    min_len = min(len(q_core), len(c_core))
+                    if min_len <= 3:
+                        artist_score = 100.0 if q_core == c_core else 0.0
+                    else:
+                        core_ratio = float(fuzz.ratio(q_core, c_core))
+                        core_sort = float(fuzz.token_sort_ratio(q_core, c_core))
+                        artist_score = max(core_ratio, core_sort)
 
-        if title_score < 70.0 or artist_score < 70.0:
+        min_title_len = min(len(query_title_clean), len(candidate_title_clean))
+        title_thresh = 95.0 if min_title_len < 8 else 85.0
+
+        if title_score < title_thresh or artist_score < 85.0:
             return 0.0
 
         return (title_score * 0.6) + (artist_score * 0.4)
 
+    min_title_len = min(len(query_title_clean), len(candidate_title_clean))
+    title_thresh = 95.0 if min_title_len < 8 else 85.0
+    if title_score < title_thresh:
+        return 0.0
     return float(title_score)
 
 
-_NON_WORD_SPACES_PATTERN = re.compile(r"[^\w\s]")
 _DATE_ISO_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _DATE_YEAR_PATTERN = re.compile(r"(\d{4})")
 
@@ -692,22 +817,7 @@ def normalize_str(text: str | None) -> str:
     if not text:
         return ""
     fixed_text = ftfy.fix_text(str(text)).replace("$", "s").replace("_", " ")
-    try:
-        ascii_text = anyascii.anyascii(fixed_text)
-    except (
-        ImportError,
-        ModuleNotFoundError,
-        KeyError,
-        AttributeError,
-        TypeError,
-        ValueError,
-        OSError,
-    ):
-        ascii_text = (
-            unicodedata.normalize("NFKD", fixed_text)
-            .encode("ASCII", "ignore")
-            .decode("ASCII")
-        )
+    ascii_text = anyascii.anyascii(fixed_text)
     cleaned_text = "".join(
         char
         for char in unicodedata.normalize("NFD", ascii_text.lower())
@@ -725,121 +835,61 @@ def normalize_date(date_value: str | None) -> str | None:
     date_str = str(date_value).strip()
     if date_str in ("0", "0000", "None", "null", ""):
         return None
+    max_year = datetime.now(tz=timezone.utc).year + 1
     match = _DATE_ISO_PATTERN.search(date_str)
     if match:
         year = int(match.group(1)[:4])
-        if 1900 <= year <= 2030:
+        if 1900 <= year <= max_year:
             return match.group(1)
         return None
     match = _DATE_YEAR_PATTERN.search(date_str)
     if match:
         year = int(match.group(1))
-        if 1900 <= year <= 2030:
+        if 1900 <= year <= max_year:
             return match.group(1)
         return None
     return None
 
 
+_GENRE_GROUPS: dict[str, str] = {
+    "Hip-Hop/Rap": (
+        "hip hop, hip-hop, hip hop/rap, hip-hop/rap, rap/hip hop, rap/hip-hop, rap, trap, "
+        "trap music, trap/hip-hop, pop rap, conscious hip hop, hardcore hip hop, christian hip hop, "
+        "gangsta rap, east coast hip hop, west coast hip hop, southern hip hop, drill, uk drill, "
+        "cloud rap, boom bap, emo rap, trap latino, urbano latino"
+    ),
+    "R&B/Soul": "rnb, r&b, r&b/soul, soul, contemporary r&b, rhythm and blues, neo-soul, neo soul",
+    "Pop": (
+        "pop, dance-pop, dance pop, synth-pop, synthpop, electropop, electro-pop, french pop, "
+        "afro-pop, afropop, k-pop, j-pop, pop/rock, teen pop"
+    ),
+    "Synth-pop": "synth-pop, synthpop",
+    "Electronic": "electronic, electronica, electro, edm",
+    "Dance": "dance, club / dance, club/dance",
+    "House": "house, euro house, deep house, tech house, progressive house, electro house",
+    "Trance": "trance",
+    "Techno": "techno",
+    "Dubstep": "dubstep",
+    "Drum & Bass": "drum and bass, drum & bass, dnb, jungle/drum'n'bass",
+    "Alternative": "alternative, alternativă, alt rock, alt-rock, alternative rock, indie, indie rock, indie pop",
+    "Rock": "rock, hard rock, classic rock, punk, pop punk, pop-punk",
+    "Metal": "metal, heavy metal",
+    "Soundtrack": "soundtrack",
+    "Reggae": "reggae",
+    "Reggaeton": "reggaeton",
+    "Latin": "latin",
+    "Country": "country",
+    "Classical": "classical",
+    "Jazz": "jazz",
+    "Blues": "blues",
+    "Folk": "folk",
+    "Singer/Songwriter": "singer/songwriter",
+}
+
 _CANONICAL_GENRE_MAP: dict[str, str] = {
-    # Hip-Hop / Rap / Trap
-    "hip hop": "Hip-Hop/Rap",
-    "hip-hop": "Hip-Hop/Rap",
-    "hip hop/rap": "Hip-Hop/Rap",
-    "hip-hop/rap": "Hip-Hop/Rap",
-    "rap/hip hop": "Hip-Hop/Rap",
-    "rap/hip-hop": "Hip-Hop/Rap",
-    "rap": "Hip-Hop/Rap",
-    "trap": "Hip-Hop/Rap",
-    "trap music": "Hip-Hop/Rap",
-    "trap/hip-hop": "Hip-Hop/Rap",
-    "pop rap": "Hip-Hop/Rap",
-    "conscious hip hop": "Hip-Hop/Rap",
-    "hardcore hip hop": "Hip-Hop/Rap",
-    "christian hip hop": "Hip-Hop/Rap",
-    "gangsta rap": "Hip-Hop/Rap",
-    "east coast hip hop": "Hip-Hop/Rap",
-    "west coast hip hop": "Hip-Hop/Rap",
-    "southern hip hop": "Hip-Hop/Rap",
-    "drill": "Hip-Hop/Rap",
-    "uk drill": "Hip-Hop/Rap",
-    "cloud rap": "Hip-Hop/Rap",
-    "boom bap": "Hip-Hop/Rap",
-    "emo rap": "Hip-Hop/Rap",
-    "trap latino": "Hip-Hop/Rap",
-    "urbano latino": "Hip-Hop/Rap",
-    # R&B / Soul
-    "rnb": "R&B/Soul",
-    "r&b": "R&B/Soul",
-    "r&b/soul": "R&B/Soul",
-    "soul": "R&B/Soul",
-    "contemporary r&b": "R&B/Soul",
-    "rhythm and blues": "R&B/Soul",
-    "neo-soul": "R&B/Soul",
-    "neo soul": "R&B/Soul",
-    # Pop
-    "pop": "Pop",
-    "dance-pop": "Pop",
-    "dance pop": "Pop",
-    "synth-pop": "Synth-pop",
-    "synthpop": "Synth-pop",
-    "electropop": "Pop",
-    "electro-pop": "Pop",
-    "french pop": "Pop",
-    "afro-pop": "Pop",
-    "afropop": "Pop",
-    "k-pop": "Pop",
-    "j-pop": "Pop",
-    "pop/rock": "Pop",
-    "teen pop": "Pop",
-    # Electronic / Dance / House
-    "electronic": "Electronic",
-    "electronica": "Electronic",
-    "electro": "Electronic",
-    "edm": "Electronic",
-    "dance": "Dance",
-    "club / dance": "Dance",
-    "club/dance": "Dance",
-    "house": "House",
-    "euro house": "House",
-    "deep house": "House",
-    "tech house": "House",
-    "progressive house": "House",
-    "electro house": "House",
-    "trance": "Trance",
-    "techno": "Techno",
-    "dubstep": "Dubstep",
-    "drum and bass": "Drum & Bass",
-    "drum & bass": "Drum & Bass",
-    "dnb": "Drum & Bass",
-    "jungle/drum'n'bass": "Drum & Bass",
-    # Alternative / Rock / Metal
-    "alternative": "Alternative",
-    "alternativă": "Alternative",
-    "alt rock": "Alternative",
-    "alt-rock": "Alternative",
-    "alternative rock": "Alternative",
-    "indie": "Alternative",
-    "indie rock": "Alternative",
-    "indie pop": "Alternative",
-    "rock": "Rock",
-    "hard rock": "Rock",
-    "classic rock": "Rock",
-    "metal": "Metal",
-    "heavy metal": "Metal",
-    "punk": "Rock",
-    "pop punk": "Rock",
-    "pop-punk": "Rock",
-    # Other canonical genres
-    "soundtrack": "Soundtrack",
-    "reggae": "Reggae",
-    "reggaeton": "Reggaeton",
-    "latin": "Latin",
-    "country": "Country",
-    "classical": "Classical",
-    "jazz": "Jazz",
-    "blues": "Blues",
-    "folk": "Folk",
-    "singer/songwriter": "Singer/Songwriter",
+    alias.strip(): canonical
+    for canonical, aliases in _GENRE_GROUPS.items()
+    for alias in aliases.split(",")
 }
 
 _NOISE_GENRES: frozenset[str] = frozenset(
@@ -863,12 +913,22 @@ _NOISE_GENRES: frozenset[str] = frozenset(
         "fitness",
         "workout",
         "miscellaneous",
+        "instrumental",
         "karaoke",
+        "mpb",
         "other",
         "audio",
         "sound",
     }
 )
+
+
+def is_noise_genre(genre_value: str | None) -> bool:
+    """Return True if a genre string represents noise or non-musical placeholder tags."""
+    if not genre_value or not str(genre_value).strip():
+        return True
+    genre_lower = str(genre_value).strip().lower()
+    return any(noise in genre_lower for noise in _NOISE_GENRES)
 
 
 @lru_cache(maxsize=8192)
@@ -880,7 +940,6 @@ def normalize_genre(genre_value: str | None) -> str | None:
     raw_genre = str(genre_value).strip()
     genre_lower = raw_genre.lower()
 
-    # Reject numeric or pure decimal tags
     if (
         raw_genre.isdigit()
         or raw_genre.replace(".", "", 1).isdigit()
@@ -888,15 +947,12 @@ def normalize_genre(genre_value: str | None) -> str | None:
     ):
         return None
 
-    # Reject spam / noise tags
     if any(noise in genre_lower for noise in _NOISE_GENRES):
         return None
 
-    # Direct canonical map
     if genre_lower in _CANONICAL_GENRE_MAP:
         return _CANONICAL_GENRE_MAP[genre_lower]
 
-    # Standard title-case formatting
     return raw_genre.title()
 
 
@@ -916,39 +972,24 @@ def normalize_country_name(country_input: str | None) -> str | None:
         return "Europe"
 
     try:
-        if len(cleaned) == 2:
-            match = pycountry.countries.get(alpha_2=upper)
-            if match is not None and hasattr(match, "name"):
-                return str(match.name)
-            historic = pycountry.historic_countries.get(alpha_2=upper)
-            if historic is not None and hasattr(historic, "name"):
-                return str(historic.name)
-
-        if len(cleaned) == 3:
-            match = pycountry.countries.get(alpha_3=upper)
-            if match is not None and hasattr(match, "name"):
-                return str(match.name)
-            historic = pycountry.historic_countries.get(alpha_3=upper)
-            if historic is not None and hasattr(historic, "name"):
-                return str(historic.name)
-
-        if len(cleaned) == 4:
-            historic = pycountry.historic_countries.get(alpha_4=upper)
-            if historic is not None and hasattr(historic, "name"):
-                return str(historic.name)
-
-        match = pycountry.countries.get(name=cleaned)
+        match = pycountry.countries.lookup(cleaned)
         if match is not None and hasattr(match, "name"):
             return str(match.name)
+    except LookupError:
+        pass
 
-        historic = pycountry.historic_countries.get(name=cleaned)
+    try:
+        historic = pycountry.historic_countries.lookup(cleaned)
         if historic is not None and hasattr(historic, "name"):
             return str(historic.name)
+    except LookupError:
+        pass
 
+    try:
         fuzzy_matches = pycountry.countries.search_fuzzy(cleaned)
         if fuzzy_matches and hasattr(fuzzy_matches[0], "name"):
             return str(fuzzy_matches[0].name)
-    except (LookupError, AttributeError):
+    except LookupError:
         pass
 
     return cleaned
@@ -971,15 +1012,11 @@ def normalize_language_name(language_input: str | None) -> str | None:
                 return str(lang.name)
 
         if len(cleaned) == 3:
-            lang = pycountry.languages.get(alpha_3=lower)
+            lang = pycountry.languages.get(alpha_3=lower) or pycountry.languages.get(
+                bibliographic=lower
+            )
             if lang is not None and hasattr(lang, "name"):
                 return str(lang.name)
-            try:
-                lang = pycountry.languages.get(bibliographic=lower)
-                if lang is not None and hasattr(lang, "name"):
-                    return str(lang.name)
-            except KeyError:
-                pass
 
         lang = pycountry.languages.get(name=cleaned)
         if lang is not None and hasattr(lang, "name"):
@@ -988,7 +1025,7 @@ def normalize_language_name(language_input: str | None) -> str | None:
         match = pycountry.languages.lookup(cleaned)
         if match is not None and hasattr(match, "name"):
             return str(match.name)
-    except (LookupError, AttributeError):
+    except LookupError:
         pass
 
     return cleaned
@@ -1004,20 +1041,10 @@ def normalize_script_name(script_input: str | None) -> str | None:
         return None
 
     try:
-        if len(cleaned) == 4:
-            script_code = cleaned[:1].upper() + cleaned[1:].lower()
-            sc = pycountry.scripts.get(alpha_4=script_code)
-            if sc is not None and hasattr(sc, "name"):
-                return str(sc.name)
-
-        sc = pycountry.scripts.get(name=cleaned)
-        if sc is not None and hasattr(sc, "name"):
-            return str(sc.name)
-
         match = pycountry.scripts.lookup(cleaned)
         if match is not None and hasattr(match, "name"):
             return str(match.name)
-    except (LookupError, AttributeError):
+    except LookupError:
         pass
 
     return cleaned
@@ -1090,7 +1117,7 @@ def is_valid_uuid(
     try:
         parsed = uuid.UUID(cleaned_uuid)
         return str(parsed).lower() == cleaned_uuid.lower()
-    except (ValueError, AttributeError, TypeError):
+    except ValueError:
         return False
 
 
@@ -1143,6 +1170,9 @@ def safe_case_rename(src: Path, dst: Path) -> Path:
     """
     if src.resolve() == dst.resolve() and src.name == dst.name:
         return src
+
+    if not os.access(src, os.W_OK) or not os.access(src.parent, os.W_OK):
+        raise PermissionError(f"Cannot rename {src}: write permission denied")
 
     if (
         src.parent == dst.parent
@@ -1204,3 +1234,4 @@ def clear_utils_cache() -> None:
     normalize_country_name.cache_clear()
     normalize_language_name.cache_clear()
     normalize_script_name.cache_clear()
+    preserve_unicode_repertoire.cache_clear()

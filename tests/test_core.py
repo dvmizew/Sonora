@@ -20,20 +20,25 @@ from sonora.core.config import (
 )
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    InterruptedOperationError,
     clean_disambiguation,
     clean_title,
     clean_unicode_punct,
     deduplicate_title_features,
+    extract_version_modifier,
     get_primary_artist,
     group_files_by_parent,
+    is_interruption,
     is_single_group_artist,
     is_valid_uuid,
+    match_score,
     normalize_country_name,
     normalize_date,
     normalize_genre,
     normalize_language_name,
     normalize_script_name,
     normalize_str,
+    preserve_unicode_repertoire,
     relocate_companion_lyrics,
     safe_case_rename,
     safe_float,
@@ -144,6 +149,10 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(
             clean_title("Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"),
             "Melodie",
+        )
+        self.assertEqual(
+            clean_title('R.I.P ROACH "EAST SIDE SOULJA"'),
+            'R.I.P ROACH "EAST SIDE SOULJA"',
         )
         self.assertEqual(clean_title(""), "")
 
@@ -305,7 +314,8 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(normalize_date("1899"))
         self.assertIsNone(normalize_date("2099"))
 
-    def test_resolve_artist_name_exact_match(self) -> None:
+    @patch("sonora.core.utils.get_cached_api", return_value=None)
+    def test_resolve_artist_name_exact_match(self, mock_get_cache: MagicMock) -> None:
         from sonora.core.utils import resolve_artist_name
 
         with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
@@ -317,6 +327,24 @@ class TestCoreUtils(unittest.TestCase):
             # Must prioritize exact match RAVA over higher-scored Enrico Rava
             self.assertEqual(resolve_artist_name("RAVA"), "RAVA")
             self.assertEqual(resolve_artist_name("rava"), "RAVA")
+
+    @patch("sonora.core.utils.get_cached_api", return_value=None)
+    def test_resolve_artist_name_allow_network_false(
+        self, mock_get_cache: MagicMock
+    ) -> None:
+        from sonora.core.utils import get_primary_artist, resolve_artist_name
+
+        resolve_artist_name.cache_clear()
+        with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
+            # When allow_network is False, MusicBrainz search must NEVER be called
+            result = resolve_artist_name("Unknown Indierock Band", allow_network=False)
+            self.assertEqual(result, "Unknown Indierock Band")
+            mock_mb.assert_not_called()
+
+            # Similarly, get_primary_artist must never invoke network
+            primary = get_primary_artist("New Artist feat. Guest Singer")
+            self.assertEqual(primary, "New Artist")
+            mock_mb.assert_not_called()
 
     def test_match_score_series_and_version_disambiguation(self) -> None:
         from sonora.core.utils import match_score
@@ -670,6 +698,144 @@ class TestSonoraConfig(unittest.TestCase):
         self.assertEqual(cfg.fanart_api_key, "test_api_key")
         self.assertEqual(cfg.fanart_client_key, "test_client_key")
         self.assertFalse(cfg.enable_shazam)
+
+    def test_clean_unicode_punct_spaces_before_comma(self) -> None:
+        self.assertEqual(
+            clean_unicode_punct("Stres feat. Anuryh , Boier Bibescu , SHIFT"),
+            "Stres feat. Anuryh, Boier Bibescu, SHIFT",
+        )
+        self.assertEqual(clean_unicode_punct("Artist , Title"), "Artist, Title")
+        self.assertEqual(clean_unicode_punct("None"), "None")
+        self.assertEqual(clean_unicode_punct(None), "")
+
+    def test_extract_version_modifier(self) -> None:
+        self.assertEqual(
+            extract_version_modifier("Breaking Me (RetroVision remix)"),
+            "retrovision remix",
+        )
+        self.assertEqual(
+            extract_version_modifier("Breaking Me (HUGEL remix)"),
+            "hugel remix",
+        )
+        self.assertEqual(
+            extract_version_modifier("Electrified [Extended Version]"),
+            "extended version",
+        )
+        self.assertIsNone(extract_version_modifier("Standard Title"))
+        self.assertIsNone(extract_version_modifier("Title (feat. Someone)"))
+
+    def test_preserve_unicode_repertoire(self) -> None:
+        self.assertEqual(
+            preserve_unicode_repertoire("Bombe în rai", "Bombe in rai"),
+            "Bombe în rai",
+        )
+        self.assertEqual(
+            preserve_unicode_repertoire("Bombe in rai", "Bombe în rai"),
+            "Bombe în rai",
+        )
+        self.assertEqual(
+            preserve_unicode_repertoire("Andreea Bănică", "Andreea Banica"),
+            "Andreea Bănică",
+        )
+        self.assertEqual(
+            preserve_unicode_repertoire("Fără Lacrimi", "Fara Lacrimi"),
+            "Fără Lacrimi",
+        )
+        # International languages (Turkish, Icelandic, German)
+        self.assertEqual(
+            preserve_unicode_repertoire("Barış Manço", "Baris Manco"),
+            "Barış Manço",
+        )
+        self.assertEqual(
+            preserve_unicode_repertoire("Sigur Rós", "Sigur Ros"),
+            "Sigur Rós",
+        )
+        self.assertEqual(
+            preserve_unicode_repertoire("Mötley Crüe", "Motley Crue"),
+            "Mötley Crüe",
+        )
+        # Diacritic density: string with more accents preferred over partial
+        self.assertEqual(
+            preserve_unicode_repertoire("Andreea Bănică", "Andreea Bănica"),
+            "Andreea Bănică",
+        )
+        self.assertEqual(
+            preserve_unicode_repertoire("Andreea Bănica", "Andreea Bănică"),
+            "Andreea Bănică",
+        )
+        self.assertEqual(preserve_unicode_repertoire(None, "Candidate"), "Candidate")
+        self.assertEqual(preserve_unicode_repertoire("Current", None), "Current")
+        self.assertEqual(preserve_unicode_repertoire("Title A", "Title B"), "Title B")
+
+    def test_match_score_penalties_and_remixes(self) -> None:
+        # Stopword immunity: "The" in band names must not produce high match scores
+        self.assertEqual(
+            match_score("The Motans", "Sangria", "The Re-Tards", "Sangria"),
+            0.0,
+        )
+        self.assertEqual(
+            match_score(
+                "The Motans",
+                "Sangria",
+                "But Then the Self in the Tree Fell Asleep",
+                "Sangria",
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            match_score(
+                "The Motans", "Flagrant", "Audra The Rapper feat. Satasha", "Flagrant"
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            match_score("The Motans", "Sativa", "The Body Rampant", "Sativa"),
+            0.0,
+        )
+
+        # Remix modifier penalty: Different remixers must score 0.0
+        self.assertEqual(
+            match_score(
+                "Topic & A7S",
+                "Breaking Me (RetroVision remix)",
+                "Topic & A7S",
+                "Breaking Me (HUGEL remix)",
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            match_score(
+                "Topic & A7S",
+                "Breaking Me (Riton remix)",
+                "Topic & A7S",
+                "Breaking Me (HUGEL remix)",
+            ),
+            0.0,
+        )
+
+        # Identical remix modifier should match perfectly
+        self.assertGreaterEqual(
+            match_score(
+                "Topic & A7S",
+                "Breaking Me (RetroVision remix)",
+                "Topic & A7S",
+                "Breaking Me (RetroVision remix)",
+            ),
+            95.0,
+        )
+
+    def test_is_interruption(self) -> None:
+        self.assertTrue(is_interruption(KeyboardInterrupt()))
+        self.assertTrue(is_interruption(InterruptedOperationError()))
+        self.assertTrue(is_interruption(RuntimeError("release unlocked lock")))
+
+        nested_exc = RuntimeError("wrapper error")
+        nested_exc.__context__ = KeyboardInterrupt()
+        self.assertTrue(is_interruption(nested_exc))
+
+        self.assertFalse(is_interruption(RuntimeError("unrelated database error")))
+        self.assertFalse(is_interruption(ValueError("invalid value")))
+        self.assertFalse(is_interruption(OSError("file not found")))
 
 
 if __name__ == "__main__":

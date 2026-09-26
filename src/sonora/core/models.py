@@ -78,30 +78,23 @@ class TrackInfo:
 
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""
-        data: dict[str, object] = asdict(self)
-        data["file_path"] = str(self.file_path)
-        data["file_name"] = self.file_path.name
-        if not data.get("album_artist"):
-            data["album_artist"] = self.album_artist or self.artist
-        return data
+        track_dict: dict[str, object] = asdict(self)
+        track_dict["file_path"] = str(self.file_path)
+        track_dict["file_name"] = self.file_path.name
+        if not track_dict.get("album_artist"):
+            track_dict["album_artist"] = self.album_artist or self.artist
+        return track_dict
 
 
 @dataclass
 class CheckReport:
-    """Represents the validation/check results for a track or directory."""
+    """Represents the aggregate validation/check results for an audio directory."""
 
-    file_path: Path | None = None
     total_files: int = 0
     corrupt_files: int = 0
     missing_metadata: int = 0
     missing_lrc: int = 0
     issues: dict[str, list[str]] = field(default_factory=dict)
-    is_valid: bool = True
-    missing_tags: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    is_fake_lossless: bool = False
-    md5_verified: bool = False
 
 
 @dataclass

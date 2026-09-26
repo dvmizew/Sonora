@@ -114,22 +114,36 @@ def _parse_config_data(path: Path) -> dict[str, Any]:
         suffix = path.suffix.lower()
         if suffix == ".toml":
             with path.open("rb") as config_file:
-                data = tomllib.load(config_file)
-            if isinstance(data, dict):
-                sub = data.get("sonora")
-                if isinstance(sub, dict):
-                    return {str(k): v for k, v in sub.items()}
-                return {str(k): v for k, v in data.items()}
+                parsed_config_data = tomllib.load(config_file)
+            if isinstance(parsed_config_data, dict):
+                sonora_section = parsed_config_data.get("sonora")
+                if isinstance(sonora_section, dict):
+                    return {str(k): v for k, v in sonora_section.items()}
+                return {str(k): v for k, v in parsed_config_data.items()}
         if suffix == ".json":
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                sub = data.get("sonora")
-                if isinstance(sub, dict):
-                    return {str(k): v for k, v in sub.items()}
-                return {str(k): v for k, v in data.items()}
+            parsed_config_data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed_config_data, dict):
+                sonora_section = parsed_config_data.get("sonora")
+                if isinstance(sonora_section, dict):
+                    return {str(k): v for k, v in sonora_section.items()}
+                return {str(k): v for k, v in parsed_config_data.items()}
     except (OSError, ValueError) as error:
         LOG.warning(f"Failed to parse configuration file {path}: {error}")
     return {}
+
+
+def _safe_load_dotenv(path: Path, seen_paths: set[Path]) -> None:
+    try:
+        resolved = path.resolve()
+        if (
+            resolved not in seen_paths
+            and resolved.is_file()
+            and resolved.stat().st_size > 0
+        ):
+            seen_paths.add(resolved)
+            load_dotenv(dotenv_path=resolved)
+    except OSError:
+        pass
 
 
 def load_app_environment(target_path: Path | None = None) -> None:
@@ -139,24 +153,11 @@ def load_app_environment(target_path: Path | None = None) -> None:
     """
     seen_paths: set[Path] = set()
 
-    def _safe_load(p: Path) -> None:
-        try:
-            resolved = p.resolve()
-            if (
-                resolved not in seen_paths
-                and resolved.is_file()
-                and resolved.stat().st_size > 0
-            ):
-                seen_paths.add(resolved)
-                load_dotenv(dotenv_path=resolved)
-        except OSError:
-            pass
-
     # 1. Standard cwd / parent discovery
     load_dotenv()
 
     # 2. XDG user config directory (~/.config/sonora/.env)
-    _safe_load(DIRS.user_config_path / ".env")
+    _safe_load_dotenv(DIRS.user_config_path / ".env", seen_paths)
 
     # 3. Target directory and its parents (e.g. /home/dvmi/Music/.env)
     if target_path is not None:
@@ -165,7 +166,7 @@ def load_app_environment(target_path: Path | None = None) -> None:
             if not curr.is_dir():
                 curr = curr.parent
             while curr != curr.parent:
-                _safe_load(curr / ".env")
+                _safe_load_dotenv(curr / ".env", seen_paths)
                 curr = curr.parent
         except (OSError, RuntimeError):
             pass
@@ -200,25 +201,24 @@ def get_config() -> SonoraConfig:
     config_file = _discover_config_file()
     raw_data = _parse_config_data(config_file) if config_file is not None else {}
 
+    from sonora.core.utils import safe_float
+
     kwargs: dict[str, Any] = {}
 
     if "artist_match_threshold" in raw_data:
-        try:
-            kwargs["artist_match_threshold"] = float(raw_data["artist_match_threshold"])
-        except (ValueError, TypeError):
-            pass
+        artist_thresh = safe_float(raw_data["artist_match_threshold"])
+        if artist_thresh is not None:
+            kwargs["artist_match_threshold"] = artist_thresh
 
     if "album_match_threshold" in raw_data:
-        try:
-            kwargs["album_match_threshold"] = float(raw_data["album_match_threshold"])
-        except (ValueError, TypeError):
-            pass
+        album_thresh = safe_float(raw_data["album_match_threshold"])
+        if album_thresh is not None:
+            kwargs["album_match_threshold"] = album_thresh
 
     if "genius_match_threshold" in raw_data:
-        try:
-            kwargs["genius_match_threshold"] = float(raw_data["genius_match_threshold"])
-        except (ValueError, TypeError):
-            pass
+        genius_thresh = safe_float(raw_data["genius_match_threshold"])
+        if genius_thresh is not None:
+            kwargs["genius_match_threshold"] = genius_thresh
 
     if "disc_folder_patterns" in raw_data:
         patterns = raw_data["disc_folder_patterns"]

@@ -42,12 +42,12 @@ def fetch_discogs_release_details(
         response = SESSION.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
-        data = response.json()
-        if not isinstance(data, dict):
+        discogs_payload = response.json()
+        if not isinstance(discogs_payload, dict):
             return None
 
         # 1. Primary Artist ID
-        artists = data.get("artists", [])
+        artists = discogs_payload.get("artists", [])
         artist_id = (
             str(artists[0].get("id"))
             if isinstance(artists, list)
@@ -58,7 +58,7 @@ def fetch_discogs_release_details(
         )
 
         # 2. Labels & Catalog Number
-        labels = data.get("labels", [])
+        labels = discogs_payload.get("labels", [])
         label_name = None
         catalog_number = None
         if isinstance(labels, list) and labels and isinstance(labels[0], dict):
@@ -71,7 +71,7 @@ def fetch_discogs_release_details(
 
         # 3. Barcode & Matrix Identifiers
         barcode_value = None
-        identifiers = data.get("identifiers", [])
+        identifiers = discogs_payload.get("identifiers", [])
         if isinstance(identifiers, list):
             for identifier in identifiers:
                 if isinstance(identifier, dict) and identifier.get("type") == "Barcode":
@@ -86,7 +86,7 @@ def fetch_discogs_release_details(
 
         # 4. Media & Format Details (e.g., "Vinyl, LP, 180g" or "CD, Album, Deluxe Edition")
         media_format = None
-        formats = data.get("formats", [])
+        formats = discogs_payload.get("formats", [])
         if isinstance(formats, list) and formats and isinstance(formats[0], dict):
             first_format = formats[0]
             format_parts: list[str] = []
@@ -102,7 +102,7 @@ def fetch_discogs_release_details(
         producers: list[str] = []
         remixers: list[str] = []
         composers: list[str] = []
-        extra_artists = data.get("extraartists", [])
+        extra_artists = discogs_payload.get("extraartists", [])
         if isinstance(extra_artists, list):
             for extra_artist in extra_artists:
                 if (
@@ -134,7 +134,7 @@ def fetch_discogs_release_details(
 
         # 6. Tracklist Level Credits
         track_credits: dict[str, dict[str, str]] = {}
-        tracklist = data.get("tracklist", [])
+        tracklist = discogs_payload.get("tracklist", [])
         if isinstance(tracklist, list):
             for track in tracklist:
                 if isinstance(track, dict):
@@ -193,14 +193,14 @@ def fetch_discogs_release_details(
                         track_credits[track_title.lower()] = credits_dict
 
         release_result: dict[str, Any] = {
-            "id": data.get("id"),
+            "id": discogs_payload.get("id"),
             "artist_id": artist_id,
-            "title": data.get("title"),
-            "year": data.get("year"),
-            "released": data.get("released"),
-            "genres": list(data.get("genres", []) or []),
-            "styles": list(data.get("styles", []) or []),
-            "country": normalize_country_name(data.get("country")),
+            "title": discogs_payload.get("title"),
+            "year": discogs_payload.get("year"),
+            "released": discogs_payload.get("released"),
+            "genres": list(discogs_payload.get("genres", []) or []),
+            "styles": list(discogs_payload.get("styles", []) or []),
+            "country": normalize_country_name(discogs_payload.get("country")),
             "label": label_name,
             "catalog_number": catalog_number,
             "barcode": barcode_value,
@@ -212,13 +212,15 @@ def fetch_discogs_release_details(
         }
         set_cached_api(cache_key, release_result)
         return release_result
-    except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Discogs release fetch failed for ID {release_id}: {error}")
         return None
 
 
-def _score_discogs_candidate(item: dict[str, Any], artist: str, album: str) -> float:
-    item_title = str(item.get("title", ""))
+def _score_discogs_candidate(
+    track_candidate: dict[str, Any], artist: str, album: str
+) -> float:
+    item_title = str(track_candidate.get("title", ""))
     if " - " in item_title:
         cand_artist, cand_album = item_title.split(" - ", 1)
     else:
@@ -228,7 +230,7 @@ def _score_discogs_candidate(item: dict[str, Any], artist: str, album: str) -> f
         return 0.0
 
     score = base_score
-    raw_formats = item.get("format", [])
+    raw_formats = track_candidate.get("format", [])
     formats: list[str] = (
         [str(f).lower() for f in raw_formats]
         if isinstance(raw_formats, list)
@@ -300,20 +302,24 @@ def search_discogs_release(
         response = SESSION.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
-        data = response.json()
-        results = data.get("results", []) if isinstance(data, dict) else []
+        discogs_payload = response.json()
+        results = (
+            discogs_payload.get("results", [])
+            if isinstance(discogs_payload, dict)
+            else []
+        )
         if not results:
             return None
 
         best_score = 0.0
         best_candidate: dict[str, Any] | None = None
-        for item in results:
-            if not isinstance(item, dict):
+        for track_candidate in results:
+            if not isinstance(track_candidate, dict):
                 continue
-            score = _score_discogs_candidate(item, artist, album)
+            score = _score_discogs_candidate(track_candidate, artist, album)
             if score > best_score and score >= 80.0:
                 best_score = score
-                best_candidate = item
+                best_candidate = track_candidate
 
         if not best_candidate:
             return None
@@ -339,7 +345,7 @@ def search_discogs_release(
         )
         formats = first.get("format", [])
         media_format = (
-            ", ".join(str(format_item) for format_item in formats)
+            ", ".join(str(format_entry) for format_entry in formats)
             if isinstance(formats, list) and formats
             else None
         )
@@ -364,6 +370,6 @@ def search_discogs_release(
         }
         set_cached_api(cache_key, release_result)
         return release_result
-    except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Discogs search failed for {artist} - {album}: {error}")
         return None

@@ -22,10 +22,7 @@ from sonora.audio.metadata import (
     read_track_metadata,
     write_track_metadata,
 )
-from sonora.audio.replaygain import (
-    calculate_album_replaygain,
-    calculate_track_replaygain,
-)
+from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.models import TrackInfo
 
 
@@ -83,6 +80,67 @@ class TestAudioEngine(unittest.TestCase):
         self.assertEqual(mock_file_instance.tags["REPLAYGAIN_TRACK_GAIN"], ["-4.25 dB"])
         self.assertEqual(mock_file_instance.tags["REPLAYGAIN_TRACK_PEAK"], ["0.951234"])
 
+    @patch("taglib.File")
+    def test_write_track_metadata_purges_none_and_cleared_tags(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.tags = {
+            "ARTIST": ["Old Artist"],
+            "TITLE": ["Old Title"],
+            "ALBUM": ["Old Album"],
+            "ALBUMARTIST": ["Old Album Artist"],
+            "GENRE": ["Old Genre"],
+            "MUSICBRAINZ_TRACKID": ["5a9fc94b-ec0c-4619-acc8-388a022630d0"],
+            "MUSICBRAINZ TRACK ID": ["5a9fc94b-ec0c-4619-acc8-388a022630d0"],
+            "ARTISTSORT": ["Old Sort"],
+            "BPM": ["120.0"],
+        }
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.tmp_path / "test_purge.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        track_info = TrackInfo(
+            file_path=flac_path,
+            artist="New Artist",
+            title="New Title",
+            album="New Album",
+            album_artist=None,
+            genre=None,
+            musicbrainz_trackid=None,
+            artist_sort=None,
+            bpm=None,
+        )
+        write_track_metadata(track_info)
+
+        mock_file_instance.save.assert_called_once()
+        self.assertEqual(mock_file_instance.tags["ARTIST"], ["New Artist"])
+        self.assertEqual(mock_file_instance.tags["TITLE"], ["New Title"])
+        self.assertEqual(mock_file_instance.tags["ALBUM"], ["New Album"])
+        self.assertNotIn("ALBUMARTIST", mock_file_instance.tags)
+        self.assertNotIn("GENRE", mock_file_instance.tags)
+        self.assertNotIn("MUSICBRAINZ_TRACKID", mock_file_instance.tags)
+        self.assertNotIn("MUSICBRAINZ TRACK ID", mock_file_instance.tags)
+        self.assertNotIn("ARTISTSORT", mock_file_instance.tags)
+        self.assertNotIn("BPM", mock_file_instance.tags)
+
+    @patch("os.access")
+    def test_write_track_metadata_permission_denied_raises_oserror(
+        self, mock_access: MagicMock
+    ) -> None:
+        mock_access.return_value = False
+        flac_path = self.tmp_path / "test_readonly.flac"
+        flac_path.write_bytes(b"dummy flac data")
+        track_info = TrackInfo(
+            file_path=flac_path,
+            artist="Readonly Artist",
+            title="Readonly Title",
+            album="Readonly Album",
+        )
+        with self.assertRaises(PermissionError):
+            write_track_metadata(track_info)
+
     def test_read_nonexistent_file_raises_metadata_error(self) -> None:
         bogus_path = self.tmp_path / "nonexistent_audio_track_9999.flac"
         with self.assertRaises(FileNotFoundError):
@@ -97,13 +155,12 @@ class TestAudioEngine(unittest.TestCase):
         self.assertTrue(verify_flac_checksum(self.dummy_audio_path))
 
     def test_calculate_track_replaygain_success(self) -> None:
-        replaygain_result = calculate_track_replaygain(self.dummy_audio_path)
-        self.assertIsNotNone(replaygain_result)
-        if replaygain_result:
-            gain, peak = replaygain_result
-            self.assertIsInstance(gain, float)
-            self.assertIsInstance(peak, float)
-            self.assertTrue(0.0 <= peak <= 1.0)
+        replaygain_success = calculate_album_replaygain(
+            [self.dummy_audio_path], force=True
+        )
+        self.assertTrue(replaygain_success)
+        reloaded_info = read_track_metadata(self.dummy_audio_path)
+        self.assertIsNotNone(reloaded_info.replaygain_track_gain)
 
     def test_calculate_album_replaygain_success(self) -> None:
         track1_path = self.tmp_path / "1.wav"

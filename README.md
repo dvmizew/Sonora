@@ -9,7 +9,8 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 ## Features
 
 - **Metadata & Tagging**: Multi-service tag lookup with AcoustID audio fingerprinting and MusicBrainz matching.
-- **Audio Processing**: Calculates BPM and ReplayGain 2.0 (ITU-R BS.1770-4 / EBU R128) for tracks and albums.
+- **Audio Processing**: Calculates BPM, Musical Key & Camelot wheel tonality (`INITIALKEY`), and ReplayGain 2.0 (ITU-R BS.1770-4 / EBU R128) for tracks and albums.
+- **High-Performance Architecture**: Compound album release queries, offline string distance matching, thread-safe persistent cache, and smart library state tracking.
 - **Spectral Analysis**: Detects fake lossless files (e.g. MP3 transcodes upscaled to FLAC) via FFT spectrogram cutoff checks.
 - **Artwork & Lyrics**: Downloads high-resolution cover art (up to 3000x3000px) and synchronized `.lrc` lyrics.
 - **Library Tools**: Validates audio file integrity, standardizes file names (`NN - Title.ext`), organizes singles, and backs up tags to JSON / `.json.gz`.
@@ -133,41 +134,49 @@ enable_shazam = true
 
 ### `sonora tag`
 
-Tags audio files with metadata, cover art, lyrics, BPM, and ReplayGain.
+Tags audio files and albums automatically with metadata, cover art, lyrics, BPM, musical key, and ReplayGain.
 
 ```bash
-# Tag a folder
+# Tag an album folder
 sonora tag /path/to/music
 
-# Dry run (no files modified)
+# Ultra-fast metadata, lyrics & artwork tagging (skipping heavy audio DSP)
+sonora tag /path/to/music --no-dsp
+
+# Dry run (simulate actions without modifying files)
 sonora tag /path/to/music --dry-run
 
-# Run with 8 threads and skip cache
+# Run with 8 threads and force re-processing
 sonora tag /path/to/music -t 8 --force
 
-# Save report to JSON
+# Force remote re-fetching bypassing the local API cache
+sonora tag /path/to/music --ignore-cache
+
+# Save tagging report to JSON
 sonora tag /path/to/music --json tag_report.json
 ```
 
 **Options:**
-- `path`: Directory to tag (required).
+- `path`: Directory containing audio files (required).
 - `-t, --threads N`: Number of parallel threads (default: `4`).
-- `--force`: Ignore disk cache and retag from scratch.
-- `--dry-run`: Preview actions without modifying files.
+- `--no-dsp`: Disable all heavy audio DSP analysis (BPM, Musical Key, and ReplayGain) simultaneously for ultra-fast metadata tagging.
+- `--force`: Force reprocessing even if tracks were already marked as valid/tagged in the library state database.
+- `--ignore-cache`: Bypass local API metadata cache and force re-fetching from remote services.
+- `--dry-run`: Preview actions without modifying files on disk.
 - `--no-bpm`: Skip BPM calculation.
-- `--no-key`: Skip musical key detection.
-- `--no-replaygain`: Skip ReplayGain calculation.
-- `--no-lyrics`: Skip `.lrc` lyrics download.
-- `--no-art`: Skip cover art download.
-- `--no-shazam`: Skip Shazam audio recognition fallback.
-- `--json PATH`: Save report to a JSON file.
-- `--lastfm-key KEY`: Last.fm API key.
-- `--acoustid-key KEY`: AcoustID API key.
-- `--discogs-token TOKEN`: Discogs user token.
-- `--genius-token TOKEN`: Genius API token.
-- `--fanart-key KEY`: Fanart.tv project API key.
-- `--fanart-client-key KEY`: Fanart.tv VIP client key.
-- `--musixmatch-token TOKEN`: Musixmatch user token for synced lyrics.
+- `--no-key`: Skip musical key and Camelot tonality detection.
+- `--no-replaygain`: Skip ReplayGain loudness normalization tags.
+- `--no-lyrics`: Skip synchronized (`.lrc`) lyrics download.
+- `--no-art`: Skip album and artist artwork download.
+- `--no-shazam`: Skip Shazam acoustic recognition fallback.
+- `-j, --json PATH`: Save tagging report to a JSON file.
+- `--lastfm-key KEY`: Last.fm API key for genre and mood lookup.
+- `--acoustid-key KEY`: AcoustID API key for acoustic fingerprinting.
+- `--discogs-token TOKEN`: Discogs user token for catalog, label, and credit data.
+- `--genius-token TOKEN`: Genius API token for song descriptions.
+- `--fanart-key KEY`: Fanart.tv project API key for logos, CD art, and fanart.
+- `--fanart-client-key KEY`: Fanart.tv personal VIP client key.
+- `--musixmatch-token TOKEN`: Musixmatch user token for word-synced lyrics.
 
 ---
 
@@ -337,24 +346,49 @@ sonora lyrics /path/to/music --force
 
 ### `sonora cache` & `sonora clear-cache`
 
-Inspects and manages Sonora cache layers and persistent scan state.
+Inspects and manages Sonora cache layers and persistent scan state. Complies with the XDG Base Directory specification (`$XDG_CACHE_HOME/sonora/` or `~/.cache/sonora/`).
+
+- **API Cache**: `$XDG_CACHE_HOME/sonora/api/` (Isolated SQLite `cache.db` and data shards for external API lookups)
+- **Library State**: `$XDG_CACHE_HOME/sonora/library_state.db` (Persistent SQLite tracker for processed files and tags)
 
 ```bash
-# Display cache statistics
+# Display cache overview
+sonora cache
+
+# Display detailed cache statistics table
 sonora cache stats
 sonora cache stats --all
+sonora cache stats --json
 
-# Clear transient API cache and memory caches
+# Clear transient API cache and memory caches (safely preserves library scan history)
+sonora cache clear
 sonora clear-cache
 
-# Purge all caches and SQLite state from disk
-sonora clear-cache --all --purge
+# Preview cache clearing without touching files
+sonora cache clear --dry-run
+sonora cache clear --dry-run --json
+
+# Clear specific cache layers
+sonora cache clear --api      # Clear only API metadata cache
+sonora cache clear --state    # Clear only library scan state database
+sonora cache clear --memory   # Clear in-memory metadata caches
+
+# Complete reset: clear all cache layers and library state
+sonora cache clear --all
+
+# Purge: completely delete cache files and directories from disk
+sonora cache clear --all --purge
 ```
 
-**Options for `clear-cache`:**
+**Options for `cache stats`:**
+- `-a, --all`: Display comprehensive statistics across all cache layers.
+- `--json`: Output cache statistics in machine-readable JSON format.
+
+**Options for `cache clear` / `clear-cache`:**
 - `--api`: Clear API response disk cache.
-- `--state`: Clear persistent library state database.
-- `--memory`: Clear in-memory caches.
-- `-a, --all`: Target all cache layers.
+- `--state`: Clear persistent library tracking state database.
+- `--memory`: Clear in-memory metadata and normalization caches.
+- `-a, --all`: Target all cache layers (API metadata, library state, and in-memory caches).
 - `-p, --purge`: Delete SQLite database files and disk cache directory completely.
-- `--dry-run`: Preview cache clearing without deleting files.
+- `--dry-run`: Simulate cache clearing without modifying or deleting files.
+- `--json`: Output clearing results in machine-readable JSON format.

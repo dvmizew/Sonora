@@ -32,7 +32,7 @@ def init_musicbrainz(
     try:
         musicbrainzngs.set_useragent(app_name, version, contact)
         musicbrainzngs.set_rate_limit(limit_or_interval=1.0, new_requests=1)
-    except (ValueError, AttributeError, RuntimeError) as error:
+    except ValueError as error:
         LOG.debug(f"MusicBrainz User-Agent initialization failed: {error}")
 
 
@@ -66,7 +66,6 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
         httpx.HTTPError,
         OSError,
         ValueError,
-        KeyError,
         RuntimeError,
     ) as error:
         LOG.debug(f"MusicBrainz discography fetch failed for {artist}: {error}")
@@ -193,14 +192,36 @@ def search_musicbrainz_release(
                 best_score = c_score
                 target_release = release
 
+        cleaned_album = clean_title(album)
+        if (
+            (target_release is None or best_score < 100.0)
+            and cleaned_album
+            and normalize_str(cleaned_album) != normalize_str(album)
+        ):
+            _MB_LIMITER.wait()
+            alt_res = musicbrainzngs.search_releases(
+                artist=artist, release=cleaned_album, limit=10
+            )
+            raw_alt = (
+                alt_res.get("release-list", []) if isinstance(alt_res, dict) else []
+            )
+            alt_releases: list[dict[str, object]] = [
+                r for r in raw_alt if isinstance(r, dict)
+            ]
+            for release in alt_releases:
+                c_score = _score_musicbrainz_candidate(
+                    release, artist, album, expected_track_count
+                )
+                if c_score > best_score and c_score >= 80.0:
+                    best_score = c_score
+                    target_release = release
+
         set_cached_api(cache_key, target_release)
         return target_release
     except (
         MusicBrainzError,
-        httpx.HTTPError,
         OSError,
         ValueError,
-        KeyError,
         RuntimeError,
     ) as error:
         LOG.debug(f"MusicBrainz search failed for {artist} - {album}: {error}")
@@ -255,10 +276,8 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         return best_mbid
     except (
         MusicBrainzError,
-        httpx.HTTPError,
         OSError,
         ValueError,
-        KeyError,
         RuntimeError,
     ) as error:
         LOG.debug(f"MusicBrainz track lookup failed for {artist} - {title}: {error}")
@@ -285,7 +304,7 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
             set_cached_api(cache_key, result_url)
             return result_url
         set_cached_api(cache_key, None)
-    except (httpx.HTTPError, OSError, ValueError, KeyError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Cover Art Archive lookup failed: {error}")
     return None
 
@@ -324,14 +343,14 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
                         position = track.get("position")
                         recording_id = track.get("recording", {}).get("id")
                         if position and recording_id:
-                            mapping[int(position)] = str(recording_id)
+                            pos_int = safe_int(position)
+                            if pos_int is not None:
+                                mapping[pos_int] = str(recording_id)
         set_cached_api(cache_key, mapping)
         return mapping
     except (
         MusicBrainzError,
         OSError,
-        ValueError,
-        KeyError,
     ) as error:
         LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {error}")
         return {}
@@ -354,18 +373,23 @@ def fetch_musicbrainz_recording_details(
 
     _MB_LIMITER.wait()
     try:
-        data = musicbrainzngs.get_recording_by_id(
+        musicbrainz_payload = musicbrainzngs.get_recording_by_id(
             recording_mbid,
             includes=[
                 "artists",
                 "releases",
                 "isrcs",
                 "work-rels",
+                "work-level-rels",
                 "artist-rels",
                 "tags",
             ],
         )
-        recording_dict = data.get("recording", {}) if isinstance(data, dict) else {}
+        recording_dict = (
+            musicbrainz_payload.get("recording", {})
+            if isinstance(musicbrainz_payload, dict)
+            else {}
+        )
         if not recording_dict:
             return None
 
@@ -415,7 +439,6 @@ def fetch_musicbrainz_recording_details(
         MusicBrainzError,
         OSError,
         ValueError,
-        KeyError,
     ) as error:
         LOG.debug(
             f"MusicBrainz recording details fetch failed for {recording_mbid}: {error}"
@@ -440,7 +463,7 @@ def fetch_musicbrainz_release_details(
 
     _MB_LIMITER.wait()
     try:
-        data = musicbrainzngs.get_release_by_id(
+        musicbrainz_payload = musicbrainzngs.get_release_by_id(
             release_mbid,
             includes=[
                 "recordings",
@@ -456,7 +479,11 @@ def fetch_musicbrainz_release_details(
                 "tags",
             ],
         )
-        release_dict = data.get("release", {}) if isinstance(data, dict) else {}
+        release_dict = (
+            musicbrainz_payload.get("release", {})
+            if isinstance(musicbrainz_payload, dict)
+            else {}
+        )
         if not release_dict:
             return None
 
@@ -553,6 +580,7 @@ def fetch_musicbrainz_release_details(
                         or release_artist
                     )
                     rec_details: dict[str, object] = {
+                        "position": safe_int(pos),
                         "title": rec.get("title") or track_item.get("title"),
                         "artist": track_artist,
                         "recording_mbid": rec_id if is_valid_uuid(rec_id) else None,
@@ -624,7 +652,6 @@ def fetch_musicbrainz_release_details(
         MusicBrainzError,
         OSError,
         ValueError,
-        KeyError,
     ) as error:
         LOG.debug(
             f"MusicBrainz release details fetch failed for {release_mbid}: {error}"
@@ -640,18 +667,18 @@ def search_musicbrainz_artists(query: str, limit: int = 5) -> list[dict[str, Any
     init_musicbrainz()
     _MB_LIMITER.wait()
     try:
-        res: Any = musicbrainzngs.search_artists(query=query, limit=limit)
-        if isinstance(res, dict):
-            raw_list = res.get("artist-list", [])
+        artist_search_payload: Any = musicbrainzngs.search_artists(
+            query=query, limit=limit
+        )
+        if isinstance(artist_search_payload, dict):
+            raw_list = artist_search_payload.get("artist-list", [])
             if isinstance(raw_list, list):
                 return [a for a in raw_list if isinstance(a, dict)]
         return []
     except (
         MusicBrainzError,
-        httpx.HTTPError,
         OSError,
         ValueError,
-        KeyError,
         RuntimeError,
     ) as error:
         LOG.debug(f"MusicBrainz artist search failed for '{query}': {error}")
