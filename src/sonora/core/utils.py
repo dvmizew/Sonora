@@ -224,7 +224,13 @@ def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str
     cache_key = f"canonical_artist:{normalized}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
-        return clean_unicode_punct(cached)
+        is_cached_acronym = (
+            len(cached.replace(".", "")) <= 3
+            or "." in cached
+            or bool(re.search(r"\d", cached))
+        )
+        if not (cached.isupper() and not is_cached_acronym):
+            return clean_unicode_punct(cached)
 
     if not allow_network:
         return clean_unicode_punct(clean_name)
@@ -243,9 +249,14 @@ def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str
             if not art_name:
                 continue
             if art_name.lower() == clean_name.lower():
+                is_acronym_or_initialism = (
+                    len(clean_name.replace(".", "")) <= 3
+                    or "." in clean_name
+                    or bool(re.search(r"\d", clean_name))
+                )
                 if (
                     clean_name.isupper()
-                    and len(clean_name.replace(".", "")) <= 5
+                    and is_acronym_or_initialism
                     and not art_name.isupper()
                 ):
                     res_name = clean_name

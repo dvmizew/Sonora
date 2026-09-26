@@ -2120,11 +2120,40 @@ def process_single_track(
                 track_info.title, primary_artist=track_info.artist
             )
         if track_info.artist:
+            track_info.artist = resolve_artist_name(track_info.artist)
             track_info.artist = clean_unicode_punct(track_info.artist)
         if track_info.album:
             track_info.album = clean_unicode_punct(track_info.album)
         if track_info.album_artist:
+            track_info.album_artist = resolve_artist_name(track_info.album_artist)
             track_info.album_artist = clean_unicode_punct(track_info.album_artist)
+
+        if (
+            track_info.artist
+            and track_info.album_artist
+            and normalize_str(track_info.artist)
+            == normalize_str(track_info.album_artist)
+            and track_info.artist != track_info.album_artist
+        ):
+            is_artist_acronym = (
+                len(track_info.artist.replace(".", "")) <= 3
+                or "." in track_info.artist
+                or bool(re.search(r"\d", track_info.artist))
+            )
+            if (
+                track_info.artist.isupper()
+                and not is_artist_acronym
+                and not track_info.album_artist.isupper()
+            ):
+                track_info.artist = track_info.album_artist
+            elif (
+                track_info.album_artist.isupper()
+                and not is_artist_acronym
+                and not track_info.artist.isupper()
+            ):
+                track_info.album_artist = track_info.artist
+            else:
+                track_info.artist = track_info.album_artist
 
         # Sanitize sort names: ensure sort names do not contradict the actual artist identity
         if track_info.artist_sort and track_info.artist:
@@ -2516,6 +2545,205 @@ def tag_album_folder(
                                                 f"Failed to save harmonized genre: {err}"
                                             )
 
+                        # Harmonize album artist and track artist casing consensus
+                        dominant_album_artist: str | None = None
+                        album_artist_counts: dict[str, int] = {}
+                        for valid_track in valid_tracks:
+                            if (
+                                valid_track.album_artist
+                                and valid_track.album_artist.strip()
+                            ):
+                                cleaned_album_artist_val = (
+                                    valid_track.album_artist.strip()
+                                )
+                                album_artist_counts[cleaned_album_artist_val] = (
+                                    album_artist_counts.get(cleaned_album_artist_val, 0)
+                                    + 1
+                                )
+
+                        if album_artist_counts:
+                            normalized_album_artist_groups: dict[
+                                str, dict[str, int]
+                            ] = {}
+                            for (
+                                album_artist_candidate,
+                                candidate_count,
+                            ) in album_artist_counts.items():
+                                normalized_group_key = normalize_str(
+                                    album_artist_candidate
+                                )
+                                if (
+                                    normalized_group_key
+                                    not in normalized_album_artist_groups
+                                ):
+                                    normalized_album_artist_groups[
+                                        normalized_group_key
+                                    ] = {}
+                                normalized_album_artist_groups[normalized_group_key][
+                                    album_artist_candidate
+                                ] = candidate_count
+
+                            dominant_normalized_key = max(
+                                normalized_album_artist_groups.keys(),
+                                key=lambda norm_key: sum(
+                                    normalized_album_artist_groups[norm_key].values()
+                                ),
+                            )
+                            casing_candidate_counts = normalized_album_artist_groups[
+                                dominant_normalized_key
+                            ]
+                            representative_album_artist = max(
+                                casing_candidate_counts.items(),
+                                key=lambda count_tuple: count_tuple[1],
+                            )[0]
+                            resolved_album_artist_candidate = resolve_artist_name(
+                                representative_album_artist, allow_network=False
+                            )
+                            if (
+                                normalize_str(resolved_album_artist_candidate)
+                                == dominant_normalized_key
+                            ):
+                                dominant_album_artist = resolved_album_artist_candidate
+                            else:
+                                dominant_album_artist = representative_album_artist
+
+                        track_artist_counts: dict[str, dict[str, int]] = {}
+                        for valid_track in valid_tracks:
+                            if valid_track.artist and valid_track.artist.strip():
+                                cleaned_track_artist = valid_track.artist.strip()
+                                normalized_artist_key = normalize_str(
+                                    cleaned_track_artist
+                                )
+                                if normalized_artist_key not in track_artist_counts:
+                                    track_artist_counts[normalized_artist_key] = {}
+                                track_artist_counts[normalized_artist_key][
+                                    cleaned_track_artist
+                                ] = (
+                                    track_artist_counts[normalized_artist_key].get(
+                                        cleaned_track_artist, 0
+                                    )
+                                    + 1
+                                )
+
+                        canonical_track_artists: dict[str, str] = {}
+                        for (
+                            normalized_artist_key,
+                            casing_frequency_map,
+                        ) in track_artist_counts.items():
+                            dominant_casing = max(
+                                casing_frequency_map.items(),
+                                key=lambda count_tuple: count_tuple[1],
+                            )[0]
+                            resolved_track_artist = resolve_artist_name(
+                                dominant_casing, allow_network=False
+                            )
+                            if (
+                                normalize_str(resolved_track_artist)
+                                == normalized_artist_key
+                            ):
+                                canonical_track_artists[normalized_artist_key] = (
+                                    resolved_track_artist
+                                )
+                            else:
+                                canonical_track_artists[normalized_artist_key] = (
+                                    dominant_casing
+                                )
+
+                        if dominant_album_artist:
+                            normalized_dominant_album_artist = normalize_str(
+                                dominant_album_artist
+                            )
+                            if (
+                                normalized_dominant_album_artist
+                                in canonical_track_artists
+                            ):
+                                candidate_track_artist = canonical_track_artists[
+                                    normalized_dominant_album_artist
+                                ]
+                                is_artist_acronym = (
+                                    len(candidate_track_artist.replace(".", "")) <= 3
+                                    or "." in candidate_track_artist
+                                    or bool(re.search(r"\d", candidate_track_artist))
+                                )
+                                if (
+                                    candidate_track_artist.isupper()
+                                    and not is_artist_acronym
+                                    and not dominant_album_artist.isupper()
+                                ):
+                                    canonical_track_artists[
+                                        normalized_dominant_album_artist
+                                    ] = dominant_album_artist
+                                elif (
+                                    dominant_album_artist.isupper()
+                                    and not is_artist_acronym
+                                    and not candidate_track_artist.isupper()
+                                ):
+                                    dominant_album_artist = candidate_track_artist
+                                    canonical_track_artists[
+                                        normalized_dominant_album_artist
+                                    ] = candidate_track_artist
+                                else:
+                                    dominant_album_artist = candidate_track_artist
+                            else:
+                                canonical_track_artists[
+                                    normalized_dominant_album_artist
+                                ] = dominant_album_artist
+
+                        for valid_track in valid_tracks:
+                            track_modified = False
+                            if (
+                                dominant_album_artist
+                                and valid_track.album_artist
+                                and normalize_str(valid_track.album_artist)
+                                == normalize_str(dominant_album_artist)
+                                and valid_track.album_artist != dominant_album_artist
+                            ):
+                                LOG.info(
+                                    f"   ∟ 🏷️ [Consensus] Harmonizing album artist casing '[bold red]{escape(valid_track.album_artist)}[/]' -> '[bold green]{escape(dominant_album_artist)}[/]' on '{escape(valid_track.file_path.name)}'"
+                                )
+                                valid_track.album_artist = dominant_album_artist
+                                track_modified = True
+
+                            if valid_track.artist:
+                                normalized_track_artist_name = normalize_str(
+                                    valid_track.artist
+                                )
+                                if (
+                                    normalized_track_artist_name
+                                    in canonical_track_artists
+                                ):
+                                    canonical_artist_name = canonical_track_artists[
+                                        normalized_track_artist_name
+                                    ]
+                                    if valid_track.artist != canonical_artist_name:
+                                        LOG.info(
+                                            f"   ∟ 🏷️ [Consensus] Harmonizing track artist casing '[bold red]{escape(valid_track.artist)}[/]' -> '[bold green]{escape(canonical_artist_name)}[/]' on '{escape(valid_track.file_path.name)}'"
+                                        )
+                                        valid_track.artist = canonical_artist_name
+                                        track_modified = True
+
+                            if (
+                                valid_track.album_artist
+                                and valid_track.artist
+                                and normalize_str(valid_track.album_artist)
+                                == normalize_str(valid_track.artist)
+                                and valid_track.album_artist != valid_track.artist
+                            ):
+                                target_casing = (
+                                    dominant_album_artist or valid_track.album_artist
+                                )
+                                valid_track.album_artist = target_casing
+                                valid_track.artist = target_casing
+                                track_modified = True
+
+                            if track_modified and not dry_run:
+                                try:
+                                    write_track_metadata(valid_track)
+                                except OSError as write_error:
+                                    LOG.debug(
+                                        f"Failed to save harmonized artist metadata: {write_error}"
+                                    )
+
                     valid_album_files = [t.file_path for t in valid_tracks]
                     if fetch_replaygain and valid_album_files:
                         wait_if_paused()
@@ -2626,6 +2854,31 @@ def normalize_single_track(
         )
     else:
         cleaned_album_artist = None
+    if (
+        cleaned_artist
+        and cleaned_album_artist
+        and normalize_str(cleaned_artist) == normalize_str(cleaned_album_artist)
+        and cleaned_artist != cleaned_album_artist
+    ):
+        is_artist_acronym = (
+            len(cleaned_artist.replace(".", "")) <= 3
+            or "." in cleaned_artist
+            or bool(re.search(r"\d", cleaned_artist))
+        )
+        if (
+            cleaned_artist.isupper()
+            and not is_artist_acronym
+            and not cleaned_album_artist.isupper()
+        ):
+            cleaned_artist = cleaned_album_artist
+        elif (
+            cleaned_album_artist.isupper()
+            and not is_artist_acronym
+            and not cleaned_artist.isupper()
+        ):
+            cleaned_album_artist = cleaned_artist
+        else:
+            cleaned_artist = cleaned_album_artist
 
     cleaned_genre = normalize_genre(current_info.genre)
     cleaned_date = normalize_date(current_info.date)

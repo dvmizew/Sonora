@@ -1454,6 +1454,19 @@ class TestCoreModules(unittest.TestCase):
             self.assertEqual(result.script, "Latin")
             mock_write.assert_called_once()
 
+            # Test artist and album_artist casing reconciliation
+            mock_read.return_value = TrackInfo(
+                file_path=audio_file,
+                artist="ALEX",
+                album_artist="Alex",
+                title="Song",
+            )
+            casing_result = normalize_single_track(audio_file, dry_run=False)
+            self.assertIsNotNone(casing_result)
+            assert casing_result is not None
+            self.assertEqual(casing_result.artist, "Alex")
+            self.assertEqual(casing_result.album_artist, "Alex")
+
             # Test normalize_library
             mock_read.return_value = TrackInfo(
                 file_path=audio_file,
@@ -1812,6 +1825,84 @@ class TestCoreModules(unittest.TestCase):
         genres = {t.title: t.genre for t in results}
         self.assertEqual(genres["Maybe"], "Alternative")
         self.assertEqual(genres["Grace"], "Alternative")
+
+    def test_album_artist_casing_consensus_harmonization(self) -> None:
+        """Album artist and track artist casing must harmonize to canonical consensus."""
+        album_dir = self.tmp_path / "Alex - Test Release"
+        album_dir.mkdir(parents=True, exist_ok=True)
+
+        track_file1 = album_dir / "01 - Intro.wav"
+        track_file2 = album_dir / "02 - Main.wav"
+        track_file3 = album_dir / "03 - Outro.wav"
+        for track_file in (track_file1, track_file2, track_file3):
+            create_dummy_wav(track_file)
+
+        write_track_metadata(
+            TrackInfo(
+                file_path=track_file1,
+                artist="Alex",
+                album_artist="Alex",
+                album="Test Release",
+                title="Intro",
+                track_number=1,
+            )
+        )
+        write_track_metadata(
+            TrackInfo(
+                file_path=track_file2,
+                artist="ALEX",
+                album_artist="Alex",
+                album="Test Release",
+                title="Main",
+                track_number=2,
+            )
+        )
+        write_track_metadata(
+            TrackInfo(
+                file_path=track_file3,
+                artist="Alex",
+                album_artist="ALEX",
+                album="Test Release",
+                title="Outro",
+                track_number=3,
+            )
+        )
+
+        with (
+            patch(
+                "sonora.modules.tagger.search_musicbrainz_release", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_deezer_album_details", return_value=None
+            ),
+            patch(
+                "sonora.modules.tagger.fetch_itunes_album_details", return_value=None
+            ),
+            patch("sonora.modules.tagger.process_artist_artwork"),
+            patch("sonora.modules.tagger.calculate_album_replaygain"),
+            patch("sonora.modules.tagger._enrich_musicbrainz"),
+            patch("sonora.modules.tagger._enrich_acoustid"),
+            patch("sonora.modules.tagger._enrich_deezer"),
+            patch("sonora.modules.tagger._enrich_itunes"),
+            patch("sonora.modules.tagger._enrich_theaudiodb"),
+            patch("sonora.modules.tagger._enrich_genius"),
+            patch(
+                "sonora.modules.tagger.resolve_artist_name",
+                side_effect=lambda name, **kwargs: name,
+            ),
+        ):
+            harmonized_tracks = tag_album_folder(
+                album_dir,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_replaygain=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+            )
+
+        for track_info_result in harmonized_tracks:
+            self.assertEqual(track_info_result.artist, "Alex")
+            self.assertEqual(track_info_result.album_artist, "Alex")
 
 
 class TestKeyboardInterruptHandling(unittest.TestCase):
