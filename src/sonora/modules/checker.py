@@ -73,6 +73,10 @@ def _is_corrupt_bracket(full_bracket: str, tokens: set[str]) -> bool:
     if is_version_or_remix(full_bracket) or FEAT_PATTERN.search(full_bracket):
         return False
 
+    inner_content = full_bracket.strip("()[]{}").strip()
+    if inner_content.isdigit() and len(inner_content) == 4:
+        return False
+
     dummy_title = f"Track {full_bracket}"
     if (
         youtube(dummy_title) == "Track"
@@ -188,8 +192,34 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: TITLE only)"
             )
 
-        delimiters = [(" & ", "&"), (" \u00d7 ", "\u00d7"), (" / ", "/"), (" + ", "+")]
-        if not is_single_group_artist(track.artist):
+        delimiters = [
+            (" \u00d7 ", "\u00d7"),
+            (" / ", "/"),
+            (" + ", "+"),
+            ("; ", ";"),
+            (" ; ", ";"),
+        ]
+        norm_album_artist = (
+            normalize_str(track.album_artist) if track.album_artist else ""
+        )
+        norm_artist = normalize_str(track.artist)
+        is_album_level_collab = bool(
+            norm_album_artist
+            and (
+                norm_artist == norm_album_artist
+                or any(
+                    normalize_str(part) in norm_album_artist
+                    or norm_album_artist in normalize_str(part)
+                    for part in re.split(r"[,/&×+;]", track.artist)
+                    if part.strip()
+                )
+            )
+        )
+        if (
+            not is_album_level_collab
+            and not FEAT_PATTERN.search(track.artist)
+            and not is_single_group_artist(track.artist)
+        ):
             for delimiter_pattern, delimiter_name in delimiters:
                 if delimiter_pattern in f" {track.artist} ":
                     issues.append(
@@ -406,18 +436,22 @@ def check_library(
                     f"Duplicate track number {track_idx} (Disc {disc_idx}) found in files: {found_files}"
                 )
 
-        discs: dict[int, set[int]] = defaultdict(set)
-        for disc_idx, track_idx in tracks_found:
-            discs[disc_idx].add(track_idx)
-        for disc_idx, track_nums in discs.items():
-            if track_nums:
-                missing = [
-                    i for i in range(1, max(track_nums) + 1) if i not in track_nums
-                ]
-                if missing:
-                    folder_issues.append(
-                        f"Missing track numbers in sequence for Disc {disc_idx}: {missing}"
-                    )
+        is_singles_container = any(
+            get_config().is_generic_container(p) for p in folder.parts
+        )
+        if not is_singles_container:
+            discs: dict[int, set[int]] = defaultdict(set)
+            for disc_idx, track_idx in tracks_found:
+                discs[disc_idx].add(track_idx)
+            for disc_idx, track_nums in discs.items():
+                if track_nums:
+                    missing = [
+                        i for i in range(1, max(track_nums) + 1) if i not in track_nums
+                    ]
+                    if missing:
+                        folder_issues.append(
+                            f"Missing track numbers in sequence for Disc {disc_idx}: {missing}"
+                        )
 
         if folder_issues:
             report.issues[str(folder)] = folder_issues

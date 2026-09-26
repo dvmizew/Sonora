@@ -509,6 +509,196 @@ class TestCoreModules(unittest.TestCase):
             any("Duplicate track number" in issue for issue in folder_issues)
         )
 
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_singles_folder_sequence_shielding(
+        self, mock_read: Any
+    ) -> None:
+        singles_dir = self.tmp_path / "Singles" / "Artist - Song"
+        singles_dir.mkdir(parents=True, exist_ok=True)
+        file1 = singles_dir / "12 - Song.wav"
+        create_dummy_wav(file1)
+
+        mock_read.return_value = TrackInfo(
+            file_path=file1,
+            artist="Artist",
+            title="Song",
+            album="Song",
+            album_artist="Artist",
+            track_number=12,
+            disc_number=1,
+            total_tracks=1,
+        )
+
+        report = check_library(self.tmp_path)
+        folder_issues = report.issues.get(str(singles_dir), [])
+        self.assertFalse(
+            any("Missing track numbers in sequence" in issue for issue in folder_issues)
+        )
+
+    def test_check_brackets_year_tolerance(self) -> None:
+        self.assertEqual(check_brackets_corruption("Rebirth (2016)"), [])
+        self.assertEqual(check_brackets_corruption("Marine Parade (2013)"), [])
+        corrupt_issues = check_brackets_corruption("Song (2011 Remaster)")
+        self.assertTrue(len(corrupt_issues) > 0)
+        self.assertIn("Corrupt bracket metadata", corrupt_issues[0])
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_unsplit_collaborative_artist_subset(
+        self, mock_read: Any, mock_checksum: Any
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "03 - Ric Flair Drip.wav"
+        create_dummy_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Offset & Metro Boomin",
+            album_artist="21 Savage, Offset & Metro Boomin",
+            title="Ric Flair Drip",
+            album="Without Warning",
+            track_number=3,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2017",
+            bpm=134.0,
+            replaygain_track_gain=-7.8,
+            replaygain_track_peak=1.0,
+        )
+        issues = check_file(wav_path)
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_unsplit_collaborative_track_with_primary_artist(
+        self, mock_read: Any, mock_checksum: Any
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "03 - Stai.wav"
+        create_dummy_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Killa Fonic & Nane",
+            album_artist="Killa Fonic",
+            title="Stai",
+            album="III",
+            track_number=3,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2019",
+            bpm=120.0,
+            replaygain_track_gain=-6.5,
+            replaygain_track_peak=0.98,
+        )
+        issues = check_file(wav_path)
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_feat_in_artist_no_double_unsplit_warning(
+        self, mock_read: Any, mock_checksum: Any
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "04 - Mr. Right Now.wav"
+        create_dummy_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="21 Savage & Metro Boomin feat. Drake",
+            album_artist="21 Savage & Metro Boomin",
+            title="Mr. Right Now",
+            album="Savage Mode II",
+            track_number=4,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2020",
+            bpm=130.0,
+            replaygain_track_gain=-7.0,
+            replaygain_track_peak=0.99,
+        )
+        issues = check_file(wav_path)
+        self.assertTrue(any("contains 'feat' info" in issue for issue in issues))
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_unsplit_delimiter_true_positive(
+        self, mock_read: Any, mock_checksum: Any
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "01 - Intro.wav"
+        create_dummy_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Artist 1 / Artist 2",
+            album_artist="Various Artists",
+            title="Intro",
+            album="Compilation",
+            track_number=1,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2024",
+            bpm=120.0,
+            replaygain_track_gain=-7.0,
+            replaygain_track_peak=0.99,
+        )
+        issues = check_file(wav_path)
+        self.assertTrue(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_diacritic_collaborative_track_alignment(
+        self, mock_read: Any, mock_checksum: Any
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "01 - LVL UP.wav"
+        create_dummy_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Nane & Amuly",
+            album_artist="Nané",
+            title="LVL UP",
+            album="AVRAM",
+            track_number=1,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2023",
+            bpm=130.0,
+            replaygain_track_gain=-6.0,
+            replaygain_track_peak=0.98,
+        )
+        issues = check_file(wav_path)
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_collective_compilation_joint_billing_conjunction(
+        self, mock_read: Any, mock_checksum: Any
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "02 - CHAMPAIN & VACAY.wav"
+        create_dummy_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Travis Scott & Don Toliver",
+            album_artist="JACKBOYS",
+            title="CHAMPAIN & VACAY",
+            album="JACKBOYS 2",
+            track_number=2,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2024",
+            bpm=125.0,
+            replaygain_track_gain=-6.8,
+            replaygain_track_peak=0.97,
+        )
+        issues = check_file(wav_path)
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
     @patch("sonora.modules.tagger.write_track_metadata")
     @patch("sonora.services.lyrics.fetch_synced_lyrics")
     @patch("sonora.modules.tagger.fetch_track_mbid")
@@ -1467,6 +1657,20 @@ class TestCoreModules(unittest.TestCase):
             self.assertEqual(casing_result.artist, "Alex")
             self.assertEqual(casing_result.album_artist, "Alex")
 
+            # Test extracting feat from artist in normalize_single_track
+            mock_read.return_value = TrackInfo(
+                file_path=audio_file,
+                artist="21 Savage & Metro Boomin feat. Drake",
+                title="Mr. Right Now",
+                album="Savage Mode II",
+            )
+            feat_result = normalize_single_track(audio_file, dry_run=False)
+            self.assertIsNotNone(feat_result)
+            assert feat_result is not None
+            self.assertEqual(feat_result.artist, "21 Savage & Metro Boomin")
+            self.assertEqual(feat_result.title, "Mr. Right Now (feat. Drake)")
+            self.assertEqual(feat_result.featured_artists, "Drake")
+
             # Test normalize_library
             mock_read.return_value = TrackInfo(
                 file_path=audio_file,
@@ -2145,6 +2349,51 @@ class TestKeyboardInterruptHandling(unittest.TestCase):
                 processed.musicbrainz_albumid, "11111111-2222-3333-4444-555555555555"
             )
             self.assertEqual(processed.artist_sort, "Malone, Post")
+
+    @patch("sonora.modules.tagger.write_track_metadata")
+    def test_process_single_track_triggers_write_on_art_upgrade(
+        self, mock_write: MagicMock
+    ) -> None:
+        wav = self.tmp_path / "lowres_art.wav"
+        create_dummy_wav(wav)
+        info = read_track_metadata(wav)
+        info.artist = "Artist"
+        info.title = "Title"
+        info.album = "Album"
+        info.art_width = 300
+        info.art_height = 300
+        write_track_metadata(info)
+
+        cover_img = self.tmp_path / "cover.jpg"
+        cover_img.write_bytes(b"dummy")
+
+        with patch("sonora.modules.tagger.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(
+                file_path=wav,
+                artist="Artist",
+                title="Title",
+                album="Album",
+                album_artist="Artist",
+                track_number=1,
+                disc_number=1,
+                art_width=300,
+                art_height=300,
+            )
+            process_single_track(
+                wav,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=True,
+                force=False,
+                dry_run=False,
+                album_cover_path=cover_img,
+                target_album_title="Album",
+                target_album_artist="Artist",
+            )
+            self.assertTrue(mock_write.called)
+            called_cover_path = mock_write.call_args[1].get("cover_art_path")
+            self.assertEqual(called_cover_path, cover_img)
 
 
 if __name__ == "__main__":

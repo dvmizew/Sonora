@@ -28,6 +28,7 @@ from sonora.audio.metadata import (
 )
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.config import clear_config_cache, get_config
+from sonora.core.constants import FEAT_KEYWORDS
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -96,6 +97,8 @@ _NETWORK_EXCEPTIONS = (
     TimeoutError,
 )
 
+
+_FEAT_ARTIST_PATTERN = re.compile(rf"\s+(?:{FEAT_KEYWORDS})\.?\s+(.+)$", re.IGNORECASE)
 
 _SKIP_DIFF_FIELDS: frozenset[str] = frozenset(
     {
@@ -2120,6 +2123,27 @@ def process_single_track(
                 track_info.title, primary_artist=track_info.artist
             )
         if track_info.artist:
+            feat_match = _FEAT_ARTIST_PATTERN.search(track_info.artist)
+            if feat_match:
+                base_artist = track_info.artist[: feat_match.start()].strip()
+                extracted_featured = feat_match.group(1).strip()
+                if base_artist:
+                    track_info.artist = base_artist
+                if extracted_featured:
+                    track_info.title = deduplicate_title_features(
+                        f"{track_info.title} (feat. {extracted_featured})",
+                        primary_artist=track_info.artist,
+                    )
+                    if track_info.featured_artists:
+                        if (
+                            extracted_featured.lower()
+                            not in track_info.featured_artists.lower()
+                        ):
+                            track_info.featured_artists = (
+                                f"{track_info.featured_artists}, {extracted_featured}"
+                            )
+                    else:
+                        track_info.featured_artists = extracted_featured
             track_info.artist = resolve_artist_name(track_info.artist)
             track_info.artist = clean_unicode_punct(track_info.artist)
         if track_info.album:
@@ -2127,6 +2151,23 @@ def process_single_track(
         if track_info.album_artist:
             track_info.album_artist = resolve_artist_name(track_info.album_artist)
             track_info.album_artist = clean_unicode_punct(track_info.album_artist)
+
+        # Normalize track numbering on standalone single releases
+        is_singles_track = bool(
+            (track_info.total_tracks == 1 and (track_info.track_number or 1) > 1)
+            or (
+                track_info.release_type
+                and track_info.release_type.lower() == "single"
+                and (track_info.total_tracks or 1) <= 1
+            )
+            or any(
+                get_config().is_generic_container(part)
+                for part in track_info.file_path.parts
+            )
+        )
+        if is_singles_track and (track_info.total_tracks or 1) <= 1:
+            track_info.track_number = 1
+            track_info.total_tracks = 1
 
         if (
             track_info.artist
@@ -2198,8 +2239,27 @@ def process_single_track(
                 track_info.album_artist_sort = None
 
         # 4. Compute tag diffs and persist metadata
+        has_art_upgrade = bool(
+            cover_image
+            and cover_image.exists()
+            and (
+                not orig_info.art_width
+                or orig_info.art_width < 500
+                or (orig_info.art_height and orig_info.art_height < 500)
+            )
+        )
         diff_lines = _render_tag_diffs(orig_info, track_info)
-        if diff_lines or force:
+        if has_art_upgrade:
+            cur_dim_str = (
+                f"{orig_info.art_width}x{orig_info.art_height}"
+                if orig_info.art_width and orig_info.art_height
+                else "None"
+            )
+            diff_lines.append(
+                f"\n       [green][+] cover_art: upgraded to high-resolution (was {cur_dim_str})[/]"
+            )
+
+        if diff_lines or force or has_art_upgrade:
             if not dry_run:
                 write_track_metadata(track_info, cover_art_path=cover_image)
                 get_library_state().record_track_state(file_path, status="TAGGED_OK")
@@ -2839,13 +2899,22 @@ def normalize_single_track(
         LOG.debug(f"Failed to read metadata for {file_path}: {error}")
         return None
 
-    cleaned_artist = clean_unicode_punct(
+    raw_artist = clean_unicode_punct(
         clean_disambiguation(ftfy.fix_text(current_info.artist or ""))
     )
+    raw_title = clean_unicode_punct(ftfy.fix_text(current_info.title or ""))
+    feat_match = _FEAT_ARTIST_PATTERN.search(raw_artist)
+    if feat_match:
+        base_artist = raw_artist[: feat_match.start()].strip()
+        extracted_featured = feat_match.group(1).strip()
+        if base_artist:
+            raw_artist = base_artist
+        if extracted_featured:
+            raw_title = f"{raw_title} (feat. {extracted_featured})"
+
+    cleaned_artist = raw_artist
     cleaned_title = clean_unicode_punct(
-        deduplicate_title_features(
-            ftfy.fix_text(current_info.title or ""), primary_artist=cleaned_artist
-        )
+        deduplicate_title_features(raw_title, primary_artist=cleaned_artist)
     )
     cleaned_album = clean_unicode_punct(ftfy.fix_text(current_info.album or ""))
     if current_info.album_artist:
