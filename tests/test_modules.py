@@ -30,6 +30,7 @@ from sonora.modules.checker import (
     check_brackets_corruption,
     check_file,
     check_library,
+    strip_corrupt_brackets,
 )
 from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import (
@@ -148,6 +149,32 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(check_brackets_corruption("Versus (feat. MHD)"), [])
         self.assertEqual(
             check_brackets_corruption("MODERN JAM (feat. Teezo Touchdown)"), []
+        )
+
+    def test_strip_corrupt_brackets(self) -> None:
+        self.assertEqual(
+            strip_corrupt_brackets("Song Title [Official Video]"),
+            "Song Title",
+        )
+        self.assertEqual(
+            strip_corrupt_brackets("Song Title [FLAC]"),
+            "Song Title",
+        )
+        self.assertEqual(
+            strip_corrupt_brackets("Song Title (Remix)"),
+            "Song Title (Remix)",
+        )
+        self.assertEqual(
+            strip_corrupt_brackets("Candy (feat. Trippie Redd)"),
+            "Candy (feat. Trippie Redd)",
+        )
+        self.assertEqual(
+            strip_corrupt_brackets("Song (2011 Remaster)"),
+            "Song",
+        )
+        self.assertEqual(
+            strip_corrupt_brackets(""),
+            "",
         )
 
     def test_sync_lrc_metadata(self) -> None:
@@ -1671,6 +1698,34 @@ class TestCoreModules(unittest.TestCase):
             self.assertEqual(feat_result.title, "Mr. Right Now (feat. Drake)")
             self.assertEqual(feat_result.featured_artists, "Drake")
 
+            # Test extracting producer bracket and cleaning title
+            mock_read.return_value = TrackInfo(
+                file_path=audio_file,
+                artist="Deliric",
+                title="Din 94 feat. Mike Diamondz [Prod: Motzu]",
+                producers=None,
+            )
+            prod_result = normalize_single_track(audio_file, dry_run=False)
+            self.assertIsNotNone(prod_result)
+            assert prod_result is not None
+            self.assertEqual(prod_result.title, "Din 94 feat. Mike Diamondz")
+            self.assertEqual(prod_result.producers, "Motzu")
+
+            # Test invalid initial_key re-detection ('m' -> 'Am')
+            with patch("sonora.modules.tagger.detect_musical_key", return_value="Am"):
+                mock_read.return_value = TrackInfo(
+                    file_path=audio_file,
+                    artist="B.U.G. Mafia",
+                    title="40 km/h",
+                    initial_key="m",
+                )
+                key_result = normalize_single_track(
+                    audio_file, fetch_key=True, dry_run=False
+                )
+                self.assertIsNotNone(key_result)
+                assert key_result is not None
+                self.assertEqual(key_result.initial_key, "Am")
+
             # Test normalize_library
             mock_read.return_value = TrackInfo(
                 file_path=audio_file,
@@ -1682,6 +1737,26 @@ class TestCoreModules(unittest.TestCase):
             )
             self.assertEqual(len(library_results), 1)
             self.assertEqual(library_results[0].artist, "Artist")
+            self.assertEqual(library_results.total_scanned, 1)
+            self.assertEqual(library_results.total_modified, 1)
+            self.assertEqual(library_results.total_unchanged, 0)
+            self.assertIn(str(audio_file), library_results.modified_files)
+
+            # Test already normalized (skip disk write)
+            mock_write.reset_mock()
+            mock_read.return_value = TrackInfo(
+                file_path=audio_file,
+                artist="Artist",
+                title="Clean Song",
+            )
+            already_clean_results = normalize_library(
+                self.tmp_path, fetch_bpm=False, fetch_replaygain=False
+            )
+            self.assertEqual(already_clean_results.total_scanned, 1)
+            self.assertEqual(already_clean_results.total_modified, 0)
+            self.assertEqual(already_clean_results.total_unchanged, 1)
+            self.assertEqual(len(already_clean_results.modified_files), 0)
+            mock_write.assert_not_called()
 
     @patch("sonora.modules.tagger.recognize_audio_track")
     def test_enrich_shazam_generic_and_force(self, mock_recognize: MagicMock) -> None:

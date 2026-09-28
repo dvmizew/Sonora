@@ -94,6 +94,8 @@ _TAG_SCHEMA: dict[str, tuple[str, ...]] = {
     "producers": ("PRODUCERS", "TXXX:PRODUCERS"),
     "genius_song_id": ("GENIUS_SONG_ID", "TXXX:GENIUS_SONG_ID"),
     "music_video_url": ("MUSIC_VIDEO_URL", "TXXX:MUSIC_VIDEO_URL"),
+    "lyrics": ("LYRICS", "UNSYNCEDLYRICS", "USLT"),
+    "disc_subtitle": ("DISCSUBTITLE", "TSST", "SETSUBTITLE"),
 }
 
 

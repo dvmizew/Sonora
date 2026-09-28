@@ -17,7 +17,7 @@ from rich.markup import escape
 
 from sonora import __version__
 from sonora.audio.bpm import calculate_bpm
-from sonora.audio.key import detect_key_details
+from sonora.audio.key import detect_key_details, key_to_camelot
 from sonora.audio.metadata import (
     get_audio_duration,
     read_track_metadata,
@@ -43,7 +43,7 @@ from sonora.core.logger import (
     interactive_pause_listener,
     wait_if_paused,
 )
-from sonora.core.models import CheckReport, RenameReport, TrackInfo
+from sonora.core.models import CheckReport, NormalizeReport, RenameReport, TrackInfo
 from sonora.core.utils import (
     InterruptedOperationError,
     find_audio_files,
@@ -137,6 +137,7 @@ def _write_json_report(
     report_data: dict[str, Any],
     label: str = "report",
 ) -> None:
+    json_report.parent.mkdir(parents=True, exist_ok=True)
     json_report.write_bytes(
         orjson.dumps(
             report_data,
@@ -853,6 +854,7 @@ def normalize(
     force: ForceOpt = False,
     threads: ThreadsOpt = 4,
     dry_run: DryRunOpt = False,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Locally clean tags, remove bracket noise, and calculate BPM/Key/ReplayGain (100% offline).
@@ -861,9 +863,9 @@ def normalize(
         f"Normalizing audio tags in [bold]{escape(str(path))}[/bold] (offline mode)..."
     )
     interrupted = False
-    count = 0
+    report = NormalizeReport([])
     try:
-        results = normalize_library(
+        report_or_list = normalize_library(
             path,
             fetch_bpm=fetch_bpm,
             fetch_key=fetch_key,
@@ -872,32 +874,70 @@ def normalize(
             dry_run=dry_run,
             max_threads=threads,
         )
-        count = len(results)
+        if isinstance(report_or_list, NormalizeReport):
+            report = report_or_list
+        else:
+            report = NormalizeReport(report_or_list)
     except (KeyboardInterrupt, RuntimeError) as exc:
         if not is_interruption(exc):
             raise
         interrupted = True
-        if isinstance(exc, InterruptedOperationError) and isinstance(
-            exc.partial_result, list
-        ):
-            count = len(exc.partial_result)
+        if isinstance(exc, InterruptedOperationError):
+            if isinstance(exc.partial_result, NormalizeReport):
+                report = exc.partial_result
+            elif isinstance(exc.partial_result, list):
+                report = NormalizeReport(exc.partial_result)
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Normalization stopped by user (Ctrl+C)."
         )
 
+    total_scanned = report.total_scanned
+    total_modified = report.total_modified
+    total_unchanged = report.total_unchanged
+
     if not interrupted:
-        LOG.success(f"Normalization completed for {count} files.")
+        LOG.success(
+            f"Normalization completed: {total_modified} modified, {total_unchanged} already normalized ({total_scanned} total)."
+        )
     else:
-        LOG.warning(f"Partially normalized {count} files before interruption.")
+        LOG.warning(
+            f"Partially processed {total_scanned} files before interruption ({total_modified} modified)."
+        )
 
     summary_rows = [
         ("Target Directory", str(path.resolve()), None),
-        ("Tracks Normalized", str(count), "green" if count else "white"),
+        ("Tracks Scanned", str(total_scanned), "cyan" if total_scanned else "white"),
+        (
+            "Tracks Modified",
+            str(total_modified),
+            "green" if total_modified else "white",
+        ),
+        (
+            "Already Normalized",
+            str(total_unchanged),
+            "dim" if total_unchanged else "white",
+        ),
         ("BPM Included", "Yes" if fetch_bpm else "No", None),
         ("Musical Key Included", "Yes" if fetch_key else "No", None),
         ("ReplayGain Included", "Yes" if fetch_replaygain else "No", None),
     ]
     LOG.summary_table("Normalization Summary", summary_rows)
+
+    if json_report:
+        report_data = {
+            "summary": {
+                "target_directory": str(path.resolve()),
+                "total_scanned": total_scanned,
+                "total_modified": total_modified,
+                "total_unchanged": total_unchanged,
+                "bpm_included": bool(fetch_bpm),
+                "key_included": bool(fetch_key),
+                "replaygain_included": bool(fetch_replaygain),
+            },
+            "modified_files": report.modified_files,
+        }
+        _write_json_report(json_report, report_data, "normalization")
+
     if interrupted:
         return 130
     return 0
@@ -971,6 +1011,7 @@ def bpm(
     force: ForceOpt = False,
     threads: ThreadsOpt = 4,
     dry_run: DryRunOpt = False,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Calculate and embed audio tempo (BPM) tags locally.
@@ -990,6 +1031,19 @@ def bpm(
         ("Already Tagged / Skipped", str(skipped), None),
     ]
     LOG.summary_table("BPM Summary", summary_rows)
+    if json_report:
+        report_data = {
+            "summary": {
+                "target_directory": str(path.resolve()),
+                "total_scanned": len(results),
+                "bpm_tagged": computed,
+                "skipped": skipped,
+            },
+            "details": [
+                {"file": str(p), "bpm": val, "modified": mod} for p, val, mod in results
+            ],
+        }
+        _write_json_report(json_report, report_data, "bpm")
     return 130 if interrupted else 0
 
 
@@ -999,7 +1053,10 @@ def _process_key_file(
     wait_if_paused()
     try:
         track_info = read_track_metadata(audio_path)
-        if not force and track_info.initial_key is not None:
+        is_invalid_key = bool(
+            track_info.initial_key and key_to_camelot(track_info.initial_key) is None
+        )
+        if not force and track_info.initial_key is not None and not is_invalid_key:
             return audio_path, track_info.initial_key, False
         details = detect_key_details(audio_path)
         if details is not None:
@@ -1020,6 +1077,7 @@ def key(
     force: ForceOpt = False,
     threads: ThreadsOpt = 4,
     dry_run: DryRunOpt = False,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Detect and embed musical key (INITIALKEY) and Camelot wheel tags locally.
@@ -1039,6 +1097,19 @@ def key(
         ("Already Tagged / Skipped", str(skipped), None),
     ]
     LOG.summary_table("Musical Key Summary", summary_rows)
+    if json_report:
+        report_data = {
+            "summary": {
+                "target_directory": str(path.resolve()),
+                "total_scanned": len(results),
+                "key_tagged": computed,
+                "skipped": skipped,
+            },
+            "details": [
+                {"file": str(p), "key": val, "modified": mod} for p, val, mod in results
+            ],
+        }
+        _write_json_report(json_report, report_data, "musical key")
     return 130 if interrupted else 0
 
 
@@ -1048,6 +1119,7 @@ def replaygain(
     force: ForceOpt = False,
     threads: ThreadsOpt = 4,
     dry_run: DryRunOpt = False,
+    json_report: JsonReportOpt = None,
 ) -> int:
     """
     Calculate and embed ReplayGain loudness normalization tags (Track & Album mode).
@@ -1102,6 +1174,16 @@ def replaygain(
         ),
     ]
     LOG.summary_table("ReplayGain Summary", summary_rows)
+    if json_report:
+        report_data = {
+            "summary": {
+                "target_directory": str(path.resolve()),
+                "total_folders": len(album_groups),
+                "total_files": len(audio_files),
+                "albums_processed": albums_processed,
+            }
+        }
+        _write_json_report(json_report, report_data, "replaygain")
     if interrupted:
         return 130
     return 0
@@ -1175,8 +1257,6 @@ def lyrics(
     LOG.summary_table("Lyrics Summary", summary_rows)
 
     if json_report:
-        import orjson
-
         report_data = {
             "total_files": len(results),
             "saved": saved_count,
@@ -1184,10 +1264,7 @@ def lyrics(
             "unavailable": missing_count,
             "details": [{"file": str(p), "status": typ} for p, _, typ in results],
         }
-        json_report.write_bytes(orjson.dumps(report_data, option=orjson.OPT_INDENT_2))
-        LOG.info(
-            f"Saved lyrics JSON report to [bold cyan]{escape(str(json_report))}[/bold cyan]"
-        )
+        _write_json_report(json_report, report_data, "lyrics")
 
     return 130 if interrupted else 0
 

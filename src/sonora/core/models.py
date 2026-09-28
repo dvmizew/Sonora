@@ -13,6 +13,7 @@ class TrackInfo:
     album_artist: str | None = None
     track_number: int | None = None
     disc_number: int | None = 1
+    disc_subtitle: str | None = None
     date: str | None = None
     genre: str | None = None
     isrc: str | None = None
@@ -75,10 +76,15 @@ class TrackInfo:
     art_width: int | None = None
     art_height: int | None = None
     is_alien: bool = False
+    _diff_descriptions: list[str] = field(
+        default_factory=list, repr=False, compare=False
+    )
 
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""
-        track_dict: dict[str, object] = asdict(self)
+        track_dict: dict[str, object] = {
+            k: v for k, v in asdict(self).items() if not k.startswith("_")
+        }
         track_dict["file_path"] = str(self.file_path)
         track_dict["file_name"] = self.file_path.name
         if not track_dict.get("album_artist"):
@@ -106,3 +112,28 @@ class RenameReport:
     folders_renamed: int = 0
     lrc_synced: int = 0
     unchanged_files: int = 0
+
+
+class NormalizeReport(list[TrackInfo]):
+    """Represents the results of library normalization, preserving list semantics for callers."""
+
+    def __init__(
+        self,
+        tracks: list[TrackInfo],
+        modified_files: dict[str, list[str]] | None = None,
+    ) -> None:
+        super().__init__(tracks)
+        self.tracks = tracks
+        self.modified_files: dict[str, list[str]] = modified_files or {}
+
+    @property
+    def total_scanned(self) -> int:
+        return len(self.tracks)
+
+    @property
+    def total_modified(self) -> int:
+        return len(self.modified_files)
+
+    @property
+    def total_unchanged(self) -> int:
+        return max(0, len(self.tracks) - len(self.modified_files))

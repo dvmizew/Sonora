@@ -20,7 +20,11 @@ from sonora.audio.art import (
 )
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import read_cuesheet_content
-from sonora.audio.key import detect_key_details, detect_musical_key
+from sonora.audio.key import (
+    detect_key_details,
+    detect_musical_key,
+    key_to_camelot,
+)
 from sonora.audio.metadata import (
     get_audio_duration,
     read_track_metadata,
@@ -35,7 +39,7 @@ from sonora.core.logger import (
     interactive_pause_listener,
     wait_if_paused,
 )
-from sonora.core.models import TrackInfo
+from sonora.core.models import NormalizeReport, TrackInfo
 from sonora.core.state import get_library_state
 from sonora.core.utils import (
     InterruptedOperationError,
@@ -62,6 +66,7 @@ from sonora.core.utils import (
     safe_float,
     safe_int,
 )
+from sonora.modules.checker import strip_corrupt_brackets
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.deezer import (
     fetch_deezer_album_details,
@@ -98,7 +103,11 @@ _NETWORK_EXCEPTIONS = (
 )
 
 
-_FEAT_ARTIST_PATTERN = re.compile(rf"\s+(?:{FEAT_KEYWORDS})\.?\s+(.+)$", re.IGNORECASE)
+_FEAT_ARTIST_PATTERN = re.compile(rf"\s+(?:{FEAT_KEYWORDS})\.?\s*(.+)$", re.IGNORECASE)
+_PROD_BRACKET_PATTERN = re.compile(
+    r"\s*[\(\[\{]\s*(?:prod(?:\.|uced|uction)?\s*(?:by|:)?|produced\s+by)\s*([^()\[\]{}]+?)[\)\]\}]",
+    re.IGNORECASE,
+)
 
 _SKIP_DIFF_FIELDS: frozenset[str] = frozenset(
     {
@@ -1200,7 +1209,10 @@ def _enrich_key(
     fetch_key: bool,
     force: bool = False,
 ) -> None:
-    if fetch_key and (track_info.initial_key is None or force):
+    is_key_invalid = bool(
+        track_info.initial_key and key_to_camelot(track_info.initial_key) is None
+    )
+    if fetch_key and (track_info.initial_key is None or force or is_key_invalid):
         try:
             key_details = detect_key_details(file_path)
             if key_details is not None:
@@ -1281,25 +1293,34 @@ def _enrich_lyrics(
         LOG.debug(f"Lyrics fetch failed for {track_info.title}: {error}")
 
 
-def _render_tag_diffs(orig_info: TrackInfo, track_info: TrackInfo) -> list[str]:
-    diff_lines: list[str] = []
+def _compute_tag_diffs(
+    orig_info: TrackInfo, track_info: TrackInfo
+) -> list[tuple[str, Any, Any]]:
+    diff_entries: list[tuple[str, Any, Any]] = []
     for field_info in dataclasses.fields(TrackInfo):
-        if field_info.name in _SKIP_DIFF_FIELDS:
+        if field_info.name in _SKIP_DIFF_FIELDS or field_info.name.startswith("_"):
             continue
         old_val = getattr(orig_info, field_info.name)
         new_val = getattr(track_info, field_info.name)
         old_clean = None if old_val in (None, "", [], ()) else old_val
         new_clean = None if new_val in (None, "", [], ()) else new_val
         if old_clean != new_clean:
-            if old_clean is None:
-                color, sym = "green", "+"
-            elif new_clean is None:
-                color, sym = "red", "-"
-            else:
-                color, sym = "yellow", "*"
-            diff_lines.append(
-                f"\n       [{color}][{sym}] {field_info.name}: {escape(str(old_clean))} -> {escape(str(new_clean))}[/]"
-            )
+            diff_entries.append((field_info.name, old_clean, new_clean))
+    return diff_entries
+
+
+def _render_tag_diffs(orig_info: TrackInfo, track_info: TrackInfo) -> list[str]:
+    diff_lines: list[str] = []
+    for field_name, old_clean, new_clean in _compute_tag_diffs(orig_info, track_info):
+        if old_clean is None:
+            color, sym = "green", "+"
+        elif new_clean is None:
+            color, sym = "red", "-"
+        else:
+            color, sym = "yellow", "*"
+        diff_lines.append(
+            f"\n       [{color}][{sym}] {field_name}: {escape(str(old_clean))} -> {escape(str(new_clean))}[/]"
+        )
     return diff_lines
 
 
@@ -2117,12 +2138,25 @@ def process_single_track(
                     track_info.advisory = "Explicit"
                 elif re.search(r"[\(\[\{]\s*clean\s*[\)\]\}]", raw_t_lower):
                     track_info.advisory = "Clean"
+            prod_matches = list(_PROD_BRACKET_PATTERN.finditer(track_info.title))
+            if prod_matches:
+                if not track_info.producers:
+                    prods = [
+                        m.group(1).strip() for m in prod_matches if m.group(1).strip()
+                    ]
+                    if prods:
+                        track_info.producers = ", ".join(prods)
+                track_info.title = _PROD_BRACKET_PATTERN.sub(
+                    "", track_info.title
+                ).strip()
+            track_info.title = strip_corrupt_brackets(track_info.title)
             track_info.title = clean_title(track_info.title)
             track_info.title = clean_unicode_punct(track_info.title)
             track_info.title = deduplicate_title_features(
                 track_info.title, primary_artist=track_info.artist
             )
         if track_info.artist:
+            track_info.artist = strip_corrupt_brackets(track_info.artist)
             feat_match = _FEAT_ARTIST_PATTERN.search(track_info.artist)
             if feat_match:
                 base_artist = track_info.artist[: feat_match.start()].strip()
@@ -2912,6 +2946,18 @@ def normalize_single_track(
         if extracted_featured:
             raw_title = f"{raw_title} (feat. {extracted_featured})"
 
+    cleaned_producers = current_info.producers
+    prod_matches = list(_PROD_BRACKET_PATTERN.finditer(raw_title))
+    if prod_matches:
+        if not cleaned_producers:
+            prods = [m.group(1).strip() for m in prod_matches if m.group(1).strip()]
+            if prods:
+                cleaned_producers = ", ".join(prods)
+        raw_title = _PROD_BRACKET_PATTERN.sub("", raw_title).strip()
+
+    raw_title = strip_corrupt_brackets(raw_title)
+    raw_artist = strip_corrupt_brackets(raw_artist)
+
     cleaned_artist = raw_artist
     cleaned_title = clean_unicode_punct(
         deduplicate_title_features(raw_title, primary_artist=cleaned_artist)
@@ -2969,8 +3015,11 @@ def normalize_single_track(
         except OSError as error:
             LOG.debug(f"BPM calculation failed for {file_path}: {error}")
 
+    is_key_invalid = bool(
+        current_info.initial_key and key_to_camelot(current_info.initial_key) is None
+    )
     updated_key = current_info.initial_key
-    if fetch_key and (force or current_info.initial_key is None):
+    if fetch_key and (force or current_info.initial_key is None or is_key_invalid):
         try:
             calculated_key = detect_musical_key(file_path)
             if calculated_key is not None:
@@ -2985,6 +3034,7 @@ def normalize_single_track(
         album=cleaned_album or current_info.album,
         album_artist=cleaned_album_artist,
         featured_artists=cleaned_featured,
+        producers=cleaned_producers,
         genre=cleaned_genre or current_info.genre,
         date=cleaned_date or current_info.date,
         release_country=cleaned_country or current_info.release_country,
@@ -2994,16 +3044,39 @@ def normalize_single_track(
         initial_key=updated_key,
     )
 
-    if not dry_run:
-        try:
-            write_track_metadata(updated_info)
-            get_library_state().record_track_state(file_path, "TAGGED_OK")
-        except OSError as error:
-            LOG.warning(
-                f"Failed to save normalized tags for {escape(file_path.name)}: {error}"
-            )
-            return None
+    diff_entries = _compute_tag_diffs(current_info, updated_info)
+    diff_descriptions: list[str] = []
+    for field_name, old_val, new_val in diff_entries:
+        if old_val is None:
+            diff_descriptions.append(f"{field_name}: added {new_val!r}")
+        elif new_val is None:
+            diff_descriptions.append(f"{field_name}: removed {old_val!r}")
+        else:
+            diff_descriptions.append(f"{field_name}: {old_val!r} -> {new_val!r}")
 
+    if diff_entries or force:
+        rendered_diffs = _render_tag_diffs(current_info, updated_info)
+        if not dry_run:
+            try:
+                write_track_metadata(updated_info)
+                get_library_state().record_track_state(file_path, "TAGGED_OK")
+            except OSError as error:
+                LOG.warning(
+                    f"Failed to save normalized tags for {escape(file_path.name)}: {error}"
+                )
+                return None
+            LOG.info(
+                f"   ∟ [green]✓[/] {escape(file_path.name)}: {len(diff_entries)} tag(s) normalized.{''.join(rendered_diffs)}"
+            )
+        else:
+            LOG.info(
+                f"   ∟ [DRY-RUN] {escape(file_path.name)}: {len(diff_entries)} tag(s) to normalize.{''.join(rendered_diffs)}"
+            )
+    else:
+        get_library_state().record_track_state(file_path, "TAGGED_OK")
+        LOG.debug(f"Track {escape(file_path.name)} is already normalized.")
+
+    updated_info._diff_descriptions = diff_descriptions
     return updated_info
 
 
@@ -3015,7 +3088,7 @@ def normalize_library(
     force: bool = False,
     dry_run: bool = False,
     max_threads: int = 4,
-) -> list[TrackInfo]:
+) -> NormalizeReport:
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")
 
@@ -3023,10 +3096,11 @@ def normalize_library(
     audio_files = find_audio_files(directory, recursive=True)
     if not audio_files:
         LOG.warning("No audio files found to normalize.")
-        return []
+        return NormalizeReport([])
 
     album_groups = group_files_by_parent(audio_files)
     results: list[TrackInfo] = []
+    modified_files: dict[str, list[str]] = {}
 
     with create_progress() as progress:
         task = progress.add_task(
@@ -3052,9 +3126,13 @@ def normalize_library(
                     }
                     for future in as_completed(futures):
                         wait_if_paused()
-                        worker_result = future.result()
-                        if worker_result is not None:
-                            results.append(worker_result)
+                        worker_track = future.result()
+                        if worker_track is not None:
+                            results.append(worker_track)
+                            if worker_track._diff_descriptions:
+                                modified_files[str(futures[future])] = (
+                                    worker_track._diff_descriptions
+                                )
                         progress.advance(task)
 
                     if fetch_replaygain:
@@ -3070,6 +3148,7 @@ def normalize_library(
                 if not is_interruption(exc):
                     raise
                 executor.shutdown(wait=True, cancel_futures=True)
-                raise InterruptedOperationError(results) from None
+                partial_report = NormalizeReport(results, modified_files=modified_files)
+                raise InterruptedOperationError(partial_report) from None
 
-    return results
+    return NormalizeReport(results, modified_files=modified_files)
