@@ -27,6 +27,7 @@ from sonora.core.utils import (
     safe_int,
     sanitize_name,
 )
+from sonora.modules.checker import strip_corrupt_brackets
 
 
 def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
@@ -87,7 +88,10 @@ def build_new_filename(
     if not title:
         return None
 
-    clean_title = sanitize_name(deduplicate_title_features(title)) or "Untitled"
+    clean_title = (
+        sanitize_name(strip_corrupt_brackets(deduplicate_title_features(title)))
+        or "Untitled"
+    )
     track_num_int = safe_int(track_number)
 
     disc_prefix = ""

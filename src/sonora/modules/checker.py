@@ -88,6 +88,20 @@ def _is_corrupt_bracket(full_bracket: str, tokens: set[str]) -> bool:
     return bool(tokens & get_config().codec_rip_keywords)
 
 
+def strip_corrupt_brackets(text: str) -> str:
+    """
+    Remove unwanted or corrupt bracket metadata (e.g., [FLAC], (Official Video), [HQ], [Prod: ...])
+    from a title or artist string, preserving legitimate features and version brackets.
+    """
+    if not text:
+        return ""
+    cleaned = text
+    for full_bracket, tokens in extract_bracket_tokens(text):
+        if _is_corrupt_bracket(full_bracket, tokens):
+            cleaned = cleaned.replace(full_bracket, "")
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
 def check_brackets_corruption(name: str) -> list[str]:
     """
     Check if a filename or tag contains corrupt/unwanted bracket metadata
