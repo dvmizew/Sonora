@@ -40,6 +40,7 @@ from sonora.services.lyrics import (
 )
 from sonora.services.musicbrainz import (
     fetch_cover_art_archive_url,
+    fetch_musicbrainz_release_details,
     fetch_track_mbid,
     search_musicbrainz_release,
 )
@@ -433,6 +434,84 @@ class TestServicesEngine(unittest.TestCase):
         )
         mbid_result = fetch_track_mbid("Artist", "Title")
         self.assertIsNone(mbid_result)
+
+    @patch("sonora.services.musicbrainz.musicbrainzngs")
+    def test_musicbrainz_multi_disc_release_details(self, mock_mb: MagicMock) -> None:
+        mock_release_payload = {
+            "release": {
+                "id": "11111111-2222-3333-4444-555555555555",
+                "title": "Double Album",
+                "artist-credit": [{"artist": {"name": "Artist"}}],
+                "date": "2024",
+                "release-group": {"first-release-date": "2024"},
+                "medium-list": [
+                    {
+                        "position": 1,
+                        "track-count": 2,
+                        "title": "Disc One",
+                        "track-list": [
+                            {
+                                "position": 1,
+                                "recording": {
+                                    "id": "aaaaaaa1-0000-0000-0000-000000000001",
+                                    "title": "Disc 1 Track 1",
+                                },
+                            },
+                            {
+                                "position": 2,
+                                "recording": {
+                                    "id": "aaaaaaa2-0000-0000-0000-000000000002",
+                                    "title": "Disc 1 Track 2",
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        "position": 2,
+                        "track-count": 2,
+                        "title": "Disc Two",
+                        "track-list": [
+                            {
+                                "position": 1,
+                                "recording": {
+                                    "id": "bbbbbbb1-0000-0000-0000-000000000001",
+                                    "title": "Disc 2 Track 1",
+                                },
+                            },
+                            {
+                                "position": 2,
+                                "recording": {
+                                    "id": "bbbbbbb2-0000-0000-0000-000000000002",
+                                    "title": "Disc 2 Track 2",
+                                },
+                            },
+                        ],
+                    },
+                ],
+            }
+        }
+        mock_mb.get_release_by_id.return_value = mock_release_payload
+
+        details = fetch_musicbrainz_release_details(
+            "11111111-2222-3333-4444-555555555555"
+        )
+        self.assertIsNotNone(details)
+        assert details is not None
+        self.assertEqual(details["total_discs"], 2)
+        self.assertEqual(details["total_tracks"], 4)
+
+        tracks_by_disc = details["tracks_by_disc_and_position"]
+        assert isinstance(tracks_by_disc, dict)
+        track_1_1 = tracks_by_disc[(1, 1)]
+        assert isinstance(track_1_1, dict)
+        self.assertEqual(track_1_1["title"], "Disc 1 Track 1")
+
+        track_2_1 = tracks_by_disc[(2, 1)]
+        assert isinstance(track_2_1, dict)
+        self.assertEqual(track_2_1["title"], "Disc 2 Track 1")
+        self.assertEqual(track_2_1["disc_subtitle"], "Disc Two")
+        self.assertEqual(track_2_1["disc_number"], 2)
+        self.assertEqual(track_2_1["total_discs"], 2)
 
     @patch("sonora.services.discogs.SESSION.get")
     def test_discogs_error_handling(self, mock_get: MagicMock) -> None:

@@ -169,7 +169,8 @@ def fetch_deezer_album_details(
             if isinstance(genre_item, dict) and "name" in genre_item
         ]
 
-        tracks_by_position: dict[int, dict[str, object]] = {}
+        tracks_by_position: dict[Any, dict[str, object]] = {}
+        tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
         tracks_deezer_payload = (
             album_deezer_payload.get("tracks", {}).get("data", [])
@@ -182,6 +183,7 @@ def fetch_deezer_album_details(
                 continue
             raw_pos = track_candidate.get("track_position")
             pos = raw_pos if isinstance(raw_pos, int) else idx
+            disk_num = safe_int(track_candidate.get("disk_number")) or 1
             t_name = str(track_candidate.get("title", ""))
             artist_name = (
                 track_candidate.get("artist", {}).get("name")
@@ -195,7 +197,7 @@ def fetch_deezer_album_details(
                 "title": t_name,
                 "artist": artist_name,
                 "track_position": pos,
-                "disk_number": track_candidate.get("disk_number", 1),
+                "disk_number": disk_num,
                 "isrc": track_candidate.get("isrc"),
                 "bpm": track_candidate.get("bpm"),
                 "gain": track_candidate.get("gain"),
@@ -203,7 +205,11 @@ def fetch_deezer_album_details(
                 "release_date": album_deezer_payload.get("release_date"),
                 "genre": genres[0] if genres else None,
             }
-            tracks_by_position[pos] = track_dict
+            tracks_by_disc_and_position[(disk_num, pos)] = track_dict
+            tracks_by_position[(disk_num, pos)] = track_dict
+            tracks_by_position[f"{disk_num}-{pos}"] = track_dict
+            if disk_num == 1 or pos not in tracks_by_position:
+                tracks_by_position[pos] = track_dict
             if t_name:
                 tracks_by_title[normalize_str(clean_title(t_name))] = track_dict
                 tracks_by_title[normalize_str(t_name)] = track_dict
@@ -224,6 +230,7 @@ def fetch_deezer_album_details(
             or album_deezer_payload.get("cover_big"),
             "genre": genres[0] if genres else None,
             "tracks_by_position": tracks_by_position,
+            "tracks_by_disc_and_position": tracks_by_disc_and_position,
             "tracks_by_title": tracks_by_title,
         }
         set_cached_api(cache_key, result)

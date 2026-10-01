@@ -19,7 +19,10 @@ from sonora.core.utils import (
     deduplicate_title_features,
     find_audio_files,
     find_companion_lyrics,
-    group_files_by_parent,
+    get_primary_artist,
+    get_single_release_title,
+    group_files_by_album_root,
+    is_in_singles_hierarchy,
     is_interruption,
     normalize_str,
     relocate_companion_lyrics,
@@ -122,18 +125,34 @@ def rename_track_file(
     except OSError as error:
         raise RuntimeError(f"Cannot rename file without metadata: {error}") from error
 
+    folder = file_path.parent
+    in_singles = is_in_singles_hierarchy(file_path)
+
     if format_pattern is None:
+        if in_singles:
+            folder_audios = find_audio_files(folder, recursive=False)
+            if len(folder_audios) <= 1:
+                track_num: int | str | None = 1
+            else:
+                track_num = track_info.track_number or 1
+            disc_num: int | str | None = 1
+            total_discs: int | str | None = 1
+        else:
+            track_num = track_info.track_number
+            disc_num = track_info.disc_number
+            total_discs = track_info.total_discs
+
         new_name = build_new_filename(
-            track_number=track_info.track_number,
+            track_number=track_num,
             title=track_info.title,
             extension=file_path.suffix,
-            disc_number=track_info.disc_number,
-            total_discs=track_info.total_discs,
+            disc_number=disc_num,
+            total_discs=total_discs,
         )
         if not new_name:
             return file_path
     else:
-        num = track_info.track_number or 1
+        num = 1 if in_singles else (track_info.track_number or 1)
         artist_clean = sanitize_name(track_info.artist)
         title_clean = (
             sanitize_name(deduplicate_title_features(track_info.title)) or "Untitled"
@@ -146,7 +165,6 @@ def rename_track_file(
         new_stem = re.sub(r"\s+", " ", new_stem).strip()
         new_name = f"{new_stem}{file_path.suffix}"
 
-    folder = file_path.parent
     new_path = folder / new_name
 
     companion_lyrics = find_companion_lyrics(file_path)
@@ -164,6 +182,15 @@ def rename_track_file(
                 ):
                     companion_lyrics.append(candidate)
                     break
+
+    if not companion_lyrics and in_singles:
+        lrc_candidates = [
+            candidate
+            for candidate in folder.iterdir()
+            if candidate.suffix.lower() == ".lrc" and candidate.is_file()
+        ]
+        if len(lrc_candidates) == 1:
+            companion_lyrics.append(lrc_candidates[0])
 
     for companion in companion_lyrics:
         if companion.suffix.lower() == ".lrc" and not dry_run:
@@ -205,14 +232,74 @@ def rename_track_file(
     return new_path
 
 
+def rename_single_folder(
+    folder_path: Path, track_info: TrackInfo, dry_run: bool = False
+) -> Path:
+    """
+    Rename a single release folder to consensus 'Primary Artist - SingleReleaseTitle'.
+    Guarantees singles folders are shielded from multi-track album consensus and dirty album tags.
+    """
+    folder_now = folder_path.name
+    if (
+        get_config().is_generic_container(folder_now)
+        or get_config().is_disc_folder(folder_now)
+        or folder_now.lower() in ("singles", "single")
+    ):
+        return folder_path
+
+    try:
+        if any(p.is_dir() for p in folder_path.iterdir()):
+            return folder_path
+    except OSError:
+        return folder_path
+
+    primary_artist = get_primary_artist(track_info.artist)
+    single_title = get_single_release_title(track_info)
+    if not primary_artist or not single_title:
+        return folder_path
+
+    expected_name = sanitize_name(f"{primary_artist} - {single_title}")
+    if folder_now != expected_name:
+        new_folder = folder_path.with_name(expected_name)
+        if (
+            new_folder.exists()
+            and folder_path.resolve() != new_folder.resolve()
+            and folder_path.name.lower() != new_folder.name.lower()
+        ):
+            return folder_path
+
+        if not dry_run:
+            try:
+                safe_case_rename(folder_path, new_folder)
+                LOG.info(
+                    f"   ∟ 📂 Single folder renamed: [dim]{escape(folder_now)}[/] -> [cyan]{escape(expected_name)}[/]"
+                )
+                return new_folder
+            except OSError as error:
+                LOG.warning(
+                    f"Failed to rename single folder {escape(folder_now)}: {error}"
+                )
+                return folder_path
+        else:
+            LOG.info(
+                f"[DRY-RUN] Would rename single folder {escape(folder_now)} -> {escape(expected_name)}"
+            )
+            return new_folder
+    return folder_path
+
+
 def rename_album_folder(
     folder_path: Path, artist: str, album: str, dry_run: bool = False
 ) -> Path:
-    if not album or get_config().is_generic_container(album):
+    if (
+        not album
+        or get_config().is_generic_container(album)
+        or get_config().is_disc_folder(folder_path.name)
+        or is_in_singles_hierarchy(folder_path)
+    ):
         return folder_path
 
     folder_now = folder_path.name
-    is_in_singles = any(get_config().is_generic_container(p) for p in folder_path.parts)
 
     # Shield artist container folders from being renamed to album names
     if normalize_str(folder_now) == normalize_str(artist) and normalize_str(
@@ -233,13 +320,6 @@ def rename_album_folder(
     expected_name = sanitize_name(f"{artist} - {album}")
 
     if folder_now != expected_name:
-        if is_in_singles:
-            base_album = album.split("(")[0].split("-")[0].strip()
-            if normalize_str(artist) in normalize_str(folder_now) and normalize_str(
-                base_album
-            ) in normalize_str(folder_now):
-                return folder_path
-
         new_folder = folder_path.with_name(expected_name)
         if (
             new_folder.exists()
@@ -262,6 +342,7 @@ def rename_album_folder(
             LOG.info(
                 f"[DRY-RUN] Would rename album folder {escape(folder_now)} -> {escape(expected_name)}"
             )
+            return new_folder
     return folder_path
 
 
@@ -299,7 +380,7 @@ def rename_directory_files(
     renamed: list[Path] = []
     all_audio_files = find_audio_files(dir_path, recursive=True)
     total_files_count = len(all_audio_files)
-    folder_files = group_files_by_parent(all_audio_files)
+    folder_files = group_files_by_album_root(all_audio_files)
 
     if report is None:
         report = RenameReport(total_files=total_files_count)
@@ -318,6 +399,7 @@ def rename_directory_files(
                 for folder, files in folder_files.items():
                     album_consensus: Counter[tuple[str, str]] = Counter()
                     folder_renamed_paths: list[Path] = []
+                    folder_track_infos: list[TrackInfo] = []
 
                     file_results = (
                         (
@@ -336,6 +418,7 @@ def rename_directory_files(
                         wait_if_paused()
                         report.lrc_synced += lrc_count
                         if track_info is not None and new_path is not None:
+                            folder_track_infos.append(track_info)
                             search_artist = track_info.album_artist or track_info.artist
                             if (
                                 search_artist != "Unknown Artist"
@@ -353,7 +436,14 @@ def rename_directory_files(
                         progress.advance(task)
 
                     final_folder = folder
-                    if album_consensus:
+                    if is_in_singles_hierarchy(folder, root_dir=dir_path):
+                        if folder_track_infos:
+                            final_folder = rename_single_folder(
+                                folder, folder_track_infos[0], dry_run=dry_run
+                            )
+                            if final_folder != folder:
+                                report.folders_renamed += 1
+                    elif album_consensus:
                         top = album_consensus.most_common(1)
                         if top and top[0][1] >= len(files) / 2:
                             art_name, alb_name = top[0][0]

@@ -44,8 +44,6 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
     Fetch and cache the entire discography (releases) of an artist from MusicBrainz in a single API call.
     Returns list of release dicts.
     """
-    if musicbrainzngs is not None:
-        init_musicbrainz()
     artist_key = normalize_str(artist)
     cache_key = f"mb_discography:{artist_key}"
 
@@ -309,21 +307,18 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
     return None
 
 
-def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
+def fetch_album_track_mbids(release_mbid: str) -> dict[Any, str]:
     """
     Fetch all track recording MBIDs for an entire album release in ONE single API call.
-    Returns mapping of track_position (1-indexed) -> recording_mbid.
+    Returns mapping of track_position (or (disc, pos) tuple) -> recording_mbid.
     """
     if not release_mbid or not is_valid_uuid(release_mbid):
         return {}
 
     cache_key = f"mb_album_tracks:{release_mbid}"
     cached = get_cached_api(cache_key)
-    if isinstance(cached, dict):
-        return {
-            int(track_position_key): str(recording_mbid_value)
-            for track_position_key, recording_mbid_value in cached.items()
-        }
+    if isinstance(cached, dict) and any(isinstance(k, tuple) for k in cached):
+        return {k: str(v) for k, v in cached.items()}
 
     _MB_LIMITER.wait()
     try:
@@ -335,9 +330,10 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
             if isinstance(release_data, dict)
             else []
         )
-        mapping: dict[int, str] = {}
-        for medium in mediums:
+        mapping: dict[Any, str] = {}
+        for medium_idx, medium in enumerate(mediums, start=1):
             if isinstance(medium, dict):
+                disc_num = safe_int(medium.get("position")) or medium_idx
                 for track in medium.get("track-list", []):
                     if isinstance(track, dict):
                         position = track.get("position")
@@ -345,7 +341,11 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[int, str]:
                         if position and recording_id:
                             pos_int = safe_int(position)
                             if pos_int is not None:
-                                mapping[pos_int] = str(recording_id)
+                                rec_mbid_str = str(recording_id)
+                                mapping[(disc_num, pos_int)] = rec_mbid_str
+                                mapping[f"{disc_num}-{pos_int}"] = rec_mbid_str
+                                if disc_num == 1 or len(mediums) <= 1:
+                                    mapping[pos_int] = rec_mbid_str
         set_cached_api(cache_key, mapping)
         return mapping
     except (
@@ -421,6 +421,15 @@ def fetch_musicbrainz_recording_details(
         if work_rels and isinstance(work_rels, list):
             work_id = work_rels[0].get("work", {}).get("id")
 
+        artist_credits = recording_dict.get("artist-credit", [])
+        artist_id = (
+            artist_credits[0].get("artist", {}).get("id")
+            if artist_credits
+            and isinstance(artist_credits, list)
+            and isinstance(artist_credits[0], dict)
+            else None
+        )
+
         details: dict[str, object] = {
             "title": recording_dict.get("title"),
             "artist": recording_dict.get("artist-credit-phrase"),
@@ -432,6 +441,9 @@ def fetch_musicbrainz_recording_details(
             "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
             "remixer": ", ".join(dict.fromkeys(remixers)) if remixers else None,
             "musicbrainz_workid": str(work_id) if is_valid_uuid(work_id) else None,
+            "musicbrainz_artistid": str(artist_id)
+            if is_valid_uuid(artist_id)
+            else None,
         }
         set_cached_api(cache_key, details)
         return details
@@ -458,7 +470,7 @@ def fetch_musicbrainz_release_details(
 
     cache_key = f"mb_rel_details:{release_mbid}"
     cached = get_cached_api(cache_key)
-    if isinstance(cached, dict):
+    if isinstance(cached, dict) and "tracks_by_disc_and_position" in cached:
         return cached
 
     _MB_LIMITER.wait()
@@ -509,32 +521,52 @@ def fetch_musicbrainz_release_details(
 
         release_title = release_dict.get("title")
         release_artist = release_dict.get("artist-credit-phrase")
-        if not release_artist:
-            artist_credits = release_dict.get("artist-credit", [])
-            if (
-                artist_credits
-                and isinstance(artist_credits, list)
-                and isinstance(artist_credits[0], dict)
-            ):
-                release_artist = artist_credits[0].get("artist", {}).get("name")
+        artist_credits = release_dict.get("artist-credit", [])
+        album_artist_id = (
+            artist_credits[0].get("artist", {}).get("id")
+            if artist_credits
+            and isinstance(artist_credits, list)
+            and isinstance(artist_credits[0], dict)
+            else None
+        )
+        if (
+            not release_artist
+            and artist_credits
+            and isinstance(artist_credits, list)
+            and isinstance(artist_credits[0], dict)
+        ):
+            release_artist = artist_credits[0].get("artist", {}).get("name")
 
         mediums = release_dict.get("medium-list", [])
         media_format = None
         total_tracks = 0
-        total_discs = len(mediums) if mediums else None
-        tracks_by_position: dict[int, dict[str, object]] = {}
+        total_discs = len(mediums) if mediums else 1
+        tracks_by_position: dict[Any, dict[str, object]] = {}
+        tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
         tracks_by_mbid: dict[str, dict[str, object]] = {}
 
         if mediums and isinstance(mediums, list):
             media_format = mediums[0].get("format")
-            for medium in mediums:
+            for medium_idx, medium in enumerate(mediums, start=1):
+                if not isinstance(medium, dict):
+                    continue
+                disc_num = safe_int(medium.get("position")) or medium_idx
                 track_count_value = medium.get("track-count")
-                if track_count_value and str(track_count_value).isdigit():
-                    total_tracks += int(track_count_value)
+                disc_total_tracks = (
+                    int(track_count_value)
+                    if track_count_value and str(track_count_value).isdigit()
+                    else None
+                )
+                if disc_total_tracks:
+                    total_tracks += disc_total_tracks
+                disc_subtitle = medium.get("title")
+
                 for track_item in medium.get("track-list", []):
                     if not isinstance(track_item, dict):
                         continue
-                    pos = track_item.get("position")
+                    pos_int = safe_int(track_item.get("position"))
+                    if pos_int is None:
+                        continue
                     rec = track_item.get("recording", {})
                     if not isinstance(rec, dict):
                         continue
@@ -579,11 +611,33 @@ def fetch_musicbrainz_release_details(
                         or rec.get("artist-credit-phrase")
                         or release_artist
                     )
+                    rec_artist_credits = (
+                        track_item.get("artist-credit")
+                        or rec.get("artist-credit")
+                        or []
+                    )
+                    rec_artist_id = (
+                        rec_artist_credits[0].get("artist", {}).get("id")
+                        if rec_artist_credits
+                        and isinstance(rec_artist_credits, list)
+                        and isinstance(rec_artist_credits[0], dict)
+                        else album_artist_id
+                    )
                     rec_details: dict[str, object] = {
-                        "position": safe_int(pos),
+                        "position": pos_int,
+                        "disc_number": disc_num,
+                        "total_discs": total_discs,
+                        "disc_total_tracks": disc_total_tracks,
+                        "disc_subtitle": disc_subtitle,
                         "title": rec.get("title") or track_item.get("title"),
                         "artist": track_artist,
                         "recording_mbid": rec_id if is_valid_uuid(rec_id) else None,
+                        "musicbrainz_artistid": str(rec_artist_id)
+                        if is_valid_uuid(rec_artist_id)
+                        else None,
+                        "musicbrainz_albumartistid": str(album_artist_id)
+                        if is_valid_uuid(album_artist_id)
+                        else None,
                         "isrc": rec_isrc,
                         "disambiguation": rec.get("disambiguation"),
                         "composer": ", ".join(dict.fromkeys(rec_composers))
@@ -600,10 +654,15 @@ def fetch_musicbrainz_release_details(
                         else None,
                         "musicbrainz_workid": rec_work_id,
                     }
-                    if isinstance(pos, int):
-                        tracks_by_position[pos] = rec_details
-                    elif pos and str(pos).isdigit():
-                        tracks_by_position[int(pos)] = rec_details
+                    tracks_by_disc_and_position[(disc_num, pos_int)] = rec_details
+                    tracks_by_position[(disc_num, pos_int)] = rec_details
+                    tracks_by_position[f"{disc_num}-{pos_int}"] = rec_details
+                    if (
+                        disc_num == 1
+                        or total_discs == 1
+                        or pos_int not in tracks_by_position
+                    ):
+                        tracks_by_position[pos_int] = rec_details
                     if is_valid_uuid(rec_id):
                         tracks_by_mbid[rec_id] = rec_details
 
@@ -631,6 +690,12 @@ def fetch_musicbrainz_release_details(
             "musicbrainz_releasegroupid": str(release_group_id)
             if is_valid_uuid(release_group_id)
             else None,
+            "musicbrainz_artistid": str(album_artist_id)
+            if is_valid_uuid(album_artist_id)
+            else None,
+            "musicbrainz_albumartistid": str(album_artist_id)
+            if is_valid_uuid(album_artist_id)
+            else None,
             "label": label_name,
             "label_mbid": label_mbid,
             "catalog_number": catalog_number,
@@ -644,6 +709,7 @@ def fetch_musicbrainz_release_details(
             "original_date": release_group.get("first-release-date")
             or release_dict.get("date"),
             "tracks_by_position": tracks_by_position,
+            "tracks_by_disc_and_position": tracks_by_disc_and_position,
             "tracks_by_mbid": tracks_by_mbid,
         }
         set_cached_api(cache_key, details)

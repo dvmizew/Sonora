@@ -1,4 +1,5 @@
 import re
+from typing import Any
 
 import httpx
 from rapidfuzz import fuzz
@@ -311,7 +312,8 @@ def fetch_itunes_album_details(
             else []
         )
 
-        tracks_by_number: dict[int, dict[str, object]] = {}
+        tracks_by_number: dict[Any, dict[str, object]] = {}
+        tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
         album_meta: dict[str, object] = {
             "itunes_collectionid": str(collection_id),
@@ -325,6 +327,7 @@ def fetch_itunes_album_details(
             else None,
             "total_tracks": best_album.get("trackCount"),
             "tracks_by_number": tracks_by_number,
+            "tracks_by_disc_and_position": tracks_by_disc_and_position,
             "tracks_by_title": tracks_by_title,
         }
 
@@ -334,7 +337,8 @@ def fetch_itunes_album_details(
                 or track_entry.get("wrapperType") != "track"
             ):
                 continue
-            t_num = track_entry.get("trackNumber")
+            t_num = safe_int(track_entry.get("trackNumber"))
+            disc_num = safe_int(track_entry.get("discNumber")) or 1
             t_name = str(track_entry.get("trackName", ""))
             explicitness = str(track_entry.get("trackExplicitness", "")).lower()
             advisory = (
@@ -367,11 +371,15 @@ def fetch_itunes_album_details(
                 else None,
                 "track_number": t_num,
                 "total_tracks": track_entry.get("trackCount"),
-                "disc_number": track_entry.get("discNumber"),
+                "disc_number": disc_num,
                 "date": r_date,
             }
-            if isinstance(t_num, int):
-                tracks_by_number[t_num] = t_info
+            if t_num is not None:
+                tracks_by_disc_and_position[(disc_num, t_num)] = t_info
+                tracks_by_number[(disc_num, t_num)] = t_info
+                tracks_by_number[f"{disc_num}-{t_num}"] = t_info
+                if disc_num == 1 or t_num not in tracks_by_number:
+                    tracks_by_number[t_num] = t_info
             if t_name:
                 tracks_by_title[normalize_str(t_name)] = t_info
 

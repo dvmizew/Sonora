@@ -5,7 +5,9 @@ import threading
 from pathlib import Path
 from typing import Any, cast
 
+import mutagen.flac
 import mutagen.mp4
+import mutagen.wave
 import taglib
 from mutagen._util import MutagenError
 from PIL import Image
@@ -14,11 +16,15 @@ from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
+    extract_disc_number_from_folder,
     is_valid_uuid,
     normalize_date,
+    normalize_featured_artists,
     normalize_genre,
+    parse_track_filename,
     safe_float,
     safe_int,
+    safe_int_pair,
 )
 
 _METADATA_CACHE: dict[tuple[str, int, int], TrackInfo] = {}
@@ -135,12 +141,34 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             genre = normalize_genre(_get_tag(tags, "GENRE", "TCON", "WM/GENRE"))
 
             # Track and disc numbering
-            track_number = safe_int(_get_tag(tags, "TRACKNUMBER", "TRCK", "TRACK"))
-            disc_number = safe_int(_get_tag(tags, "DISCNUMBER", "TPOS", "DISC")) or 1
+            track_num_tag = _get_tag(tags, "TRACKNUMBER", "TRCK", "TRACK")
+            track_number, track_total_fallback = safe_int_pair(track_num_tag)
+
+            disc_num_tag = _get_tag(tags, "DISCNUMBER", "TPOS", "DISC")
+            disc_number, disc_total_fallback = safe_int_pair(disc_num_tag)
+
             raw_total_tracks = _get_tag(tags, "TRACKTOTAL", "TOTALTRACKS")
-            total_tracks = safe_int(raw_total_tracks)
+            total_tracks = safe_int(raw_total_tracks) or track_total_fallback
+
             raw_total_discs = _get_tag(tags, "DISCTOTAL", "TOTALDISCS")
-            total_discs = safe_int(raw_total_discs)
+            total_discs = safe_int(raw_total_discs) or disc_total_fallback
+
+            # Deduce disc and track numbers from folder structure or filename when missing or default
+            if (disc_number is None or disc_number == 1) and file_path.parent:
+                folder_disc = extract_disc_number_from_folder(file_path.parent.name)
+                if folder_disc is not None:
+                    disc_number = folder_disc
+
+            fn_disc, fn_track, _ = parse_track_filename(file_path.name)
+            if fn_disc is not None and (disc_number is None or disc_number == 1):
+                disc_number = fn_disc
+            if track_number is None and fn_track is not None:
+                track_number = fn_track
+
+            if disc_number is None:
+                disc_number = 1
+            if total_discs is None and disc_number > 1:
+                total_discs = disc_number
 
             # Numerical and audio stats
             bpm = safe_float(_get_tag(tags, "BPM", "TBPM", "WM/BEATSPERMINUTE"))
@@ -196,7 +224,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                     if a and a.strip() and a.strip().lower() != artist.lower()
                 ]
                 if extra_artists:
-                    mapped_fields["featured_artists"] = ", ".join(extra_artists)
+                    mapped_fields["featured_artists"] = normalize_featured_artists(
+                        extra_artists, primary_artist=artist, allow_network=False
+                    )
             raw_advisory = mapped_fields.get("advisory")
             if raw_advisory:
                 raw_str = str(raw_advisory).strip().lower()
@@ -225,6 +255,24 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             else:
                 is_lossless = True
 
+            bits_per_sample: int | None = None
+            if file_ext == ".flac":
+                try:
+                    flac_info = cast(Any, mutagen.flac.FLAC)(file_path).info
+                    bits_per_sample = safe_int(
+                        getattr(flac_info, "bits_per_sample", None)
+                    )
+                except (MutagenError, OSError):
+                    pass
+            elif file_ext == ".wav":
+                try:
+                    wav_info = cast(Any, mutagen.wave.WAVE)(file_path).info
+                    bits_per_sample = safe_int(
+                        getattr(wav_info, "bits_per_sample", None)
+                    )
+                except (MutagenError, OSError):
+                    pass
+
             track_info = TrackInfo(
                 file_path=file_path,
                 artist=artist,
@@ -244,6 +292,8 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 sample_rate=song.sampleRate,
                 bitrate=song.bitrate,
                 channels=song.channels,
+                duration=float(song.length) if song.length is not None else None,
+                bits_per_sample=bits_per_sample,
                 is_lossless=is_lossless,
                 replaygain_track_gain=replaygain_track_gain,
                 replaygain_track_peak=replaygain_track_peak,
@@ -411,6 +461,10 @@ def write_track_metadata(
                         else:
                             song.tags.pop("ITUNESADVISORY", None)
                             song.tags.pop("ADVISORY", None)
+                        continue
+                    if field == "disc_subtitle":
+                        for k in tag_keys:
+                            song.tags[k] = [str(tag_value)]
                         continue
                     song.tags[canonical_key] = [str(tag_value)]
                     for alias_key in tag_keys[1:]:

@@ -36,6 +36,7 @@ from sonora.core.utils import (
     is_version_or_remix,
     normalize_genre,
     normalize_str,
+    parse_track_filename,
 )
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
@@ -53,20 +54,6 @@ def extract_bracket_tokens(text: str) -> list[tuple[str, set[str]]]:
         tokens = set("".join(c if c.isalnum() else " " for c in inner).split())
         results.append((full_bracket, tokens))
     return results
-
-
-def is_valid_track_filename(filename: str) -> bool:
-    """Check if filename starts with a clean track number prefix (e.g. '01 - ...' or '1-01 - ...')."""
-    stem = filename.rsplit(".", 1)[0]
-    for delim in [" - ", " _ ", ". ", "_", " "]:
-        if delim in stem:
-            prefix = stem.split(delim, 1)[0].strip()
-            parts = prefix.split("-")
-            if len(parts) in (1, 2) and all(
-                part.isdigit() and 1 <= len(part) <= 4 for part in parts
-            ):
-                return True
-    return False
 
 
 def _is_corrupt_bracket(full_bracket: str, tokens: set[str]) -> bool:
@@ -196,12 +183,15 @@ def check_file(file_path: Path, check_spectral: bool = False) -> list[str]:
                 f"Low resolution cover art: {track.art_width}x{track.art_height}"
             )
 
-        if not is_valid_track_filename(file_path.name):
+        _, filename_track_num, _ = parse_track_filename(file_path.name)
+        if filename_track_num is None:
             issues.append(
                 f"Filename does not start with track number: '{file_path.name}'"
             )
 
-        if FEAT_PATTERN.search(track.artist):
+        if FEAT_PATTERN.search(track.artist) and not is_single_group_artist(
+            track.artist, allow_network=False
+        ):
             issues.append(
                 f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: TITLE only)"
             )
@@ -450,8 +440,12 @@ def check_library(
                     f"Duplicate track number {track_idx} (Disc {disc_idx}) found in files: {found_files}"
                 )
 
+        try:
+            rel_parts = folder.relative_to(folder_path).parts
+        except ValueError:
+            rel_parts = (folder.name,)
         is_singles_container = any(
-            get_config().is_generic_container(p) for p in folder.parts
+            get_config().is_generic_container(p) for p in rel_parts
         )
         if not is_singles_container:
             discs: dict[int, set[int]] = defaultdict(set)
