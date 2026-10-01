@@ -33,7 +33,10 @@ class SonoraConfig:
     album_match_threshold: float = ALBUM_MATCH_THRESHOLD
     genius_match_threshold: float = GENIUS_MATCH_THRESHOLD
 
-    disc_folder_patterns: tuple[str, ...] = (r"^(?:cd|disc|side)\s*\d+$",)
+    disc_folder_patterns: tuple[str, ...] = (
+        r"^(?:cd|disc)\s*\d+$",
+        r"^side\s*[a-z0-9]+$",
+    )
 
     generic_containers: frozenset[str] = field(
         default_factory=lambda: frozenset(
@@ -77,6 +80,8 @@ class SonoraConfig:
         "ft",
         "featuring",
         "with",
+        "w/",
+        "w.",
         "and",
         "vs",
         "cu",
@@ -339,6 +344,8 @@ def get_artist_split_pattern() -> re.Pattern[str]:
         escaped = re.escape(c)
         if c in ("feat", "ft", "vs"):
             parts.append(rf"\s+{escaped}\.?\s+")
+        elif c == "w/":
+            parts.append(rf"\s+{escaped}(?!\s*[oO](?:ut)?\b)\s*")
         else:
             parts.append(rf"\s+{escaped}\s+")
     parts.extend(
@@ -347,7 +354,7 @@ def get_artist_split_pattern() -> re.Pattern[str]:
             r"\s*&\s*",
             r"\s*,\s*",
             r"\s*;\s*",
-            r"\s*/\s*",
+            r"\s+/\s+",
         ]
     )
     return re.compile("|".join(parts), re.IGNORECASE)
@@ -356,12 +363,20 @@ def get_artist_split_pattern() -> re.Pattern[str]:
 @functools.cache
 def get_disambiguation_pattern() -> re.Pattern[str]:
     cfg = get_config()
-    words = "|".join(
-        rf"{re.escape(c)}\.?" if c in ("feat", "ft", "vs") else re.escape(c)
-        for c in cfg.featuring_conjunctions
-    )
+    words: list[str] = []
+    for c in cfg.featuring_conjunctions:
+        escaped = re.escape(c)
+        if c in ("feat", "ft", "vs"):
+            words.append(rf"{escaped}\.?")
+        elif c == "w/":
+            words.append(rf"{escaped}(?!\s*[oO](?:ut)?\b)")
+        elif c.endswith("."):
+            words.append(rf"{escaped}")
+        else:
+            words.append(rf"{escaped}\b")
+    words_expr = "|".join(words)
     return re.compile(
-        rf"\s*\([^()]{{1,40}}\)(?=\s*(?:[,;/&+-\\]|\b(?:{words})\b|$))",
+        rf"\s*\([^()]{{1,40}}\)(?=\s*(?:[,;/&+-\\]|\b(?:{words_expr})|$))",
         re.IGNORECASE,
     )
 
@@ -383,34 +398,61 @@ def get_duplicate_feat_pattern() -> re.Pattern[str]:
 @functools.cache
 def get_bracket_feat_pattern() -> re.Pattern[str]:
     cfg = get_config()
-    words = "|".join(
-        rf"{re.escape(c)}\.?" if c in ("feat", "ft") else re.escape(c)
-        for c in cfg.featuring_conjunctions
-        if c not in ("with", "and", "vs")
+    words: list[str] = []
+    for c in cfg.featuring_conjunctions:
+        if c in ("with", "and", "vs"):
+            continue
+        escaped = re.escape(c)
+        if c in ("feat", "ft"):
+            words.append(rf"{escaped}\.?")
+        elif c == "w/":
+            words.append(rf"{escaped}(?!\s*[oO](?:ut)?\b)")
+        elif c.endswith("."):
+            words.append(rf"{escaped}")
+        else:
+            words.append(rf"{escaped}\b")
+    return re.compile(
+        rf"\s*[\(\[\{{]\s*(?:{'|'.join(words)})\s+.*?[\)\]\}}]", re.IGNORECASE
     )
-    return re.compile(rf"\s*[\(\[\{{]\s*(?:{words})\s+.*?[\)\]\}}]", re.IGNORECASE)
 
 
 @functools.cache
 def get_balanced_feat_pattern() -> re.Pattern[str]:
     cfg = get_config()
-    words = "|".join(
-        rf"{re.escape(c)}\.?" if c in ("feat", "ft") else rf"{re.escape(c)}\b"
-        for c in cfg.featuring_conjunctions
-        if c not in ("with", "and", "vs")
-    )
-    return re.compile(rf"^(?:{words})\s+(.*)$", re.IGNORECASE)
+    words: list[str] = []
+    for c in cfg.featuring_conjunctions:
+        if c in ("with", "and", "vs"):
+            continue
+        escaped = re.escape(c)
+        if c in ("feat", "ft"):
+            words.append(rf"{escaped}\.?")
+        elif c == "w/":
+            words.append(rf"{escaped}(?!\s*[oO](?:ut)?\b)")
+        elif c.endswith("."):
+            words.append(rf"{escaped}")
+        else:
+            words.append(rf"{escaped}\b")
+    return re.compile(rf"^(?:{'|'.join(words)})\s+(.*)$", re.IGNORECASE)
 
 
 @functools.cache
 def get_feat_tokens_pattern() -> re.Pattern[str]:
     cfg = get_config()
     dotted = [c for c in cfg.featuring_conjunctions if c in ("feat", "ft", "vs")]
-    regular = [c for c in cfg.featuring_conjunctions if c not in ("feat", "ft", "vs")]
+    regular = [
+        c
+        for c in cfg.featuring_conjunctions
+        if c not in ("feat", "ft", "vs", "w.", "w/", "w")
+    ]
 
-    parts: list[str] = [r"[,;&+]"]
+    parts: list[str] = [
+        r"[,;&+]",
+        r"\bw/(?!\s*[oO](?:ut)?\b)\s*",
+        r"\bw\.\s*",
+    ]
     if dotted:
-        dot_expr = "|".join(re.escape(c) for c in dotted)
+        dot_clean = [c.rstrip(".") for c in dotted]
+        dot_expr = "|".join(re.escape(c) for c in dot_clean)
         parts.append(rf"\b(?:{dot_expr})\.?(?!\w)")
     if regular:
         reg_expr = "|".join(re.escape(c) for c in regular)

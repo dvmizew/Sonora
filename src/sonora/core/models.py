@@ -72,6 +72,8 @@ class TrackInfo:
     sample_rate: int | None = None
     bitrate: int | None = None
     channels: int | None = None
+    duration: float | None = None
+    bits_per_sample: int | None = None
     is_lossless: bool = True
     art_width: int | None = None
     art_height: int | None = None

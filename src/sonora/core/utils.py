@@ -45,6 +45,7 @@ from sonora.core.constants import (
 )
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
+from sonora.core.models import TrackInfo
 
 _ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50}
 
@@ -138,6 +139,23 @@ def safe_int(value: object) -> int | None:
     return int(val_str) if val_str.isdigit() else None
 
 
+def safe_int_pair(value: object) -> tuple[int | None, int | None]:
+    """Safely parse paired numeric values (e.g. '1/2', '01/12', 1) into (current, total)."""
+    if value is None:
+        return None, None
+    if isinstance(value, int):
+        return value, None
+    val_str = str(value).strip()
+    if not val_str:
+        return None, None
+    if "/" in val_str:
+        parts = val_str.split("/", 1)
+        curr = safe_int(parts[0])
+        tot = safe_int(parts[1])
+        return curr, tot
+    return safe_int(val_str), None
+
+
 def safe_float(value: object) -> float | None:
     if value is None:
         return None
@@ -152,6 +170,44 @@ def safe_float(value: object) -> float | None:
 
 _UNICODE_HYPHENS_PATTERN = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2015]")
 _SPACES_BEFORE_COMMA_PATTERN = re.compile(r"\s+,")
+_ROMANIAN_CHARS_PATTERN = re.compile(r"[ăĂîÎâÂțȚţŢ]")
+_ROMANIAN_WORDS_OR_SUFFIXES = re.compile(
+    r"\b(?:[şŞ]i|[şŞ]ofer|[şŞ]i-|[şŞ]osea|[Ll]e[şŞ]|[Şş]tii?|[Mm]a[şŞ]in[aăe]?|[Pp]e[şŞ]te|[Ss]f[âa]r[şŞ]it|[Oo]ra[şŞ])\b|"
+    r"[A-Za-zĂăÎîÂâȚțȘș]*(?:e[şŞ]ti|e[şŞ]te|[şŞ]oi|[şŞ]el|[şŞ]or)\b",
+    re.IGNORECASE,
+)
+_TURKISH_CHARS_PATTERN = re.compile(r"[ğĞıİ]")
+_T_CEDILLA_TRANSLATION = str.maketrans({"ţ": "ț", "Ţ": "Ț"})
+_S_CEDILLA_TRANSLATION = str.maketrans({"ş": "ș", "Ş": "Ș"})
+
+
+@lru_cache(maxsize=8192)
+def normalize_legacy_diacritics(text: str | None) -> str:
+    """
+    Standardize obsolete legacy diacritics into canonical Unicode characters.
+    - Unconditionally converts legacy T-cedilla ('Ţ'/'ţ') to standard Romanian comma-below ('Ț'/'ț')
+      as T-cedilla exists exclusively as an ISO-8859-2 encoding artifact.
+    - Converts legacy S-cedilla ('Ş'/'ş') to Romanian comma-below ('Ș'/'ș') when Romanian
+      orthographic markers, words, or suffixes are present, preserving Turkish S-cedilla.
+    """
+    if not text:
+        return ""
+
+    if "ţ" not in text and "Ţ" not in text and "ş" not in text and "Ş" not in text:
+        return text
+
+    normalized = text.translate(_T_CEDILLA_TRANSLATION)
+
+    if "ş" in normalized or "Ş" in normalized:
+        has_ro = bool(
+            _ROMANIAN_CHARS_PATTERN.search(normalized)
+            or _ROMANIAN_WORDS_OR_SUFFIXES.search(normalized)
+        )
+        has_tr = bool(_TURKISH_CHARS_PATTERN.search(normalized))
+        if has_ro and not has_tr:
+            normalized = normalized.translate(_S_CEDILLA_TRANSLATION)
+
+    return normalized
 
 
 def clean_unicode_punct(text: str | None) -> str:
@@ -159,7 +215,8 @@ def clean_unicode_punct(text: str | None) -> str:
         return ""
     cleaned = remove_zero_width(str(text))
     cleaned = _UNICODE_HYPHENS_PATTERN.sub("-", cleaned)
-    return _SPACES_BEFORE_COMMA_PATTERN.sub(",", cleaned)
+    cleaned = _SPACES_BEFORE_COMMA_PATTERN.sub(",", cleaned)
+    return normalize_legacy_diacritics(cleaned)
 
 
 _COLLAPSE_SPACES_PATTERN = re.compile(r"\s+")
@@ -333,7 +390,7 @@ def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str
 
 
 @lru_cache(maxsize=4096)
-def is_single_group_artist(raw_name: str | None) -> bool:
+def is_single_group_artist(raw_name: str | None, allow_network: bool = True) -> bool:
     """
     Determine if an artist name containing delimiters ('&', '+', ',') is a registered
     single band/group entity (e.g. 'Simon & Garfunkel', 'Earth, Wind & Fire', 'Play & Win')
@@ -368,6 +425,9 @@ def is_single_group_artist(raw_name: str | None) -> bool:
     cached = get_cached_api(cache_key)
     if isinstance(cached, bool):
         return cached
+
+    if not allow_network:
+        return False
 
     # Format query ensuring spacing around delimiters like '&'
     query_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", clean_name).strip()
@@ -412,7 +472,7 @@ def get_primary_artist(artist_name: str | None, allow_network: bool = False) -> 
 
     raw_artist_name = str(artist_name).strip()
     formatted_artist_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", raw_artist_name).strip()
-    if is_single_group_artist(raw_artist_name):
+    if is_single_group_artist(raw_artist_name, allow_network=allow_network):
         return sanitize_name(
             resolve_artist_name(formatted_artist_name, allow_network=allow_network)
         )
@@ -505,6 +565,174 @@ def extract_balanced_features(
     return base_title, matches, open_char, close_char
 
 
+def extract_featured_artist_tokens(
+    featured_artists_input: str | Sequence[str | None] | None,
+    primary_artist: str | None = None,
+    allow_network: bool = False,
+) -> list[str]:
+    """
+    Extract, normalize and deduplicate featured artists into a canonical list of individual artist names.
+    - Strips composite conjunction strings (e.g. 'A & B' alongside 'A, B').
+    - Handles multilingual conjunctions ('feat', 'ft', 'with', 'w/', 'w.', 'and', 'si', 'și', '&').
+    - Preserves single registered group/band entities containing delimiters (e.g. 'Vargas & Lagola', 'Play & Win').
+    - Reconciles Unicode diacritics / canonical repertoire (e.g. 'DJ Flamă' over 'Dj Flama').
+    - Strips self-featured occurrences matching the primary track artist.
+    """
+    if not featured_artists_input:
+        return []
+
+    raw_items: list[str] = (
+        [featured_artists_input]
+        if isinstance(featured_artists_input, str)
+        else [str(raw_entry) for raw_entry in featured_artists_input if raw_entry]
+    )
+    if not raw_items:
+        return []
+
+    tokens: list[str] = []
+    feat_pattern = get_feat_tokens_pattern()
+    for raw_chunk in raw_items:
+        cleaned_chunk = clean_unicode_punct(raw_chunk).strip()
+        if not cleaned_chunk:
+            continue
+        if is_single_group_artist(cleaned_chunk, allow_network=allow_network):
+            tokens.append(cleaned_chunk)
+            continue
+
+        comma_parts = re.split(r"[,;\n]+|\s+/\s+", cleaned_chunk)
+        for part in comma_parts:
+            part_strip = part.strip()
+            if not part_strip:
+                continue
+            if is_single_group_artist(part_strip, allow_network=allow_network):
+                tokens.append(part_strip)
+            else:
+                for subpart in feat_pattern.split(part_strip):
+                    subpart_clean = subpart.strip()
+                    if subpart_clean:
+                        tokens.append(subpart_clean)
+
+    unique_artists: list[str] = []
+    norm_to_index: dict[str, int] = {}
+    primary_norm = normalize_str(primary_artist) if primary_artist else None
+    user_overrides = _load_user_overrides()
+
+    for tok in tokens:
+        clean_tok = clean_disambiguation(tok)
+        clean_tok = re.sub(r"[\(\)\[\]\{\}]", "", clean_tok).strip()
+        clean_tok = re.sub(
+            r"^(?:fea?t(?:uring)?|ft|with|w/(?!\s*[oO](?:ut)?\b)|w\.|and|si|și|cu)\.?\s+",
+            "",
+            clean_tok,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not clean_tok:
+            continue
+
+        norm = normalize_str(clean_tok)
+        if norm in user_overrides:
+            clean_tok = user_overrides[norm]
+            norm = normalize_str(clean_tok)
+        if (
+            not norm
+            or norm
+            in (
+                "unknown",
+                "unknown artist",
+                "various",
+                "various artists",
+                "untitled",
+                "none",
+                "null",
+            )
+            or clean_tok.lower()
+            in (
+                "unknown",
+                "unknown artist",
+                "various",
+                "various artists",
+                "untitled",
+                "none",
+                "null",
+            )
+        ):
+            continue
+
+        if primary_norm and (
+            norm == primary_norm or fuzz.ratio(norm, primary_norm) >= 88
+        ):
+            continue
+
+        if norm in norm_to_index:
+            existing_idx = norm_to_index[norm]
+            unique_artists[existing_idx] = preserve_unicode_repertoire(
+                unique_artists[existing_idx], clean_tok
+            )
+            continue
+
+        fuzzy_matched = False
+        for existing_norm, idx in norm_to_index.items():
+            if fuzz.ratio(norm, existing_norm) >= 88:
+                unique_artists[idx] = preserve_unicode_repertoire(
+                    unique_artists[idx], clean_tok
+                )
+                fuzzy_matched = True
+                break
+
+        if not fuzzy_matched:
+            norm_to_index[norm] = len(unique_artists)
+            unique_artists.append(clean_tok)
+
+    registered_groups = [
+        artist_token
+        for artist_token in unique_artists
+        if is_single_group_artist(artist_token, allow_network=allow_network)
+    ]
+    if registered_groups:
+        feat_token_pattern = get_feat_tokens_pattern()
+        filtered_unique_artists: list[str] = []
+        for artist_token in unique_artists:
+            is_subtoken = False
+            token_norm = normalize_str(artist_token)
+            for registered_group in registered_groups:
+                if artist_token == registered_group:
+                    continue
+                group_subtokens = [
+                    normalize_str(subtok)
+                    for subtok in feat_token_pattern.split(registered_group)
+                    if subtok.strip()
+                ]
+                if any(
+                    token_norm == subtok_norm
+                    or fuzz.ratio(token_norm, subtok_norm) >= 90
+                    for subtok_norm in group_subtokens
+                ):
+                    is_subtoken = True
+                    break
+            if not is_subtoken:
+                filtered_unique_artists.append(artist_token)
+        unique_artists = filtered_unique_artists
+
+    return unique_artists
+
+
+def normalize_featured_artists(
+    featured_artists_input: str | Sequence[str | None] | None,
+    primary_artist: str | None = None,
+    allow_network: bool = False,
+) -> str | None:
+    """
+    Format normalized featured artists as a canonical comma-separated string,
+    or None if no featured artists are present.
+    """
+    tokens = extract_featured_artist_tokens(
+        featured_artists_input,
+        primary_artist=primary_artist,
+        allow_network=allow_network,
+    )
+    return ", ".join(tokens) if tokens else None
+
+
 @lru_cache(maxsize=8192)
 def deduplicate_title_features(
     title: str | None, primary_artist: str | None = None
@@ -518,41 +746,18 @@ def deduplicate_title_features(
     if not matches:
         return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned).strip()
 
-    unique_artists: list[str] = []
-    seen_normalized: set[str] = set()
-    primary_norm = normalize_str(primary_artist) if primary_artist else None
-
-    for raw_feats in matches:
-        tokens = get_feat_tokens_pattern().split(raw_feats)
-        for tok in tokens:
-            if not tok.strip():
-                continue
-            clean_tok = clean_disambiguation(tok.strip())
-            clean_tok = re.sub(r"[\(\)\[\]\{\}]", "", clean_tok).strip()
-            if not clean_tok:
-                continue
-            user_overrides = _load_user_overrides()
-            norm = normalize_str(clean_tok)
-            if norm in user_overrides:
-                clean_tok = user_overrides[norm]
-                norm = normalize_str(clean_tok)
-            if not norm or norm in seen_normalized:
-                continue
-            if primary_norm and (
-                norm == primary_norm or fuzz.ratio(norm, primary_norm) >= 88
-            ):
-                continue
-            if any(fuzz.ratio(norm, s) >= 88 for s in seen_normalized):
-                continue
-            seen_normalized.add(norm)
-            unique_artists.append(clean_tok)
-
+    unique_artists = extract_featured_artist_tokens(
+        matches, primary_artist=primary_artist, allow_network=False
+    )
     if not unique_artists:
-        formatted_title = base_title
+        return _COLLAPSE_SPACES_PATTERN.sub(" ", base_title).strip()
     elif len(unique_artists) == 1:
         formatted_title = (
             f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
         )
+    elif any(" & " in a or " and " in a.lower() for a in unique_artists):
+        feat_str = ", ".join(unique_artists)
+        formatted_title = f"{base_title} {open_char}feat. {feat_str}{close_char}"
     else:
         feat_str = ", ".join(unique_artists[:-1]) + f" & {unique_artists[-1]}"
         formatted_title = f"{base_title} {open_char}feat. {feat_str}{close_char}"
@@ -628,23 +833,26 @@ def preserve_unicode_repertoire(current: str | None, candidate: str | None) -> s
     Operates universally across all languages and scripts without language-specific hardcoding.
     """
     if not current:
-        return candidate or ""
+        return normalize_legacy_diacritics(candidate) if candidate else ""
     if not candidate:
-        return current
-    if current == candidate:
-        return current
+        return normalize_legacy_diacritics(current)
 
-    if normalize_str(current) == normalize_str(candidate):
-        current_accents = count_unicode_accents(current)
-        candidate_accents = count_unicode_accents(candidate)
+    clean_cur = normalize_legacy_diacritics(current)
+    clean_cand = normalize_legacy_diacritics(candidate)
+    if clean_cur == clean_cand:
+        return clean_cur
+
+    if normalize_str(clean_cur) == normalize_str(clean_cand):
+        current_accents = count_unicode_accents(clean_cur)
+        candidate_accents = count_unicode_accents(clean_cand)
 
         if current_accents > candidate_accents:
-            return current
+            return clean_cur
         if candidate_accents > current_accents:
-            return candidate
-        return current if current_accents > 0 else candidate
+            return clean_cand
+        return clean_cur if current_accents > 0 else clean_cand
 
-    return candidate
+    return clean_cand
 
 
 _NON_WORD_SPACES_PATTERN = re.compile(r"[^\w\s]")
@@ -1163,6 +1371,129 @@ def group_files_by_parent(files: Sequence[Path]) -> dict[Path, list[Path]]:
     return grouped
 
 
+_CD_PREFIXED_FILENAME_PATTERN = re.compile(
+    r"^(?:cd|disc)\s*(\d{1,2})\s*[-_.]\s*(\d{1,3})\s*[-._\s]\s*(.*)$",
+    re.IGNORECASE,
+)
+_MULTI_DISC_FILENAME_PATTERN = re.compile(r"^(\d{1,2})[-.](\d{1,3})\s*[-._\s]\s*(.*)$")
+_SINGLE_TRACK_FILENAME_PATTERN = re.compile(r"^(\d{1,3})\s*[-._\s]\s*(.*)$")
+
+
+def parse_track_filename(filename: str) -> tuple[int | None, int | None, str]:
+    """
+    Parse filename for disc number, track number, and clean title stem.
+    Returns (disc_number, track_number, clean_title).
+    """
+    stem = Path(filename).stem
+    cd_match = _CD_PREFIXED_FILENAME_PATTERN.match(stem)
+    if cd_match:
+        disc_num = safe_int(cd_match.group(1))
+        track_num = safe_int(cd_match.group(2))
+        title_part = cd_match.group(3).strip()
+        return disc_num, track_num, title_part
+
+    multi_match = _MULTI_DISC_FILENAME_PATTERN.match(stem)
+    if multi_match:
+        disc_num = safe_int(multi_match.group(1))
+        track_num = safe_int(multi_match.group(2))
+        title_part = multi_match.group(3).strip()
+        return disc_num, track_num, title_part
+
+    single_match = _SINGLE_TRACK_FILENAME_PATTERN.match(stem)
+    if single_match:
+        track_num = safe_int(single_match.group(1))
+        title_part = single_match.group(2).strip()
+        return None, track_num, title_part
+
+    return None, None, stem.strip()
+
+
+def extract_disc_number_from_folder(folder_name: str) -> int | None:
+    """
+    Extract disc number from disc folder name if it matches SonoraConfig.disc_folder_patterns.
+    (e.g., 'CD 1' -> 1, 'Disc 02' -> 2, 'Side A' -> 1).
+    """
+    from sonora.core.config import get_config
+
+    clean = folder_name.strip()
+    if not get_config().is_disc_folder(clean):
+        return None
+    num_match = re.search(r"\d+", clean)
+    if num_match:
+        return safe_int(num_match.group(0))
+    side_match = re.search(r"side\s*([a-z])", clean, re.IGNORECASE)
+    if side_match:
+        char_code = ord(side_match.group(1).lower()) - ord("a") + 1
+        return char_code if char_code > 0 else None
+    return None
+
+
+def group_files_by_album_root(files: Sequence[Path]) -> dict[Path, list[Path]]:
+    """
+    Group audio files by their canonical album root directory.
+    If files reside inside disc subdirectories (e.g., 'Album/CD 1/', 'Album/Disc 2/'),
+    they are unified under 'Album/'.
+    """
+    from sonora.core.config import get_config
+
+    grouped: dict[Path, list[Path]] = {}
+    for file_path in files:
+        parent = file_path.parent
+        if get_config().is_disc_folder(parent.name) and parent.parent != parent:
+            album_root = parent.parent
+        else:
+            album_root = parent
+        grouped.setdefault(album_root, []).append(file_path)
+    return grouped
+
+
+def is_in_singles_hierarchy(path: Path, root_dir: Path | None = None) -> bool:
+    """
+    Check if a path is located inside a Singles container or directory.
+    Universally matches 'singles' folder components and configured container names
+    without misinterpreting root library folders (e.g. 'FLAC', 'Music').
+    """
+    if any(p.lower() in ("singles", "single") for p in path.parts):
+        return True
+    if root_dir is not None:
+        try:
+            rel_parts = path.relative_to(root_dir).parts
+            dir_parts = rel_parts[:-1] if not path.is_dir() else rel_parts
+            from sonora.core.config import get_config
+
+            config = get_config()
+            return any(config.is_generic_container(p) for p in dir_parts)
+        except ValueError:
+            pass
+    return False
+
+
+def get_single_release_title(track_info: TrackInfo) -> str:
+    """
+    Return the release title for a single folder, preserving version descriptors
+    (e.g. 'Deluxe Edition', 'Monoir Remix', 'Extended Mix', 'Live')
+    from the album tag if absent from the track title.
+    """
+    title = (track_info.title or "").strip() or "Untitled"
+    album = (track_info.album or "").strip()
+    from sonora.core.config import get_config
+
+    if not album or get_config().is_generic_container(album):
+        return title
+
+    matches = re.findall(r"(\((?:[^()]+)\)|\[(?:[^\[\]]+)\])", album)
+    descriptors_to_add: list[str] = []
+    for d in matches:
+        if re.search(r"\b(?:feat|ft|featuring)\b", d, re.IGNORECASE):
+            continue
+        if normalize_str(d) not in normalize_str(title):
+            descriptors_to_add.append(d)
+
+    if descriptors_to_add:
+        return f"{title} " + " ".join(descriptors_to_add)
+    return title
+
+
 def safe_case_rename(src: Path, dst: Path) -> Path:
     """
     Safely rename a file or directory across all platforms, including case-only renames
@@ -1235,3 +1566,4 @@ def clear_utils_cache() -> None:
     normalize_language_name.cache_clear()
     normalize_script_name.cache_clear()
     preserve_unicode_repertoire.cache_clear()
+    normalize_legacy_diacritics.cache_clear()
