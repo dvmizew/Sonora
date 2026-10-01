@@ -2765,7 +2765,10 @@ class TestKeyboardInterruptHandling(unittest.TestCase):
         cover_img = self.tmp_path / "cover.jpg"
         cover_img.write_bytes(b"dummy")
 
-        with patch("sonora.modules.tagger.read_track_metadata") as mock_read:
+        with (
+            patch("sonora.modules.tagger.fetch_track_mbid", return_value=(None, None)),
+            patch("sonora.modules.tagger.read_track_metadata") as mock_read,
+        ):
             mock_read.return_value = TrackInfo(
                 file_path=wav,
                 artist="Artist",

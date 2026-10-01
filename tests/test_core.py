@@ -590,7 +590,10 @@ class TestCoreUtils(unittest.TestCase):
                 "ext:score": "100",
             }
         ]
-        self.assertEqual(get_primary_artist("Above & Beyond"), "Above & Beyond")
+        self.assertEqual(
+            get_primary_artist("Above & Beyond", allow_network=True),
+            "Above & Beyond",
+        )
 
         is_single_group_artist.cache_clear()
         mock_search.return_value = [
@@ -600,7 +603,9 @@ class TestCoreUtils(unittest.TestCase):
                 "ext:score": "100",
             }
         ]
-        self.assertEqual(get_primary_artist("Alan & Kepa"), "Alan & Kepa")
+        self.assertEqual(
+            get_primary_artist("Alan & Kepa", allow_network=True), "Alan & Kepa"
+        )
 
         is_single_group_artist.cache_clear()
         mock_search.return_value = [
@@ -610,8 +615,12 @@ class TestCoreUtils(unittest.TestCase):
                 "ext:score": "100",
             }
         ]
-        self.assertEqual(get_primary_artist("Play & Win"), "Play & Win")
-        self.assertEqual(get_primary_artist("Play&Win"), "Play & Win")
+        self.assertEqual(
+            get_primary_artist("Play & Win", allow_network=True), "Play & Win"
+        )
+        self.assertEqual(
+            get_primary_artist("Play&Win", allow_network=True), "Play & Win"
+        )
 
         is_single_group_artist.cache_clear()
         mock_search.return_value = [
@@ -621,7 +630,10 @@ class TestCoreUtils(unittest.TestCase):
                 "ext:score": "100",
             }
         ]
-        self.assertEqual(get_primary_artist("Simon & Garfunkel"), "Simon & Garfunkel")
+        self.assertEqual(
+            get_primary_artist("Simon & Garfunkel", allow_network=True),
+            "Simon & Garfunkel",
+        )
 
         is_single_group_artist.cache_clear()
         mock_search.return_value = []
