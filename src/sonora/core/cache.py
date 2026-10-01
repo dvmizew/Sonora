@@ -1,9 +1,9 @@
 import atexit
 import dataclasses
-import re
 import shutil
 import sqlite3
 import threading
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -29,32 +29,6 @@ def get_cache_dir() -> Path:
 def get_api_cache_dir() -> Path:
     """Return dedicated directory for diskcache API cache files."""
     return get_cache_dir() / "api"
-
-
-def _migrate_legacy_cache(cache_dir: Path, api_cache_dir: Path) -> None:
-    """Migrate legacy cache files from cache root and clean up obsolete FanoutCache shards."""
-    for parent in (cache_dir, api_cache_dir):
-        if parent.exists() and parent.is_dir():
-            try:
-                for item in parent.iterdir():
-                    if item.is_dir() and re.match(r"^\d{3}$", item.name):
-                        shutil.rmtree(item, ignore_errors=True)
-            except OSError as error:
-                LOG.debug(f"Legacy shard cleanup failed: {error}")
-
-    legacy_db = cache_dir / "cache.db"
-    if not legacy_db.exists():
-        return
-    try:
-        api_cache_dir.mkdir(parents=True, exist_ok=True)
-        for item in list(cache_dir.iterdir()):
-            if item.name.startswith("library_state.db") or item.name == "api":
-                continue
-            target = api_cache_dir / item.name
-            if not target.exists():
-                shutil.move(str(item), str(target))
-    except OSError as error:
-        LOG.debug(f"Legacy cache migration failed: {error}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -121,13 +95,16 @@ def set_ignore_cache(ignore: bool) -> None:
 
 def get_cache() -> Any:
     global _CACHE_INSTANCE
+    api_cache_dir = get_api_cache_dir()
+    if _CACHE_INSTANCE is not None and getattr(
+        _CACHE_INSTANCE, "directory", None
+    ) != str(api_cache_dir):
+        close_cache()
+
     if _CACHE_INSTANCE is None:
         with _CACHE_LOCK:
             if _CACHE_INSTANCE is None:
                 try:
-                    cache_dir = get_cache_dir()
-                    api_cache_dir = get_api_cache_dir()
-                    _migrate_legacy_cache(cache_dir, api_cache_dir)
                     api_cache_dir.mkdir(parents=True, exist_ok=True)
                     _CACHE_INSTANCE = diskcache.Cache(
                         str(api_cache_dir),
@@ -136,9 +113,8 @@ def get_cache() -> Any:
                 except (
                     OSError,
                     ValueError,
-                    KeyError,
                     RuntimeError,
-                    TypeError,
+                    sqlite3.Error,
                 ) as error:
                     LOG.debug(f"Cache initialization failed: {error}")
                     _CACHE_INSTANCE = None
@@ -152,14 +128,14 @@ def get_cached_api(key: str) -> Any | None:
     cache = get_cache()
     if cache is not None:
         try:
-            with _CACHE_LOCK:
-                return cache.get(key)
+            return cache.get(key)
         except (
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
+            sqlite3.Error,
+            diskcache.core.pickle.PickleError,
+            EOFError,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Cache fetch failed for key '{key}': {error}")
@@ -175,14 +151,12 @@ def set_cached_api(
     cache = get_cache()
     if cache is not None:
         try:
-            with _CACHE_LOCK:
-                cache.set(key, value, expire=expire_seconds)
+            cache.set(key, value, expire=expire_seconds)
         except (
             OSError,
             ValueError,
-            KeyError,
             RuntimeError,
-            TypeError,
+            sqlite3.Error,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Cache store failed for key '{key}': {error}")
@@ -212,28 +186,37 @@ def get_cache_stats() -> CacheStats:
     cache_dir = get_cache_dir()
     api_cache_dir = get_api_cache_dir()
     api_entries = 0
-    cache = get_cache()
-    if cache is not None:
-        try:
-            with _CACHE_LOCK:
-                api_entries = len(cache)
-        except (
-            OSError,
-            ValueError,
-            KeyError,
-            RuntimeError,
-            TypeError,
-            diskcache.Timeout,
-        ) as error:
-            LOG.debug(f"Failed to get cache length: {error}")
-
     api_size = _get_api_cache_size(api_cache_dir)
 
-    from sonora.core.state import get_library_state
+    if _CACHE_INSTANCE is not None or (
+        api_cache_dir.exists() and (api_cache_dir / "cache.db").exists()
+    ):
+        cache = get_cache()
+        if cache is not None:
+            try:
+                api_entries = len(cache)
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                sqlite3.Error,
+                diskcache.Timeout,
+            ) as error:
+                LOG.debug(f"Failed to get cache length: {error}")
 
-    state_mgr = get_library_state()
-    state_entries = state_mgr.get_state_count()
-    state_size = state_mgr.get_state_size()
+    from sonora.core.state import (
+        _STATE_INSTANCE,
+        _get_default_db_path,
+        get_library_state,
+    )
+
+    state_entries = 0
+    state_size = 0
+    default_state_path = _get_default_db_path()
+    if _STATE_INSTANCE is not None or default_state_path.exists():
+        library_state = get_library_state()
+        state_entries = library_state.get_state_count()
+        state_size = library_state.get_state_size()
 
     from sonora.audio.metadata import get_metadata_cache_size
 
@@ -303,14 +286,12 @@ def clear_cache(
         cache = get_cache()
         if cache is not None:
             try:
-                with _CACHE_LOCK:
-                    api_entries_cleared = len(cache)
+                api_entries_cleared = len(cache)
             except (
                 OSError,
                 ValueError,
-                KeyError,
                 RuntimeError,
-                TypeError,
+                sqlite3.Error,
                 diskcache.Timeout,
             ) as error:
                 LOG.debug(f"Failed to read cache entries before clearing: {error}")
@@ -327,24 +308,16 @@ def clear_cache(
                 try:
                     with _CACHE_LOCK:
                         cache.clear(retry=True)
-                        cache.check(fix=True, retry=True)
+                        with warnings.catch_warnings(action="always"):
+                            cache.check(fix=True, retry=True)
                 except (
                     OSError,
                     ValueError,
-                    KeyError,
                     RuntimeError,
-                    TypeError,
+                    sqlite3.Error,
                     diskcache.Timeout,
                 ) as error:
                     LOG.debug(f"Cache clear/check failed: {error}")
-
-            if api_cache_dir.exists() and api_cache_dir.is_dir():
-                try:
-                    for item in api_cache_dir.iterdir():
-                        if item.is_dir() and re.match(r"^\d{3}$", item.name):
-                            shutil.rmtree(item, ignore_errors=True)
-                except OSError as error:
-                    LOG.debug(f"Legacy shard cleanup failed: {error}")
 
             db_path = api_cache_dir / "cache.db"
             if db_path.exists():
@@ -366,16 +339,16 @@ def clear_cache(
     if clear_state:
         from sonora.core.state import get_library_state, reset_library_state
 
-        state_mgr = get_library_state()
-        state_entries_cleared = state_mgr.get_state_count()
-        state_bytes_before = state_mgr.get_state_size()
+        library_state = get_library_state()
+        state_entries_cleared = library_state.get_state_count()
+        state_bytes_before = library_state.get_state_size()
 
-        state_mgr.clear_state(purge=purge)
+        library_state.clear_state(purge=purge)
         if purge:
             reset_library_state()
             state_bytes_after = 0
         else:
-            state_bytes_after = state_mgr.get_state_size()
+            state_bytes_after = library_state.get_state_size()
 
         state_bytes_freed = max(0, state_bytes_before - state_bytes_after)
 
@@ -409,9 +382,8 @@ def close_cache() -> None:
             except (
                 OSError,
                 ValueError,
-                KeyError,
                 RuntimeError,
-                TypeError,
+                sqlite3.Error,
                 diskcache.Timeout,
             ) as error:
                 LOG.debug(f"Cache close failed: {error}")

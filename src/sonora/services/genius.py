@@ -15,15 +15,6 @@ from sonora.core.utils import (
 _GENIUS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_GENIUS)
 
 
-def fetch_genius_description(
-    artist: str, title: str, api_token: str | None = None
-) -> str | None:
-    details = fetch_genius_song_details(artist, title, api_token)
-    return (
-        str(details["description"]) if details and details.get("description") else None
-    )
-
-
 def fetch_genius_song_details(
     artist: str, title: str, api_token: str | None = None
 ) -> dict[str, object] | None:
@@ -47,8 +38,8 @@ def fetch_genius_song_details(
             timeout=5,
         )
         response.raise_for_status()
-        data = response.json()
-        hits = data.get("response", {}).get("hits", [])
+        genius_payload = response.json()
+        hits = genius_payload.get("response", {}).get("hits", [])
         if not hits:
             return None
 
@@ -80,41 +71,38 @@ def fetch_genius_song_details(
             timeout=5,
         )
         song_response.raise_for_status()
-        song_data = song_response.json().get("response", {}).get("song", {})
+        song_genius_payload = song_response.json().get("response", {}).get("song", {})
 
-        plain_description = song_data.get("description", {}).get("plain")
+        plain_description = song_genius_payload.get("description", {}).get("plain")
         if plain_description and "Lyrics for this song are unavailable" in str(
             plain_description
         ):
             plain_description = None
 
-        genius_song_id = song_data.get("id")
+        genius_song_id = song_genius_payload.get("id")
 
-        # Parse featured artists
-        featured_list = song_data.get("featured_artists", [])
+        featured_list = song_genius_payload.get("featured_artists", [])
         featured_names = [
             clean_disambiguation(str(featured["name"]))
             for featured in featured_list
             if isinstance(featured, dict) and featured.get("name")
         ]
 
-        # Parse producers
-        producer_list = song_data.get("producer_artists", [])
+        producer_list = song_genius_payload.get("producer_artists", [])
         producer_names = [
             clean_disambiguation(str(producer["name"]))
             for producer in producer_list
             if isinstance(producer, dict) and producer.get("name")
         ]
 
-        # Parse writers / composers
-        writer_list = song_data.get("writer_artists", [])
+        writer_list = song_genius_payload.get("writer_artists", [])
         writer_names = [
             clean_disambiguation(str(writer["name"]))
             for writer in writer_list
             if isinstance(writer, dict) and writer.get("name")
         ]
 
-        release_date = song_data.get("release_date")
+        release_date = song_genius_payload.get("release_date")
 
         result = {
             "genius_song_id": genius_song_id,
@@ -127,6 +115,6 @@ def fetch_genius_song_details(
         set_cached_api(cache_key, result)
         return result
 
-    except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
+    except (httpx.HTTPError, OSError, ValueError) as error:
         LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {error}")
         return None

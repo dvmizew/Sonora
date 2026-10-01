@@ -13,6 +13,7 @@ class TrackInfo:
     album_artist: str | None = None
     track_number: int | None = None
     disc_number: int | None = 1
+    disc_subtitle: str | None = None
     date: str | None = None
     genre: str | None = None
     isrc: str | None = None
@@ -71,37 +72,37 @@ class TrackInfo:
     sample_rate: int | None = None
     bitrate: int | None = None
     channels: int | None = None
+    duration: float | None = None
+    bits_per_sample: int | None = None
     is_lossless: bool = True
     art_width: int | None = None
     art_height: int | None = None
     is_alien: bool = False
+    _diff_descriptions: list[str] = field(
+        default_factory=list, repr=False, compare=False
+    )
 
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""
-        data: dict[str, object] = asdict(self)
-        data["file_path"] = str(self.file_path)
-        data["file_name"] = self.file_path.name
-        if not data.get("album_artist"):
-            data["album_artist"] = self.album_artist or self.artist
-        return data
+        track_dict: dict[str, object] = {
+            k: v for k, v in asdict(self).items() if not k.startswith("_")
+        }
+        track_dict["file_path"] = str(self.file_path)
+        track_dict["file_name"] = self.file_path.name
+        if not track_dict.get("album_artist"):
+            track_dict["album_artist"] = self.album_artist or self.artist
+        return track_dict
 
 
 @dataclass
 class CheckReport:
-    """Represents the validation/check results for a track or directory."""
+    """Represents the aggregate validation/check results for an audio directory."""
 
-    file_path: Path | None = None
     total_files: int = 0
     corrupt_files: int = 0
     missing_metadata: int = 0
     missing_lrc: int = 0
     issues: dict[str, list[str]] = field(default_factory=dict)
-    is_valid: bool = True
-    missing_tags: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    is_fake_lossless: bool = False
-    md5_verified: bool = False
 
 
 @dataclass
@@ -113,3 +114,28 @@ class RenameReport:
     folders_renamed: int = 0
     lrc_synced: int = 0
     unchanged_files: int = 0
+
+
+class NormalizeReport(list[TrackInfo]):
+    """Represents the results of library normalization, preserving list semantics for callers."""
+
+    def __init__(
+        self,
+        tracks: list[TrackInfo],
+        modified_files: dict[str, list[str]] | None = None,
+    ) -> None:
+        super().__init__(tracks)
+        self.tracks = tracks
+        self.modified_files: dict[str, list[str]] = modified_files or {}
+
+    @property
+    def total_scanned(self) -> int:
+        return len(self.tracks)
+
+    @property
+    def total_modified(self) -> int:
+        return len(self.modified_files)
+
+    @property
+    def total_unchanged(self) -> int:
+        return max(0, len(self.tracks) - len(self.modified_files))

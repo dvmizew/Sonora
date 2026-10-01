@@ -2,6 +2,7 @@
 Unit and integration tests for Sonora audio engine modules.
 """
 
+import io
 import sys
 import tempfile
 import wave
@@ -9,6 +10,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import soundfile
+from PIL import Image
 
 # Guarantee src/ is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -22,10 +25,8 @@ from sonora.audio.metadata import (
     read_track_metadata,
     write_track_metadata,
 )
-from sonora.audio.replaygain import (
-    calculate_album_replaygain,
-    calculate_track_replaygain,
-)
+from sonora.audio.replaygain import calculate_album_replaygain
+from sonora.audio.spectral import detect_fake_lossless
 from sonora.core.models import TrackInfo
 
 
@@ -83,6 +84,67 @@ class TestAudioEngine(unittest.TestCase):
         self.assertEqual(mock_file_instance.tags["REPLAYGAIN_TRACK_GAIN"], ["-4.25 dB"])
         self.assertEqual(mock_file_instance.tags["REPLAYGAIN_TRACK_PEAK"], ["0.951234"])
 
+    @patch("taglib.File")
+    def test_write_track_metadata_purges_none_and_cleared_tags(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.tags = {
+            "ARTIST": ["Old Artist"],
+            "TITLE": ["Old Title"],
+            "ALBUM": ["Old Album"],
+            "ALBUMARTIST": ["Old Album Artist"],
+            "GENRE": ["Old Genre"],
+            "MUSICBRAINZ_TRACKID": ["5a9fc94b-ec0c-4619-acc8-388a022630d0"],
+            "MUSICBRAINZ TRACK ID": ["5a9fc94b-ec0c-4619-acc8-388a022630d0"],
+            "ARTISTSORT": ["Old Sort"],
+            "BPM": ["120.0"],
+        }
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.tmp_path / "test_purge.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        track_info = TrackInfo(
+            file_path=flac_path,
+            artist="New Artist",
+            title="New Title",
+            album="New Album",
+            album_artist=None,
+            genre=None,
+            musicbrainz_trackid=None,
+            artist_sort=None,
+            bpm=None,
+        )
+        write_track_metadata(track_info)
+
+        mock_file_instance.save.assert_called_once()
+        self.assertEqual(mock_file_instance.tags["ARTIST"], ["New Artist"])
+        self.assertEqual(mock_file_instance.tags["TITLE"], ["New Title"])
+        self.assertEqual(mock_file_instance.tags["ALBUM"], ["New Album"])
+        self.assertNotIn("ALBUMARTIST", mock_file_instance.tags)
+        self.assertNotIn("GENRE", mock_file_instance.tags)
+        self.assertNotIn("MUSICBRAINZ_TRACKID", mock_file_instance.tags)
+        self.assertNotIn("MUSICBRAINZ TRACK ID", mock_file_instance.tags)
+        self.assertNotIn("ARTISTSORT", mock_file_instance.tags)
+        self.assertNotIn("BPM", mock_file_instance.tags)
+
+    @patch("os.access")
+    def test_write_track_metadata_permission_denied_raises_oserror(
+        self, mock_access: MagicMock
+    ) -> None:
+        mock_access.return_value = False
+        flac_path = self.tmp_path / "test_readonly.flac"
+        flac_path.write_bytes(b"dummy flac data")
+        track_info = TrackInfo(
+            file_path=flac_path,
+            artist="Readonly Artist",
+            title="Readonly Title",
+            album="Readonly Album",
+        )
+        with self.assertRaises(PermissionError):
+            write_track_metadata(track_info)
+
     def test_read_nonexistent_file_raises_metadata_error(self) -> None:
         bogus_path = self.tmp_path / "nonexistent_audio_track_9999.flac"
         with self.assertRaises(FileNotFoundError):
@@ -97,13 +159,12 @@ class TestAudioEngine(unittest.TestCase):
         self.assertTrue(verify_flac_checksum(self.dummy_audio_path))
 
     def test_calculate_track_replaygain_success(self) -> None:
-        replaygain_result = calculate_track_replaygain(self.dummy_audio_path)
-        self.assertIsNotNone(replaygain_result)
-        if replaygain_result:
-            gain, peak = replaygain_result
-            self.assertIsInstance(gain, float)
-            self.assertIsInstance(peak, float)
-            self.assertTrue(0.0 <= peak <= 1.0)
+        replaygain_success = calculate_album_replaygain(
+            [self.dummy_audio_path], force=True
+        )
+        self.assertTrue(replaygain_success)
+        reloaded_info = read_track_metadata(self.dummy_audio_path)
+        self.assertIsNotNone(reloaded_info.replaygain_track_gain)
 
     def test_calculate_album_replaygain_success(self) -> None:
         track1_path = self.tmp_path / "1.wav"
@@ -238,6 +299,158 @@ class TestAudioEngine(unittest.TestCase):
         if found:
             self.assertEqual(found.resolve(), cover_path.resolve())
 
+    def test_process_album_cover_art_low_resolution_upgrade(self) -> None:
+        album_dir = self.tmp_path / "LowResAlbum"
+        album_dir.mkdir(parents=True)
+        cover_path = album_dir / "cover.jpg"
+
+        low_res = Image.new("RGB", (300, 300), color="blue")
+        low_res_buf = io.BytesIO()
+        low_res.save(low_res_buf, format="JPEG")
+        cover_path.write_bytes(low_res_buf.getvalue())
+
+        hi_res = Image.new("RGB", (1400, 1400), color="blue")
+        hi_res_buf = io.BytesIO()
+        hi_res.save(hi_res_buf, format="JPEG")
+        hi_res_bytes = hi_res_buf.getvalue()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = hi_res_bytes
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch(
+                "sonora.audio.art.fetch_itunes_cover_art_url",
+                return_value="https://itunes.com/art.jpg",
+            ),
+            patch("sonora.core.http.SESSION.get", return_value=mock_resp),
+        ):
+            found = process_album_cover_art(album_dir, "Artist", "Album", force=False)
+            self.assertIsNotNone(found)
+            assert found is not None
+            with Image.open(found) as img:
+                self.assertEqual(img.size, (1400, 1400))
+
+    def test_process_album_cover_art_caa_low_res_falls_back_to_itunes_hi_res(
+        self,
+    ) -> None:
+        album_dir = self.tmp_path / "CaaLowResAlbum"
+        album_dir.mkdir(parents=True)
+
+        caa_low = Image.new("RGB", (400, 400), color="red")
+        caa_buf = io.BytesIO()
+        caa_low.save(caa_buf, format="JPEG")
+        caa_bytes = caa_buf.getvalue()
+
+        itunes_hi = Image.new("RGB", (1400, 1400), color="blue")
+        itunes_buf = io.BytesIO()
+        itunes_hi.save(itunes_buf, format="JPEG")
+        itunes_bytes = itunes_buf.getvalue()
+
+        def mock_get(url: str, **kwargs: object) -> MagicMock:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            if "coverartarchive" in url:
+                resp.content = caa_bytes
+            else:
+                resp.content = itunes_bytes
+            return resp
+
+        with (
+            patch(
+                "sonora.audio.art.fetch_cover_art_archive_url",
+                return_value="https://coverartarchive.org/release/123/front",
+            ),
+            patch(
+                "sonora.audio.art.fetch_itunes_cover_art_url",
+                return_value="https://itunes.com/art_hi.jpg",
+            ),
+            patch("sonora.core.http.SESSION.get", side_effect=mock_get),
+        ):
+            found = process_album_cover_art(
+                album_dir,
+                "Artist",
+                "Album",
+                musicbrainz_album_id="123",
+                force=True,
+            )
+            self.assertIsNotNone(found)
+            assert found is not None
+            with Image.open(found) as img:
+                self.assertEqual(img.size, (1400, 1400))
+
+    def test_process_album_cover_art_caa_low_res_preserved_when_no_higher_source(
+        self,
+    ) -> None:
+        album_dir = self.tmp_path / "CaaOnlyAlbum"
+        album_dir.mkdir(parents=True)
+
+        caa_low = Image.new("RGB", (400, 400), color="red")
+        caa_buf = io.BytesIO()
+        caa_low.save(caa_buf, format="JPEG")
+        caa_bytes = caa_buf.getvalue()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = caa_bytes
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch(
+                "sonora.audio.art.fetch_cover_art_archive_url",
+                return_value="https://coverartarchive.org/release/456/front",
+            ),
+            patch("sonora.audio.art.fetch_itunes_cover_art_url", return_value=None),
+            patch("sonora.audio.art.fetch_deezer_cover_art_url", return_value=None),
+            patch("sonora.core.http.SESSION.get", return_value=mock_resp),
+        ):
+            found = process_album_cover_art(
+                album_dir,
+                "Artist",
+                "Album",
+                musicbrainz_album_id="456",
+                force=True,
+            )
+            self.assertIsNotNone(found)
+            assert found is not None
+            with Image.open(found) as img:
+                self.assertEqual(img.size, (400, 400))
+
+    def test_process_album_cover_art_quality_downgrade_protection(self) -> None:
+        album_dir = self.tmp_path / "HighResAlbum"
+        album_dir.mkdir(parents=True)
+        cover_path = album_dir / "cover.jpg"
+
+        hi_res = Image.new("RGB", (1400, 1400), color="green")
+        hi_res_buf = io.BytesIO()
+        hi_res.save(hi_res_buf, format="JPEG")
+        cover_path.write_bytes(hi_res_buf.getvalue())
+
+        low_res = Image.new("RGB", (500, 500), color="green")
+        low_res_buf = io.BytesIO()
+        low_res.save(low_res_buf, format="JPEG")
+        low_res_bytes = low_res_buf.getvalue()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = low_res_bytes
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch(
+                "sonora.audio.art.fetch_itunes_cover_art_url",
+                return_value="https://itunes.com/art_small.jpg",
+            ),
+            patch("sonora.core.http.SESSION.get", return_value=mock_resp),
+        ):
+            found = process_album_cover_art(album_dir, "Artist", "Album", force=True)
+            self.assertIsNotNone(found)
+            assert found is not None
+            with Image.open(found) as img:
+                self.assertEqual(img.size, (1400, 1400))
+
     def test_format_lossless_and_lossy_classification(self) -> None:
         lossless_exts = [".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"]
         lossy_exts = [".mp3", ".ogg", ".opus", ".mpc", ".wma"]
@@ -273,6 +486,56 @@ class TestAudioEngine(unittest.TestCase):
                 self.assertFalse(
                     info.is_lossless, f"Expected {ext} to be classified as lossy"
                 )
+
+    def test_detect_fake_lossless_authentic_audio(self) -> None:
+        authentic_path = self.tmp_path / "authentic.wav"
+        rng = np.random.default_rng(42)
+        samples = rng.normal(0.0, 0.15, int(44100 * 25.0)).astype(np.float32)
+        soundfile.write(str(authentic_path), samples, 44100)
+
+        is_fake, cutoff_khz, description = detect_fake_lossless(authentic_path)
+        self.assertFalse(is_fake)
+        self.assertEqual(cutoff_khz, 0.0)
+        self.assertIsNone(description)
+
+    def test_detect_fake_lossless_brickwall_transcode(self) -> None:
+        fake_path = self.tmp_path / "transcode_128k.wav"
+        rng = np.random.default_rng(42)
+        time_axis = np.linspace(0, 25.0, int(44100 * 25.0), endpoint=False)
+        audio_signal = (
+            np.sin(2 * np.pi * 100 * time_axis) * 0.5
+            + np.sin(2 * np.pi * 1000 * time_axis) * 0.2
+            + rng.normal(0.0, 0.05, len(time_axis))
+        )
+        fft_coefficients = np.fft.rfft(audio_signal)
+        fft_frequencies = np.fft.rfftfreq(len(audio_signal), d=1 / 44100)
+        fft_coefficients[fft_frequencies > 16000] = 1e-6
+        brickwall_audio = np.fft.irfft(fft_coefficients, n=len(audio_signal)).astype(
+            np.float32
+        )
+        soundfile.write(str(fake_path), brickwall_audio, 44100)
+
+        is_fake, cutoff_khz, description = detect_fake_lossless(fake_path)
+        self.assertTrue(is_fake)
+        self.assertGreaterEqual(cutoff_khz, 14.5)
+        self.assertLessEqual(cutoff_khz, 16.5)
+        assert description is not None
+        self.assertIn("128kbps", description)
+
+    def test_detect_fake_lossless_nonexistent_file(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            detect_fake_lossless(self.tmp_path / "nonexistent.flac")
+
+    def test_detect_fake_lossless_short_audio(self) -> None:
+        short_path = self.tmp_path / "short.wav"
+        rng = np.random.default_rng(42)
+        samples = rng.normal(0.0, 0.15, int(44100 * 1.0)).astype(np.float32)
+        soundfile.write(str(short_path), samples, 44100)
+
+        is_fake, cutoff_khz, description = detect_fake_lossless(short_path)
+        self.assertFalse(is_fake)
+        self.assertEqual(cutoff_khz, 0.0)
+        self.assertIsNone(description)
 
 
 if __name__ == "__main__":

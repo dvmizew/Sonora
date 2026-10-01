@@ -1,33 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
 
-datas = []
-binaries = []
-hiddenimports = []
-tmp_ret = collect_all('soundfile')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('taglib')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('scipy')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('rich')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('anyascii')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('pycountry')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('syncedlyrics')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('shazamio')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('shazamio_core')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+datas = collect_data_files('anyascii') + collect_data_files('pycountry') + collect_data_files('ftfy')
+hiddenimports = collect_submodules('anyascii') + collect_submodules('pycountry') + collect_submodules('syncedlyrics') + collect_submodules('ftfy')
 
 a = Analysis(
     ['src/sonora/cli/main.py'],
-    pathex=[],
-    binaries=binaries,
+    pathex=['src'],
+    binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

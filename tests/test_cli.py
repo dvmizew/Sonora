@@ -5,7 +5,7 @@ Unit tests for Sonora CLI main entrypoint and subcommands.
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # Guarantee src/ is in sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import unittest
 
 from sonora.cli.main import main
-from sonora.core.models import CheckReport, TrackInfo
+from sonora.core.models import CheckReport, NormalizeReport, TrackInfo
 
 
 class TestCLIInterface(unittest.TestCase):
@@ -56,6 +56,30 @@ class TestCLIInterface(unittest.TestCase):
             _, kwargs = mock_tag_album_folder.call_args
             self.assertEqual(kwargs.get("fanart_api_key"), "test_fanart_key")
             self.assertFalse(kwargs.get("enable_shazam"))
+
+    @patch("sonora.cli.main.set_ignore_cache")
+    def test_handle_tag_subcommand_with_no_dsp_and_ignore_cache(
+        self, mock_set_ignore_cache: MagicMock
+    ) -> None:
+        with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:
+            mock_tag_album_folder.return_value = [
+                TrackInfo(file_path=Path("dummy.flac"))
+            ]
+            exit_code = main(
+                [
+                    "tag",
+                    str(self.temporary_path),
+                    "--no-dsp",
+                    "--ignore-cache",
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            mock_tag_album_folder.assert_called_once()
+            _, kwargs = mock_tag_album_folder.call_args
+            self.assertFalse(kwargs.get("fetch_bpm"))
+            self.assertFalse(kwargs.get("fetch_key"))
+            self.assertFalse(kwargs.get("fetch_replaygain"))
+            mock_set_ignore_cache.assert_called_once_with(True)
 
     def test_handle_tag_subcommand_with_json_report(self) -> None:
         with patch("sonora.cli.main.tag_album_folder") as mock_tag_album_folder:
@@ -146,16 +170,29 @@ class TestCLIInterface(unittest.TestCase):
 
     def test_handle_normalize_subcommand(self) -> None:
         with patch("sonora.cli.main.normalize_library") as mock_normalize:
-            mock_normalize.return_value = [TrackInfo(file_path=Path("song.flac"))]
+            mock_normalize.return_value = NormalizeReport(
+                [TrackInfo(file_path=Path("song.flac"))],
+                modified_files={"song.flac": ["artist: 'Old' -> 'New'"]},
+            )
+            json_output = self.temporary_path / "normalize_report.json"
             exit_code = main(
-                ["normalize", str(self.temporary_path), "--bpm", "--replaygain"]
+                [
+                    "normalize",
+                    str(self.temporary_path),
+                    "--bpm",
+                    "--replaygain",
+                    "--json",
+                    str(json_output),
+                ]
             )
             self.assertEqual(exit_code, 0)
             mock_normalize.assert_called_once()
+            self.assertTrue(json_output.exists())
 
     def test_handle_bpm_subcommand(self) -> None:
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
+        json_out = self.temporary_path / "bpm.json"
         with (
             patch("sonora.cli.main.calculate_bpm") as mock_calc_bpm,
             patch("sonora.cli.main.read_track_metadata") as mock_read,
@@ -163,40 +200,60 @@ class TestCLIInterface(unittest.TestCase):
         ):
             mock_read.return_value = TrackInfo(file_path=song, bpm=None)
             mock_calc_bpm.return_value = 128.0
-            exit_code = main(["bpm", str(self.temporary_path)])
+            exit_code = main(["bpm", str(self.temporary_path), "--json", str(json_out)])
             self.assertEqual(exit_code, 0)
             mock_write.assert_called_once()
             mock_read.assert_called_once()
             mock_calc_bpm.assert_called_once()
+            self.assertTrue(json_out.exists())
 
     def test_handle_key_subcommand(self) -> None:
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
+        json_out = self.temporary_path / "key.json"
         with (
             patch("sonora.cli.main.detect_key_details") as mock_detect_key,
             patch("sonora.cli.main.read_track_metadata") as mock_read,
             patch("sonora.cli.main.write_track_metadata") as mock_write,
         ):
+            # Test key detection on missing key
             mock_read.return_value = TrackInfo(file_path=song, initial_key=None)
             mock_detect_key.return_value = ("C#m", "12A", 0.85)
-            exit_code = main(["key", str(self.temporary_path)])
+            exit_code = main(["key", str(self.temporary_path), "--json", str(json_out)])
             self.assertEqual(exit_code, 0)
             mock_write.assert_called_once()
             mock_read.assert_called_once()
             mock_detect_key.assert_called_once()
+            self.assertTrue(json_out.exists())
+
+            # Test auto-healing on invalid key (e.g. 'm')
+            mock_write.reset_mock()
+            mock_read.reset_mock()
+            mock_detect_key.reset_mock()
+            mock_read.return_value = TrackInfo(file_path=song, initial_key="m")
+            mock_detect_key.return_value = ("Am", "8A", 0.90)
+            exit_code_invalid = main(["key", str(self.temporary_path)])
+            self.assertEqual(exit_code_invalid, 0)
+            mock_detect_key.assert_called_once()
+            mock_write.assert_called_once()
 
     def test_handle_replaygain_subcommand(self) -> None:
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
+        json_out = self.temporary_path / "rg.json"
         with patch("sonora.cli.main.calculate_album_replaygain") as mock_rg:
             mock_rg.return_value = True
-            exit_code = main(["replaygain", str(self.temporary_path)])
+            exit_code = main(
+                ["replaygain", str(self.temporary_path), "--json", str(json_out)]
+            )
             self.assertEqual(exit_code, 0)
             mock_rg.assert_called_once()
+            self.assertTrue(json_out.exists())
 
     def test_handle_lyrics_subcommand(self) -> None:
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
+        json_out = self.temporary_path / "lyrics.json"
         with (
             patch("sonora.cli.main.process_track_lyrics") as mock_lyrics,
             patch("sonora.cli.main.read_track_metadata") as mock_read,
@@ -206,15 +263,20 @@ class TestCLIInterface(unittest.TestCase):
                 file_path=song, artist="Artist", title="Title"
             )
             mock_lyrics.return_value = ("[00:01.00] Line", "synced")
-            exit_code = main(["lyrics", str(self.temporary_path)])
+            exit_code = main(
+                ["lyrics", str(self.temporary_path), "--json", str(json_out)]
+            )
             self.assertEqual(exit_code, 0)
             mock_read.assert_called_once()
             mock_lyrics.assert_called_once()
             mock_write.assert_called_once()
+            self.assertTrue(json_out.exists())
 
     def test_handle_keyboard_interrupts(self) -> None:
         dummy_backup = self.temporary_path / "backup.json"
         dummy_backup.write_text("{}", encoding="utf-8")
+        song = self.temporary_path / "song.flac"
+        song.write_bytes(b"dummy")
 
         with (
             patch("sonora.cli.main.tag_album_folder", side_effect=KeyboardInterrupt),
@@ -228,11 +290,23 @@ class TestCLIInterface(unittest.TestCase):
                 side_effect=KeyboardInterrupt,
             ),
             patch(
+                "sonora.cli.main.backup_library_tags",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch(
                 "sonora.cli.main.restore_library_tags",
                 side_effect=KeyboardInterrupt,
             ),
             patch(
                 "sonora.cli.main.normalize_library",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch(
+                "sonora.cli.main.calculate_album_replaygain",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch(
+                "sonora.cli.main.as_completed",
                 side_effect=KeyboardInterrupt,
             ),
         ):
@@ -241,8 +315,13 @@ class TestCLIInterface(unittest.TestCase):
                 ["check", str(self.temporary_path)],
                 ["rename", str(self.temporary_path)],
                 ["organize", str(self.temporary_path)],
+                ["backup", str(self.temporary_path)],
                 ["restore", str(dummy_backup)],
                 ["normalize", str(self.temporary_path)],
+                ["bpm", str(self.temporary_path), "--force"],
+                ["key", str(self.temporary_path), "--force"],
+                ["replaygain", str(self.temporary_path), "--force"],
+                ["lyrics", str(self.temporary_path), "--force"],
             ]:
                 with self.subTest(args=args):
                     exit_code = main(args)

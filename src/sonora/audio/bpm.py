@@ -35,7 +35,7 @@ def load_audio(
                 else audio_data[:, 0]
             )
         return audio_data, int(sample_rate)
-    except (soundfile.LibsndfileError, OSError, ValueError, RuntimeError) as error:
+    except (soundfile.LibsndfileError, OSError) as error:
         LOG.debug(f"soundfile decode failed for {file_path}: {error}")
 
     try:
@@ -63,7 +63,7 @@ def load_audio(
             )
             if len(audio_array) > 0:
                 return audio_array, 44100
-    except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as error:
+    except (subprocess.SubprocessError, OSError) as error:
         LOG.debug(f"ffmpeg decode failed for {file_path}: {error}")
 
     return None
@@ -123,13 +123,8 @@ def calculate_bpm(file_path: Path) -> float | None:
         while bpm_value > 190.0:
             bpm_value /= 2.0
 
-        bpm_result = round(float(bpm_value), 1)
-        del spectrogram
-        del onset_env
-        del autocorr
-        del audio_mono
-        return bpm_result
+        return round(float(bpm_value), 1)
 
-    except (OSError, ValueError, RuntimeError, IndexError, TypeError) as error:
+    except OSError as error:
         LOG.debug(f"BPM calculation failed for {file_path}: {error}")
         return None

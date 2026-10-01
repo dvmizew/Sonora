@@ -23,20 +23,29 @@ from sonora.services.fanart import (
     fetch_fanart_artist,
     fetch_fanart_label,
 )
-from sonora.services.genius import fetch_genius_description
-from sonora.services.itunes import fetch_itunes_cover_art_url
+from sonora.services.genius import fetch_genius_song_details
+from sonora.services.itunes import (
+    fetch_itunes_album_details,
+    fetch_itunes_cover_art_url,
+)
 from sonora.services.lastfm import fetch_lastfm_tags
 from sonora.services.lyrics import (
     clean_lyrics_text,
+    detect_lrc_quality,
+    extract_max_timestamp,
     fetch_synced_lyrics,
+    get_lyrics_quality,
+    is_lyrics_duration_valid,
     process_track_lyrics,
 )
 from sonora.services.musicbrainz import (
     fetch_cover_art_archive_url,
+    fetch_musicbrainz_release_details,
     fetch_track_mbid,
     search_musicbrainz_release,
 )
-from sonora.services.shazam import get_shazam_track_about, recognize_audio_track
+from sonora.services.shazam import recognize_audio_track
+from sonora.services.theaudiodb import fetch_theaudiodb_track_details
 
 
 class TestServicesEngine(unittest.TestCase):
@@ -85,6 +94,32 @@ class TestServicesEngine(unittest.TestCase):
             url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg"
         )
 
+    @patch("sonora.core.http.SESSION.get")
+    def test_fetch_itunes_cover_art_url_primary_artist_fallback(
+        self, mock_get: MagicMock
+    ) -> None:
+        empty_response = MagicMock()
+        empty_response.json.return_value = {"results": []}
+
+        success_response = MagicMock()
+        success_response.json.return_value = {
+            "results": [
+                {
+                    "artistName": "21 Savage",
+                    "collectionName": "Savage Mode II",
+                    "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/100x100-75.jpg",
+                }
+            ]
+        }
+        mock_get.side_effect = [empty_response, success_response]
+
+        url = fetch_itunes_cover_art_url(
+            "21 Savage & Metro Boomin", "Savage Mode II", resolution=1400
+        )
+        self.assertEqual(
+            url, "https://is1-ssl.mzstatic.com/image/thumb/1400x1400bb.jpg"
+        )
+
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics(self, mock_syncedlyrics: MagicMock) -> None:
         # 1. Basic search
@@ -122,6 +157,43 @@ class TestServicesEngine(unittest.TestCase):
         mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
         with self.assertRaises(RuntimeError):
             fetch_synced_lyrics("FailArtist", "FailTitle")
+
+    @patch("sonora.services.lyrics.set_cached_api")
+    @patch("sonora.services.lyrics.get_cached_api", return_value=None)
+    @patch("sonora.services.lyrics.syncedlyrics")
+    def test_fetch_synced_lyrics_negative_caching(
+        self,
+        mock_syncedlyrics: MagicMock,
+        mock_get_cache: MagicMock,
+        mock_set_cache: MagicMock,
+    ) -> None:
+        mock_syncedlyrics.search.return_value = None
+        result = fetch_synced_lyrics("Artist Without Lyrics", "Instrumental Track")
+        self.assertIsNone(result)
+        # Verify negative cache sentinel was persisted
+        mock_set_cache.assert_called_with(
+            "lyrics:artist without lyrics:instrumental track:", ""
+        )
+
+    @patch("sonora.services.theaudiodb.set_cached_api")
+    @patch("sonora.services.theaudiodb.get_cached_api", return_value=None)
+    @patch("sonora.services.theaudiodb.SESSION.get")
+    def test_fetch_theaudiodb_track_details_negative_caching(
+        self,
+        mock_get: MagicMock,
+        mock_get_cache: MagicMock,
+        mock_set_cache: MagicMock,
+    ) -> None:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"track": None}
+        mock_get.return_value = mock_resp
+
+        result = fetch_theaudiodb_track_details("Unknown Artist", "Unknown Track")
+        self.assertIsNone(result)
+        mock_set_cache.assert_called_with(
+            "theaudiodb_track:unknown artist:unknown track", {}
+        )
 
     def test_synced_lyrics_empty_query_returns_none(self) -> None:
         self.assertIsNone(fetch_synced_lyrics("", ""))
@@ -284,10 +356,14 @@ class TestServicesEngine(unittest.TestCase):
         }
         mock_get.side_effect = [mock_search_response, mock_song_response]
 
-        song_description = fetch_genius_description(
+        song_details = fetch_genius_song_details(
             "Artist", "Title", api_token="dummy_genius_token"
         )
-        self.assertEqual(song_description, "Song story description")
+        self.assertIsNotNone(song_details)
+        if song_details:
+            self.assertEqual(song_details["description"], "Song story description")
+            self.assertEqual(song_details["producers"], "Producer 1")
+            self.assertEqual(song_details["writers"], "Writer 1")
 
     @patch("sonora.services.genius.get_cached_api")
     def test_fetch_genius_song_details_cached(self, mock_cache: MagicMock) -> None:
@@ -299,8 +375,10 @@ class TestServicesEngine(unittest.TestCase):
             "writers": None,
             "release_date": None,
         }
-        details = fetch_genius_description("Artist", "Title", api_token="dummy_token")
-        self.assertEqual(details, "Cached story")
+        details = fetch_genius_song_details("Artist", "Title", api_token="dummy_token")
+        self.assertIsNotNone(details)
+        if details:
+            self.assertEqual(details["description"], "Cached story")
 
     def test_acoustid_no_api_key_returns_none(self) -> None:
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key=""))
@@ -322,7 +400,17 @@ class TestServicesEngine(unittest.TestCase):
     def test_genius_rejects_lyrics_unavailable_text(self, mock_get: MagicMock) -> None:
         mock_search_response = MagicMock()
         mock_search_response.json.return_value = {
-            "response": {"hits": [{"result": {"api_path": "/songs/1"}}]}
+            "response": {
+                "hits": [
+                    {
+                        "result": {
+                            "api_path": "/songs/1",
+                            "title": "Title",
+                            "primary_artist": {"name": "Artist"},
+                        }
+                    }
+                ]
+            }
         }
         mock_song_response = MagicMock()
         mock_song_response.json.return_value = {
@@ -334,9 +422,10 @@ class TestServicesEngine(unittest.TestCase):
         }
         mock_get.side_effect = [mock_search_response, mock_song_response]
 
-        self.assertIsNone(
-            fetch_genius_description("Artist", "Title", api_token="token")
-        )
+        details = fetch_genius_song_details("Artist", "Title", api_token="token")
+        self.assertIsNotNone(details)
+        assert details is not None
+        self.assertIsNone(details["description"])
 
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_error_handling(self, mock_mb: MagicMock) -> None:
@@ -345,6 +434,84 @@ class TestServicesEngine(unittest.TestCase):
         )
         mbid_result = fetch_track_mbid("Artist", "Title")
         self.assertIsNone(mbid_result)
+
+    @patch("sonora.services.musicbrainz.musicbrainzngs")
+    def test_musicbrainz_multi_disc_release_details(self, mock_mb: MagicMock) -> None:
+        mock_release_payload = {
+            "release": {
+                "id": "11111111-2222-3333-4444-555555555555",
+                "title": "Double Album",
+                "artist-credit": [{"artist": {"name": "Artist"}}],
+                "date": "2024",
+                "release-group": {"first-release-date": "2024"},
+                "medium-list": [
+                    {
+                        "position": 1,
+                        "track-count": 2,
+                        "title": "Disc One",
+                        "track-list": [
+                            {
+                                "position": 1,
+                                "recording": {
+                                    "id": "aaaaaaa1-0000-0000-0000-000000000001",
+                                    "title": "Disc 1 Track 1",
+                                },
+                            },
+                            {
+                                "position": 2,
+                                "recording": {
+                                    "id": "aaaaaaa2-0000-0000-0000-000000000002",
+                                    "title": "Disc 1 Track 2",
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        "position": 2,
+                        "track-count": 2,
+                        "title": "Disc Two",
+                        "track-list": [
+                            {
+                                "position": 1,
+                                "recording": {
+                                    "id": "bbbbbbb1-0000-0000-0000-000000000001",
+                                    "title": "Disc 2 Track 1",
+                                },
+                            },
+                            {
+                                "position": 2,
+                                "recording": {
+                                    "id": "bbbbbbb2-0000-0000-0000-000000000002",
+                                    "title": "Disc 2 Track 2",
+                                },
+                            },
+                        ],
+                    },
+                ],
+            }
+        }
+        mock_mb.get_release_by_id.return_value = mock_release_payload
+
+        details = fetch_musicbrainz_release_details(
+            "11111111-2222-3333-4444-555555555555"
+        )
+        self.assertIsNotNone(details)
+        assert details is not None
+        self.assertEqual(details["total_discs"], 2)
+        self.assertEqual(details["total_tracks"], 4)
+
+        tracks_by_disc = details["tracks_by_disc_and_position"]
+        assert isinstance(tracks_by_disc, dict)
+        track_1_1 = tracks_by_disc[(1, 1)]
+        assert isinstance(track_1_1, dict)
+        self.assertEqual(track_1_1["title"], "Disc 1 Track 1")
+
+        track_2_1 = tracks_by_disc[(2, 1)]
+        assert isinstance(track_2_1, dict)
+        self.assertEqual(track_2_1["title"], "Disc 2 Track 1")
+        self.assertEqual(track_2_1["disc_subtitle"], "Disc Two")
+        self.assertEqual(track_2_1["disc_number"], 2)
+        self.assertEqual(track_2_1["total_discs"], 2)
 
     @patch("sonora.services.discogs.SESSION.get")
     def test_discogs_error_handling(self, mock_get: MagicMock) -> None:
@@ -401,6 +568,91 @@ class TestServicesEngine(unittest.TestCase):
             self.assertEqual(release_result["label"], "Universal Music")
             self.assertEqual(release_result["barcode"], "123456789012")
             self.assertEqual(release_result["genre"], "Hip Hop")
+
+    @patch("sonora.services.deezer.SESSION.get")
+    def test_fetch_deezer_album_details_prefers_expected_tracks(
+        self, mock_get: MagicMock
+    ) -> None:
+        mock_search = MagicMock()
+        mock_search.status_code = 200
+        mock_search.json.return_value = {
+            "data": [
+                {
+                    "id": 111,
+                    "title": "Revenge",
+                    "artist": {"name": "XXXTENTACION"},
+                    "nb_tracks": 1,
+                    "record_type": "single",
+                },
+                {
+                    "id": 777,
+                    "title": "Revenge",
+                    "artist": {"name": "XXXTENTACION"},
+                    "nb_tracks": 7,
+                    "record_type": "album",
+                },
+            ]
+        }
+
+        mock_album = MagicMock()
+        mock_album.status_code = 200
+        mock_album.json.return_value = {
+            "title": "Revenge",
+            "tracks": {
+                "data": [
+                    {"id": 1, "title": "Track 1", "track_position": 1, "disk_number": 1}
+                ]
+            },
+        }
+        mock_get.side_effect = [mock_search, mock_album]
+
+        res = fetch_deezer_album_details(
+            "XXXTENTACION", "Revenge", expected_track_count=7
+        )
+        self.assertIsNotNone(res)
+        # Verify it requested album ID 777, not the 1-track single 111
+        mock_get.assert_called_with("https://api.deezer.com/album/777", timeout=6)
+
+    @patch("sonora.services.itunes.SESSION.get")
+    @patch("sonora.services.itunes.search_itunes")
+    def test_fetch_itunes_album_details_prefers_expected_tracks(
+        self, mock_search: MagicMock, mock_get: MagicMock
+    ) -> None:
+        mock_search.return_value = [
+            {
+                "collectionId": 111,
+                "collectionName": "Revenge",
+                "artistName": "XXXTENTACION",
+                "trackCount": 1,
+            },
+            {
+                "collectionId": 777,
+                "collectionName": "Revenge",
+                "artistName": "XXXTENTACION",
+                "trackCount": 7,
+            },
+        ]
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "results": [
+                {
+                    "wrapperType": "collection",
+                    "collectionId": 777,
+                    "collectionName": "Revenge",
+                    "artistName": "XXXTENTACION",
+                    "trackCount": 7,
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        res = fetch_itunes_album_details(
+            "XXXTENTACION", "Revenge", expected_track_count=7
+        )
+        self.assertIsNotNone(res)
+        if res:
+            self.assertEqual(res["itunes_collectionid"], "777")
 
     @patch("sonora.services.deezer.SESSION.get")
     def test_fetch_deezer_track_details(self, mock_get: MagicMock) -> None:
@@ -552,6 +804,69 @@ class TestServicesEngine(unittest.TestCase):
             )
             self.assertEqual(lyrics, "<00:01.00> Word enhanced lyrics")
             self.assertEqual(tag_type, "enhanced")
+
+            # 4. Downgrade protection: force=True with remote Plain text does NOT overwrite Synced
+            mock_fetch.return_value = "Just plain text fallback from remote"
+            lyrics, tag_type = process_track_lyrics(
+                audio_file, "Artist", "Title", force=True
+            )
+            self.assertEqual(lyrics, "<00:01.00> Word enhanced lyrics")
+            self.assertEqual(tag_type, "enhanced")
+
+    def test_clean_lyrics_extended_junk_and_watermarks(self) -> None:
+        raw_dirty = (
+            "[re:www.megalobiz.com/lrc/maker]\n"
+            "[ve:v1.2.3]\n"
+            "[00:00.00-1] 作词 : Pierre Bourne\n"
+            "[00:00.00-1] 作曲 : Shayaa Joseph\n"
+            "[00:05.86]가사 제작: megalobiz\n"
+            "[00:10.00]\n"
+            "[00:12.34] Valid lyric line\n"
+            "This song is called test song\n"
+            "[00:15.00] Second valid line\n"
+            "[00:20.00]Instrumental"
+        )
+        cleaned = clean_lyrics_text(raw_dirty)
+        self.assertEqual(
+            cleaned,
+            "[00:12.34] Valid lyric line\n[00:15.00] Second valid line",
+        )
+
+    def test_lyrics_duration_validation_and_mismatch(self) -> None:
+        lrc_text = (
+            "[00:10.00] First line\n[01:30.50] Middle line\n[03:15.20] Final line\n"
+        )
+        max_ts = extract_max_timestamp(lrc_text)
+        self.assertIsNotNone(max_ts)
+        assert max_ts is not None
+        self.assertAlmostEqual(max_ts, 195.2, places=1)
+
+        # Song of 141s (Azteca) rejected against 195s lyrics (tolerance 15s)
+        self.assertFalse(is_lyrics_duration_valid(lrc_text, 141.0))
+        # Song of 190s accepted (195.2 <= 190.0 + 15.0 = 205.0)
+        self.assertTrue(is_lyrics_duration_valid(lrc_text, 190.0))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_audio = Path(tmp_dir) / "track.flac"
+            test_audio.write_bytes(b"dummy")
+            test_lrc = Path(tmp_dir) / "track.lrc"
+            test_lrc.write_text(lrc_text, encoding="utf-8")
+            # Mismatched duration triggers quality 0
+            self.assertEqual(detect_lrc_quality(test_audio, audio_duration=120.0), 0)
+            # Matching duration returns quality 2 (synced)
+            self.assertEqual(detect_lrc_quality(test_audio, audio_duration=200.0), 2)
+
+    def test_get_lyrics_quality_filters_empty_headers(self) -> None:
+        header_only = "[ar:Artist]\n[ti:Title]\n[al:Album]"
+        self.assertEqual(get_lyrics_quality(header_only), 0)
+
+        chinese_credits_only = (
+            "[00:00.00-1] 作词 : Writer\n[00:00.00-1] 作曲 : Composer"
+        )
+        self.assertEqual(get_lyrics_quality(chinese_credits_only), 0)
+
+        placeholder_only = "This song is called placeholder"
+        self.assertEqual(get_lyrics_quality(placeholder_only), 0)
 
     @patch("sonora.services.acoustid.acoustid.fingerprint_file")
     def test_fingerprint_in_memory_cache(self, mock_fp: MagicMock) -> None:
@@ -766,14 +1081,6 @@ class TestServicesEngine(unittest.TestCase):
             with patch("sonora.services.shazam.get_config") as mock_cfg:
                 mock_cfg.return_value = MagicMock(enable_shazam=False)
                 self.assertIsNone(recognize_audio_track(audio_file))
-
-    @patch("sonora.services.shazam._track_about_async")
-    def test_get_shazam_track_about(self, mock_about_async: MagicMock) -> None:
-        mock_about_async.return_value = {"id": 123456, "title": "Starboy"}
-        res = get_shazam_track_about(123456)
-        self.assertEqual(res, {"id": 123456, "title": "Starboy"})
-        self.assertIsNone(get_shazam_track_about(0))
-        self.assertIsNone(get_shazam_track_about(-1))
 
 
 if __name__ == "__main__":

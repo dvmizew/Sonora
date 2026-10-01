@@ -1,4 +1,6 @@
 import io
+import os
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -61,18 +63,85 @@ def check_image_similarity(
     if threshold is not None:
         max_distance = round((1.0 - threshold) * 64)
 
+    first_image: Image.Image | None = None
+    second_image: Image.Image | None = None
     try:
         first_image = _load_normalized_image(first_image_bytes)
         second_image = _load_normalized_image(second_image_bytes)
 
         first_hash = imagehash.phash(first_image)
         second_hash = imagehash.phash(second_image)
-        first_image.close()
-        second_image.close()
         return bool((first_hash - second_hash) <= max_distance)
     except (OSError, ValueError, UnidentifiedImageError) as error:
         LOG.debug(f"Perceptual image comparison failed: {error}")
         return True
+    finally:
+        if first_image is not None:
+            first_image.close()
+        if second_image is not None:
+            second_image.close()
+
+
+def _fetch_candidate_artwork(
+    artist: str,
+    album: str,
+    musicbrainz_album_id: str | None = None,
+) -> tuple[bytes, tuple[int, int]] | None:
+    """
+    Downloads cover art across authoritative sources in preference order:
+    1. MusicBrainz Cover Art Archive (CAA)
+    2. iTunes Search API (1400x1400+)
+    3. Deezer API (1000x1000)
+
+    If an earlier source returns a low-resolution image (< 500x500), queries subsequent
+    sources to obtain a high-resolution candidate, falling back to the best low-resolution
+    image if no high-resolution asset is available.
+    """
+    providers: list[tuple[str, Callable[[], str | None]]] = []
+    if musicbrainz_album_id:
+        providers.append(
+            (
+                "Cover Art Archive",
+                lambda: fetch_cover_art_archive_url(musicbrainz_album_id),
+            )
+        )
+    providers.append(("iTunes", lambda: fetch_itunes_cover_art_url(artist, album)))
+    providers.append(("Deezer", lambda: fetch_deezer_cover_art_url(artist, album)))
+
+    best_candidate: tuple[bytes, tuple[int, int]] | None = None
+
+    for provider_name, url_fetcher in providers:
+        try:
+            candidate_url = url_fetcher()
+            if not candidate_url:
+                continue
+
+            response = SESSION.get(candidate_url, timeout=15)
+            response.raise_for_status()
+            image_bytes = response.content
+
+            candidate_dim: tuple[int, int] | None = None
+            try:
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    candidate_dim = img.size
+            except (OSError, UnidentifiedImageError):
+                continue
+
+            if candidate_dim[0] >= 500 and candidate_dim[1] >= 500:
+                return (image_bytes, candidate_dim)
+
+            if not best_candidate:
+                best_candidate = (image_bytes, candidate_dim)
+            else:
+                _, prev_dim = best_candidate
+                if (candidate_dim[0] * candidate_dim[1]) > (prev_dim[0] * prev_dim[1]):
+                    best_candidate = (image_bytes, candidate_dim)
+
+        except (httpx.HTTPError, OSError) as error:
+            LOG.debug(f"{provider_name} cover art fetch failed: {error}")
+            continue
+
+    return best_candidate
 
 
 def process_album_cover_art(
@@ -85,7 +154,7 @@ def process_album_cover_art(
 ) -> Path | None:
     """
     Downloads and validates high-resolution album cover art (cover.jpg).
-    Tries iTunes API first, then Cover Art Archive fallback.
+    Tries Cover Art Archive, iTunes API, and Deezer fallback.
     Returns Path to cover.jpg if present/downloaded, else None.
     """
     target_dir = folder_path
@@ -99,55 +168,75 @@ def process_album_cover_art(
         target_dir = folder_path.parent
 
     cover_image_path = target_dir / "cover.jpg"
+    is_low_res = False
+    existing_bytes: bytes | None = None
+    existing_dim: tuple[int, int] | None = None
+    if cover_image_path.exists() and cover_image_path.stat().st_size > 0:
+        try:
+            existing_bytes = cover_image_path.read_bytes()
+            with Image.open(io.BytesIO(existing_bytes)) as cur_img:
+                existing_dim = cur_img.size
+                if cur_img.width < 500 or cur_img.height < 500:
+                    is_low_res = True
+        except (OSError, UnidentifiedImageError):
+            pass
+
     artwork_already_present = (
-        cover_image_path.exists() and cover_image_path.stat().st_size > 0 and not force
+        cover_image_path.exists()
+        and cover_image_path.stat().st_size > 0
+        and not force
+        and not is_low_res
     )
 
     if not artwork_already_present:
-        artwork_url = None
-        if musicbrainz_album_id:
-            artwork_url = fetch_cover_art_archive_url(musicbrainz_album_id)
-        if not artwork_url:
-            artwork_url = fetch_itunes_cover_art_url(artist, album)
-        if not artwork_url:
-            artwork_url = fetch_deezer_cover_art_url(artist, album)
+        if not dry_run and not os.access(target_dir, os.W_OK):
+            LOG.debug(
+                f"Target album directory is read-only, skipping cover download: {target_dir}"
+            )
+            return cover_image_path if cover_image_path.exists() else None
 
-        if artwork_url:
-            try:
-                response = SESSION.get(artwork_url, timeout=15)
-                response.raise_for_status()
-                new_artwork_bytes = response.content
+        artwork_result = _fetch_candidate_artwork(
+            artist=artist,
+            album=album,
+            musicbrainz_album_id=musicbrainz_album_id,
+        )
 
-                if not dry_run:
-                    existing_bytes = (
-                        cover_image_path.read_bytes()
-                        if (
-                            cover_image_path.exists()
-                            and cover_image_path.stat().st_size > 0
-                        )
-                        else None
+        if artwork_result:
+            new_artwork_bytes, new_dim = artwork_result
+            if not dry_run:
+                # Quality Downgrade Protection (GEMINI.md Rule 9)
+                if (
+                    existing_dim
+                    and existing_dim[0] >= 500
+                    and existing_dim[1] >= 500
+                    and (existing_dim[0] * existing_dim[1]) > (new_dim[0] * new_dim[1])
+                ):
+                    LOG.info(
+                        f"   ∟ 🛡️  [Quality Shield] Preserved higher-resolution cover ({existing_dim[0]}x{existing_dim[1]} > {new_dim[0]}x{new_dim[1]})"
                     )
-                    if (
-                        existing_bytes
-                        and not force
-                        and not check_image_similarity(
-                            existing_bytes, new_artwork_bytes
-                        )
+                elif (
+                    existing_bytes
+                    and not force
+                    and not is_low_res
+                    and not check_image_similarity(existing_bytes, new_artwork_bytes)
+                ):
+                    LOG.info("   ∟ 🖼️  Skipped cover upgrade: visual mismatch")
+                else:
+                    temp_path = cover_image_path.with_suffix(".tmp")
+                    temp_path.write_bytes(new_artwork_bytes)
+                    temp_path.replace(cover_image_path)
+                    if existing_dim and (new_dim[0] * new_dim[1]) > (
+                        existing_dim[0] * existing_dim[1]
                     ):
                         LOG.info(
-                            "   ∟ 🖼️  Skipped iTunes cover upgrade: visual mismatch"
+                            f"   ∟ 🖼️  Upgraded Cover Art ({existing_dim[0]}x{existing_dim[1]} -> {new_dim[0]}x{new_dim[1]})"
                         )
                     else:
-                        temp_path = cover_image_path.with_suffix(".tmp")
-                        temp_path.write_bytes(new_artwork_bytes)
-                        temp_path.replace(cover_image_path)
                         LOG.info("   ∟ 🖼️  Downloaded Cover Art")
-                else:
-                    LOG.info(
-                        f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
-                    )
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
-                LOG.debug(f"Cover art download failed: {error}")
+            else:
+                LOG.info(
+                    f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
+                )
 
     if musicbrainz_album_id and get_config().fanart_api_key:
         cdart_path = target_dir / "cdart.png"
@@ -161,7 +250,7 @@ def process_album_cover_art(
                     if cdart_bytes:
                         cdart_path.write_bytes(cdart_bytes)
                         LOG.info("   ∟ 💿 Downloaded CD disc art -> cdart.png")
-            except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+            except (httpx.HTTPError, OSError) as error:
                 LOG.debug(f"CD art download failed: {error}")
 
     if cover_image_path.exists() and cover_image_path.stat().st_size > 0:
@@ -183,12 +272,10 @@ def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
             break
         current = current.parent
 
-    # 1. Prioritize exact match anywhere in the ancestor hierarchy
     for cand in candidates:
         if normalize_str(cand.name) == clean_artist:
             return cand
 
-    # 2. Check for close variation (excluding generic folder names like singles, flac, mp3)
     for cand in candidates:
         if (
             not get_config().is_generic_container(cand.name)
@@ -211,10 +298,19 @@ def process_artist_artwork(
     dry_run: bool = False,
 ) -> None:
     """Ensure artist.jpg, banner.jpg, and optional fanart.tv logo.png exist in the artist root."""
-    if not artist_name or artist_name in ["Various Artists", "Unknown Artist"]:
+    if not artist_name or artist_name.lower() in {
+        "various artists",
+        "unknown artist",
+        "unknown",
+    }:
         return
 
     artist_dir = _find_artist_directory(folder_path, artist_name)
+    if not dry_run and not os.access(artist_dir, os.W_OK):
+        LOG.debug(
+            f"Artist directory is read-only, skipping artist artwork: {artist_dir}"
+        )
+        return
 
     has_artist_image = any(
         (artist_dir / filename).exists()
@@ -267,7 +363,7 @@ def process_artist_artwork(
                         LOG.info(
                             f"   ∟ 🎨 Downloaded artist banner: {escape(artist_name)} -> banner.jpg"
                         )
-        except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+        except (httpx.HTTPError, OSError) as error:
             LOG.debug(f"Fanart artist fetch failed: {error}")
 
     if has_artist_image and has_banner_image:
@@ -275,7 +371,7 @@ def process_artist_artwork(
 
     try:
         thumbnail_bytes, banner_bytes = fetch_artist_images(artist_name)
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Failed to fetch artist artwork for {artist_name}: {error}")
         return
 
@@ -309,7 +405,7 @@ def process_label_artwork(
         return
 
     label_path = folder_path / "label.png"
-    if label_path.exists():
+    if label_path.exists() or not os.access(folder_path, os.W_OK):
         return
 
     try:
@@ -320,5 +416,5 @@ def process_label_artwork(
                 label_path.write_bytes(logo_bytes)
                 name_display = escape(label_name) if label_name else "Record Label"
                 LOG.info(f"   ∟ 🏷️  Downloaded label logo: {name_display} -> label.png")
-    except (httpx.HTTPError, OSError, ValueError, RuntimeError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Record label logo download failed for {label_mbid}: {error}")
