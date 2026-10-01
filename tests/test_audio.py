@@ -332,6 +332,92 @@ class TestAudioEngine(unittest.TestCase):
             with Image.open(found) as img:
                 self.assertEqual(img.size, (1400, 1400))
 
+    def test_process_album_cover_art_caa_low_res_falls_back_to_itunes_hi_res(
+        self,
+    ) -> None:
+        album_dir = self.tmp_path / "CaaLowResAlbum"
+        album_dir.mkdir(parents=True)
+
+        caa_low = Image.new("RGB", (400, 400), color="red")
+        caa_buf = io.BytesIO()
+        caa_low.save(caa_buf, format="JPEG")
+        caa_bytes = caa_buf.getvalue()
+
+        itunes_hi = Image.new("RGB", (1400, 1400), color="blue")
+        itunes_buf = io.BytesIO()
+        itunes_hi.save(itunes_buf, format="JPEG")
+        itunes_bytes = itunes_buf.getvalue()
+
+        def mock_get(url: str, **kwargs: object) -> MagicMock:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            if "coverartarchive" in url:
+                resp.content = caa_bytes
+            else:
+                resp.content = itunes_bytes
+            return resp
+
+        with (
+            patch(
+                "sonora.audio.art.fetch_cover_art_archive_url",
+                return_value="https://coverartarchive.org/release/123/front",
+            ),
+            patch(
+                "sonora.audio.art.fetch_itunes_cover_art_url",
+                return_value="https://itunes.com/art_hi.jpg",
+            ),
+            patch("sonora.core.http.SESSION.get", side_effect=mock_get),
+        ):
+            found = process_album_cover_art(
+                album_dir,
+                "Artist",
+                "Album",
+                musicbrainz_album_id="123",
+                force=True,
+            )
+            self.assertIsNotNone(found)
+            assert found is not None
+            with Image.open(found) as img:
+                self.assertEqual(img.size, (1400, 1400))
+
+    def test_process_album_cover_art_caa_low_res_preserved_when_no_higher_source(
+        self,
+    ) -> None:
+        album_dir = self.tmp_path / "CaaOnlyAlbum"
+        album_dir.mkdir(parents=True)
+
+        caa_low = Image.new("RGB", (400, 400), color="red")
+        caa_buf = io.BytesIO()
+        caa_low.save(caa_buf, format="JPEG")
+        caa_bytes = caa_buf.getvalue()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = caa_bytes
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch(
+                "sonora.audio.art.fetch_cover_art_archive_url",
+                return_value="https://coverartarchive.org/release/456/front",
+            ),
+            patch("sonora.audio.art.fetch_itunes_cover_art_url", return_value=None),
+            patch("sonora.audio.art.fetch_deezer_cover_art_url", return_value=None),
+            patch("sonora.core.http.SESSION.get", return_value=mock_resp),
+        ):
+            found = process_album_cover_art(
+                album_dir,
+                "Artist",
+                "Album",
+                musicbrainz_album_id="456",
+                force=True,
+            )
+            self.assertIsNotNone(found)
+            assert found is not None
+            with Image.open(found) as img:
+                self.assertEqual(img.size, (400, 400))
+
     def test_process_album_cover_art_quality_downgrade_protection(self) -> None:
         album_dir = self.tmp_path / "HighResAlbum"
         album_dir.mkdir(parents=True)

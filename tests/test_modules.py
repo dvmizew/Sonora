@@ -21,6 +21,7 @@ from sonora.core.state import reset_library_state
 from sonora.core.utils import (
     RateLimiter,
     find_audio_files,
+    get_single_release_title,
     is_valid_uuid,
     match_score,
     resolve_artist_name,
@@ -32,10 +33,14 @@ from sonora.modules.checker import (
     check_library,
     strip_corrupt_brackets,
 )
-from sonora.modules.organizer import organize_library_singles
+from sonora.modules.organizer import (
+    SingleDeduplicator,
+    organize_library_singles,
+)
 from sonora.modules.renamer import (
     rename_album_folder,
     rename_directory_files,
+    rename_single_folder,
     rename_track_file,
     sync_lrc_metadata,
 )
@@ -295,6 +300,84 @@ class TestCoreModules(unittest.TestCase):
         result2 = rename_album_folder(album_folder, "Artist", "Album With Subdirs")
         self.assertEqual(result2, album_folder)
 
+    def test_rename_single_folder(self) -> None:
+        singles_dir = self.tmp_path / "Singles"
+        singles_dir.mkdir()
+        single_folder = singles_dir / "Alex Velea - Track 2"
+        single_folder.mkdir()
+
+        track_info = TrackInfo(
+            file_path=single_folder / "01 - Minim Doi.wav",
+            artist="Alex Velea",
+            title="Minim Doi",
+            album="Track 2",
+        )
+        renamed_folder = rename_single_folder(single_folder, track_info)
+        self.assertTrue(renamed_folder.exists())
+        self.assertEqual(renamed_folder.name, "Alex Velea - Minim Doi")
+
+        # rename_album_folder must be shielded and not touch single folder in Singles/
+        shielded = rename_album_folder(renamed_folder, "Alex Velea", "Track 2")
+        self.assertEqual(shielded, renamed_folder)
+        self.assertEqual(shielded.name, "Alex Velea - Minim Doi")
+
+    @patch("sonora.modules.renamer.read_track_metadata")
+    def test_rename_track_file_in_singles_forces_01(self, mock_read: Any) -> None:
+        singles_folder = self.tmp_path / "Artist" / "Singles" / "Artist - Song"
+        singles_folder.mkdir(parents=True)
+        audio_file = singles_folder / "03 - Song.wav"
+        create_dummy_wav(audio_file)
+        lrc_file = singles_folder / "03 - Song.lrc"
+        lrc_file.write_text("[00:01.00] Test\n", encoding="utf-8")
+
+        mock_read.return_value = TrackInfo(
+            file_path=audio_file,
+            artist="Artist",
+            title="Song",
+            track_number=3,
+            disc_number=2,
+            total_discs=2,
+        )
+
+        renamed_audio = rename_track_file(audio_file)
+        self.assertTrue(renamed_audio.exists())
+        self.assertEqual(renamed_audio.name, "01 - Song.wav")
+        self.assertTrue((singles_folder / "01 - Song.lrc").exists())
+
+    @patch("sonora.modules.renamer.read_track_metadata")
+    def test_rename_directory_files_heals_corrupted_singles(
+        self, mock_read: Any
+    ) -> None:
+        single_dir = (
+            self.tmp_path
+            / "Connect-R"
+            / "Singles"
+            / "Connect-R - Track 2 (feat. Joyce Meyer)"
+        )
+        single_dir.mkdir(parents=True)
+        audio_file = single_dir / "03 - Tren De Noapte.wav"
+        create_dummy_wav(audio_file)
+        lrc_file = single_dir / "03 - Tren De Noapte.lrc"
+        lrc_file.write_text("[00:01.00] Lyrics\n", encoding="utf-8")
+
+        mock_read.return_value = TrackInfo(
+            file_path=audio_file,
+            artist="Connect-R",
+            title="Tren De Noapte",
+            album="Track 2 (feat. Joyce Meyer)",
+            track_number=3,
+        )
+
+        renamed = rename_directory_files(self.tmp_path)
+        self.assertEqual(len(renamed), 1)
+
+        healed_folder = (
+            self.tmp_path / "Connect-R" / "Singles" / "Connect-R - Tren De Noapte"
+        )
+        self.assertTrue(healed_folder.exists())
+        self.assertTrue((healed_folder / "01 - Tren De Noapte.wav").exists())
+        self.assertTrue((healed_folder / "01 - Tren De Noapte.lrc").exists())
+
     @patch("sonora.modules.organizer.read_track_metadata")
     def test_organize_library_singles(self, mock_read: Any) -> None:
         src_dir = self.tmp_path / "source"
@@ -481,6 +564,65 @@ class TestCoreModules(unittest.TestCase):
         self.assertTrue(f2_track1.exists())
         self.assertTrue(f2_track2.exists())
         self.assertTrue(f2_track3.exists())
+
+    def test_single_deduplicator_duration_safety(self) -> None:
+        deduplicator = SingleDeduplicator()
+        t1 = TrackInfo(
+            file_path=Path("/tmp/t1.flac"),
+            artist="Artist",
+            title="Song",
+            duration=200.0,
+            bits_per_sample=16,
+        )
+        deduplicator.register(t1)
+
+        # Different duration (>15s): distinct mix / version, NOT a duplicate
+        t2_remix = TrackInfo(
+            file_path=Path("/tmp/t2.flac"),
+            artist="Artist",
+            title="Song",
+            duration=260.0,
+            bits_per_sample=24,
+        )
+        self.assertFalse(deduplicator.is_duplicate(t2_remix))
+
+        # Similar duration (<=15s): true duplicate
+        t3_dup = TrackInfo(
+            file_path=Path("/tmp/t3.flac"),
+            artist="Artist",
+            title="Song",
+            duration=203.0,
+            bits_per_sample=16,
+        )
+        self.assertTrue(deduplicator.is_duplicate(t3_dup))
+
+    def test_get_single_release_title(self) -> None:
+        # Album has version not present in title -> appended
+        t1 = TrackInfo(
+            file_path=Path("/tmp/t1.flac"),
+            artist="DJ Sava",
+            title="I Loved You",
+            album="I Loved You (Monoir Remix) (feat. Irina Rimes)",
+        )
+        self.assertEqual(get_single_release_title(t1), "I Loved You (Monoir Remix)")
+
+        # Title already has version -> not duplicated
+        t2 = TrackInfo(
+            file_path=Path("/tmp/t2.flac"),
+            artist="DJ Sava",
+            title="I Loved You (Monoir Remix)",
+            album="I Loved You (Monoir Remix)",
+        )
+        self.assertEqual(get_single_release_title(t2), "I Loved You (Monoir Remix)")
+
+        # Generic album title -> title unmodified
+        t3 = TrackInfo(
+            file_path=Path("/tmp/t3.flac"),
+            artist="Dennis Lloyd",
+            title="Alien",
+            album="Alien",
+        )
+        self.assertEqual(get_single_release_title(t3), "Alien")
 
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library(self, mock_read: Any) -> None:
@@ -1307,6 +1449,187 @@ class TestCoreModules(unittest.TestCase):
             self.assertTrue(audio_file_1.exists())
             self.assertTrue(audio_file_2.exists())
             self.assertTrue(audio_file_3.exists())
+
+    def test_organize_library_in_flac_container_does_not_dismantle_albums(self) -> None:
+        flac_root = self.tmp_path / "Music" / "FLAC"
+        album_dir = flac_root / "21 Savage" / "21 Savage - Savage Mode"
+        album_dir.mkdir(parents=True)
+        track_1 = album_dir / "01 - No Advance.wav"
+        track_2 = album_dir / "02 - No Heart.wav"
+        track_3 = album_dir / "03 - X.wav"
+        create_dummy_wav(track_1)
+        create_dummy_wav(track_2)
+        create_dummy_wav(track_3)
+
+        target_dir = flac_root / "Singles"
+
+        with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
+
+            def side_effect(path: Path) -> TrackInfo:
+                return TrackInfo(
+                    file_path=path,
+                    artist="21 Savage",
+                    album="Savage Mode",
+                    total_tracks=3,
+                    track_number=1,
+                    title=path.stem,
+                )
+
+            mock_read.side_effect = side_effect
+            moved = organize_library_singles(flac_root, target_dir)
+            self.assertEqual(moved, 0)
+            self.assertTrue(track_1.exists())
+            self.assertTrue(track_2.exists())
+            self.assertTrue(track_3.exists())
+
+    def test_organize_incomplete_album_download_not_moved(self) -> None:
+        album_dir = self.tmp_path / "Artist - Incomplete Album"
+        album_dir.mkdir()
+        track_1 = album_dir / "05 - Song Five.wav"
+        track_2 = album_dir / "06 - Song Six.wav"
+        create_dummy_wav(track_1)
+        create_dummy_wav(track_2)
+
+        target_dir = self.tmp_path / "Singles"
+
+        with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
+
+            def side_effect(path: Path) -> TrackInfo:
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    album="Incomplete Album",
+                    total_tracks=12,
+                    track_number=5,
+                    title=path.stem,
+                )
+
+            mock_read.side_effect = side_effect
+            moved = organize_library_singles(self.tmp_path, target_dir)
+            self.assertEqual(moved, 0)
+            self.assertTrue(track_1.exists())
+            self.assertTrue(track_2.exists())
+
+    def test_organize_already_organized_single_skipped_cleanly(self) -> None:
+        single_dir = self.tmp_path / "Singles" / "Adele - Hit Song"
+        single_dir.mkdir(parents=True)
+        track_file = single_dir / "01 - Hit Song.wav"
+        create_dummy_wav(track_file)
+
+        with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(
+                file_path=track_file,
+                artist="Adele",
+                title="Hit Song",
+                album="Hit Song",
+                total_tracks=1,
+                track_number=1,
+            )
+            moved = organize_library_singles(self.tmp_path, self.tmp_path / "Singles")
+            self.assertEqual(moved, 0)
+            self.assertTrue(track_file.exists())
+
+    def test_organize_bonus_edition_tracks_do_not_dismantle_album(self) -> None:
+        album_dir = self.tmp_path / "Avicii" / "Avicii - True"
+        album_dir.mkdir(parents=True)
+        files: list[Path] = []
+        for i in range(1, 14):
+            f = album_dir / f"{i:02d} - Track {i}.wav"
+            create_dummy_wav(f)
+            files.append(f)
+
+        target_dir = self.tmp_path / "Singles"
+
+        with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
+
+            def side_effect(path: Path) -> TrackInfo:
+                track_num = int(path.stem.split(" - ")[0])
+                album_title = "True (Bonus Edition)" if track_num == 13 else "True"
+                return TrackInfo(
+                    file_path=path,
+                    artist="Avicii",
+                    album=album_title,
+                    title=f"Track {track_num}",
+                    track_number=track_num,
+                    total_tracks=13,
+                )
+
+            mock_read.side_effect = side_effect
+            moved = organize_library_singles(self.tmp_path, target_dir)
+            self.assertEqual(moved, 0)
+            for f in files:
+                self.assertTrue(f.exists())
+
+    def test_organize_deluxe_version_variations_do_not_dismantle_album(self) -> None:
+        album_dir = self.tmp_path / "Lil Peep" / "Lil Peep - COWYS2"
+        album_dir.mkdir(parents=True)
+        files: list[Path] = []
+        for i in range(1, 11):
+            f = album_dir / f"{i:02d} - Song {i}.wav"
+            create_dummy_wav(f)
+            files.append(f)
+
+        target_dir = self.tmp_path / "Singles"
+
+        with patch("sonora.modules.organizer.read_track_metadata") as mock_read:
+
+            def side_effect(path: Path) -> TrackInfo:
+                track_num = int(path.stem.split(" - ")[0])
+                album_title = (
+                    "Come Over When You're Sober, Pt. 2 (og version)"
+                    if track_num > 7
+                    else "Come Over When You're Sober, Pt. 2"
+                )
+                return TrackInfo(
+                    file_path=path,
+                    artist="Lil Peep",
+                    album=album_title,
+                    title=f"Song {track_num}",
+                    track_number=track_num,
+                    total_tracks=10,
+                )
+
+            mock_read.side_effect = side_effect
+            moved = organize_library_singles(self.tmp_path, target_dir)
+            self.assertEqual(moved, 0)
+            for f in files:
+                self.assertTrue(f.exists())
+
+    def test_single_deduplicator_isrc_collision_prevention(self) -> None:
+        deduplicator = SingleDeduplicator()
+        album_track = TrackInfo(
+            file_path=Path("/music/album/03 - The Walls.flac"),
+            artist="Chase Atlantic",
+            title="The Walls",
+            isrc="USWB11701708",
+        )
+        deduplicator.register(album_track)
+
+        colliding_single = TrackInfo(
+            file_path=Path("/music/singles/01 - Tidal Wave.flac"),
+            artist="Chase Atlantic",
+            title="Tidal Wave",
+            isrc="USWB11701708",
+        )
+        self.assertFalse(deduplicator.is_duplicate(colliding_single))
+
+    def test_single_deduplicator_similar_title_isrc_match(self) -> None:
+        deduplicator = SingleDeduplicator()
+        album_track = TrackInfo(
+            file_path=Path("/music/album/02 - Missing You.flac"),
+            artist="Cheyanne",
+            title="Missing You",
+            isrc="QZDA52149872",
+        )
+        deduplicator.register(album_track)
+
+        duplicate_single = TrackInfo(
+            file_path=Path("/music/singles/01 - Missin' You.flac"),
+            artist="Cheyanne",
+            title="Missin' You",
+            isrc="QZDA52149872",
+        )
+        self.assertTrue(deduplicator.is_duplicate(duplicate_single))
 
     @patch("sonora.modules.tagger.write_track_metadata")
     @patch("sonora.modules.tagger.search_discogs_release")

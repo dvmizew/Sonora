@@ -1,5 +1,6 @@
 import io
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -81,6 +82,68 @@ def check_image_similarity(
             second_image.close()
 
 
+def _fetch_candidate_artwork(
+    artist: str,
+    album: str,
+    musicbrainz_album_id: str | None = None,
+) -> tuple[bytes, tuple[int, int]] | None:
+    """
+    Downloads cover art across authoritative sources in preference order:
+    1. MusicBrainz Cover Art Archive (CAA)
+    2. iTunes Search API (1400x1400+)
+    3. Deezer API (1000x1000)
+
+    If an earlier source returns a low-resolution image (< 500x500), queries subsequent
+    sources to obtain a high-resolution candidate, falling back to the best low-resolution
+    image if no high-resolution asset is available.
+    """
+    providers: list[tuple[str, Callable[[], str | None]]] = []
+    if musicbrainz_album_id:
+        providers.append(
+            (
+                "Cover Art Archive",
+                lambda: fetch_cover_art_archive_url(musicbrainz_album_id),
+            )
+        )
+    providers.append(("iTunes", lambda: fetch_itunes_cover_art_url(artist, album)))
+    providers.append(("Deezer", lambda: fetch_deezer_cover_art_url(artist, album)))
+
+    best_candidate: tuple[bytes, tuple[int, int]] | None = None
+
+    for provider_name, url_fetcher in providers:
+        try:
+            candidate_url = url_fetcher()
+            if not candidate_url:
+                continue
+
+            response = SESSION.get(candidate_url, timeout=15)
+            response.raise_for_status()
+            image_bytes = response.content
+
+            candidate_dim: tuple[int, int] | None = None
+            try:
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    candidate_dim = img.size
+            except (OSError, UnidentifiedImageError):
+                continue
+
+            if candidate_dim[0] >= 500 and candidate_dim[1] >= 500:
+                return (image_bytes, candidate_dim)
+
+            if not best_candidate:
+                best_candidate = (image_bytes, candidate_dim)
+            else:
+                _, prev_dim = best_candidate
+                if (candidate_dim[0] * candidate_dim[1]) > (prev_dim[0] * prev_dim[1]):
+                    best_candidate = (image_bytes, candidate_dim)
+
+        except (httpx.HTTPError, OSError) as error:
+            LOG.debug(f"{provider_name} cover art fetch failed: {error}")
+            continue
+
+    return best_candidate
+
+
 def process_album_cover_art(
     folder_path: Path,
     artist: str,
@@ -91,7 +154,7 @@ def process_album_cover_art(
 ) -> Path | None:
     """
     Downloads and validates high-resolution album cover art (cover.jpg).
-    Tries iTunes API first, then Cover Art Archive fallback.
+    Tries Cover Art Archive, iTunes API, and Deezer fallback.
     Returns Path to cover.jpg if present/downloaded, else None.
     """
     target_dir = folder_path
@@ -132,70 +195,48 @@ def process_album_cover_art(
             )
             return cover_image_path if cover_image_path.exists() else None
 
-        artwork_url = None
-        if musicbrainz_album_id:
-            artwork_url = fetch_cover_art_archive_url(musicbrainz_album_id)
-        if not artwork_url:
-            artwork_url = fetch_itunes_cover_art_url(artist, album)
-        if not artwork_url:
-            artwork_url = fetch_deezer_cover_art_url(artist, album)
+        artwork_result = _fetch_candidate_artwork(
+            artist=artist,
+            album=album,
+            musicbrainz_album_id=musicbrainz_album_id,
+        )
 
-        if artwork_url:
-            try:
-                response = SESSION.get(artwork_url, timeout=15)
-                response.raise_for_status()
-                new_artwork_bytes = response.content
-
-                if not dry_run:
-                    new_dim: tuple[int, int] | None = None
-                    try:
-                        with Image.open(io.BytesIO(new_artwork_bytes)) as n_img:
-                            new_dim = n_img.size
-                    except (OSError, UnidentifiedImageError):
-                        pass
-
-                    # Quality Downgrade Protection (GEMINI.md Rule 9)
-                    if (
-                        existing_dim
-                        and new_dim
-                        and existing_dim[0] >= 500
-                        and existing_dim[1] >= 500
-                        and (existing_dim[0] * existing_dim[1])
-                        > (new_dim[0] * new_dim[1])
+        if artwork_result:
+            new_artwork_bytes, new_dim = artwork_result
+            if not dry_run:
+                # Quality Downgrade Protection (GEMINI.md Rule 9)
+                if (
+                    existing_dim
+                    and existing_dim[0] >= 500
+                    and existing_dim[1] >= 500
+                    and (existing_dim[0] * existing_dim[1]) > (new_dim[0] * new_dim[1])
+                ):
+                    LOG.info(
+                        f"   ∟ 🛡️  [Quality Shield] Preserved higher-resolution cover ({existing_dim[0]}x{existing_dim[1]} > {new_dim[0]}x{new_dim[1]})"
+                    )
+                elif (
+                    existing_bytes
+                    and not force
+                    and not is_low_res
+                    and not check_image_similarity(existing_bytes, new_artwork_bytes)
+                ):
+                    LOG.info("   ∟ 🖼️  Skipped cover upgrade: visual mismatch")
+                else:
+                    temp_path = cover_image_path.with_suffix(".tmp")
+                    temp_path.write_bytes(new_artwork_bytes)
+                    temp_path.replace(cover_image_path)
+                    if existing_dim and (new_dim[0] * new_dim[1]) > (
+                        existing_dim[0] * existing_dim[1]
                     ):
                         LOG.info(
-                            f"   ∟ 🛡️  [Quality Shield] Preserved higher-resolution cover ({existing_dim[0]}x{existing_dim[1]} > {new_dim[0]}x{new_dim[1]})"
+                            f"   ∟ 🖼️  Upgraded Cover Art ({existing_dim[0]}x{existing_dim[1]} -> {new_dim[0]}x{new_dim[1]})"
                         )
-                    elif (
-                        existing_bytes
-                        and not force
-                        and not is_low_res
-                        and not check_image_similarity(
-                            existing_bytes, new_artwork_bytes
-                        )
-                    ):
-                        LOG.info("   ∟ 🖼️  Skipped cover upgrade: visual mismatch")
                     else:
-                        temp_path = cover_image_path.with_suffix(".tmp")
-                        temp_path.write_bytes(new_artwork_bytes)
-                        temp_path.replace(cover_image_path)
-                        if (
-                            existing_dim
-                            and new_dim
-                            and (new_dim[0] * new_dim[1])
-                            > (existing_dim[0] * existing_dim[1])
-                        ):
-                            LOG.info(
-                                f"   ∟ 🖼️  Upgraded Cover Art ({existing_dim[0]}x{existing_dim[1]} -> {new_dim[0]}x{new_dim[1]})"
-                            )
-                        else:
-                            LOG.info("   ∟ 🖼️  Downloaded Cover Art")
-                else:
-                    LOG.info(
-                        f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
-                    )
-            except (httpx.HTTPError, OSError) as error:
-                LOG.debug(f"Cover art download failed: {error}")
+                        LOG.info("   ∟ 🖼️  Downloaded Cover Art")
+            else:
+                LOG.info(
+                    f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
+                )
 
     if musicbrainz_album_id and get_config().fanart_api_key:
         cdart_path = target_dir / "cdart.png"
