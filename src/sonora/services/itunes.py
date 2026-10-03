@@ -184,13 +184,7 @@ def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | 
         return None
 
     explicitness = str(best_result.get("trackExplicitness", "")).lower()
-    advisory = (
-        "Explicit"
-        if explicitness == "explicit"
-        else "Clean"
-        if explicitness == "cleaned"
-        else None
-    )
+    advisory = "Explicit" if explicitness == "explicit" else None
 
     release_date_raw = best_result.get("releaseDate")
     release_date_str = str(release_date_raw)[:10] if release_date_raw else None
@@ -341,13 +335,7 @@ def fetch_itunes_album_details(
             disc_num = safe_int(track_entry.get("discNumber")) or 1
             t_name = str(track_entry.get("trackName", ""))
             explicitness = str(track_entry.get("trackExplicitness", "")).lower()
-            advisory = (
-                "Explicit"
-                if explicitness == "explicit"
-                else "Clean"
-                if explicitness == "cleaned"
-                else None
-            )
+            advisory = "Explicit" if explicitness == "explicit" else None
             r_date = (
                 str(track_entry.get("releaseDate"))[:10]
                 if track_entry.get("releaseDate")

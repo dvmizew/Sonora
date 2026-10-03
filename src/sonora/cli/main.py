@@ -48,7 +48,7 @@ from sonora.core.utils import (
     InterruptedOperationError,
     find_audio_files,
     format_filesize,
-    group_files_by_parent,
+    group_files_by_album_root,
     is_interruption,
 )
 from sonora.modules.backup import (
@@ -1132,7 +1132,7 @@ def replaygain(
         LOG.warning("No audio files found.")
         return 0
 
-    album_groups = group_files_by_parent(audio_files)
+    album_groups = group_files_by_album_root(audio_files)
     LOG.info(
         f"Calculating ReplayGain for {len(audio_files)} files across {len(album_groups)} folders..."
     )

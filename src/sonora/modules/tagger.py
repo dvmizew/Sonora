@@ -19,7 +19,7 @@ from sonora.audio.art import (
     process_label_artwork,
 )
 from sonora.audio.bpm import calculate_bpm
-from sonora.audio.cuesheet import read_cuesheet_content
+from sonora.audio.cuesheet import find_companion_cuesheet, read_cuesheet_content
 from sonora.audio.key import (
     detect_key_details,
     detect_musical_key,
@@ -32,7 +32,7 @@ from sonora.audio.metadata import (
 )
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.core.config import clear_config_cache, get_config
-from sonora.core.constants import FEAT_KEYWORDS
+from sonora.core.constants import MIN_COVER_ART_DIMENSION
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -46,12 +46,14 @@ from sonora.core.utils import (
     clean_disambiguation,
     clean_title,
     clean_unicode_punct,
-    deduplicate_title_features,
-    extract_balanced_features,
+    extract_artist_features,
     extract_disc_number_from_folder,
+    extract_title_features,
     find_audio_files,
+    get_album_root_directory,
     get_primary_artist,
     group_files_by_album_root,
+    harmonize_artist_casing,
     is_interruption,
     is_noise_genre,
     is_valid_uuid,
@@ -68,8 +70,8 @@ from sonora.core.utils import (
     resolve_artist_name,
     safe_float,
     safe_int,
+    strip_corrupt_brackets,
 )
-from sonora.modules.checker import strip_corrupt_brackets
 from sonora.services.acoustid import lookup_acoustid
 from sonora.services.deezer import (
     fetch_deezer_album_details,
@@ -106,7 +108,6 @@ _NETWORK_EXCEPTIONS = (
 )
 
 
-_FEAT_ARTIST_PATTERN = re.compile(rf"\s+(?:{FEAT_KEYWORDS})\.?\s*(.+)$", re.IGNORECASE)
 _PROD_BRACKET_PATTERN = re.compile(
     r"\s*[\(\[\{]\s*(?:prod(?:\.|uced|uction)?\s*(?:by|:)?|produced\s+by)\s*([^()\[\]{}]+?)[\)\]\}]",
     re.IGNORECASE,
@@ -154,13 +155,17 @@ def _apply_mapping(
             val_str = normalized_d
         elif target_attr == "title":
             val_str = clean_unicode_punct(val_str)
+            clean_t, extracted_feats = extract_title_features(
+                val_str, primary_artist=track_info.artist
+            )
+            if extracted_feats:
+                track_info.featured_artists = normalize_featured_artists(
+                    [track_info.featured_artists, *extracted_feats],
+                    primary_artist=track_info.artist,
+                )
             existing_title = getattr(track_info, "title", None)
             val_str = preserve_unicode_repertoire(
-                str(existing_title) if existing_title else None, val_str
-            )
-            val_str = (
-                deduplicate_title_features(val_str, primary_artist=track_info.artist)
-                or val_str
+                str(existing_title) if existing_title else None, clean_t or val_str
             )
         elif target_attr in ("artist", "album", "album_artist"):
             val_str = clean_unicode_punct(val_str)
@@ -168,12 +173,10 @@ def _apply_mapping(
             val_str = preserve_unicode_repertoire(
                 str(existing_val) if existing_val else None, val_str
             )
-        elif (
-            target_attr == "advisory"
-            and getattr(track_info, "advisory", None) == "Explicit"
-            and val_str == "Clean"
-        ):
-            continue
+        elif target_attr == "advisory":
+            if str(val_str).strip().capitalize() != "Explicit":
+                continue
+            val_str = "Explicit"
         elif target_attr == "featured_artists":
             existing_featured = getattr(track_info, "featured_artists", None)
             if existing_featured and not force:
@@ -1200,8 +1203,6 @@ def _enrich_deezer(
             track_info.disc_number = disk_num
         if track.get("explicit_lyrics"):
             track_info.advisory = "Explicit"
-        elif not track_info.advisory and track.get("explicit_lyrics") is False:
-            track_info.advisory = "Clean"
         deezer_track_map = {
             "isrc": "isrc",
             "composer": "composer",
@@ -1318,9 +1319,9 @@ def _enrich_cuesheet(
     if cuesheet_content:
         track_info.cuesheet = cuesheet_content
     elif not track_info.cuesheet:
-        cue_files = list(file_path.parent.glob("*.cue"))
-        if cue_files:
-            track_info.cuesheet = read_cuesheet_content(cue_files[0])
+        companion_cue = find_companion_cuesheet(file_path.parent)
+        if companion_cue:
+            track_info.cuesheet = read_cuesheet_content(companion_cue)
 
 
 def _enrich_bpm(
@@ -2108,8 +2109,7 @@ def is_alien_album_track(
                     album_matches = True
                     break
 
-        fn_match = re.match(r"^(\d{1,3})\s*[-._\s]", file_path.name)
-        fn_pos = safe_int(fn_match.group(1)) if fn_match else None
+        _, fn_pos, _ = parse_track_filename(file_path.name)
         track_pos = (
             track_info.track_number
             if track_info.track_number and track_info.track_number > 0
@@ -2397,14 +2397,11 @@ def process_single_track(
         # 3. Clean title, detect embedded advisory markers, and clean unicode
         if track_info.title:
             raw_t_lower = track_info.title.lower()
-            if not track_info.advisory:
-                if (
-                    re.search(r"[\(\[\{]\s*explicit\s*[\)\]\}]", raw_t_lower)
-                    or "album version (explicit)" in raw_t_lower
-                ):
-                    track_info.advisory = "Explicit"
-                elif re.search(r"[\(\[\{]\s*clean\s*[\)\]\}]", raw_t_lower):
-                    track_info.advisory = "Clean"
+            if not track_info.advisory and (
+                re.search(r"[\(\[\{]\s*explicit\s*[\)\]\}]", raw_t_lower)
+                or "album version (explicit)" in raw_t_lower
+            ):
+                track_info.advisory = "Explicit"
             prod_matches = list(_PROD_BRACKET_PATTERN.finditer(track_info.title))
             if prod_matches:
                 if not track_info.producers:
@@ -2417,28 +2414,25 @@ def process_single_track(
                     "", track_info.title
                 ).strip()
             track_info.title = strip_corrupt_brackets(track_info.title)
-            track_info.title = clean_title(track_info.title)
-            track_info.title = clean_unicode_punct(track_info.title)
-            track_info.title = deduplicate_title_features(
+            clean_base, title_feats = extract_title_features(
                 track_info.title, primary_artist=track_info.artist
             )
+            if title_feats:
+                track_info.featured_artists = normalize_featured_artists(
+                    [track_info.featured_artists, *title_feats],
+                    primary_artist=track_info.artist,
+                )
+            track_info.title = clean_unicode_punct(clean_base)
         if track_info.artist:
             track_info.artist = strip_corrupt_brackets(track_info.artist)
-            feat_match = _FEAT_ARTIST_PATTERN.search(track_info.artist)
-            if feat_match:
-                base_artist = track_info.artist[: feat_match.start()].strip()
-                extracted_featured = feat_match.group(1).strip()
-                if base_artist:
-                    track_info.artist = base_artist
-                if extracted_featured:
-                    track_info.title = deduplicate_title_features(
-                        f"{track_info.title} (feat. {extracted_featured})",
-                        primary_artist=track_info.artist,
-                    )
-                    track_info.featured_artists = normalize_featured_artists(
-                        [track_info.featured_artists, extracted_featured],
-                        primary_artist=track_info.artist,
-                    )
+            base_artist, extracted_features = extract_artist_features(track_info.artist)
+            if base_artist:
+                track_info.artist = base_artist
+            if extracted_features:
+                track_info.featured_artists = normalize_featured_artists(
+                    [track_info.featured_artists, *extracted_features],
+                    primary_artist=track_info.artist,
+                )
             track_info.artist = resolve_artist_name(track_info.artist)
             track_info.artist = clean_unicode_punct(track_info.artist)
         if track_info.featured_artists:
@@ -2474,25 +2468,12 @@ def process_single_track(
             == normalize_str(track_info.album_artist)
             and track_info.artist != track_info.album_artist
         ):
-            is_artist_acronym = (
-                len(track_info.artist.replace(".", "")) <= 3
-                or "." in track_info.artist
-                or bool(re.search(r"\d", track_info.artist))
+            harmonized_artist = harmonize_artist_casing(
+                candidate_artist=track_info.artist,
+                reference_artist=track_info.album_artist,
             )
-            if (
-                track_info.artist.isupper()
-                and not is_artist_acronym
-                and not track_info.album_artist.isupper()
-            ):
-                track_info.artist = track_info.album_artist
-            elif (
-                track_info.album_artist.isupper()
-                and not is_artist_acronym
-                and not track_info.artist.isupper()
-            ):
-                track_info.album_artist = track_info.artist
-            else:
-                track_info.artist = track_info.album_artist
+            track_info.artist = harmonized_artist
+            track_info.album_artist = harmonized_artist
 
         # Sanitize sort names: ensure sort names do not contradict the actual artist identity
         if track_info.artist_sort and track_info.artist:
@@ -2544,8 +2525,11 @@ def process_single_track(
             and cover_image.exists()
             and (
                 not orig_info.art_width
-                or orig_info.art_width < 500
-                or (orig_info.art_height and orig_info.art_height < 500)
+                or orig_info.art_width < MIN_COVER_ART_DIMENSION
+                or (
+                    orig_info.art_height
+                    and orig_info.art_height < MIN_COVER_ART_DIMENSION
+                )
             )
         )
         diff_lines = _render_tag_diffs(orig_info, track_info)
@@ -2589,9 +2573,7 @@ def _resolve_album_folder_identity(
     directory structure ("Artist - Album" or parent artist directory) with
     metadata consensus across audio files.
     """
-    effective_dir = album_dir
-    if get_config().is_disc_folder(album_dir.name) and album_dir.parent != album_dir:
-        effective_dir = album_dir.parent
+    effective_dir = get_album_root_directory(album_dir)
 
     folder_name = effective_dir.name
     folder_artist: str | None = None
@@ -2735,9 +2717,9 @@ def tag_album_folder(
                     )
 
                     # Pre-resolve Cuesheet content once for entire album
-                    cue_files = list(album_dir.glob("*.cue"))
+                    companion_cue = find_companion_cuesheet(album_dir)
                     album_cue_content = (
-                        read_cuesheet_content(cue_files[0]) if cue_files else None
+                        read_cuesheet_content(companion_cue) if companion_cue else None
                     )
 
                     # Batch Optimization: Fetch entire album track MBIDs, release details, Deezer, iTunes, and Discogs once per album
@@ -3044,30 +3026,14 @@ def tag_album_folder(
                                 candidate_track_artist = canonical_track_artists[
                                     normalized_dominant_album_artist
                                 ]
-                                is_artist_acronym = (
-                                    len(candidate_track_artist.replace(".", "")) <= 3
-                                    or "." in candidate_track_artist
-                                    or bool(re.search(r"\d", candidate_track_artist))
+                                harmonized_artist = harmonize_artist_casing(
+                                    candidate_artist=candidate_track_artist,
+                                    reference_artist=dominant_album_artist,
                                 )
-                                if (
-                                    candidate_track_artist.isupper()
-                                    and not is_artist_acronym
-                                    and not dominant_album_artist.isupper()
-                                ):
-                                    canonical_track_artists[
-                                        normalized_dominant_album_artist
-                                    ] = dominant_album_artist
-                                elif (
-                                    dominant_album_artist.isupper()
-                                    and not is_artist_acronym
-                                    and not candidate_track_artist.isupper()
-                                ):
-                                    dominant_album_artist = candidate_track_artist
-                                    canonical_track_artists[
-                                        normalized_dominant_album_artist
-                                    ] = candidate_track_artist
-                                else:
-                                    dominant_album_artist = candidate_track_artist
+                                dominant_album_artist = harmonized_artist
+                                canonical_track_artists[
+                                    normalized_dominant_album_artist
+                                ] = harmonized_artist
                             else:
                                 canonical_track_artists[
                                     normalized_dominant_album_artist
@@ -3226,16 +3192,12 @@ def normalize_single_track(
     raw_artist = clean_unicode_punct(
         clean_disambiguation(ftfy.fix_text(current_info.artist or ""))
     )
-    raw_title = clean_unicode_punct(ftfy.fix_text(current_info.title or ""))
-    feat_match = _FEAT_ARTIST_PATTERN.search(raw_artist)
-    if feat_match:
-        base_artist = raw_artist[: feat_match.start()].strip()
-        extracted_featured = feat_match.group(1).strip()
-        if base_artist:
-            raw_artist = base_artist
-        if extracted_featured:
-            raw_title = f"{raw_title} (feat. {extracted_featured})"
+    raw_artist = strip_corrupt_brackets(raw_artist)
+    base_artist, artist_features = extract_artist_features(raw_artist)
+    if base_artist:
+        raw_artist = base_artist
 
+    raw_title = clean_unicode_punct(ftfy.fix_text(current_info.title or ""))
     cleaned_producers = current_info.producers
     prod_matches = list(_PROD_BRACKET_PATTERN.finditer(raw_title))
     if prod_matches:
@@ -3246,12 +3208,12 @@ def normalize_single_track(
         raw_title = _PROD_BRACKET_PATTERN.sub("", raw_title).strip()
 
     raw_title = strip_corrupt_brackets(raw_title)
-    raw_artist = strip_corrupt_brackets(raw_artist)
 
     cleaned_artist = raw_artist
-    cleaned_title = clean_unicode_punct(
-        deduplicate_title_features(raw_title, primary_artist=cleaned_artist)
+    clean_base, title_feats = extract_title_features(
+        raw_title, primary_artist=cleaned_artist
     )
+    cleaned_title = clean_unicode_punct(clean_base)
     cleaned_album = clean_unicode_punct(ftfy.fix_text(current_info.album or ""))
     if current_info.album_artist:
         cleaned_album_artist = clean_unicode_punct(
@@ -3265,25 +3227,9 @@ def normalize_single_track(
         and normalize_str(cleaned_artist) == normalize_str(cleaned_album_artist)
         and cleaned_artist != cleaned_album_artist
     ):
-        is_artist_acronym = (
-            len(cleaned_artist.replace(".", "")) <= 3
-            or "." in cleaned_artist
-            or bool(re.search(r"\d", cleaned_artist))
-        )
-        if (
-            cleaned_artist.isupper()
-            and not is_artist_acronym
-            and not cleaned_album_artist.isupper()
-        ):
-            cleaned_artist = cleaned_album_artist
-        elif (
-            cleaned_album_artist.isupper()
-            and not is_artist_acronym
-            and not cleaned_artist.isupper()
-        ):
-            cleaned_album_artist = cleaned_artist
-        else:
-            cleaned_artist = cleaned_album_artist
+        harmonized = harmonize_artist_casing(cleaned_artist, cleaned_album_artist)
+        cleaned_artist = harmonized
+        cleaned_album_artist = harmonized
 
     cleaned_genre = normalize_genre(current_info.genre)
     cleaned_date = normalize_date(current_info.date)
@@ -3291,13 +3237,12 @@ def normalize_single_track(
     cleaned_language = normalize_language_name(current_info.language)
     cleaned_script = normalize_script_name(current_info.script)
 
-    cleaned_featured = current_info.featured_artists
-    _, feat_list, _, _ = extract_balanced_features(cleaned_title)
     cleaned_featured = normalize_featured_artists(
-        [cleaned_featured, *feat_list],
+        [current_info.featured_artists, *title_feats, *artist_features],
         primary_artist=cleaned_artist or current_info.artist,
         allow_network=False,
     )
+    cleaned_advisory = "Explicit" if current_info.advisory == "Explicit" else None
 
     updated_bpm = current_info.bpm
     if fetch_bpm and (force or current_info.bpm is None):
@@ -3328,6 +3273,7 @@ def normalize_single_track(
         album_artist=cleaned_album_artist,
         featured_artists=cleaned_featured,
         producers=cleaned_producers,
+        advisory=cleaned_advisory,
         genre=cleaned_genre or current_info.genre,
         date=cleaned_date or current_info.date,
         release_country=cleaned_country or current_info.release_country,

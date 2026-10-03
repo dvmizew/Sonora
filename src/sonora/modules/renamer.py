@@ -16,7 +16,7 @@ from sonora.core.logger import (
 from sonora.core.models import RenameReport, TrackInfo
 from sonora.core.utils import (
     InterruptedOperationError,
-    deduplicate_title_features,
+    clean_title,
     find_audio_files,
     find_companion_lyrics,
     get_primary_artist,
@@ -26,11 +26,12 @@ from sonora.core.utils import (
     is_interruption,
     normalize_str,
     relocate_companion_lyrics,
+    resolve_unique_path,
     safe_case_rename,
     safe_int,
     sanitize_name,
+    strip_corrupt_brackets,
 )
-from sonora.modules.checker import strip_corrupt_brackets
 
 
 def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
@@ -91,9 +92,8 @@ def build_new_filename(
     if not title:
         return None
 
-    clean_title = (
-        sanitize_name(strip_corrupt_brackets(deduplicate_title_features(title)))
-        or "Untitled"
+    cleaned_title_str = (
+        sanitize_name(strip_corrupt_brackets(clean_title(title))) or "Untitled"
     )
     track_num_int = safe_int(track_number)
 
@@ -105,8 +105,8 @@ def build_new_filename(
             disc_prefix = f"{disc_num_int}-"
 
     if track_num_int is not None:
-        return f"{disc_prefix}{track_num_int:02d} - {clean_title}{extension}"
-    return f"{disc_prefix}{clean_title}{extension}"
+        return f"{disc_prefix}{track_num_int:02d} - {cleaned_title_str}{extension}"
+    return f"{disc_prefix}{cleaned_title_str}{extension}"
 
 
 def rename_track_file(
@@ -154,9 +154,7 @@ def rename_track_file(
     else:
         num = 1 if in_singles else (track_info.track_number or 1)
         artist_clean = sanitize_name(track_info.artist)
-        title_clean = (
-            sanitize_name(deduplicate_title_features(track_info.title)) or "Untitled"
-        )
+        title_clean = sanitize_name(clean_title(track_info.title)) or "Untitled"
         new_stem = format_pattern.format(
             track_number=num,
             artist=artist_clean,
@@ -167,49 +165,21 @@ def rename_track_file(
 
     new_path = folder / new_name
 
-    companion_lyrics = find_companion_lyrics(file_path)
-
-    # Fallback search by track number prefix if no exact stem match
-    if not companion_lyrics and track_info.track_number is not None:
-        parsed_track = safe_int(track_info.track_number)
-        if parsed_track is not None:
-            prefix = f"{parsed_track:02d}"
-            prefix_unpadded = str(parsed_track)
-            for candidate in folder.iterdir():
-                if candidate.suffix.lower() == ".lrc" and (
-                    candidate.name.startswith(prefix)
-                    or candidate.name.startswith(prefix_unpadded)
-                ):
-                    companion_lyrics.append(candidate)
-                    break
-
-    if not companion_lyrics and in_singles:
-        lrc_candidates = [
-            candidate
-            for candidate in folder.iterdir()
-            if candidate.suffix.lower() == ".lrc" and candidate.is_file()
-        ]
-        if len(lrc_candidates) == 1:
-            companion_lyrics.append(lrc_candidates[0])
+    companion_lyrics = find_companion_lyrics(
+        file_path, track_number=track_info.track_number, in_singles=in_singles
+    )
 
     for companion in companion_lyrics:
         if companion.suffix.lower() == ".lrc" and not dry_run:
             sync_lrc_metadata(companion, track_info.artist, track_info.title)
 
     if file_path.name != new_name or file_path.parent != new_path.parent:
-        base_stem = Path(new_name).stem
         if new_path.exists() and (
             file_path.parent != new_path.parent
             or file_path.name.lower() != new_path.name.lower()
         ):
-            counter = 2
-            while new_path.exists() and (
-                file_path.parent != new_path.parent
-                or file_path.name.lower() != new_path.name.lower()
-            ):
-                new_name = f"{base_stem} ({counter}){file_path.suffix}"
-                new_path = folder / new_name
-                counter += 1
+            new_path = resolve_unique_path(new_path, current_path=file_path)
+            new_name = new_path.name
 
         if not dry_run:
             try:

@@ -20,7 +20,6 @@ from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     InterruptedOperationError,
     clean_title,
-    deduplicate_title_features,
     find_audio_files,
     find_companion_lyrics,
     get_primary_artist,
@@ -29,28 +28,24 @@ from sonora.core.utils import (
     is_in_singles_hierarchy,
     is_interruption,
     normalize_str,
+    relocate_companion_artwork,
     relocate_companion_lyrics,
+    resolve_unique_path,
     sanitize_name,
 )
 
 
 def _quarantine_file(file_path: Path, quarantine_dir: Path) -> Path:
     quarantine_dir.mkdir(parents=True, exist_ok=True)
-    target = quarantine_dir / file_path.name
-    counter = 1
-    while target.exists() and target.resolve() != file_path.resolve():
-        target = quarantine_dir / f"{file_path.stem} ({counter}){file_path.suffix}"
-        counter += 1
+    target = resolve_unique_path(
+        quarantine_dir / file_path.name, current_path=file_path
+    )
     if target.resolve() != file_path.resolve():
         shutil.move(str(file_path), str(target))
     for companion in find_companion_lyrics(file_path):
-        comp_target = quarantine_dir / companion.name
-        c_counter = 1
-        while comp_target.exists() and comp_target.resolve() != companion.resolve():
-            comp_target = (
-                quarantine_dir / f"{companion.stem} ({c_counter}){companion.suffix}"
-            )
-            c_counter += 1
+        comp_target = resolve_unique_path(
+            quarantine_dir / companion.name, current_path=companion
+        )
         if comp_target.resolve() != companion.resolve():
             shutil.move(str(companion), str(comp_target))
     return target
@@ -88,7 +83,7 @@ class SingleDeduplicator:
 
     def register(self, track_info: TrackInfo, target_path: Path | None = None) -> None:
         primary_artist_key = normalize_str(get_primary_artist(track_info.artist))
-        clean_title_key = normalize_str(deduplicate_title_features(track_info.title))
+        clean_title_key = normalize_str(clean_title(track_info.title))
         isrc_key = track_info.isrc.strip().upper() if track_info.isrc else None
         mbid_key = (
             track_info.musicbrainz_trackid.strip().lower()
@@ -119,7 +114,7 @@ class SingleDeduplicator:
         if not existing_list:
             return False, None, None, None
 
-        clean_title_key = normalize_str(deduplicate_title_features(track_info.title))
+        clean_title_key = normalize_str(clean_title(track_info.title))
         isrc_key = track_info.isrc.strip().upper() if track_info.isrc else None
         mbid_key = (
             track_info.musicbrainz_trackid.strip().lower()
@@ -372,7 +367,7 @@ def organize_library_singles(
             for path, track_info in singles_to_process:
                 wait_if_paused()
                 primary_artist = get_primary_artist(track_info.artist)
-                clean_title_str = deduplicate_title_features(track_info.title)
+                clean_title_str = clean_title(track_info.title)
                 primary_artist_key = normalize_str(primary_artist)
                 track_identity_key = (
                     f"{primary_artist_key} - {normalize_str(clean_title_str)}"
@@ -503,19 +498,10 @@ def organize_library_singles(
                         continue
 
                 if not dry_run:
-                    # Also move companion artwork from old single folder if changing folders
                     if path.parent != single_folder:
-                        for art_name in [
-                            "cover.jpg",
-                            "cover.png",
-                            "folder.jpg",
-                            "front.jpg",
-                        ]:
-                            old_art = path.parent / art_name
-                            new_art = single_folder / art_name
-                            if old_art.exists() and not new_art.exists():
-                                with contextlib.suppress(OSError):
-                                    shutil.move(str(old_art), str(new_art))
+                        relocate_companion_artwork(
+                            path.parent, single_folder, dry_run=False
+                        )
                     shutil.move(str(path), str(target_file))
                     LOG.info(
                         f"   ∟ 📁 Moved single: {escape(path.name)} -> {escape(single_folder.name)}/"
