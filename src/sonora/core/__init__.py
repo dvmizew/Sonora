@@ -8,14 +8,21 @@ from sonora.core.constants import (
 from sonora.core.logger import CONSOLE, LOG
 from sonora.core.models import CheckReport, TrackInfo
 from sonora.core.utils import (
+    extract_artist_features,
     extract_featured_artist_tokens,
+    get_album_root_directory,
+    harmonize_artist_casing,
+    is_artist_acronym,
     is_single_group_artist,
     is_valid_uuid,
     normalize_featured_artists,
     normalize_genre,
     normalize_str,
+    relocate_companion_artwork,
     resolve_artist_name,
+    resolve_unique_path,
     sanitize_name,
+    strip_corrupt_brackets,
 )
 
 __all__ = [
@@ -28,12 +35,19 @@ __all__ = [
     "USER_AGENT",
     "CheckReport",
     "TrackInfo",
+    "extract_artist_features",
     "extract_featured_artist_tokens",
+    "get_album_root_directory",
+    "harmonize_artist_casing",
+    "is_artist_acronym",
     "is_single_group_artist",
     "is_valid_uuid",
     "normalize_featured_artists",
     "normalize_genre",
     "normalize_str",
+    "relocate_companion_artwork",
     "resolve_artist_name",
+    "resolve_unique_path",
     "sanitize_name",
+    "strip_corrupt_brackets",
 ]

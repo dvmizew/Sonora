@@ -10,7 +10,7 @@ from sonora.core.constants import DIRS
 from sonora.core.logger import LOG
 
 
-def _get_default_db_path() -> Path:
+def get_default_state_db_path() -> Path:
     return DIRS.user_cache_path / "library_state.db"
 
 
@@ -22,7 +22,7 @@ class LibraryStateVault:
     """Persistent SQLite-backed state tracker for library files."""
 
     def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = db_path if db_path is not None else _get_default_db_path()
+        self.db_path = db_path if db_path is not None else get_default_state_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._all_connections: set[sqlite3.Connection] = set()

@@ -1,7 +1,8 @@
 from sonora.audio.art import check_image_similarity
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.checksum import verify_flac_checksum
-from sonora.audio.cuesheet import read_cuesheet_content
+from sonora.audio.cuesheet import find_companion_cuesheet, read_cuesheet_content
+from sonora.audio.decode import load_audio
 from sonora.audio.key import (
     detect_key_details,
     detect_musical_key,
@@ -21,7 +22,9 @@ __all__ = [
     "detect_fake_lossless",
     "detect_key_details",
     "detect_musical_key",
+    "find_companion_cuesheet",
     "key_to_camelot",
+    "load_audio",
     "read_cuesheet_content",
     "read_track_metadata",
     "verify_flac_checksum",

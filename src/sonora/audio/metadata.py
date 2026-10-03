@@ -17,10 +17,12 @@ from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
 from sonora.core.utils import (
     extract_disc_number_from_folder,
+    extract_featured_artist_tokens,
     is_valid_uuid,
     normalize_date,
     normalize_featured_artists,
     normalize_genre,
+    normalize_str,
     parse_track_filename,
     safe_float,
     safe_int,
@@ -79,10 +81,10 @@ _TAG_SCHEMA: dict[str, tuple[str, ...]] = {
     "release_type": ("RELEASETYPE",),
     "release_status": ("RELEASESTATUS",),
     "release_country": ("RELEASECOUNTRY", "COUNTRY"),
-    "label": ("LABEL", "PUBLISHER"),
-    "catalog_number": ("CATALOGNUMBER",),
+    "label": ("LABEL", "PUBLISHER", "ORGANIZATION", "TPUB"),
+    "catalog_number": ("CATALOGNUMBER", "CATALOG_NUMBER"),
     "barcode": ("BARCODE",),
-    "media": ("MEDIA",),
+    "media": ("MEDIA", "TMED"),
     "comment": ("COMMENT", "COMM"),
     "advisory": ("ITUNESADVISORY", "ADVISORY"),
     "cuesheet": ("CUESHEET",),
@@ -218,26 +220,31 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             }
             if not mapped_fields.get("featured_artists"):
                 raw_artists_list = tags.get("ARTISTS") or []
-                extra_artists = [
-                    a.strip()
-                    for a in raw_artists_list
-                    if a and a.strip() and a.strip().lower() != artist.lower()
-                ]
-                if extra_artists:
-                    mapped_fields["featured_artists"] = normalize_featured_artists(
-                        extra_artists, primary_artist=artist, allow_network=False
+                if raw_artists_list:
+                    primary_tokens = extract_featured_artist_tokens(
+                        artist, allow_network=False
                     )
+                    primary_norms = {
+                        normalize_str(tok) for tok in primary_tokens if tok
+                    }
+                    extra_artists = [
+                        art_candidate.strip()
+                        for art_candidate in raw_artists_list
+                        if art_candidate
+                        and art_candidate.strip()
+                        and normalize_str(art_candidate.strip()) not in primary_norms
+                    ]
+                    if extra_artists:
+                        mapped_fields["featured_artists"] = normalize_featured_artists(
+                            extra_artists, primary_artist=artist, allow_network=False
+                        )
             raw_advisory = mapped_fields.get("advisory")
             if raw_advisory:
                 raw_str = str(raw_advisory).strip().lower()
                 if raw_str in ("1", "explicit"):
                     mapped_fields["advisory"] = "Explicit"
-                elif raw_str in ("2", "clean"):
-                    mapped_fields["advisory"] = "Clean"
-                elif raw_str in ("0", "none"):
-                    mapped_fields["advisory"] = None
                 else:
-                    mapped_fields["advisory"] = str(raw_advisory).strip().capitalize()
+                    mapped_fields["advisory"] = None
 
             file_ext = file_path.suffix.lower()
             if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
@@ -331,11 +338,62 @@ def write_track_metadata(
             song.tags["TITLE"] = [track_info.title]
             song.tags["ALBUM"] = [track_info.album]
 
+            # Multi-artist ARTISTS tag
+            primary_tokens = (
+                extract_featured_artist_tokens(track_info.artist, allow_network=False)
+                if track_info.artist
+                else []
+            )
+            if not primary_tokens and track_info.artist:
+                primary_tokens = [track_info.artist]
+
+            feat_tokens = (
+                extract_featured_artist_tokens(
+                    track_info.featured_artists,
+                    primary_artist=track_info.artist,
+                    allow_network=False,
+                )
+                if track_info.featured_artists
+                else []
+            )
+
+            all_track_artists: list[str] = []
+            for art_candidate in [*primary_tokens, *feat_tokens]:
+                clean_art = str(art_candidate).strip()
+                if clean_art and clean_art not in all_track_artists:
+                    all_track_artists.append(clean_art)
+
+            if len(all_track_artists) > 1:
+                song.tags["ARTISTS"] = all_track_artists
+            else:
+                song.tags.pop("ARTISTS", None)
+                song.tags.pop("TXXX:ARTISTS", None)
+
+            # Album artist and multi-album-artist ALBUMARTISTS tag
             if track_info.album_artist:
                 song.tags["ALBUMARTIST"] = [track_info.album_artist]
+                album_tokens = extract_featured_artist_tokens(
+                    track_info.album_artist, allow_network=False
+                )
+                if not album_tokens:
+                    album_tokens = [track_info.album_artist]
+                unique_album_artists: list[str] = []
+                for alb_candidate in album_tokens:
+                    clean_alb = str(alb_candidate).strip()
+                    if clean_alb and clean_alb not in unique_album_artists:
+                        unique_album_artists.append(clean_alb)
+                if len(unique_album_artists) > 1 and normalize_str(
+                    track_info.album_artist
+                ) not in ("various artists", "soundtrack"):
+                    song.tags["ALBUMARTISTS"] = unique_album_artists
+                else:
+                    song.tags.pop("ALBUMARTISTS", None)
+                    song.tags.pop("TXXX:ALBUMARTISTS", None)
             else:
                 song.tags.pop("ALBUMARTIST", None)
                 song.tags.pop("ALBUM ARTIST", None)
+                song.tags.pop("ALBUMARTISTS", None)
+                song.tags.pop("TXXX:ALBUMARTISTS", None)
 
             # Track & Disc numbering
             total_tracks_str = (
@@ -407,6 +465,11 @@ def write_track_metadata(
 
             if track_info.compilation is not None:
                 song.tags["COMPILATION"] = ["1" if track_info.compilation else "0"]
+            elif track_info.album_artist and normalize_str(track_info.album_artist) in (
+                "various artists",
+                "soundtrack",
+            ):
+                song.tags["COMPILATION"] = ["1"]
             else:
                 song.tags.pop("COMPILATION", None)
 
@@ -451,13 +514,12 @@ def write_track_metadata(
                             song.tags.pop(k, None)
                         continue
                     if field == "advisory":
-                        norm_adv = str(tag_value).strip().capitalize()
+                        norm_adv = (
+                            str(tag_value).strip().capitalize() if tag_value else None
+                        )
                         if norm_adv == "Explicit":
                             song.tags["ITUNESADVISORY"] = ["1"]
                             song.tags["ADVISORY"] = ["Explicit"]
-                        elif norm_adv == "Clean":
-                            song.tags["ITUNESADVISORY"] = ["2"]
-                            song.tags["ADVISORY"] = ["Clean"]
                         else:
                             song.tags.pop("ITUNESADVISORY", None)
                             song.tags.pop("ADVISORY", None)
@@ -466,12 +528,18 @@ def write_track_metadata(
                         for k in tag_keys:
                             song.tags[k] = [str(tag_value)]
                         continue
+                    if field == "lyrics":
+                        song.tags["LYRICS"] = [str(tag_value)]
+                        song.tags["UNSYNCEDLYRICS"] = [str(tag_value)]
+                        continue
                     song.tags[canonical_key] = [str(tag_value)]
                     for alias_key in tag_keys[1:]:
                         song.tags.pop(alias_key, None)
                 else:
                     for k in tag_keys:
                         song.tags.pop(k, None)
+                    if field == "lyrics":
+                        song.tags.pop("UNSYNCEDLYRICS", None)
 
             # Front cover
             if cover_art_path and cover_art_path.exists():

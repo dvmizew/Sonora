@@ -4,7 +4,7 @@ import numpy as np
 import scipy.signal
 import soundfile
 
-from sonora.audio.bpm import load_audio
+from sonora.audio.decode import load_audio
 from sonora.core.logger import LOG
 
 

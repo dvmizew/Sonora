@@ -10,10 +10,13 @@ from rapidfuzz import fuzz
 from rich.markup import escape
 
 from sonora.core.config import get_config
-from sonora.core.constants import ARTIST_MATCH_THRESHOLD
+from sonora.core.constants import (
+    ARTIST_MATCH_THRESHOLD,
+    MIN_COVER_ART_DIMENSION,
+)
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import normalize_str
+from sonora.core.utils import get_album_root_directory, normalize_str
 from sonora.services.deezer import fetch_deezer_cover_art_url
 from sonora.services.fanart import (
     download_fanart_image_bytes,
@@ -127,7 +130,10 @@ def _fetch_candidate_artwork(
             except (OSError, UnidentifiedImageError):
                 continue
 
-            if candidate_dim[0] >= 500 and candidate_dim[1] >= 500:
+            if (
+                candidate_dim[0] >= MIN_COVER_ART_DIMENSION
+                and candidate_dim[1] >= MIN_COVER_ART_DIMENSION
+            ):
                 return (image_bytes, candidate_dim)
 
             if not best_candidate:
@@ -157,15 +163,11 @@ def process_album_cover_art(
     Tries Cover Art Archive, iTunes API, and Deezer fallback.
     Returns Path to cover.jpg if present/downloaded, else None.
     """
-    target_dir = folder_path
-    if (
-        get_config().is_disc_folder(folder_path.name)
-        and folder_path.parent != folder_path
-    ):
-        parent_cover = folder_path.parent / "cover.jpg"
+    target_dir = get_album_root_directory(folder_path)
+    if target_dir != folder_path:
+        parent_cover = target_dir / "cover.jpg"
         if parent_cover.exists() and parent_cover.stat().st_size > 0:
             return parent_cover
-        target_dir = folder_path.parent
 
     cover_image_path = target_dir / "cover.jpg"
     is_low_res = False
@@ -176,7 +178,10 @@ def process_album_cover_art(
             existing_bytes = cover_image_path.read_bytes()
             with Image.open(io.BytesIO(existing_bytes)) as cur_img:
                 existing_dim = cur_img.size
-                if cur_img.width < 500 or cur_img.height < 500:
+                if (
+                    cur_img.width < MIN_COVER_ART_DIMENSION
+                    or cur_img.height < MIN_COVER_ART_DIMENSION
+                ):
                     is_low_res = True
         except (OSError, UnidentifiedImageError):
             pass
@@ -207,8 +212,8 @@ def process_album_cover_art(
                 # Quality Downgrade Protection (GEMINI.md Rule 9)
                 if (
                     existing_dim
-                    and existing_dim[0] >= 500
-                    and existing_dim[1] >= 500
+                    and existing_dim[0] >= MIN_COVER_ART_DIMENSION
+                    and existing_dim[1] >= MIN_COVER_ART_DIMENSION
                     and (existing_dim[0] * existing_dim[1]) > (new_dim[0] * new_dim[1])
                 ):
                     LOG.info(

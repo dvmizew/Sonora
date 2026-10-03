@@ -7,7 +7,7 @@ import numpy as np
 import pyloudnorm
 from rich.markup import escape
 
-from sonora.audio.bpm import load_audio
+from sonora.audio.decode import load_audio
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG

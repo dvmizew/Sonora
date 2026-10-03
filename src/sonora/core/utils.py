@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import unicodedata
@@ -25,6 +26,7 @@ from music_metadata_filter.functions import (
     remove_remastered,
     remove_zero_width,
     replace_nbsp,
+    youtube,
 )
 from pathvalidate import sanitize_filename
 from rapidfuzz import fuzz
@@ -34,13 +36,16 @@ from sonora.core.config import (
     get_artist_split_pattern,
     get_balanced_feat_pattern,
     get_bracket_feat_pattern,
+    get_config,
     get_disambiguation_pattern,
     get_duplicate_feat_pattern,
     get_feat_tokens_pattern,
 )
 from sonora.core.constants import (
+    ALBUM_COVER_NAMES,
     COMPANION_LYRICS_EXTS,
     DIRS,
+    FEAT_KEYWORDS,
     SUPPORTED_EXTS,
 )
 from sonora.core.http import SESSION
@@ -496,18 +501,6 @@ _METADATA_FILTER = MetadataFilter(
             remove_feature,
             fix_track_suffix,
         ),
-        "album": (
-            remove_zero_width,
-            replace_nbsp,
-            remove_clean_explicit,
-            remove_reissue,
-            remove_remastered,
-            fix_track_suffix,
-        ),
-        "artist": (
-            remove_zero_width,
-            replace_nbsp,
-        ),
     }
 )
 
@@ -733,49 +726,112 @@ def normalize_featured_artists(
     return ", ".join(tokens) if tokens else None
 
 
-@lru_cache(maxsize=8192)
-def deduplicate_title_features(
+_UNBRACKETED_FEAT_PATTERN = re.compile(
+    r"(?:[\(\[\{\s]+|\s+)(?:fea?t(?:uring)?|ft|w/(?!\s*[oO](?:ut)?\b)|w\.)\.?\s+([^\)\]\}\n]+)[\)\]\}\s]*",
+    re.IGNORECASE,
+)
+
+
+def extract_title_features(
     title: str | None, primary_artist: str | None = None
-) -> str:
+) -> tuple[str, list[str]]:
+    """
+    Extract featuring artists from a track title and return (clean_title, list_of_featured_artists).
+    Removes bracketed and unbracketed featuring phrases, keeping title clean.
+    """
     if not title:
-        return ""
+        return ("", [])
     fixed_title = clean_unicode_punct(ftfy.fix_text(str(title)))
-    cleaned = get_duplicate_feat_pattern().sub("", fixed_title)
+    deduped_title = get_duplicate_feat_pattern().sub("", fixed_title)
+    clean_base, bracket_feats, _, _ = extract_balanced_features(deduped_title)
 
-    base_title, matches, open_char, close_char = extract_balanced_features(cleaned)
-    if not matches:
-        return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned).strip()
+    unbracketed_feats: list[str] = []
+    feat_m = _UNBRACKETED_FEAT_PATTERN.search(clean_base)
+    if feat_m:
+        unbracketed_feats.append(feat_m.group(1).strip())
+        clean_base = clean_base[: feat_m.start()].strip()
 
-    unique_artists = extract_featured_artist_tokens(
-        matches, primary_artist=primary_artist, allow_network=False
-    )
-    if not unique_artists:
-        return _COLLAPSE_SPACES_PATTERN.sub(" ", base_title).strip()
-    elif len(unique_artists) == 1:
-        formatted_title = (
-            f"{base_title} {open_char}feat. {unique_artists[0]}{close_char}"
-        )
-    elif any(" & " in a or " and " in a.lower() for a in unique_artists):
-        feat_str = ", ".join(unique_artists)
-        formatted_title = f"{base_title} {open_char}feat. {feat_str}{close_char}"
-    else:
-        feat_str = ", ".join(unique_artists[:-1]) + f" & {unique_artists[-1]}"
-        formatted_title = f"{base_title} {open_char}feat. {feat_str}{close_char}"
-
-    return _COLLAPSE_SPACES_PATTERN.sub(" ", formatted_title).strip()
-
-
-@lru_cache(maxsize=8192)
-def clean_title(title: str) -> str:
-    """Clean track title by removing feat./ft./with brackets, remaster suffixes, and mojibake text."""
-    if not title:
-        return ""
-    fixed_title = clean_unicode_punct(ftfy.fix_text(str(title)))
-    deduped = deduplicate_title_features(fixed_title)
-    cleaned = _METADATA_FILTER.filter_field("track", deduped)
+    cleaned = _METADATA_FILTER.filter_field("track", clean_base)
     cleaned = get_bracket_feat_pattern().sub("", cleaned)
     cleaned = _TITLE_EDITION_PATTERN.sub("", cleaned)
-    return cleaned.strip()
+    cleaned_title = _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned).strip()
+
+    all_raw_feats = bracket_feats + unbracketed_feats
+    featured_tokens = extract_featured_artist_tokens(
+        all_raw_feats, primary_artist=primary_artist, allow_network=False
+    )
+    return cleaned_title, featured_tokens
+
+
+_FEAT_ARTIST_PATTERN = re.compile(rf"\s+(?:{FEAT_KEYWORDS})\.?\s*(.+)$", re.IGNORECASE)
+
+
+def extract_artist_features(
+    artist_name: str | None, allow_network: bool = False
+) -> tuple[str, list[str]]:
+    """
+    Extract featuring artists embedded within an artist tag, returning (base_artist, featured_artists_list).
+    (e.g., '21 Savage feat. Metro Boomin' -> ('21 Savage', ['Metro Boomin'])).
+    Preserves registered collaborative and multi-artist bands (e.g. 'Vargas & Lagola').
+    """
+    if not artist_name:
+        return ("", [])
+    raw_artist = ftfy.fix_text(str(artist_name)).strip()
+    if is_single_group_artist(raw_artist, allow_network=allow_network):
+        return (raw_artist, [])
+
+    feat_match = _FEAT_ARTIST_PATTERN.search(raw_artist)
+    if not feat_match:
+        return (raw_artist, [])
+
+    base_artist = raw_artist[: feat_match.start()].strip()
+    raw_featured = feat_match.group(1).strip()
+    featured_tokens = extract_featured_artist_tokens(
+        raw_featured, primary_artist=base_artist, allow_network=allow_network
+    )
+    return (base_artist, featured_tokens)
+
+
+def is_artist_acronym(artist_name: str | None) -> bool:
+    """
+    Check if an artist string represents an acronym, initials, or alphanumeric band code
+    (e.g., 'ABBA', 'M.G.L.', 'U2', 'DMX', '3OH!3') that should preserve uppercase branding.
+    """
+    if not artist_name:
+        return False
+    clean = artist_name.strip()
+    return (
+        len(clean.replace(".", "")) <= 3
+        or "." in clean
+        or any(char.isdigit() for char in clean)
+    )
+
+
+def harmonize_artist_casing(candidate_artist: str, reference_artist: str) -> str:
+    """
+    Reconcile two case variations of the same artist (whose normalized strings match).
+    Demotes ALL-CAPS screaming to mixed/title case unless the artist is an acronym/initials.
+    """
+    if candidate_artist == reference_artist:
+        return candidate_artist
+    if normalize_str(candidate_artist) != normalize_str(reference_artist):
+        return candidate_artist
+
+    is_acronym = is_artist_acronym(candidate_artist)
+    if candidate_artist.isupper() and not is_acronym and not reference_artist.isupper():
+        return reference_artist
+    if reference_artist.isupper() and not is_acronym and not candidate_artist.isupper():
+        return candidate_artist
+    return reference_artist
+
+
+@lru_cache(maxsize=8192)
+def clean_title(title: str | None) -> str:
+    """Clean track title by removing feat./ft./with markers, remaster suffixes, and mojibake text."""
+    if not title:
+        return ""
+    clean_t, _ = extract_title_features(title)
+    return clean_t
 
 
 _VERSION_OR_REMIX_KEYWORDS = frozenset(
@@ -812,6 +868,55 @@ def extract_version_modifier(title: str) -> str | None:
 def is_version_or_remix(text: str) -> bool:
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in _VERSION_OR_REMIX_KEYWORDS)
+
+
+_BRACKET_PATTERN = re.compile(r"[\(\[\{][^\(\)\[\]\{\}]+[\)\]\}]")
+
+
+def extract_bracket_tokens(text: str) -> list[tuple[str, set[str]]]:
+    """Extract all bracketed substrings and their constituent alphanumeric word tokens."""
+    results: list[tuple[str, set[str]]] = []
+    for match in _BRACKET_PATTERN.finditer(text):
+        full_bracket = match.group(0)
+        inner = full_bracket[1:-1].lower()
+        tokens = set("".join(c if c.isalnum() else " " for c in inner).split())
+        results.append((full_bracket, tokens))
+    return results
+
+
+def _is_corrupt_bracket(full_bracket: str, tokens: set[str]) -> bool:
+    if is_version_or_remix(full_bracket) or re.search(
+        FEAT_KEYWORDS, full_bracket, re.IGNORECASE
+    ):
+        return False
+
+    inner_content = full_bracket.strip("()[]{}").strip()
+    if inner_content.isdigit() and len(inner_content) == 4:
+        return False
+
+    dummy_title = f"Track {full_bracket}"
+    if (
+        youtube(dummy_title) == "Track"
+        or remove_remastered(dummy_title) == "Track"
+        or remove_clean_explicit(dummy_title) == "Track"
+    ):
+        return True
+
+    return bool(tokens & get_config().codec_rip_keywords)
+
+
+def strip_corrupt_brackets(text: str) -> str:
+    """
+    Remove unwanted or corrupt bracket metadata (e.g., [FLAC], (Official Video), [HQ], [Prod: ...])
+    from a title or artist string, preserving legitimate features and version brackets.
+    """
+    if not text:
+        return ""
+    cleaned = text
+    for full_bracket, tokens in extract_bracket_tokens(text):
+        if _is_corrupt_bracket(full_bracket, tokens):
+            cleaned = cleaned.replace(full_bracket, "")
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
 def count_unicode_accents(text: str) -> int:
@@ -1352,7 +1457,11 @@ def find_audio_files(
     return sorted(files)
 
 
-def find_companion_lyrics(audio_file: Path) -> list[Path]:
+def find_companion_lyrics(
+    audio_file: Path,
+    track_number: int | str | None = None,
+    in_singles: bool = False,
+) -> list[Path]:
     """Find all existing companion lyric files (.lrc) for a given audio file."""
     parent = audio_file.parent
     stem = audio_file.stem
@@ -1361,6 +1470,35 @@ def find_companion_lyrics(audio_file: Path) -> list[Path]:
         candidate = parent / f"{stem}{ext}"
         if candidate.exists() and candidate.is_file():
             results.append(candidate)
+
+    if not results and track_number is not None and parent.is_dir():
+        parsed_track = safe_int(track_number)
+        if parsed_track is not None:
+            prefix = f"{parsed_track:02d}"
+            prefix_unpadded = str(parsed_track)
+            try:
+                for candidate in parent.iterdir():
+                    if candidate.suffix.lower() in COMPANION_LYRICS_EXTS and (
+                        candidate.name.startswith(prefix)
+                        or candidate.name.startswith(prefix_unpadded)
+                    ):
+                        results.append(candidate)
+                        break
+            except OSError:
+                pass
+
+    if not results and in_singles and parent.is_dir():
+        try:
+            lrc_candidates = [
+                c
+                for c in parent.iterdir()
+                if c.suffix.lower() in COMPANION_LYRICS_EXTS and c.is_file()
+            ]
+            if len(lrc_candidates) == 1:
+                results.append(lrc_candidates[0])
+        except OSError:
+            pass
+
     return results
 
 
@@ -1428,23 +1566,76 @@ def extract_disc_number_from_folder(folder_name: str) -> int | None:
     return None
 
 
+def get_album_root_directory(folder: Path) -> Path:
+    """Resolve disc subdirectory (e.g., 'CD 1', 'Disc 2') to its canonical album root directory."""
+    from sonora.core.config import get_config
+
+    if get_config().is_disc_folder(folder.name) and folder.parent != folder:
+        return folder.parent
+    return folder
+
+
 def group_files_by_album_root(files: Sequence[Path]) -> dict[Path, list[Path]]:
     """
     Group audio files by their canonical album root directory.
     If files reside inside disc subdirectories (e.g., 'Album/CD 1/', 'Album/Disc 2/'),
     they are unified under 'Album/'.
     """
-    from sonora.core.config import get_config
-
     grouped: dict[Path, list[Path]] = {}
     for file_path in files:
-        parent = file_path.parent
-        if get_config().is_disc_folder(parent.name) and parent.parent != parent:
-            album_root = parent.parent
-        else:
-            album_root = parent
+        album_root = get_album_root_directory(file_path.parent)
         grouped.setdefault(album_root, []).append(file_path)
     return grouped
+
+
+def resolve_unique_path(target_path: Path, current_path: Path | None = None) -> Path:
+    """
+    Resolve a unique, non-colliding destination path by incrementing a counter
+    'Stem (2).ext', 'Stem (3).ext' if target_path already exists on disk.
+    """
+    if not target_path.exists() or (
+        current_path and target_path.resolve() == current_path.resolve()
+    ):
+        return target_path
+    counter = 2
+    parent_dir = target_path.parent
+    base_stem = target_path.stem
+    extension = target_path.suffix
+    while True:
+        candidate = parent_dir / f"{base_stem} ({counter}){extension}"
+        if not candidate.exists() or (
+            current_path and candidate.resolve() == current_path.resolve()
+        ):
+            return candidate
+        counter += 1
+
+
+def relocate_companion_artwork(
+    source_dir: Path, target_dir: Path, dry_run: bool = False
+) -> list[Path]:
+    """
+    Move companion album artwork ('cover.jpg', 'cover.png', etc.) from source_dir to target_dir.
+    Returns list of relocated artwork files.
+    """
+    relocated: list[Path] = []
+    if source_dir.resolve() == target_dir.resolve():
+        return relocated
+
+    for art_name in ALBUM_COVER_NAMES:
+        source_art = source_dir / art_name
+        target_art = target_dir / art_name
+        if source_art.exists() and source_art.is_file() and not target_art.exists():
+            if not dry_run:
+                try:
+                    shutil.move(str(source_art), str(target_art))
+                    relocated.append(target_art)
+                except OSError as error:
+                    LOG.debug(
+                        f"Failed to relocate companion artwork {source_art}: {error}"
+                    )
+            else:
+                relocated.append(target_art)
+    return relocated
 
 
 def is_in_singles_hierarchy(path: Path, root_dir: Path | None = None) -> bool:
@@ -1557,7 +1748,6 @@ def clear_utils_cache() -> None:
     _load_user_overrides.cache_clear()
     resolve_artist_name.cache_clear()
     is_single_group_artist.cache_clear()
-    deduplicate_title_features.cache_clear()
     clean_title.cache_clear()
     normalize_str.cache_clear()
     normalize_date.cache_clear()

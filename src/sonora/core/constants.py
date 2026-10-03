@@ -34,6 +34,14 @@ COMPANION_LYRICS_EXTS = frozenset(
     }
 )
 
+ALBUM_COVER_NAMES: tuple[str, ...] = (
+    "cover.jpg",
+    "cover.png",
+    "folder.jpg",
+    "front.jpg",
+)
+MIN_COVER_ART_DIMENSION: int = 500
+
 FEAT_KEYWORDS = (
     r"\b(?:fea?t(?:uring)?|ft|with|w/(?!\s*[oO](?:ut)?\b)|w\.)(?:\.?(?!\w))|\u00d7"
 )

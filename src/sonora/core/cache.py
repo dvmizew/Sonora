@@ -206,13 +206,13 @@ def get_cache_stats() -> CacheStats:
 
     from sonora.core.state import (
         _STATE_INSTANCE,
-        _get_default_db_path,
+        get_default_state_db_path,
         get_library_state,
     )
 
     state_entries = 0
     state_size = 0
-    default_state_path = _get_default_db_path()
+    default_state_path = get_default_state_db_path()
     if _STATE_INSTANCE is not None or default_state_path.exists():
         library_state = get_library_state()
         state_entries = library_state.get_state_count()

@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import scipy.signal
 
-from sonora.audio.bpm import load_audio
+from sonora.audio.decode import load_audio
 from sonora.core.logger import LOG
 
 PITCH_CLASSES: tuple[str, ...] = (
