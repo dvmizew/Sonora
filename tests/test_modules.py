@@ -25,13 +25,13 @@ from sonora.core.utils import (
     is_valid_uuid,
     match_score,
     resolve_artist_name,
+    strip_corrupt_brackets,
 )
 from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.checker import (
     check_brackets_corruption,
     check_file,
     check_library,
-    strip_corrupt_brackets,
 )
 from sonora.modules.organizer import (
     SingleDeduplicator,
@@ -703,6 +703,171 @@ class TestCoreModules(unittest.TestCase):
         self.assertFalse(
             any("Missing track numbers in sequence" in issue for issue in folder_issues)
         )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_album_tag_mismatch(self, mock_read: Any) -> None:
+        album_dir = self.tmp_path / "Artist - Album"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        file3 = album_dir / "03 - Track 3.wav"
+        create_dummy_wav(file1)
+        create_dummy_wav(file2)
+        create_dummy_wav(file3)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "03 - Track 3.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    title="Track 3",
+                    album="Album (Deluxe Edition)",
+                    album_artist="Artist",
+                    track_number=3,
+                    disc_number=1,
+                )
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        file3_issues = report.issues.get(str(file3), [])
+        self.assertTrue(any("Mismatched ALBUM tag" in issue for issue in file3_issues))
+        file1_issues = report.issues.get(str(file1), [])
+        self.assertFalse(any("Mismatched ALBUM tag" in issue for issue in file1_issues))
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_alien_track_detection(self, mock_read: Any) -> None:
+        album_dir = self.tmp_path / "Main Artist - Main Album"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        alien_file = album_dir / "09 - Alien Song.wav"
+        create_dummy_wav(file1)
+        create_dummy_wav(file2)
+        create_dummy_wav(alien_file)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "09 - Alien Song.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Foreign Artist",
+                    title="Alien Song",
+                    album="Foreign Album",
+                    album_artist="Foreign Artist",
+                    track_number=9,
+                    disc_number=1,
+                )
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Main Artist",
+                title=f"Track {num}",
+                album="Main Album",
+                album_artist="Main Artist",
+                track_number=num,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        alien_issues = report.issues.get(str(alien_file), [])
+        self.assertTrue(
+            any(
+                "Alien track detected in album folder" in issue
+                for issue in alien_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_alien_single_duplicate_position(
+        self, mock_read: Any
+    ) -> None:
+        album_dir = self.tmp_path / "Artist - Album"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Album Track.wav"
+        file2 = album_dir / "01 - Loose Single.wav"
+        file3 = album_dir / "02 - Second Track.wav"
+        create_dummy_wav(file1)
+        create_dummy_wav(file2)
+        create_dummy_wav(file3)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "01 - Loose Single.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    title="Loose Single",
+                    album="Loose Single",
+                    album_artist="Artist",
+                    track_number=1,
+                    disc_number=1,
+                )
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Album Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        single_issues = report.issues.get(str(file2), [])
+        self.assertTrue(
+            any(
+                "Alien single detected in album folder" in issue
+                for issue in single_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_compilation_shielded_from_alien(
+        self, mock_read: Any
+    ) -> None:
+        album_dir = self.tmp_path / "Various Artists - OST"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Song by A.wav"
+        file2 = album_dir / "02 - Song by B.wav"
+        create_dummy_wav(file1)
+        create_dummy_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if "01" in path.name:
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist A",
+                    title="Song A",
+                    album="Movie Soundtrack",
+                    album_artist="Various Artists",
+                    track_number=1,
+                    disc_number=1,
+                )
+            return TrackInfo(
+                file_path=path,
+                artist="Artist B",
+                title="Song B",
+                album="Movie Soundtrack",
+                album_artist="Various Artists",
+                track_number=2,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        for issues in report.issues.values():
+            self.assertFalse(any("Alien track detected" in issue for issue in issues))
 
     def test_check_brackets_year_tolerance(self) -> None:
         self.assertEqual(check_brackets_corruption("Rebirth (2016)"), [])
@@ -1987,7 +2152,8 @@ class TestCoreModules(unittest.TestCase):
             self.assertIsNotNone(result)
             assert result is not None
             self.assertEqual(result.artist, "Armin")
-            self.assertEqual(result.title, "Melodie (feat. Nane)")
+            self.assertEqual(result.title, "Melodie")
+            self.assertEqual(result.featured_artists, "Nane")
             self.assertEqual(result.genre, "Hip-Hop/Rap")
             self.assertEqual(result.release_country, "United States")
             self.assertEqual(result.language, "English")
@@ -2018,7 +2184,7 @@ class TestCoreModules(unittest.TestCase):
             self.assertIsNotNone(feat_result)
             assert feat_result is not None
             self.assertEqual(feat_result.artist, "21 Savage & Metro Boomin")
-            self.assertEqual(feat_result.title, "Mr. Right Now (feat. Drake)")
+            self.assertEqual(feat_result.title, "Mr. Right Now")
             self.assertEqual(feat_result.featured_artists, "Drake")
 
             # Test extracting producer bracket and cleaning title
@@ -2031,7 +2197,8 @@ class TestCoreModules(unittest.TestCase):
             prod_result = normalize_single_track(audio_file, dry_run=False)
             self.assertIsNotNone(prod_result)
             assert prod_result is not None
-            self.assertEqual(prod_result.title, "Din 94 feat. Mike Diamondz")
+            self.assertEqual(prod_result.title, "Din 94")
+            self.assertEqual(prod_result.featured_artists, "Mike Diamondz")
             self.assertEqual(prod_result.producers, "Motzu")
 
             # Test invalid initial_key re-detection ('m' -> 'Am')

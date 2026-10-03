@@ -4,7 +4,13 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 datas = collect_data_files('anyascii') + collect_data_files('pycountry') + collect_data_files('ftfy')
-hiddenimports = collect_submodules('anyascii') + collect_submodules('pycountry') + collect_submodules('syncedlyrics') + collect_submodules('ftfy')
+hiddenimports = (
+    collect_submodules('anyascii')
+    + collect_submodules('pycountry')
+    + collect_submodules('syncedlyrics')
+    + collect_submodules('ftfy')
+    + collect_submodules('music_metadata_filter')
+)
 
 a = Analysis(
     ['src/sonora/cli/main.py'],

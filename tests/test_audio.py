@@ -22,6 +22,7 @@ from sonora.audio.art import _find_artist_directory, process_album_cover_art
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import (
+    clear_metadata_cache,
     read_track_metadata,
     write_track_metadata,
 )
@@ -536,6 +537,170 @@ class TestAudioEngine(unittest.TestCase):
         self.assertFalse(is_fake)
         self.assertEqual(cutoff_khz, 0.0)
         self.assertIsNone(description)
+
+    @patch("taglib.File")
+    def test_advisory_metadata_explicit_and_clean_purging(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.tags = {
+            "ITUNESADVISORY": ["2"],
+            "ADVISORY": ["Clean"],
+        }
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.tmp_path / "test_advisory.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        # 1. Non-explicit track must purge ITUNESADVISORY and ADVISORY (no Clean spam)
+        clean_track = TrackInfo(
+            file_path=flac_path,
+            artist="Artist",
+            title="Clean Song",
+            advisory=None,
+        )
+        write_track_metadata(clean_track)
+        self.assertNotIn("ITUNESADVISORY", mock_file_instance.tags)
+        self.assertNotIn("ADVISORY", mock_file_instance.tags)
+
+        # 2. Explicit track must write ITUNESADVISORY="1" and ADVISORY="Explicit"
+        explicit_track = TrackInfo(
+            file_path=flac_path,
+            artist="Artist",
+            title="Explicit Song",
+            advisory="Explicit",
+        )
+        write_track_metadata(explicit_track)
+        self.assertEqual(mock_file_instance.tags["ITUNESADVISORY"], ["1"])
+        self.assertEqual(mock_file_instance.tags["ADVISORY"], ["Explicit"])
+
+    @patch("taglib.File")
+    def test_featured_artists_and_multi_artists_tag(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.tags = {}
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.tmp_path / "test_featured.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        track_with_feat = TrackInfo(
+            file_path=flac_path,
+            artist="Armin",
+            title="Melodie",
+            featured_artists="Nane, Super ED",
+        )
+        write_track_metadata(track_with_feat)
+        self.assertEqual(
+            mock_file_instance.tags["ARTISTS"], ["Armin", "Nane", "Super ED"]
+        )
+
+        track_without_feat = TrackInfo(
+            file_path=flac_path,
+            artist="Armin",
+            title="Melodie",
+            featured_artists=None,
+        )
+        write_track_metadata(track_without_feat)
+        self.assertNotIn("ARTISTS", mock_file_instance.tags)
+
+    @patch("taglib.File")
+    def test_collaborative_release_multi_artists_and_album_artists(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.tags = {}
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.tmp_path / "test_collab.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        # 1. Collaborative primary artist and album artist (e.g. 21 Savage & Metro Boomin)
+        collab_track = TrackInfo(
+            file_path=flac_path,
+            artist="21 Savage & Metro Boomin",
+            album_artist="21 Savage & Metro Boomin",
+            title="No Heart",
+            album="Savage Mode",
+            featured_artists=None,
+            lyrics="Sample lyrics text",
+        )
+        write_track_metadata(collab_track)
+        self.assertEqual(
+            mock_file_instance.tags["ARTIST"], ["21 Savage & Metro Boomin"]
+        )
+        self.assertEqual(
+            mock_file_instance.tags["ARTISTS"], ["21 Savage", "Metro Boomin"]
+        )
+        self.assertEqual(
+            mock_file_instance.tags["ALBUMARTIST"], ["21 Savage & Metro Boomin"]
+        )
+        self.assertEqual(
+            mock_file_instance.tags["ALBUMARTISTS"], ["21 Savage", "Metro Boomin"]
+        )
+        self.assertEqual(mock_file_instance.tags["LYRICS"], ["Sample lyrics text"])
+        self.assertEqual(
+            mock_file_instance.tags["UNSYNCEDLYRICS"], ["Sample lyrics text"]
+        )
+
+        # 2. Collaborative artist with additional featured artist
+        collab_with_feat = TrackInfo(
+            file_path=flac_path,
+            artist="21 Savage & Metro Boomin",
+            album_artist="21 Savage & Metro Boomin",
+            title="X",
+            album="Savage Mode",
+            featured_artists="Future",
+        )
+        write_track_metadata(collab_with_feat)
+        self.assertEqual(
+            mock_file_instance.tags["ARTISTS"],
+            ["21 Savage", "Metro Boomin", "Future"],
+        )
+
+        # 3. Various Artists compilation auto-flag
+        compilation_track = TrackInfo(
+            file_path=flac_path,
+            artist="Individual Artist",
+            album_artist="Various Artists",
+            title="Hits Track",
+            album="Top Hits 2026",
+        )
+        write_track_metadata(compilation_track)
+        self.assertEqual(mock_file_instance.tags["COMPILATION"], ["1"])
+
+    @patch("taglib.File")
+    def test_read_track_metadata_filters_primary_artists_from_artists_tag(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        # Tags has collaborative ARTIST and multi-valued ARTISTS
+        mock_file_instance.tags = {
+            "ARTIST": ["21 Savage & Metro Boomin"],
+            "TITLE": ["No Heart"],
+            "ALBUM": ["Savage Mode"],
+            "ARTISTS": ["21 Savage", "Metro Boomin"],
+        }
+        mock_file_instance.sampleRate = 44100
+        mock_file_instance.channels = 2
+        mock_file_instance.bitrate = 1411
+        mock_file_instance.length = 180
+        mock_file_instance.pictures = []
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.tmp_path / "test_read_collab.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        track_info = read_track_metadata(flac_path)
+        # Must NOT classify primary artists 21 Savage or Metro Boomin as featured artists
+        self.assertIsNone(track_info.featured_artists)
+
+        # Case with genuine extra artist in ARTISTS tag
+        clear_metadata_cache()
+        mock_file_instance.tags["ARTISTS"] = ["21 Savage", "Metro Boomin", "Future"]
+        track_info_with_feat = read_track_metadata(flac_path)
+        self.assertEqual(track_info_with_feat.featured_artists, "Future")
 
 
 if __name__ == "__main__":

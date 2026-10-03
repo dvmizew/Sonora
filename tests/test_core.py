@@ -24,9 +24,9 @@ from sonora.core.utils import (
     clean_disambiguation,
     clean_title,
     clean_unicode_punct,
-    deduplicate_title_features,
     extract_disc_number_from_folder,
     extract_featured_artist_tokens,
+    extract_title_features,
     extract_version_modifier,
     get_primary_artist,
     get_single_release_title,
@@ -163,7 +163,39 @@ class TestCoreUtils(unittest.TestCase):
             clean_title('R.I.P ROACH "EAST SIDE SOULJA"'),
             'R.I.P ROACH "EAST SIDE SOULJA"',
         )
+        self.assertEqual(clean_title("Mr. Right Now feat. Drake"), "Mr. Right Now")
+        self.assertEqual(clean_title("Stay With Me"), "Stay With Me")
+        self.assertEqual(clean_title("Ball w/o You"), "Ball w/o You")
+        self.assertEqual(
+            clean_title("Solo (Wideboys remix) (feat. Demi Lovato)"),
+            "Solo (Wideboys remix)",
+        )
         self.assertEqual(clean_title(""), "")
+
+    def test_extract_title_features(self) -> None:
+        clean_t, feats = extract_title_features("Rockstar (feat. 21 Savage)")
+        self.assertEqual(clean_t, "Rockstar")
+        self.assertEqual(feats, ["21 Savage"])
+
+        clean_t2, feats2 = extract_title_features(
+            "Mr. Right Now feat. Drake", primary_artist="21 Savage"
+        )
+        self.assertEqual(clean_t2, "Mr. Right Now")
+        self.assertEqual(feats2, ["Drake"])
+
+        clean_t3, feats3 = extract_title_features("Stay With Me")
+        self.assertEqual(clean_t3, "Stay With Me")
+        self.assertEqual(feats3, [])
+
+        clean_t4, feats4 = extract_title_features("Ball w/o You")
+        self.assertEqual(clean_t4, "Ball w/o You")
+        self.assertEqual(feats4, [])
+
+        clean_t5, feats5 = extract_title_features(
+            "Solo (Wideboys remix) (feat. Demi Lovato)"
+        )
+        self.assertEqual(clean_t5, "Solo (Wideboys remix)")
+        self.assertEqual(feats5, ["Demi Lovato"])
 
     def test_clean_disambiguation(self) -> None:
         self.assertEqual(clean_disambiguation("Armin (ROU)"), "Armin")
@@ -194,91 +226,82 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(safe_float(None))
         self.assertIsNone(safe_float("bad"))
 
-    def test_deduplicate_title_features(self) -> None:
+    def test_clean_title_featuring_removal(self) -> None:
         self.assertEqual(
-            deduplicate_title_features(
-                "Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"
+            clean_title("Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"),
+            "Melodie",
+        )
+        self.assertEqual(
+            clean_title("Piesa cu Nane [feat. Nane]"),
+            "Piesa",
+        )
+        self.assertEqual(
+            clean_title("Dans cu Lupii (feat. Vlad Dobrescu)"),
+            "Dans cu Lupii",
+        )
+        self.assertEqual(
+            clean_title("În golul tău (feat. RAVA)"),
+            "În golul tău",
+        )
+        self.assertEqual(
+            clean_title("Capitanu' (feat. Amuly & RAVA)"),
+            "Capitanu'",
+        )
+        self.assertEqual(
+            clean_title("ZODIAC (feat. NOUA UNSPE & RAVA & BITTNER)"),
+            "ZODIAC",
+        )
+        self.assertEqual(
+            clean_title(
+                "MĂ AGITĂ (feat. RAVA & Armin & Ravisval & Super ED & Armin & RAVA)"
             ),
-            "Melodie (feat. Vlad Dobrescu)",
+            "MĂ AGITĂ",
         )
         self.assertEqual(
-            deduplicate_title_features("Piesa cu Nane [feat. Nane]"),
-            "Piesa [feat. Nane]",
+            clean_title("AX8 (feat. Lentile Blur, Ares (ROU))"),
+            "AX8",
         )
         self.assertEqual(
-            deduplicate_title_features("Dans cu Lupii (feat. Vlad Dobrescu)"),
-            "Dans cu Lupii (feat. Vlad Dobrescu)",
-        )
-        self.assertEqual(
-            deduplicate_title_features("În golul tău (feat. RAVA)"),
-            "În golul tău (feat. RAVA)",
-        )
-        self.assertEqual(
-            deduplicate_title_features(
-                "Capitanu' (feat. Amuly & RAVA)", primary_artist="Tussin"
-            ),
-            "Capitanu' (feat. Amuly & RAVA)",
-        )
-        self.assertEqual(
-            deduplicate_title_features(
-                "ZODIAC (feat. NOUA UNSPE & RAVA & BITTNER)",
-                primary_artist="NOUA UNSPE",
-            ),
-            "ZODIAC (feat. RAVA & BITTNER)",
-        )
-        self.assertEqual(
-            deduplicate_title_features(
-                "MĂ AGITĂ (feat. RAVA & Armin & Ravisval & Super ED & Armin & RAVA)",
-                primary_artist="4 226",
-            ),
-            "MĂ AGITĂ (feat. RAVA, Armin, Ravisval & Super ED)",
-        )
-        self.assertEqual(
-            deduplicate_title_features("AX8 (feat. Lentile Blur, Ares (ROU))"),
-            "AX8 (feat. Lentile Blur & Ares)",
-        )
-        self.assertEqual(
-            deduplicate_title_features(
+            clean_title(
                 "Undeva-n Balkani (Double L remix) (feat. Viper, Reptile (Rapper))"
             ),
-            "Undeva-n Balkani (Double L remix) (feat. Viper & Reptile)",
+            "Undeva-n Balkani (Double L remix)",
         )
         self.assertEqual(
-            deduplicate_title_features("Lately (feat. Bugus & Musa (KingofBabylon))"),
-            "Lately (feat. Bugus & Musa)",
+            clean_title("Lately (feat. Bugus & Musa (KingofBabylon))"),
+            "Lately",
         )
         self.assertEqual(
-            deduplicate_title_features("sex with my ex (og version) (feat. my ex)"),
-            "sex with my ex (og version) (feat. my ex)",
+            clean_title("sex with my ex (og version) (feat. my ex)"),
+            "sex with my ex (og version)",
         )
         self.assertEqual(
-            deduplicate_title_features("sex with my ex (feat. my ex)"),
-            "sex with my ex (feat. my ex)",
+            clean_title("sex with my ex (feat. my ex)"),
+            "sex with my ex",
         )
         self.assertEqual(
-            deduplicate_title_features("ball w/o you"),
+            clean_title("ball w/o you"),
             "ball w/o you",
         )
         self.assertEqual(
-            deduplicate_title_features("Track (w/o Drums)"),
+            clean_title("Track (w/o Drums)"),
             "Track (w/o Drums)",
         )
         self.assertEqual(
-            deduplicate_title_features("Song (w/ Drake)"),
-            "Song (feat. Drake)",
+            clean_title("Song (w/ Drake)"),
+            "Song",
         )
-        self.assertEqual(deduplicate_title_features(""), "")
-        self.assertEqual(deduplicate_title_features(None), "")
+        self.assertEqual(clean_title(""), "")
+        self.assertEqual(clean_title(None), "")
 
-    def test_deduplicate_title_features_with_user_aliases(self) -> None:
+    def test_extract_title_features_with_user_aliases(self) -> None:
         with patch(
             "sonora.core.utils._load_user_overrides",
             return_value={"ravi": "Ravisval"},
         ):
-            self.assertEqual(
-                deduplicate_title_features("SEMAKA (feat. RAVi & Armin)"),
-                "SEMAKA (feat. Ravisval & Armin)",
-            )
+            clean_t, feats = extract_title_features("SEMAKA (feat. RAVi & Armin)")
+            self.assertEqual(clean_t, "SEMAKA")
+            self.assertEqual(feats, ["Ravisval", "Armin"])
 
     def test_normalize_featured_artists(self) -> None:
         self.assertIsNone(normalize_featured_artists(None))
