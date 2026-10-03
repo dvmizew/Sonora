@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import acoustid
-import ftfy
 import httpx
 from musicbrainzngs import MusicBrainzError
 from rapidfuzz import fuzz
@@ -21,7 +20,6 @@ from sonora.audio.art import (
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.cuesheet import find_companion_cuesheet, read_cuesheet_content
 from sonora.audio.key import (
-    detect_key_details,
     detect_musical_key,
     key_to_camelot,
 )
@@ -153,6 +151,21 @@ def _apply_mapping(
             if not normalized_d:
                 continue
             val_str = normalized_d
+        elif target_attr == "release_country":
+            normalized_country = normalize_country_name(val_str)
+            if not normalized_country:
+                continue
+            val_str = normalized_country
+        elif target_attr == "language":
+            normalized_lang = normalize_language_name(val_str)
+            if not normalized_lang:
+                continue
+            val_str = normalized_lang
+        elif target_attr == "script":
+            normalized_script = normalize_script_name(val_str)
+            if not normalized_script:
+                continue
+            val_str = normalized_script
         elif target_attr == "title":
             val_str = clean_unicode_punct(val_str)
             clean_t, extracted_feats = extract_title_features(
@@ -1351,12 +1364,12 @@ def _enrich_key(
     )
     if fetch_key and (track_info.initial_key is None or force or is_key_invalid):
         try:
-            key_details = detect_key_details(file_path)
-            if key_details is not None:
-                key_name, camelot, _ = key_details
-                track_info.initial_key = key_name
+            detected_key = detect_musical_key(file_path)
+            if detected_key is not None:
+                track_info.initial_key = detected_key
+                camelot = key_to_camelot(detected_key) or "Unknown"
                 LOG.info(
-                    f"   ∟ 🎵 Musical Key: [green]{escape(key_name)}[/] ({escape(camelot)})"
+                    f"   ∟ 🎵 Musical Key: [green]{escape(detected_key)}[/] ({escape(camelot)})"
                 )
         except OSError as error:
             LOG.debug(f"Key calculation failed for {track_info.title}: {error}")
@@ -2137,6 +2150,157 @@ def is_alien_album_track(
     return False
 
 
+def normalize_track_metadata(
+    track_info: TrackInfo,
+    *,
+    allow_network: bool = False,
+) -> TrackInfo:
+    """
+    Apply canonical, deterministic normalization to all metadata fields of a TrackInfo object.
+    Unifies offline tag normalization and online tag post-processing into a single source of truth.
+    """
+    if track_info.title:
+        raw_t_lower = track_info.title.lower()
+        if not track_info.advisory and (
+            re.search(r"[\(\[\{]\s*explicit\s*[\)\]\}]", raw_t_lower)
+            or "album version (explicit)" in raw_t_lower
+        ):
+            track_info.advisory = "Explicit"
+
+        prod_matches = list(_PROD_BRACKET_PATTERN.finditer(track_info.title))
+        if prod_matches:
+            if not track_info.producers:
+                prods = [m.group(1).strip() for m in prod_matches if m.group(1).strip()]
+                if prods:
+                    track_info.producers = ", ".join(prods)
+            track_info.title = _PROD_BRACKET_PATTERN.sub("", track_info.title).strip()
+
+        track_info.title = strip_corrupt_brackets(track_info.title)
+        clean_base, title_feats = extract_title_features(
+            track_info.title, primary_artist=track_info.artist
+        )
+        if title_feats:
+            track_info.featured_artists = normalize_featured_artists(
+                [track_info.featured_artists, *title_feats],
+                primary_artist=track_info.artist,
+                allow_network=allow_network,
+            )
+        track_info.title = clean_unicode_punct(clean_base)
+
+    if track_info.artist:
+        track_info.artist = strip_corrupt_brackets(track_info.artist)
+        base_artist, extracted_features = extract_artist_features(track_info.artist)
+        if base_artist:
+            track_info.artist = base_artist
+        if extracted_features:
+            track_info.featured_artists = normalize_featured_artists(
+                [track_info.featured_artists, *extracted_features],
+                primary_artist=track_info.artist,
+                allow_network=allow_network,
+            )
+        track_info.artist = clean_disambiguation(track_info.artist)
+        if allow_network:
+            track_info.artist = resolve_artist_name(track_info.artist)
+        track_info.artist = clean_unicode_punct(track_info.artist)
+
+    if track_info.featured_artists:
+        track_info.featured_artists = normalize_featured_artists(
+            track_info.featured_artists,
+            primary_artist=track_info.artist,
+            allow_network=allow_network,
+        )
+
+    if track_info.album:
+        track_info.album = clean_unicode_punct(track_info.album)
+
+    if track_info.album_artist:
+        track_info.album_artist = clean_disambiguation(track_info.album_artist)
+        if allow_network:
+            track_info.album_artist = resolve_artist_name(track_info.album_artist)
+        track_info.album_artist = clean_unicode_punct(track_info.album_artist)
+
+    if (
+        track_info.artist
+        and track_info.album_artist
+        and normalize_str(track_info.artist) == normalize_str(track_info.album_artist)
+        and track_info.artist != track_info.album_artist
+    ):
+        harmonized = harmonize_artist_casing(
+            candidate_artist=track_info.artist,
+            reference_artist=track_info.album_artist,
+        )
+        track_info.artist = harmonized
+        track_info.album_artist = harmonized
+
+    is_singles_track = bool(
+        (track_info.total_tracks == 1 and (track_info.track_number or 1) > 1)
+        or (
+            track_info.release_type
+            and track_info.release_type.lower() == "single"
+            and (track_info.total_tracks or 1) <= 1
+        )
+        or "singles" in [p.lower() for p in track_info.file_path.parts]
+        or get_config().is_generic_container(track_info.file_path.parent.name)
+    )
+    if is_singles_track and (track_info.total_tracks or 1) <= 1:
+        track_info.track_number = 1
+        track_info.total_tracks = 1
+
+    if track_info.artist_sort and track_info.artist:
+        sort_norm = normalize_str(track_info.artist_sort)
+        art_candidates = [normalize_str(track_info.artist)]
+        primary_artist_val = get_primary_artist(track_info.artist)
+        if primary_artist_val:
+            art_candidates.append(normalize_str(primary_artist_val))
+        sort_score = max(
+            (
+                max(
+                    fuzz.ratio(sort_norm, cand),
+                    fuzz.token_sort_ratio(sort_norm, cand),
+                    fuzz.token_set_ratio(sort_norm, cand),
+                )
+                for cand in art_candidates
+                if cand
+            ),
+            default=0.0,
+        )
+        if sort_score < 75.0:
+            track_info.artist_sort = None
+
+    cmp_sort_art = track_info.album_artist or track_info.artist or ""
+    if track_info.album_artist_sort and cmp_sort_art:
+        sort_norm = normalize_str(track_info.album_artist_sort)
+        art_candidates = [normalize_str(cmp_sort_art)]
+        primary_album_art = get_primary_artist(cmp_sort_art)
+        if primary_album_art:
+            art_candidates.append(normalize_str(primary_album_art))
+        sort_score = max(
+            (
+                max(
+                    fuzz.ratio(sort_norm, cand),
+                    fuzz.token_sort_ratio(sort_norm, cand),
+                    fuzz.token_set_ratio(sort_norm, cand),
+                )
+                for cand in art_candidates
+                if cand
+            ),
+            default=0.0,
+        )
+        if sort_score < 75.0:
+            track_info.album_artist_sort = None
+
+    track_info.genre = normalize_genre(track_info.genre)
+    track_info.date = normalize_date(track_info.date)
+    track_info.original_date = normalize_date(track_info.original_date)
+    track_info.release_country = normalize_country_name(track_info.release_country)
+    track_info.language = normalize_language_name(track_info.language)
+    track_info.script = normalize_script_name(track_info.script)
+    if track_info.advisory != "Explicit":
+        track_info.advisory = None
+
+    return track_info
+
+
 def process_single_track(
     file_path: Path,
     fetch_bpm: bool = True,
@@ -2394,130 +2558,8 @@ def process_single_track(
             dry_run=dry_run,
         )
 
-        # 3. Clean title, detect embedded advisory markers, and clean unicode
-        if track_info.title:
-            raw_t_lower = track_info.title.lower()
-            if not track_info.advisory and (
-                re.search(r"[\(\[\{]\s*explicit\s*[\)\]\}]", raw_t_lower)
-                or "album version (explicit)" in raw_t_lower
-            ):
-                track_info.advisory = "Explicit"
-            prod_matches = list(_PROD_BRACKET_PATTERN.finditer(track_info.title))
-            if prod_matches:
-                if not track_info.producers:
-                    prods = [
-                        m.group(1).strip() for m in prod_matches if m.group(1).strip()
-                    ]
-                    if prods:
-                        track_info.producers = ", ".join(prods)
-                track_info.title = _PROD_BRACKET_PATTERN.sub(
-                    "", track_info.title
-                ).strip()
-            track_info.title = strip_corrupt_brackets(track_info.title)
-            clean_base, title_feats = extract_title_features(
-                track_info.title, primary_artist=track_info.artist
-            )
-            if title_feats:
-                track_info.featured_artists = normalize_featured_artists(
-                    [track_info.featured_artists, *title_feats],
-                    primary_artist=track_info.artist,
-                )
-            track_info.title = clean_unicode_punct(clean_base)
-        if track_info.artist:
-            track_info.artist = strip_corrupt_brackets(track_info.artist)
-            base_artist, extracted_features = extract_artist_features(track_info.artist)
-            if base_artist:
-                track_info.artist = base_artist
-            if extracted_features:
-                track_info.featured_artists = normalize_featured_artists(
-                    [track_info.featured_artists, *extracted_features],
-                    primary_artist=track_info.artist,
-                )
-            track_info.artist = resolve_artist_name(track_info.artist)
-            track_info.artist = clean_unicode_punct(track_info.artist)
-        if track_info.featured_artists:
-            track_info.featured_artists = normalize_featured_artists(
-                track_info.featured_artists,
-                primary_artist=track_info.artist,
-            )
-        if track_info.album:
-            track_info.album = clean_unicode_punct(track_info.album)
-        if track_info.album_artist:
-            track_info.album_artist = resolve_artist_name(track_info.album_artist)
-            track_info.album_artist = clean_unicode_punct(track_info.album_artist)
-
-        # Normalize track numbering on standalone single releases
-        is_singles_track = bool(
-            (track_info.total_tracks == 1 and (track_info.track_number or 1) > 1)
-            or (
-                track_info.release_type
-                and track_info.release_type.lower() == "single"
-                and (track_info.total_tracks or 1) <= 1
-            )
-            or "singles" in [p.lower() for p in track_info.file_path.parts]
-            or get_config().is_generic_container(track_info.file_path.parent.name)
-        )
-        if is_singles_track and (track_info.total_tracks or 1) <= 1:
-            track_info.track_number = 1
-            track_info.total_tracks = 1
-
-        if (
-            track_info.artist
-            and track_info.album_artist
-            and normalize_str(track_info.artist)
-            == normalize_str(track_info.album_artist)
-            and track_info.artist != track_info.album_artist
-        ):
-            harmonized_artist = harmonize_artist_casing(
-                candidate_artist=track_info.artist,
-                reference_artist=track_info.album_artist,
-            )
-            track_info.artist = harmonized_artist
-            track_info.album_artist = harmonized_artist
-
-        # Sanitize sort names: ensure sort names do not contradict the actual artist identity
-        if track_info.artist_sort and track_info.artist:
-            sort_norm = normalize_str(track_info.artist_sort)
-            art_candidates = [normalize_str(track_info.artist)]
-            primary_artist_val = get_primary_artist(track_info.artist)
-            if primary_artist_val:
-                art_candidates.append(normalize_str(primary_artist_val))
-            sort_score = max(
-                (
-                    max(
-                        fuzz.ratio(sort_norm, cand),
-                        fuzz.token_sort_ratio(sort_norm, cand),
-                        fuzz.token_set_ratio(sort_norm, cand),
-                    )
-                    for cand in art_candidates
-                    if cand
-                ),
-                default=0.0,
-            )
-            if sort_score < 75.0:
-                track_info.artist_sort = None
-
-        cmp_sort_art = track_info.album_artist or track_info.artist or ""
-        if track_info.album_artist_sort and cmp_sort_art:
-            sort_norm = normalize_str(track_info.album_artist_sort)
-            art_candidates = [normalize_str(cmp_sort_art)]
-            primary_album_art = get_primary_artist(cmp_sort_art)
-            if primary_album_art:
-                art_candidates.append(normalize_str(primary_album_art))
-            sort_score = max(
-                (
-                    max(
-                        fuzz.ratio(sort_norm, cand),
-                        fuzz.token_sort_ratio(sort_norm, cand),
-                        fuzz.token_set_ratio(sort_norm, cand),
-                    )
-                    for cand in art_candidates
-                    if cand
-                ),
-                default=0.0,
-            )
-            if sort_score < 75.0:
-                track_info.album_artist_sort = None
+        # 3. Canonical metadata normalization (unifies tagger and normalizer)
+        normalize_track_metadata(track_info, allow_network=True)
 
         # 4. Compute tag diffs and persist metadata
         has_art_upgrade = bool(
@@ -3189,101 +3231,16 @@ def normalize_single_track(
         LOG.debug(f"Failed to read metadata for {file_path}: {error}")
         return None
 
-    raw_artist = clean_unicode_punct(
-        clean_disambiguation(ftfy.fix_text(current_info.artist or ""))
-    )
-    raw_artist = strip_corrupt_brackets(raw_artist)
-    base_artist, artist_features = extract_artist_features(raw_artist)
-    if base_artist:
-        raw_artist = base_artist
+    orig_info = dataclasses.replace(current_info)
 
-    raw_title = clean_unicode_punct(ftfy.fix_text(current_info.title or ""))
-    cleaned_producers = current_info.producers
-    prod_matches = list(_PROD_BRACKET_PATTERN.finditer(raw_title))
-    if prod_matches:
-        if not cleaned_producers:
-            prods = [m.group(1).strip() for m in prod_matches if m.group(1).strip()]
-            if prods:
-                cleaned_producers = ", ".join(prods)
-        raw_title = _PROD_BRACKET_PATTERN.sub("", raw_title).strip()
+    # 1. Local DSP calculation (BPM & Key)
+    _enrich_bpm(current_info, file_path, fetch_bpm, force=force)
+    _enrich_key(current_info, file_path, fetch_key, force=force)
 
-    raw_title = strip_corrupt_brackets(raw_title)
+    # 2. Canonical metadata normalization (offline)
+    normalize_track_metadata(current_info, allow_network=False)
 
-    cleaned_artist = raw_artist
-    clean_base, title_feats = extract_title_features(
-        raw_title, primary_artist=cleaned_artist
-    )
-    cleaned_title = clean_unicode_punct(clean_base)
-    cleaned_album = clean_unicode_punct(ftfy.fix_text(current_info.album or ""))
-    if current_info.album_artist:
-        cleaned_album_artist = clean_unicode_punct(
-            clean_disambiguation(ftfy.fix_text(current_info.album_artist))
-        )
-    else:
-        cleaned_album_artist = None
-    if (
-        cleaned_artist
-        and cleaned_album_artist
-        and normalize_str(cleaned_artist) == normalize_str(cleaned_album_artist)
-        and cleaned_artist != cleaned_album_artist
-    ):
-        harmonized = harmonize_artist_casing(cleaned_artist, cleaned_album_artist)
-        cleaned_artist = harmonized
-        cleaned_album_artist = harmonized
-
-    cleaned_genre = normalize_genre(current_info.genre)
-    cleaned_date = normalize_date(current_info.date)
-    cleaned_country = normalize_country_name(current_info.release_country)
-    cleaned_language = normalize_language_name(current_info.language)
-    cleaned_script = normalize_script_name(current_info.script)
-
-    cleaned_featured = normalize_featured_artists(
-        [current_info.featured_artists, *title_feats, *artist_features],
-        primary_artist=cleaned_artist or current_info.artist,
-        allow_network=False,
-    )
-    cleaned_advisory = "Explicit" if current_info.advisory == "Explicit" else None
-
-    updated_bpm = current_info.bpm
-    if fetch_bpm and (force or current_info.bpm is None):
-        try:
-            calculated = calculate_bpm(file_path)
-            if calculated is not None:
-                updated_bpm = calculated
-        except OSError as error:
-            LOG.debug(f"BPM calculation failed for {file_path}: {error}")
-
-    is_key_invalid = bool(
-        current_info.initial_key and key_to_camelot(current_info.initial_key) is None
-    )
-    updated_key = current_info.initial_key
-    if fetch_key and (force or current_info.initial_key is None or is_key_invalid):
-        try:
-            calculated_key = detect_musical_key(file_path)
-            if calculated_key is not None:
-                updated_key = calculated_key
-        except OSError as error:
-            LOG.debug(f"Key calculation failed for {file_path}: {error}")
-
-    updated_info = dataclasses.replace(
-        current_info,
-        artist=cleaned_artist or current_info.artist,
-        title=cleaned_title or current_info.title,
-        album=cleaned_album or current_info.album,
-        album_artist=cleaned_album_artist,
-        featured_artists=cleaned_featured,
-        producers=cleaned_producers,
-        advisory=cleaned_advisory,
-        genre=cleaned_genre or current_info.genre,
-        date=cleaned_date or current_info.date,
-        release_country=cleaned_country or current_info.release_country,
-        language=cleaned_language or current_info.language,
-        script=cleaned_script or current_info.script,
-        bpm=updated_bpm,
-        initial_key=updated_key,
-    )
-
-    diff_entries = _compute_tag_diffs(current_info, updated_info)
+    diff_entries = _compute_tag_diffs(orig_info, current_info)
     diff_descriptions: list[str] = []
     for field_name, old_val, new_val in diff_entries:
         if old_val is None:
@@ -3294,10 +3251,10 @@ def normalize_single_track(
             diff_descriptions.append(f"{field_name}: {old_val!r} -> {new_val!r}")
 
     if diff_entries or force:
-        rendered_diffs = _render_tag_diffs(current_info, updated_info)
+        rendered_diffs = _render_tag_diffs(orig_info, current_info)
         if not dry_run:
             try:
-                write_track_metadata(updated_info)
+                write_track_metadata(current_info)
                 get_library_state().record_track_state(file_path, "TAGGED_OK")
             except OSError as error:
                 LOG.warning(
@@ -3315,8 +3272,8 @@ def normalize_single_track(
         get_library_state().record_track_state(file_path, "TAGGED_OK")
         LOG.debug(f"Track {escape(file_path.name)} is already normalized.")
 
-    updated_info._diff_descriptions = diff_descriptions
-    return updated_info
+    current_info._diff_descriptions = diff_descriptions
+    return current_info
 
 
 def normalize_library(

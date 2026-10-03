@@ -228,7 +228,20 @@ def rename_single_folder(
     if not primary_artist or not single_title:
         return folder_path
 
-    expected_name = sanitize_name(f"{primary_artist} - {single_title}")
+    canonical_with_feat = (
+        sanitize_name(
+            f"{primary_artist} - {single_title} (feat. {track_info.featured_artists})"
+        )
+        if track_info.featured_artists
+        and not re.search(r"\b(?:feat|ft|featuring)\b", single_title, re.IGNORECASE)
+        else None
+    )
+    canonical_without_feat = sanitize_name(f"{primary_artist} - {single_title}")
+
+    if folder_now in (canonical_with_feat, canonical_without_feat):
+        return folder_path
+
+    expected_name = canonical_with_feat or canonical_without_feat
     if folder_now != expected_name:
         new_folder = folder_path.with_name(expected_name)
         if (

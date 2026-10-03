@@ -54,6 +54,7 @@ from sonora.modules.tagger import (
     is_alien_album_track,
     normalize_library,
     normalize_single_track,
+    normalize_track_metadata,
     process_single_track,
     tag_album_folder,
 )
@@ -1795,6 +1796,81 @@ class TestCoreModules(unittest.TestCase):
             isrc="QZDA52149872",
         )
         self.assertTrue(deduplicator.is_duplicate(duplicate_single))
+
+    def test_single_deduplicator_featured_artists_distinction(self) -> None:
+        deduplicator = SingleDeduplicator()
+        track_lil_tjay = TrackInfo(
+            file_path=Path(
+                "/music/singles/Lithe - Fall Back (feat. Lil Tjay)/01 - Fall Back.flac"
+            ),
+            artist="Lithe",
+            title="Fall Back",
+            featured_artists="Lil Tjay",
+            isrc="USUG12406285",
+            duration=160.0,
+        )
+        deduplicator.register(track_lil_tjay)
+
+        # Different collaboration / feature on same track title -> NOT a duplicate
+        track_nav = TrackInfo(
+            file_path=Path(
+                "/music/singles/Lithe - Fall Back (feat. NAV)/01 - Fall Back.flac"
+            ),
+            artist="Lithe",
+            title="Fall Back",
+            featured_artists="NAV",
+            isrc="AUGBT2416821",
+            duration=160.0,
+        )
+        self.assertFalse(deduplicator.is_duplicate(track_nav))
+
+    def test_single_deduplicator_different_isrc_not_duplicate(self) -> None:
+        deduplicator = SingleDeduplicator()
+        track_version_one = TrackInfo(
+            file_path=Path("/music/track1.flac"),
+            artist="Artist",
+            title="Song",
+            isrc="ISRC11111111",
+            duration=200.0,
+        )
+        deduplicator.register(track_version_one)
+
+        track_version_two = TrackInfo(
+            file_path=Path("/music/track2.flac"),
+            artist="Artist",
+            title="Song",
+            isrc="ISRC22222222",
+            duration=200.0,
+        )
+        self.assertFalse(deduplicator.is_duplicate(track_version_two))
+
+    def test_normalize_track_metadata_unification(self) -> None:
+        track = TrackInfo(
+            file_path=Path("/music/singles/Lithe - Fall Back/01 - Fall Back.flac"),
+            artist="D’banj",
+            album_artist="D’banj",
+            title="Fall Back (feat. Lil Tjay) [Prod: Metro Boomin]",
+            album="Tomorrow‘s Midnight",
+            release_country="CA",
+            language="eng",
+            script="Latn",
+            genre="hip hop",
+            track_number=5,
+            total_tracks=1,
+            release_type="Single",
+        )
+        normalized = normalize_track_metadata(track, allow_network=False)
+        self.assertEqual(normalized.artist, "D'banj")
+        self.assertEqual(normalized.album_artist, "D'banj")
+        self.assertEqual(normalized.title, "Fall Back")
+        self.assertEqual(normalized.featured_artists, "Lil Tjay")
+        self.assertEqual(normalized.producers, "Metro Boomin")
+        self.assertEqual(normalized.album, "Tomorrow's Midnight")
+        self.assertEqual(normalized.release_country, "Canada")
+        self.assertEqual(normalized.language, "English")
+        self.assertEqual(normalized.script, "Latin")
+        self.assertEqual(normalized.track_number, 1)
+        self.assertEqual(normalized.total_tracks, 1)
 
     @patch("sonora.modules.tagger.write_track_metadata")
     @patch("sonora.modules.tagger.search_discogs_release")

@@ -1,5 +1,6 @@
 import contextlib
 import os
+import re
 import shutil
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -71,6 +72,7 @@ class SingleDeduplicator:
             list[
                 tuple[
                     str,
+                    str,
                     str | None,
                     str | None,
                     float | None,
@@ -84,6 +86,7 @@ class SingleDeduplicator:
     def register(self, track_info: TrackInfo, target_path: Path | None = None) -> None:
         primary_artist_key = normalize_str(get_primary_artist(track_info.artist))
         clean_title_key = normalize_str(clean_title(track_info.title))
+        feat_key = normalize_str(track_info.featured_artists or "")
         isrc_key = track_info.isrc.strip().upper() if track_info.isrc else None
         mbid_key = (
             track_info.musicbrainz_trackid.strip().lower()
@@ -93,6 +96,7 @@ class SingleDeduplicator:
         resolved_path = target_path or track_info.file_path
         entry = (
             clean_title_key,
+            feat_key,
             isrc_key,
             mbid_key,
             track_info.duration,
@@ -115,6 +119,7 @@ class SingleDeduplicator:
             return False, None, None, None
 
         clean_title_key = normalize_str(clean_title(track_info.title))
+        feat_key = normalize_str(track_info.featured_artists or "")
         isrc_key = track_info.isrc.strip().upper() if track_info.isrc else None
         mbid_key = (
             track_info.musicbrainz_trackid.strip().lower()
@@ -125,6 +130,7 @@ class SingleDeduplicator:
 
         for (
             ex_title,
+            ex_feat,
             ex_isrc,
             ex_mbid,
             ex_duration,
@@ -137,6 +143,14 @@ class SingleDeduplicator:
                 and ex_duration is not None
                 and abs(curr_duration - ex_duration) > 15.0
             ):
+                continue
+
+            # Authoritative truth anchor: distinct non-empty ISRCs signify different recordings/releases
+            if isrc_key and ex_isrc and isrc_key != ex_isrc:
+                continue
+
+            # Distinct non-matching featured artists signify different collaborations
+            if feat_key != ex_feat:
                 continue
 
             if clean_title_key == ex_title:
@@ -374,9 +388,26 @@ def organize_library_singles(
                 )
 
                 single_release_title = get_single_release_title(track_info)
-                single_folder_name = sanitize_name(
+                canonical_with_feat = (
+                    sanitize_name(
+                        f"{primary_artist} - {single_release_title} (feat. {track_info.featured_artists})"
+                    )
+                    if track_info.featured_artists
+                    and not re.search(
+                        r"\b(?:feat|ft|featuring)\b",
+                        single_release_title,
+                        re.IGNORECASE,
+                    )
+                    else None
+                )
+                canonical_without_feat = sanitize_name(
                     f"{primary_artist} - {single_release_title}"
                 )
+
+                if path.parent.name in (canonical_with_feat, canonical_without_feat):
+                    single_folder_name = path.parent.name
+                else:
+                    single_folder_name = canonical_with_feat or canonical_without_feat
                 primary_artist_clean = sanitize_name(primary_artist)
 
                 if target_singles_dir and target_singles_dir != source_dir / "Singles":

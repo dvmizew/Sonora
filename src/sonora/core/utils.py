@@ -218,7 +218,8 @@ def normalize_legacy_diacritics(text: str | None) -> str:
 def clean_unicode_punct(text: str | None) -> str:
     if not text:
         return ""
-    cleaned = remove_zero_width(str(text))
+    cleaned = ftfy.fix_text(str(text))
+    cleaned = remove_zero_width(cleaned)
     cleaned = _UNICODE_HYPHENS_PATTERN.sub("-", cleaned)
     cleaned = _SPACES_BEFORE_COMMA_PATTERN.sub(",", cleaned)
     return normalize_legacy_diacritics(cleaned)
