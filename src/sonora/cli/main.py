@@ -130,6 +130,14 @@ ShazamOpt = Annotated[
         help="Enable acoustic recognition via Shazam for untagged tracks",
     ),
 ]
+NoDspOpt = Annotated[
+    bool,
+    Parameter(
+        name=["--no-dsp"],
+        negative="",
+        help="Disable all heavy audio DSP analysis (BPM, Musical Key, and ReplayGain)",
+    ),
+]
 
 
 def _write_json_report(
@@ -368,13 +376,7 @@ def tag(
         ),
     ] = None,
     enable_shazam: ShazamOpt = True,
-    no_dsp: Annotated[
-        bool,
-        Parameter(
-            name=["--no-dsp"],
-            help="Disable all heavy audio DSP analysis (BPM, Musical Key, and ReplayGain) for fast metadata tagging",
-        ),
-    ] = False,
+    no_dsp: NoDspOpt = False,
     ignore_cache: Annotated[
         bool,
         Parameter(
@@ -851,6 +853,7 @@ def normalize(
     fetch_bpm: BpmOpt = True,
     fetch_key: KeyOpt = True,
     fetch_replaygain: ReplayGainOpt = True,
+    no_dsp: NoDspOpt = False,
     force: ForceOpt = False,
     threads: ThreadsOpt = 4,
     dry_run: DryRunOpt = False,
@@ -862,6 +865,10 @@ def normalize(
     LOG.info(
         f"Normalizing audio tags in [bold]{escape(str(path))}[/bold] (offline mode)..."
     )
+    if no_dsp:
+        fetch_bpm = False
+        fetch_key = False
+        fetch_replaygain = False
     interrupted = False
     report = NormalizeReport([])
     try:

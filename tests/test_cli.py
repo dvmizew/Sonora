@@ -189,6 +189,21 @@ class TestCLIInterface(unittest.TestCase):
             mock_normalize.assert_called_once()
             self.assertTrue(json_output.exists())
 
+    def test_handle_normalize_subcommand_no_dsp(self) -> None:
+        with patch("sonora.cli.main.normalize_library") as mock_normalize:
+            mock_normalize.return_value = NormalizeReport([])
+            exit_code = main(["normalize", str(self.temporary_path), "--no-dsp"])
+            self.assertEqual(exit_code, 0)
+            mock_normalize.assert_called_once_with(
+                self.temporary_path,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_replaygain=False,
+                force=False,
+                dry_run=False,
+                max_threads=4,
+            )
+
     def test_handle_bpm_subcommand(self) -> None:
         song = self.temporary_path / "song.flac"
         song.write_bytes(b"dummy")
