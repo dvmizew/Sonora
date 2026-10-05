@@ -287,40 +287,66 @@ def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str
     cache_key = f"canonical_artist:{normalized}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
+        cached_words = cached.split()
+        norm_words = normalized.split()
+        is_corrupt_expansion = (
+            len(norm_words) == 1
+            and len(cached_words) > 1
+            and normalized in [w.lower() for w in cached_words]
+        )
         is_cached_acronym = (
             len(cached.replace(".", "")) <= 3
             or "." in cached
             or bool(re.search(r"\d", cached))
         )
-        if not (cached.isupper() and not is_cached_acronym):
+        if is_corrupt_expansion or (
+            clean_name.istitle() and cached.isupper() and not is_cached_acronym
+        ):
+            set_cached_api(cache_key, None)
+        elif not (cached.isupper() and not is_cached_acronym):
             return clean_unicode_punct(cached)
 
     if not allow_network:
         return clean_unicode_punct(clean_name)
 
-    # Tier 3: MusicBrainz Alias / Legal Name lookup
+    artists: list[dict[str, Any]] = []
+    # Tier 3: MusicBrainz exact match lookup
     try:
         from sonora.services.musicbrainz import search_musicbrainz_artists
 
         artists = search_musicbrainz_artists(
             query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
         )
+        # Check for exact case-sensitive match first
+        for artist in artists:
+            art_name = str(artist.get("name", "")).strip()
+            if art_name == clean_name:
+                clean_res = clean_unicode_punct(art_name)
+                set_cached_api(cache_key, clean_res)
+                return clean_res
 
-        # Priority 1: Exact case-insensitive name match
+        clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
         for artist in artists:
             art_name = str(artist.get("name", "")).strip()
             if not art_name:
                 continue
-            if art_name.lower() == clean_name.lower():
-                is_acronym_or_initialism = (
+            is_exact = art_name.lower() == clean_name.lower()
+            is_norm = normalize_str(art_name) == normalized
+            if is_exact or is_norm:
+                cand_has_punct = bool(re.search(r"[^\w\s]", art_name))
+                if not is_exact and not clean_has_punct and cand_has_punct:
+                    continue
+                is_short_acronym = (
                     len(clean_name.replace(".", "")) <= 3
                     or "." in clean_name
                     or bool(re.search(r"\d", clean_name))
                 )
                 if (
-                    clean_name.isupper()
-                    and is_acronym_or_initialism
-                    and not art_name.isupper()
+                    clean_name.istitle()
+                    and art_name.isupper()
+                    and len(clean_name.replace(".", "")) > 3
+                ) or (
+                    clean_name.isupper() and is_short_acronym and not art_name.isupper()
                 ):
                     res_name = clean_name
                 else:
@@ -328,44 +354,10 @@ def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str
                 clean_res = clean_unicode_punct(res_name)
                 set_cached_api(cache_key, clean_res)
                 return clean_res
-
-        # Priority 2: Normalized exact match (ignoring punctuation/diacritics)
-        clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
-        for artist in artists:
-            art_name = str(artist.get("name", "")).strip()
-            if not art_name:
-                continue
-            if normalize_str(art_name) == normalized:
-                cand_has_punct = bool(re.search(r"[^\w\s]", art_name))
-                if not clean_has_punct and cand_has_punct:
-                    continue
-                clean_art = clean_unicode_punct(art_name)
-                set_cached_api(cache_key, clean_art)
-                return clean_art
-
-        # Priority 3: Exact alias match
-        for artist in artists:
-            art_name = str(artist.get("name", "")).strip()
-            if not art_name:
-                continue
-            for alias_item in artist.get("alias-list", []):
-                alias_name = (
-                    alias_item.get("alias")
-                    if isinstance(alias_item, dict)
-                    else str(alias_item)
-                )
-                if alias_name and alias_name.lower() == clean_name.lower():
-                    clean_art = clean_unicode_punct(art_name)
-                    set_cached_api(cache_key, clean_art)
-                    return clean_art
-                if alias_name and normalize_str(alias_name) == normalized:
-                    clean_art = clean_unicode_punct(art_name)
-                    set_cached_api(cache_key, clean_art)
-                    return clean_art
     except (httpx.HTTPError, OSError) as e:
         LOG.debug(f"MusicBrainz API error during artist resolution: {e}")
 
-    # Tier 4: Deezer Artist lookup
+    # Tier 4: Deezer Artist lookup (exact catalog stage name match)
     try:
         response = SESSION.get(
             "https://api.deezer.com/search/artist",
@@ -374,21 +366,76 @@ def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str
         )
         if response.status_code == 200:
             deezer_results = response.json().get("data", [])
-            if deezer_results and isinstance(deezer_results, list):
-                deezer_name = str(deezer_results[0].get("name", "")).strip()
-                if deezer_name and normalize_str(deezer_name) == normalized:
-                    # Do not override all-caps acronyms (e.g. M.G.L) with lowercased titles
-                    if (
-                        clean_name.isupper()
-                        and not deezer_name.isupper()
-                        and len(clean_name.replace(".", "")) <= 5
-                    ):
-                        deezer_name = clean_name
-                    clean_deezer = clean_unicode_punct(deezer_name)
-                    set_cached_api(cache_key, clean_deezer)
-                    return clean_deezer
+            if isinstance(deezer_results, list):
+                # Check exact case match first
+                for deezer_entry in deezer_results[:10]:
+                    d_name = str(deezer_entry.get("name", "")).strip()
+                    if d_name == clean_name:
+                        clean_deezer = clean_unicode_punct(d_name)
+                        set_cached_api(cache_key, clean_deezer)
+                        return clean_deezer
+
+                clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
+                for deezer_entry in deezer_results[:10]:
+                    d_name = str(deezer_entry.get("name", "")).strip()
+                    if not d_name:
+                        continue
+                    is_exact = d_name.lower() == clean_name.lower()
+                    is_norm = normalize_str(d_name) == normalized
+                    if is_exact or is_norm:
+                        if (
+                            not is_exact
+                            and not clean_has_punct
+                            and bool(re.search(r"[^\w\s]", d_name))
+                        ):
+                            continue
+                        if (clean_name.istitle() and d_name.isupper()) or (
+                            clean_name.isupper()
+                            and len(clean_name.replace(".", "")) <= 5
+                        ):
+                            res_name = clean_name
+                        else:
+                            res_name = d_name
+                        clean_deezer = clean_unicode_punct(res_name)
+                        set_cached_api(cache_key, clean_deezer)
+                        return clean_deezer
     except (httpx.HTTPError, OSError) as e:
         LOG.debug(f"Deezer API error during artist resolution: {e}")
+
+    # Tier 5: MusicBrainz Alias / Legal Name lookup (from pre-fetched results)
+    clean_words = clean_name.split()
+    for artist in artists:
+        art_name = str(artist.get("name", "")).strip()
+        if not art_name:
+            continue
+        art_words = art_name.split()
+
+        # Guardrail: Single-word stage names must never expand into multi-word entities via aliases
+        if len(clean_words) == 1 and len(art_words) > 1:
+            continue
+        if clean_name.lower() in [w.lower() for w in art_words]:
+            continue
+
+        for alias_item in artist.get("alias-list", []):
+            if isinstance(alias_item, dict):
+                alias_name = str(alias_item.get("alias") or "")
+                alias_type = str(alias_item.get("type") or "").strip().lower()
+            else:
+                alias_name = str(alias_item)
+                alias_type = ""
+
+            if alias_type == "search hint" or (
+                alias_type == "legal name" and len(clean_words) < 2
+            ):
+                continue
+
+            if alias_name and (
+                alias_name.lower() == clean_name.lower()
+                or normalize_str(alias_name) == normalized
+            ):
+                clean_art = clean_unicode_punct(art_name)
+                set_cached_api(cache_key, clean_art)
+                return clean_art
 
     clean_final = clean_unicode_punct(clean_name)
     set_cached_api(cache_key, clean_final)
@@ -425,6 +472,11 @@ def is_single_group_artist(raw_name: str | None, allow_network: bool = True) -> 
 
     user_overrides = _load_user_overrides()
     if normalized in user_overrides:
+        return True
+
+    from sonora.core.config import get_config
+
+    if any(normalize_str(g) == normalized for g in get_config().known_group_artists):
         return True
 
     cache_key = f"is_group_entity:{normalized}"

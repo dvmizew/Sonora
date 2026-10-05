@@ -9,6 +9,7 @@ from sonora.core.constants import RATE_LIMIT_ACOUSTID
 from sonora.core.logger import LOG
 from sonora.core.utils import (
     RateLimiter,
+    clean_title,
     is_valid_uuid,
     match_score,
     normalize_str,
@@ -112,23 +113,39 @@ def lookup_acoustid(
             candidate_title,
             candidate_artist,
         ) in acoustid.parse_lookup_result(acoustid_lookup_payload):
-            if score >= 0.75 and recording_id and is_valid_uuid(str(recording_id)):
+            if score >= 0.80 and recording_id and is_valid_uuid(str(recording_id)):
                 combined_score = float(score) * 100.0
-                if (
-                    expected_artist
-                    and expected_title
-                    and candidate_title
-                    and candidate_artist
-                ):
-                    text_score = match_score(
-                        expected_artist,
-                        expected_title,
-                        str(candidate_artist),
-                        str(candidate_title),
-                    )
-                    if text_score < 80.0:
+                if expected_artist and expected_title:
+                    if candidate_title and candidate_artist:
+                        text_score = match_score(
+                            expected_artist,
+                            expected_title,
+                            str(candidate_artist),
+                            str(candidate_title),
+                        )
+                        if text_score < 85.0:
+                            continue
+                        combined_score = (float(score) * 40.0) + (text_score * 0.6)
+                    elif candidate_title:
+                        from rapidfuzz import fuzz
+
+                        title_sim = float(
+                            fuzz.ratio(
+                                clean_title(expected_title).lower(),
+                                clean_title(str(candidate_title)).lower(),
+                            )
+                        )
+                        min_len = min(
+                            len(clean_title(expected_title)),
+                            len(clean_title(str(candidate_title))),
+                        )
+                        title_thresh = 95.0 if min_len < 8 else 85.0
+                        if title_sim < title_thresh:
+                            continue
+                        combined_score = (float(score) * 40.0) + (title_sim * 0.6)
+                    else:
+                        # Candidate lacks metadata: reject when expected metadata is present to prevent false collisions
                         continue
-                    combined_score = (float(score) * 40.0) + (text_score * 0.6)
 
                 if combined_score > best_combined_score:
                     best_combined_score = combined_score

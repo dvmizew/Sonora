@@ -393,6 +393,26 @@ class TestServicesEngine(unittest.TestCase):
 
         self.assertIsNone(lookup_acoustid(Path(__file__), api_key="dummy_key"))
 
+    @patch("sonora.services.acoustid.acoustid")
+    def test_acoustid_rejects_fingerprint_collision(
+        self, mock_acoustid: MagicMock
+    ) -> None:
+        mock_acoustid.fingerprint_file.return_value = (216.0, "fp_data")
+        mock_acoustid.lookup.return_value = {}
+        # AcoustID returns high audio score (0.95) for unrelated song (e.g. Diego Modena - Brazil)
+        mock_acoustid.parse_lookup_result.return_value = [
+            (0.95, "cbe3bed2-4dc5-461d-b6e3-a5e11c9845d5", "Brazil", "Diego Modena")
+        ]
+
+        # When searching for Laurentiu Duta - Shining Heart, the collision must be rejected
+        mbid = lookup_acoustid(
+            Path(__file__),
+            api_key="dummy_key",
+            expected_title="Shining Heart",
+            expected_artist="Laurentiu Duta",
+        )
+        self.assertIsNone(mbid)
+
     def test_lastfm_no_api_key_returns_empty(self) -> None:
         self.assertEqual(fetch_lastfm_tags("Artist", "Title", api_key=None), [])
 

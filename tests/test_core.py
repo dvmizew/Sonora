@@ -512,6 +512,36 @@ class TestCoreUtils(unittest.TestCase):
             self.assertEqual(resolve_artist_name("rava"), "RAVA")
 
     @patch("sonora.core.utils.get_cached_api", return_value=None)
+    @patch("sonora.core.utils.set_cached_api")
+    def test_resolve_artist_name_preserves_titlecase_over_allcaps(
+        self, mock_set_cache: MagicMock, mock_get_cache: MagicMock
+    ) -> None:
+        from sonora.core.utils import resolve_artist_name
+
+        resolve_artist_name.cache_clear()
+        with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
+            # MusicBrainz returns CRUSH (Group, score 100)
+            mock_mb.return_value = [
+                {"name": "CRUSH", "type": "Group", "ext:score": "100", "id": "uuid-1"},
+            ]
+            # TitleCase "Crush" must not be converted to screaming "CRUSH"
+            self.assertEqual(resolve_artist_name("Crush"), "Crush")
+
+    def test_resolve_artist_name_heals_corrupted_cached_expansion(self) -> None:
+        from sonora.core.utils import resolve_artist_name
+
+        resolve_artist_name.cache_clear()
+        with (
+            patch("sonora.core.utils.get_cached_api", return_value="Gruppe Drei"),
+            patch("sonora.core.utils.set_cached_api") as mock_set_cache,
+        ):
+            # When cache has corrupt multi-word expansion "Gruppe Drei" for single word "Drei"
+            # It must purge cache and return "Drei" (when network is disabled)
+            resolved_artist_name = resolve_artist_name("Drei", allow_network=False)
+            mock_set_cache.assert_called_with("canonical_artist:drei", None)
+            self.assertEqual(resolved_artist_name, "Drei")
+
+    @patch("sonora.core.utils.get_cached_api", return_value=None)
     def test_resolve_artist_name_allow_network_false(
         self, mock_get_cache: MagicMock
     ) -> None:

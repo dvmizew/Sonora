@@ -92,6 +92,25 @@ class SonoraConfig:
         "mit",
     )
 
+    known_group_artists: frozenset[str] = field(
+        default_factory=lambda: frozenset(
+            {
+                "vargas & lagola",
+                "simon & garfunkel",
+                "play & win",
+                "earth, wind & fire",
+                "crosby, stills & nash",
+                "crosby, stills, nash & young",
+                "brooks & dunn",
+                "hall & oates",
+                "kool & the gang",
+                "kc & the sunshine band",
+                "emerson, lake & palmer",
+                "m&g",
+            }
+        )
+    )
+
     discogs_token: str | None = None
     acoustid_api_key: str | None = None
     genius_api_token: str | None = None
@@ -446,7 +465,8 @@ def get_feat_tokens_pattern() -> re.Pattern[str]:
     ]
 
     parts: list[str] = [
-        r"[,;&+]",
+        r"[,;]",
+        r"\s+[&+]|\s*[&+](?=\s)",
         r"\bw/(?!\s*[oO](?:ut)?\b)\s*",
         r"\bw\.\s*",
     ]
