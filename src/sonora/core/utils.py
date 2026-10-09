@@ -6,11 +6,11 @@ import threading
 import time
 import unicodedata
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, TypeGuard, TypeVar
 
 import anyascii
 import ftfy
@@ -1459,6 +1459,52 @@ class RateLimiter:
         if sleep_time > 0:
             time.sleep(sleep_time)
         return sleep_time
+
+
+_T = TypeVar("_T")
+
+
+def retry_network_call(
+    func: Callable[[], _T],
+    *,
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    rate_limiter: RateLimiter | None = None,
+    transient_exceptions: tuple[type[Exception], ...] = (
+        OSError,
+        TimeoutError,
+    ),
+    retry_condition: Callable[[Exception], bool] | None = None,
+) -> _T:
+    """
+    Execute a network-dependent callable with exponential backoff retries.
+    Optionally coordinates with a RateLimiter before each attempt to ensure rate
+    limits are strictly respected.
+    """
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        if rate_limiter is not None:
+            rate_limiter.wait()
+        try:
+            return func()
+        except transient_exceptions as error:
+            if retry_condition is not None and not retry_condition(error):
+                raise
+            last_error = error
+            if attempt < max_retries - 1:
+                delay = initial_delay * (backoff_factor**attempt)
+                LOG.debug(
+                    f"Transient network error ({type(error).__name__}: {error}). "
+                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries})..."
+                )
+                time.sleep(delay)
+                continue
+            raise
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Unreachable")
 
 
 def is_valid_uuid(

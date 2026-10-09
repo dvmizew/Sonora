@@ -3,6 +3,7 @@ import threading
 from pathlib import Path
 
 import acoustid
+from acoustid import AcoustidError, WebServiceError
 
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.constants import RATE_LIMIT_ACOUSTID
@@ -13,6 +14,7 @@ from sonora.core.utils import (
     is_valid_uuid,
     match_score,
     normalize_str,
+    retry_network_call,
     safe_float,
 )
 
@@ -101,9 +103,18 @@ def lookup_acoustid(
         if cached is not None:
             return str(cached) if cached else None
 
-        _ACOUSTID_LIMITER.wait()
-
-        acoustid_lookup_payload = acoustid.lookup(api_key, fingerprint, duration)
+        acoustid_lookup_payload = retry_network_call(
+            lambda: acoustid.lookup(api_key, fingerprint, duration),
+            max_retries=3,
+            initial_delay=1.0,
+            rate_limiter=_ACOUSTID_LIMITER,
+            transient_exceptions=(
+                AcoustidError,
+                WebServiceError,
+                OSError,
+                TimeoutError,
+            ),
+        )
         best_mbid = None
         best_combined_score = -1.0
 
@@ -153,6 +164,6 @@ def lookup_acoustid(
 
         set_cached_api(cache_key, best_mbid)
         return best_mbid or None
-    except (acoustid.AcoustidError, acoustid.WebServiceError, OSError) as error:
+    except (AcoustidError, WebServiceError, OSError) as error:
         LOG.debug(f"AcoustID lookup failed for {file_path.name}: {error}")
         return None

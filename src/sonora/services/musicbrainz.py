@@ -1,8 +1,10 @@
-from typing import Any
+import urllib.error
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import httpx
 import musicbrainzngs
-from musicbrainzngs import MusicBrainzError
+from musicbrainzngs import MusicBrainzError, NetworkError, ResponseError
 
 from sonora import __version__
 from sonora.core.cache import get_cached_api, set_cached_api
@@ -18,10 +20,38 @@ from sonora.core.utils import (
     normalize_language_name,
     normalize_script_name,
     normalize_str,
+    retry_network_call,
     safe_int,
 )
 
 _MB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_MUSICBRAINZ)
+_T = TypeVar("_T")
+
+
+def _is_retryable_mb_error(error: Exception) -> bool:
+    if isinstance(error, NetworkError):
+        return True
+    if isinstance(error, ResponseError):
+        cause = getattr(error, "cause", None)
+        if isinstance(cause, urllib.error.HTTPError):
+            return cause.code not in (400, 404)
+        return True
+    return isinstance(error, (OSError, TimeoutError))
+
+
+def _call_musicbrainz(func: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    return retry_network_call(
+        lambda: func(*args, **kwargs),
+        max_retries=3,
+        initial_delay=1.5,
+        rate_limiter=_MB_LIMITER,
+        transient_exceptions=(
+            MusicBrainzError,
+            OSError,
+            TimeoutError,
+        ),
+        retry_condition=_is_retryable_mb_error,
+    )
 
 
 def init_musicbrainz(
@@ -51,9 +81,10 @@ def fetch_artist_discography(artist: str) -> list[dict[str, object]]:
     if isinstance(cached, list):
         return cached
 
-    _MB_LIMITER.wait()
     try:
-        result = musicbrainzngs.search_releases(artist=artist, limit=100)
+        result = _call_musicbrainz(
+            musicbrainzngs.search_releases, artist=artist, limit=100
+        )
         releases: list[dict[str, object]] = (
             result.get("release-list", []) if isinstance(result, dict) else []
         )
@@ -173,9 +204,10 @@ def search_musicbrainz_release(
         set_cached_api(cache_key, target_release)
         return target_release
 
-    _MB_LIMITER.wait()
     try:
-        result = musicbrainzngs.search_releases(artist=artist, release=album, limit=10)
+        result = _call_musicbrainz(
+            musicbrainzngs.search_releases, artist=artist, release=album, limit=10
+        )
         raw_releases = (
             result.get("release-list", []) if isinstance(result, dict) else []
         )
@@ -196,9 +228,11 @@ def search_musicbrainz_release(
             and cleaned_album
             and normalize_str(cleaned_album) != normalize_str(album)
         ):
-            _MB_LIMITER.wait()
-            alt_res = musicbrainzngs.search_releases(
-                artist=artist, release=cleaned_album, limit=10
+            alt_res = _call_musicbrainz(
+                musicbrainzngs.search_releases,
+                artist=artist,
+                release=cleaned_album,
+                limit=10,
             )
             raw_alt = (
                 alt_res.get("release-list", []) if isinstance(alt_res, dict) else []
@@ -233,10 +267,12 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
     if cached is not None:
         return str(cached) if cached else None
 
-    _MB_LIMITER.wait()
     try:
-        result = musicbrainzngs.search_recordings(
-            artist=artist, recording=cleaned_title, limit=5
+        result = _call_musicbrainz(
+            musicbrainzngs.search_recordings,
+            artist=artist,
+            recording=cleaned_title,
+            limit=5,
         )
         recordings = result.get("recording-list", [])
         if not recordings:
@@ -320,10 +356,11 @@ def fetch_album_track_mbids(release_mbid: str) -> dict[Any, str]:
     if isinstance(cached, dict) and any(isinstance(k, tuple) for k in cached):
         return {k: str(v) for k, v in cached.items()}
 
-    _MB_LIMITER.wait()
     try:
-        release_data = musicbrainzngs.get_release_by_id(
-            release_mbid, includes=["recordings", "media", "artist-credits"]
+        release_data = _call_musicbrainz(
+            musicbrainzngs.get_release_by_id,
+            release_mbid,
+            includes=["recordings", "media", "artist-credits"],
         )
         mediums = (
             release_data.get("release", {}).get("medium-list", [])
@@ -371,9 +408,9 @@ def fetch_musicbrainz_recording_details(
     if isinstance(cached, dict):
         return cached
 
-    _MB_LIMITER.wait()
     try:
-        musicbrainz_payload = musicbrainzngs.get_recording_by_id(
+        musicbrainz_payload = _call_musicbrainz(
+            musicbrainzngs.get_recording_by_id,
             recording_mbid,
             includes=[
                 "artists",
@@ -473,9 +510,9 @@ def fetch_musicbrainz_release_details(
     if isinstance(cached, dict) and "tracks_by_disc_and_position" in cached:
         return cached
 
-    _MB_LIMITER.wait()
     try:
-        musicbrainz_payload = musicbrainzngs.get_release_by_id(
+        musicbrainz_payload = _call_musicbrainz(
+            musicbrainzngs.get_release_by_id,
             release_mbid,
             includes=[
                 "recordings",
@@ -731,10 +768,9 @@ def search_musicbrainz_artists(query: str, limit: int = 5) -> list[dict[str, Any
     Returns list of artist dictionaries.
     """
     init_musicbrainz()
-    _MB_LIMITER.wait()
     try:
-        artist_search_payload: Any = musicbrainzngs.search_artists(
-            query=query, limit=limit
+        artist_search_payload: Any = _call_musicbrainz(
+            musicbrainzngs.search_artists, query=query, limit=limit
         )
         if isinstance(artist_search_payload, dict):
             raw_list = artist_search_payload.get("artist-list", [])

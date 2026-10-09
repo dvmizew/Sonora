@@ -1102,6 +1102,78 @@ class TestServicesEngine(unittest.TestCase):
                 mock_cfg.return_value = MagicMock(enable_shazam=False)
                 self.assertIsNone(recognize_audio_track(audio_file))
 
+    def test_call_musicbrainz_retries_on_transient_network_error(self) -> None:
+        import musicbrainzngs
+
+        from sonora.services.musicbrainz import _call_musicbrainz
+
+        mock_api = MagicMock(
+            side_effect=[
+                musicbrainzngs.NetworkError("Temporary dropout"),
+                {"recording-list": [{"id": "uuid-123", "title": "Song"}]},
+            ]
+        )
+        with patch("time.sleep"):
+            result = _call_musicbrainz(mock_api, "param")
+        self.assertEqual(
+            result, {"recording-list": [{"id": "uuid-123", "title": "Song"}]}
+        )
+        self.assertEqual(mock_api.call_count, 2)
+
+    def test_call_musicbrainz_does_not_retry_on_404(self) -> None:
+        import email.message
+        import io
+        import urllib.error
+
+        import musicbrainzngs
+
+        from sonora.services.musicbrainz import _call_musicbrainz
+
+        http_404 = urllib.error.HTTPError(
+            "https://musicbrainz.org",
+            404,
+            "Not Found",
+            email.message.Message(),
+            io.BytesIO(b""),
+        )
+        self.addCleanup(http_404.close)
+        err_404 = musicbrainzngs.ResponseError(cause=http_404)
+        mock_api = MagicMock(side_effect=err_404)
+
+        with patch("time.sleep"), self.assertRaises(musicbrainzngs.ResponseError):
+            _call_musicbrainz(mock_api)
+        self.assertEqual(mock_api.call_count, 1)
+
+    @patch("sonora.services.acoustid.acoustid")
+    def test_lookup_acoustid_retries_on_webservice_error(
+        self, mock_acoustid: MagicMock
+    ) -> None:
+        import acoustid
+
+        from sonora.services.acoustid import lookup_acoustid
+
+        mock_acoustid.fingerprint_file.return_value = (180.0, "fp_test")
+        mock_acoustid.lookup.side_effect = [
+            acoustid.WebServiceError("HTTP 503 Service Unavailable"),
+            {
+                "status": "ok",
+                "results": [{"score": 0.95, "recordings": [{"id": "uuid-test"}]}],
+            },
+        ]
+        mock_acoustid.parse_lookup_result.return_value = [
+            (0.95, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Track", "Artist")
+        ]
+
+        with (
+            patch("sonora.services.acoustid.get_cached_api", return_value=None),
+            patch("sonora.services.acoustid.set_cached_api"),
+            patch("time.sleep"),
+        ):
+            mbid = lookup_acoustid(Path(__file__), api_key="dummy_key")
+
+        self.assertEqual(mbid, "c8b03190-306c-4125-9b32-3f9d86d60a12")
+        self.assertEqual(mock_acoustid.lookup.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

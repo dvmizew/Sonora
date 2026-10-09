@@ -22,6 +22,7 @@ from sonora.core.utils import (
     clean_title,
     get_primary_artist,
     normalize_str,
+    retry_network_call,
 )
 
 logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
@@ -378,8 +379,17 @@ def _query_syncedlyrics(
     if lang:
         kwargs["lang"] = lang
 
-    _LYRICS_LIMITER.wait()
-    result = syncedlyrics.search(query_str, **kwargs)
+    result = retry_network_call(
+        lambda: syncedlyrics.search(query_str, **kwargs),
+        max_retries=2,
+        initial_delay=1.0,
+        rate_limiter=_LYRICS_LIMITER,
+        transient_exceptions=(
+            httpx.HTTPError,
+            OSError,
+            TimeoutError,
+        ),
+    )
     if isinstance(result, str) and result.strip():
         cleaned_lyrics = clean_lyrics_text(result.strip())
         if cleaned_lyrics and is_lyrics_duration_valid(cleaned_lyrics, duration):
