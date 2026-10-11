@@ -1,5 +1,18 @@
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
+
+MetadataSource = Literal[
+    "MusicBrainz",
+    "Discogs",
+    "iTunes",
+    "Deezer",
+    "Last.fm",
+    "Genius",
+    "TheAudioDB",
+    "Shazam",
+    "AcoustID",
+]
 
 
 @dataclass
@@ -78,6 +91,7 @@ class TrackInfo:
     art_width: int | None = None
     art_height: int | None = None
     is_alien: bool = False
+    metadata_sources: dict[str, MetadataSource] = field(default_factory=dict)
     _diff_descriptions: list[str] = field(
         default_factory=list, repr=False, compare=False
     )
@@ -102,6 +116,13 @@ class CheckReport:
     corrupt_files: int = 0
     missing_metadata: int = 0
     missing_lrc: int = 0
+
+    @property
+    def files_with_issues(self) -> int:
+        from sonora.core.constants import SUPPORTED_EXTS
+
+        return sum(Path(path).suffix.lower() in SUPPORTED_EXTS for path in self.issues)
+
     issues: dict[str, list[str]] = field(default_factory=dict)
 
 
@@ -114,6 +135,7 @@ class RenameReport:
     folders_renamed: int = 0
     lrc_synced: int = 0
     unchanged_files: int = 0
+    failed_files: int = 0
 
 
 class NormalizeReport(list[TrackInfo]):

@@ -3,19 +3,13 @@ from typing import Any
 
 import httpx
 
+from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.constants import RATE_LIMIT_DEEZER
+from sonora.core.config import get_config
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import (
-    RateLimiter,
-    clean_title,
-    match_score,
-    normalize_str,
-    safe_int,
-)
-
-_DEEZER_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_DEEZER)
+from sonora.core.text import normalize_str, safe_int
+from sonora.core.titles import clean_title, score_artist_title_match
 
 
 def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
@@ -28,7 +22,6 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
     if cached is not None:
         return str(cached) if cached else None
 
-    _DEEZER_LIMITER.wait()
     query = f'artist:"{artist}" album:"{clean_album}"'
     url = f"https://api.deezer.com/search/album?q={urllib.parse.quote(query)}"
 
@@ -38,30 +31,33 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
             set_cached_api(cache_key, None)
             return None
 
-        deezer_payload = response.json()
-        items = (
-            deezer_payload.get("data", []) if isinstance(deezer_payload, dict) else []
+        deezer_payload = require_api_object(response.json(), "Deezer search response")
+        if deezer_payload.get("error"):
+            return None
+        catalog_candidates = require_api_records(
+            deezer_payload.get("data"), "Deezer search results"
         )
-        if not items:
+        if not catalog_candidates:
             query2 = f"{artist} {clean_album}"
             url2 = f"https://api.deezer.com/search/album?q={urllib.parse.quote(query2)}"
+
             fallback_response = SESSION.get(url2, timeout=6)
             if fallback_response.status_code == 200:
-                fallback_payload = fallback_response.json()
-                items = (
-                    fallback_payload.get("data", [])
-                    if isinstance(fallback_payload, dict)
-                    else []
+                fallback_payload = require_api_object(
+                    fallback_response.json(), "Deezer fallback response"
+                )
+                if fallback_payload.get("error"):
+                    return None
+                catalog_candidates = require_api_records(
+                    fallback_payload.get("data"), "Deezer fallback results"
                 )
 
         best_cover_url = None
         best_score = 0.0
 
-        for track_candidate in items:
-            if not isinstance(track_candidate, dict):
-                continue
-            item_artist = str(track_candidate.get("artist", {}).get("name", ""))
-            item_album = str(track_candidate.get("title", ""))
+        for track_candidate in catalog_candidates:
+            candidate_artist = str(track_candidate.get("artist", {}).get("name", ""))
+            candidate_album = str(track_candidate.get("title", ""))
             cover_xl = str(track_candidate.get("cover_xl", "")) or str(
                 track_candidate.get("cover_big", "")
             )
@@ -69,8 +65,10 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
             if not cover_xl:
                 continue
 
-            score = match_score(artist, clean_album, item_artist, item_album)
-            if score > best_score and score >= 70.0:
+            score = score_artist_title_match(
+                artist, clean_album, candidate_artist, candidate_album
+            )
+            if score > best_score:
                 best_score = score
                 best_cover_url = cover_xl
 
@@ -94,7 +92,6 @@ def fetch_deezer_album_details(
     if isinstance(cached, dict):
         return cached
 
-    _DEEZER_LIMITER.wait()
     query = f'artist:"{artist}" album:"{clean_album}"'
     url = f"https://api.deezer.com/search/album?q={urllib.parse.quote(query)}"
 
@@ -104,22 +101,27 @@ def fetch_deezer_album_details(
             set_cached_api(cache_key, None)
             return None
 
-        items = (
-            response.json().get("data", []) if isinstance(response.json(), dict) else []
+        deezer_payload = require_api_object(response.json(), "Deezer search response")
+        if deezer_payload.get("error"):
+            return None
+        catalog_candidates = require_api_records(
+            deezer_payload.get("data"), "Deezer search results"
         )
-        if not items:
+        if not catalog_candidates:
             set_cached_api(cache_key, None)
             return None
 
-        best_item = None
+        best_candidate = None
         best_score = 0.0
-        for track_candidate in items:
-            if not isinstance(track_candidate, dict):
+        for track_candidate in catalog_candidates:
+            candidate_title = str(track_candidate.get("title", ""))
+            candidate_artist = str(track_candidate.get("artist", {}).get("name", ""))
+            score = score_artist_title_match(
+                artist, clean_album, candidate_artist, candidate_title
+            )
+            if score <= 0.0:
                 continue
-            item_title = str(track_candidate.get("title", ""))
-            item_artist = str(track_candidate.get("artist", {}).get("name", ""))
-            score = match_score(artist, clean_album, item_artist, item_title)
-            if normalize_str(item_title) == normalize_str(clean_album):
+            if normalize_str(candidate_title) == normalize_str(clean_album):
                 score += 50.0
 
             nb_tracks = safe_int(track_candidate.get("nb_tracks"))
@@ -139,29 +141,31 @@ def fetch_deezer_album_details(
             ):
                 score -= 40.0
 
-            if score > best_score and score >= 60.0:
+            if (
+                score > best_score
+                and score >= get_config().album_candidate_rank_threshold
+            ):
                 best_score = score
-                best_item = track_candidate
+                best_candidate = track_candidate
 
-        if not best_item:
+        if not best_candidate:
             set_cached_api(cache_key, None)
             return None
 
-        album_id = best_item.get("id")
+        album_id = best_candidate.get("id")
         if not album_id:
             return None
 
-        _DEEZER_LIMITER.wait()
         detail_response = SESSION.get(
             f"https://api.deezer.com/album/{album_id}", timeout=6
         )
         if detail_response.status_code != 200:
             return None
 
-        album_deezer_payload = detail_response.json()
-        if not isinstance(album_deezer_payload, dict) or album_deezer_payload.get(
-            "error"
-        ):
+        album_deezer_payload = require_api_object(
+            detail_response.json(), "Deezer album response"
+        )
+        if album_deezer_payload.get("error"):
             return None
         genres = [
             genre_item["name"]
@@ -172,19 +176,40 @@ def fetch_deezer_album_details(
         tracks_by_position: dict[Any, dict[str, object]] = {}
         tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
-        tracks_deezer_payload = (
-            album_deezer_payload.get("tracks", {}).get("data", [])
-            if isinstance(album_deezer_payload.get("tracks"), dict)
-            else []
+        tracks_page = require_api_object(
+            album_deezer_payload.get("tracks", {}), "Deezer album tracks"
         )
+        tracks_deezer_payload = list(
+            require_api_records(
+                tracks_page.get("data", []), "Deezer album track records"
+            )
+        )
+        visited_pages: set[str] = set()
+        while tracks_page.get("next"):
+            page_url = urllib.parse.urlsplit(str(tracks_page["next"]))
+            if page_url.hostname != "api.deezer.com" or page_url.scheme not in (
+                "http",
+                "https",
+            ):
+                raise ValueError("Unexpected Deezer pagination host")
+            next_page = page_url._replace(scheme="https").geturl()
+            if next_page in visited_pages:
+                raise ValueError("Repeated Deezer pagination link")
+            visited_pages.add(next_page)
+            page_response = SESSION.get(next_page, timeout=6)
+            page_response.raise_for_status()
+            tracks_page = require_api_object(page_response.json(), "Deezer tracks page")
+            tracks_deezer_payload.extend(
+                require_api_records(
+                    tracks_page.get("data"), "Deezer tracks page records"
+                )
+            )
 
-        for idx, track_candidate in enumerate(tracks_deezer_payload, start=1):
-            if not isinstance(track_candidate, dict):
-                continue
+        for track_index, track_candidate in enumerate(tracks_deezer_payload, start=1):
             raw_pos = track_candidate.get("track_position")
-            pos = raw_pos if isinstance(raw_pos, int) else idx
-            disk_num = safe_int(track_candidate.get("disk_number")) or 1
-            t_name = str(track_candidate.get("title", ""))
+            track_position = raw_pos if isinstance(raw_pos, int) else track_index
+            disc_number = safe_int(track_candidate.get("disk_number")) or 1
+            track_title = str(track_candidate.get("title", ""))
             artist_name = (
                 track_candidate.get("artist", {}).get("name")
                 if isinstance(track_candidate.get("artist"), dict)
@@ -194,10 +219,10 @@ def fetch_deezer_album_details(
 
             track_dict: dict[str, object] = {
                 "id": track_candidate.get("id"),
-                "title": t_name,
+                "title": track_title,
                 "artist": artist_name,
-                "track_position": pos,
-                "disk_number": disk_num,
+                "track_position": track_position,
+                "disk_number": disc_number,
                 "isrc": track_candidate.get("isrc"),
                 "bpm": track_candidate.get("bpm"),
                 "gain": track_candidate.get("gain"),
@@ -205,14 +230,14 @@ def fetch_deezer_album_details(
                 "release_date": album_deezer_payload.get("release_date"),
                 "genre": genres[0] if genres else None,
             }
-            tracks_by_disc_and_position[(disk_num, pos)] = track_dict
-            tracks_by_position[(disk_num, pos)] = track_dict
-            tracks_by_position[f"{disk_num}-{pos}"] = track_dict
-            if disk_num == 1 or pos not in tracks_by_position:
-                tracks_by_position[pos] = track_dict
-            if t_name:
-                tracks_by_title[normalize_str(clean_title(t_name))] = track_dict
-                tracks_by_title[normalize_str(t_name)] = track_dict
+            tracks_by_disc_and_position[(disc_number, track_position)] = track_dict
+            tracks_by_position[(disc_number, track_position)] = track_dict
+            tracks_by_position[f"{disc_number}-{track_position}"] = track_dict
+            if disc_number == 1 or track_position not in tracks_by_position:
+                tracks_by_position[track_position] = track_dict
+            if track_title:
+                tracks_by_title[normalize_str(clean_title(track_title))] = track_dict
+                tracks_by_title[normalize_str(track_title)] = track_dict
 
         result = {
             "title": album_deezer_payload.get("title"),
@@ -269,7 +294,7 @@ def _parse_deezer_track_payload(
                     lyricists.append(str(contributor_name))
 
     track_pos = safe_int(track_deezer_payload.get("track_position"))
-    disk_num = safe_int(track_deezer_payload.get("disk_number"))
+    disc_number = safe_int(track_deezer_payload.get("disk_number"))
     artist_deezer_payload = track_deezer_payload.get("artist")
     artist_name = (
         str(artist_deezer_payload.get("name"))
@@ -294,7 +319,7 @@ def _parse_deezer_track_payload(
         "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
         "lyricist": ", ".join(dict.fromkeys(lyricists)) if lyricists else None,
         "track_position": track_pos,
-        "disk_number": disk_num,
+        "disk_number": disc_number,
         "release_date": track_deezer_payload.get("release_date"),
     }
 
@@ -311,7 +336,6 @@ def fetch_deezer_track_by_isrc(
     if isinstance(cached, dict):
         return cached
 
-    _DEEZER_LIMITER.wait()
     url = f"https://api.deezer.com/track/isrc:{urllib.parse.quote(clean_isrc)}"
 
     try:
@@ -320,12 +344,10 @@ def fetch_deezer_track_by_isrc(
             set_cached_api(cache_key, None)
             return None
 
-        track_deezer_payload = response.json()
-        if (
-            not isinstance(track_deezer_payload, dict)
-            or track_deezer_payload.get("error")
-            or not track_deezer_payload.get("id")
-        ):
+        track_deezer_payload = require_api_object(
+            response.json(), "Deezer ISRC response"
+        )
+        if track_deezer_payload.get("error") or not track_deezer_payload.get("id"):
             set_cached_api(cache_key, None)
             return None
 
@@ -351,7 +373,6 @@ def fetch_deezer_track_details(
     if isinstance(cached, dict):
         return cached
 
-    _DEEZER_LIMITER.wait()
     query = f"{artist} {clean_track_title}"
     url = f"https://api.deezer.com/search/track?q={urllib.parse.quote(query)}"
 
@@ -361,43 +382,45 @@ def fetch_deezer_track_details(
             set_cached_api(cache_key, None)
             return None
 
-        items = (
-            response.json().get("data", []) if isinstance(response.json(), dict) else []
+        deezer_payload = require_api_object(response.json(), "Deezer search response")
+        if deezer_payload.get("error"):
+            return None
+        catalog_candidates = require_api_records(
+            deezer_payload.get("data"), "Deezer search results"
         )
-        if not items:
+        if not catalog_candidates:
             return None
 
-        best_item = None
+        best_candidate = None
         best_score = 0.0
-        for track_candidate in items:
-            if not isinstance(track_candidate, dict):
-                continue
-            item_artist = str(track_candidate.get("artist", {}).get("name", ""))
-            item_title = str(track_candidate.get("title", ""))
-            score = match_score(artist, clean_track_title, item_artist, item_title)
-            if score > best_score and score >= 65.0:
+        for track_candidate in catalog_candidates:
+            candidate_artist = str(track_candidate.get("artist", {}).get("name", ""))
+            candidate_title = str(track_candidate.get("title", ""))
+            score = score_artist_title_match(
+                artist, clean_track_title, candidate_artist, candidate_title
+            )
+            if score > best_score:
                 best_score = score
-                best_item = track_candidate
+                best_candidate = track_candidate
 
-        if not best_item:
+        if not best_candidate:
             set_cached_api(cache_key, None)
             return None
 
-        track_id = best_item.get("id")
+        track_id = best_candidate.get("id")
         if not track_id:
             return None
 
-        _DEEZER_LIMITER.wait()
         detail_response = SESSION.get(
             f"https://api.deezer.com/track/{track_id}", timeout=6
         )
         if detail_response.status_code != 200:
             return None
 
-        track_deezer_payload = detail_response.json()
-        if not isinstance(track_deezer_payload, dict) or track_deezer_payload.get(
-            "error"
-        ):
+        track_deezer_payload = require_api_object(
+            detail_response.json(), "Deezer track response"
+        )
+        if track_deezer_payload.get("error"):
             return None
 
         result = _parse_deezer_track_payload(track_deezer_payload)

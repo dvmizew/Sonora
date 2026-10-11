@@ -3,31 +3,33 @@ import io
 import os
 import threading
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import mutagen.flac
-import mutagen.mp4
-import mutagen.wave
 import taglib
-from mutagen._util import MutagenError
+from mutagen import MutagenError
+from mutagen.flac import FLAC
+from mutagen.mp4 import MP4
+from mutagen.wave import WAVE
 from PIL import Image
 
+from sonora.core.artists import (
+    extract_featured_artist_tokens,
+    normalize_featured_artists,
+)
 from sonora.core.constants import SUPPORTED_EXTS
+from sonora.core.files import atomic_audio_edit
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
-from sonora.core.utils import (
-    extract_disc_number_from_folder,
-    extract_featured_artist_tokens,
+from sonora.core.text import (
     is_valid_uuid,
     normalize_date,
-    normalize_featured_artists,
     normalize_genre,
     normalize_str,
-    parse_track_filename,
     safe_float,
     safe_int,
     safe_int_pair,
 )
+from sonora.core.utils import extract_disc_number_from_folder, parse_track_filename
 
 _METADATA_CACHE: dict[tuple[str, int, int], TrackInfo] = {}
 _METADATA_CACHE_LOCK = threading.RLock()
@@ -115,6 +117,59 @@ def _get_tag(tags: dict[str, list[str]], *keys: str) -> str | None:
     return None
 
 
+def _read_audio_encoding(file_path: Path) -> tuple[bool, int | None]:
+    file_ext = file_path.suffix.lower()
+    if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
+        is_lossless = True
+    elif file_ext in {".mp3", ".ogg", ".opus", ".mpc", ".wma"}:
+        is_lossless = False
+    elif file_ext in {".m4a", ".mp4"}:
+        try:
+            mp4_audio = MP4(file_path)
+            is_lossless = str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
+        except (MutagenError, OSError):
+            is_lossless = False
+    else:
+        is_lossless = True
+
+    bits_per_sample: int | None = None
+    if file_ext == ".flac":
+        try:
+            flac_info = FLAC(file_path).info
+            bits_per_sample = safe_int(getattr(flac_info, "bits_per_sample", None))
+        except (MutagenError, OSError):
+            pass
+    elif file_ext == ".wav":
+        try:
+            wav_info = WAVE(file_path).info
+            bits_per_sample = safe_int(getattr(wav_info, "bits_per_sample", None))
+        except (MutagenError, OSError):
+            pass
+
+    return is_lossless, bits_per_sample
+
+
+def _featured_artists_from_tags(
+    tags: dict[str, list[str]], primary_artist: str
+) -> str | None:
+    raw_artists = [*tags.get("ARTISTS", []), *tags.get("ARTIST", [])]
+    primary_tokens = extract_featured_artist_tokens(primary_artist, allow_network=False)
+    primary_keys = {normalize_str(artist) for artist in primary_tokens if artist}
+    primary_keys.add(normalize_str(primary_artist))
+    extra_artists = [
+        artist.strip()
+        for artist in raw_artists
+        if artist
+        and artist.strip()
+        and normalize_str(artist.strip()) not in primary_keys
+    ]
+    if not extra_artists:
+        return None
+    return normalize_featured_artists(
+        extra_artists, primary_artist=primary_artist, allow_network=False
+    )
+
+
 def read_track_metadata(file_path: Path) -> TrackInfo:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -126,7 +181,11 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
     with _METADATA_CACHE_LOCK:
         cached = _METADATA_CACHE.get(cache_key)
         if cached is not None:
-            return dataclasses.replace(cached)
+            return dataclasses.replace(
+                cached,
+                metadata_sources=dict(cached.metadata_sources),
+                _diff_descriptions=list(cached._diff_descriptions),
+            )
 
     try:
         with taglib.File(str(file_path)) as song:
@@ -140,9 +199,19 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             )
             date = normalize_date(_get_tag(tags, "DATE", "TDRC", "YEAR", "WM/YEAR"))
             original_date = _get_tag(tags, "ORIGINALDATE", "ORIGINALYEAR")
-            genre = normalize_genre(_get_tag(tags, "GENRE", "TCON", "WM/GENRE"))
+            genre_values: list[str] = next(
+                (tags[key] for key in ("GENRE", "TCON", "WM/GENRE") if tags.get(key)),
+                [],
+            )
+            genre = next(
+                (
+                    normalized
+                    for value in genre_values
+                    if (normalized := normalize_genre(value))
+                ),
+                None,
+            )
 
-            # Track and disc numbering
             track_num_tag = _get_tag(tags, "TRACKNUMBER", "TRCK", "TRACK")
             track_number, track_total_fallback = safe_int_pair(track_num_tag)
 
@@ -172,7 +241,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             if total_discs is None and disc_number > 1:
                 total_discs = disc_number
 
-            # Numerical and audio stats
             bpm = safe_float(_get_tag(tags, "BPM", "TBPM", "WM/BEATSPERMINUTE"))
             raw_rating = _get_tag(tags, "RATING", "POPM")
             rating = safe_float(raw_rating)
@@ -186,7 +254,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 else None
             )
 
-            # ReplayGain
             replaygain_track_gain = safe_float(
                 _get_tag(tags, "REPLAYGAIN_TRACK_GAIN", "TXXX:REPLAYGAIN_TRACK_GAIN")
             )
@@ -202,7 +269,14 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
 
             art_width, art_height = None, None
             if hasattr(song, "pictures") and song.pictures:
-                first_picture = song.pictures[0]
+                first_picture = next(
+                    (
+                        picture
+                        for picture in song.pictures
+                        if picture.picture_type == "Front Cover"
+                    ),
+                    song.pictures[0],
+                )
                 art_width = getattr(first_picture, "width", None) or None
                 art_height = getattr(first_picture, "height", None) or None
                 if (not art_width or not art_height) and getattr(
@@ -219,25 +293,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 for field, tag_keys in _TAG_SCHEMA.items()
             }
             if not mapped_fields.get("featured_artists"):
-                raw_artists_list = tags.get("ARTISTS") or []
-                if raw_artists_list:
-                    primary_tokens = extract_featured_artist_tokens(
-                        artist, allow_network=False
-                    )
-                    primary_norms = {
-                        normalize_str(tok) for tok in primary_tokens if tok
-                    }
-                    extra_artists = [
-                        art_candidate.strip()
-                        for art_candidate in raw_artists_list
-                        if art_candidate
-                        and art_candidate.strip()
-                        and normalize_str(art_candidate.strip()) not in primary_norms
-                    ]
-                    if extra_artists:
-                        mapped_fields["featured_artists"] = normalize_featured_artists(
-                            extra_artists, primary_artist=artist, allow_network=False
-                        )
+                additional_features = _featured_artists_from_tags(tags, artist)
+                if additional_features:
+                    mapped_fields["featured_artists"] = additional_features
             raw_advisory = mapped_fields.get("advisory")
             if raw_advisory:
                 raw_str = str(raw_advisory).strip().lower()
@@ -246,39 +304,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 else:
                     mapped_fields["advisory"] = None
 
-            file_ext = file_path.suffix.lower()
-            if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
-                is_lossless = True
-            elif file_ext in {".mp3", ".ogg", ".opus", ".mpc", ".wma"}:
-                is_lossless = False
-            elif file_ext in {".m4a", ".mp4"}:
-                try:
-                    mp4_audio = cast(Any, mutagen.mp4.MP4)(file_path)
-                    is_lossless = (
-                        str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
-                    )
-                except (MutagenError, OSError):
-                    is_lossless = False
-            else:
-                is_lossless = True
-
-            bits_per_sample: int | None = None
-            if file_ext == ".flac":
-                try:
-                    flac_info = cast(Any, mutagen.flac.FLAC)(file_path).info
-                    bits_per_sample = safe_int(
-                        getattr(flac_info, "bits_per_sample", None)
-                    )
-                except (MutagenError, OSError):
-                    pass
-            elif file_ext == ".wav":
-                try:
-                    wav_info = cast(Any, mutagen.wave.WAVE)(file_path).info
-                    bits_per_sample = safe_int(
-                        getattr(wav_info, "bits_per_sample", None)
-                    )
-                except (MutagenError, OSError):
-                    pass
+            is_lossless, bits_per_sample = _read_audio_encoding(file_path)
 
             track_info = TrackInfo(
                 file_path=file_path,
@@ -313,7 +339,11 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             with _METADATA_CACHE_LOCK:
                 if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
                     _METADATA_CACHE.clear()
-                _METADATA_CACHE[cache_key] = dataclasses.replace(track_info)
+                _METADATA_CACHE[cache_key] = dataclasses.replace(
+                    track_info,
+                    metadata_sources=dict(track_info.metadata_sources),
+                    _diff_descriptions=list(track_info._diff_descriptions),
+                )
             return track_info
     except FileNotFoundError:
         raise
@@ -461,7 +491,6 @@ def _write_audio_properties_tags(
     else:
         tags.pop("COMPILATION", None)
 
-    # ReplayGain
     if track_info.replaygain_track_gain is not None:
         tags["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
     else:
@@ -521,6 +550,58 @@ def _write_schema_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> Non
                 tags.pop("UNSYNCEDLYRICS", None)
 
 
+def _preserve_unchanged_multivalues(
+    original_tags: dict[str, list[str]],
+    updated_tags: dict[str, list[str]],
+) -> None:
+    original_genres = [
+        normalized
+        for value in original_tags.get("GENRE", [])
+        if (normalized := normalize_genre(value))
+    ]
+    updated_genres = updated_tags.get("GENRE")
+    if (
+        original_genres
+        and updated_genres
+        and len(updated_genres) == 1
+        and normalize_genre(updated_genres[0]) == original_genres[0]
+    ):
+        updated_tags["GENRE"] = [updated_genres[0], *original_genres[1:]]
+    for tag_key, original_values in original_tags.items():
+        updated_values = updated_tags.get(tag_key)
+        if (
+            len(original_values) > 1
+            and updated_values
+            and len(updated_values) == 1
+            and normalize_str(updated_values[0]) == normalize_str(original_values[0])
+        ):
+            updated_tags[tag_key] = [updated_values[0], *original_values[1:]]
+    for tag_keys in _TAG_SCHEMA.values():
+        original_values = next(
+            (original_tags[key] for key in tag_keys if original_tags.get(key)), []
+        )
+        updated_values = updated_tags.get(tag_keys[0])
+        if (
+            len(original_values) > 1
+            and updated_values
+            and len(updated_values) == 1
+            and normalize_str(updated_values[0]) == normalize_str(original_values[0])
+        ):
+            updated_tags[tag_keys[0]] = [updated_values[0], *original_values[1:]]
+    original_album_artist = _get_tag(
+        original_tags, "ALBUMARTIST", "ALBUM ARTIST", "ALBUMARTISTS"
+    )
+    updated_album_artist = _get_tag(updated_tags, "ALBUMARTIST", "ALBUM ARTIST")
+    if (
+        original_album_artist
+        and updated_album_artist
+        and normalize_str(original_album_artist) == normalize_str(updated_album_artist)
+    ):
+        for tag_key in ("ALBUMARTISTS", "TXXX:ALBUMARTISTS"):
+            if tag_key not in updated_tags and original_tags.get(tag_key):
+                updated_tags[tag_key] = original_tags[tag_key]
+
+
 def write_track_metadata(
     track_info: TrackInfo, cover_art_path: Path | None = None
 ) -> None:
@@ -532,23 +613,47 @@ def write_track_metadata(
         )
 
     try:
-        with taglib.File(str(track_info.file_path)) as song:
+        with (
+            atomic_audio_edit(track_info.file_path) as staging_path,
+            taglib.File(str(staging_path)) as song,
+        ):
+            original_tags = {key: list(values) for key, values in song.tags.items()}
             _write_artist_tags(song.tags, track_info)
             _write_numbering_and_dates(song.tags, track_info)
             _write_audio_properties_tags(song.tags, track_info)
             _write_schema_tags(song.tags, track_info)
+            _preserve_unchanged_multivalues(original_tags, song.tags)
 
-            # Front cover
             if cover_art_path and cover_art_path.exists():
-                mime = (
-                    "image/jpeg"
-                    if cover_art_path.suffix.lower() in [".jpg", ".jpeg"]
-                    else "image/png"
-                )
-                if hasattr(song, "pictures"):
+                cover_bytes = cover_art_path.read_bytes()
+                with Image.open(io.BytesIO(cover_bytes)) as cover_image:
+                    cover_image.load()
+                    cover_dimensions = cover_image.size
+                    mime = Image.MIME.get(cover_image.format or "", "image/jpeg")
+                existing_pictures = song.pictures
+                front_covers = [
+                    picture
+                    for picture in existing_pictures
+                    if picture.picture_type == "Front Cover"
+                ]
+                existing_dimensions: list[tuple[int, int]] = []
+                for picture in front_covers:
+                    try:
+                        with Image.open(io.BytesIO(picture.data)) as embedded_image:
+                            existing_dimensions.append(embedded_image.size)
+                    except OSError:
+                        continue
+                if not any(
+                    width * height > cover_dimensions[0] * cover_dimensions[1]
+                    for width, height in existing_dimensions
+                ):
                     song.pictures = [
+                        picture
+                        for picture in existing_pictures
+                        if picture.picture_type != "Front Cover"
+                    ] + [
                         taglib.Picture(
-                            data=cover_art_path.read_bytes(),
+                            data=cover_bytes,
                             mime_type=mime,
                             description="Cover",
                             picture_type="Front Cover",
@@ -557,21 +662,10 @@ def write_track_metadata(
 
             unsaved = song.save()
             if unsaved:
-                LOG.debug(f"TagLib unsaved tags for {track_info.file_path}: {unsaved}")
-
-            try:
-                new_stat = track_info.file_path.stat()
-                new_key = (
-                    str(track_info.file_path.resolve()),
-                    new_stat.st_mtime_ns,
-                    new_stat.st_size,
+                raise OSError(
+                    f"Unsupported tags for {track_info.file_path}: {', '.join(unsaved)}"
                 )
-                with _METADATA_CACHE_LOCK:
-                    if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
-                        _METADATA_CACHE.clear()
-                    _METADATA_CACHE[new_key] = dataclasses.replace(track_info)
-            except OSError as e:
-                LOG.debug(f"Failed to cache track metadata by inode: {e}")
+            clear_metadata_cache()
     except FileNotFoundError:
         raise
     except (OSError, ValueError) as error:
@@ -598,7 +692,7 @@ def get_audio_duration(file_path: Path) -> float | None:
     try:
         import mutagen
 
-        m_file = cast(Any, mutagen).File(file_path)
+        m_file = mutagen.File(file_path)
         if m_file and getattr(m_file, "info", None):
             return safe_float(m_file.info.length)
     except (OSError, MutagenError):

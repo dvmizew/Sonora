@@ -6,17 +6,13 @@ import acoustid
 from acoustid import AcoustidError, WebServiceError
 
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.config import get_config
 from sonora.core.constants import RATE_LIMIT_ACOUSTID
 from sonora.core.logger import LOG
-from sonora.core.utils import (
-    RateLimiter,
-    clean_title,
-    is_valid_uuid,
-    match_score,
-    normalize_str,
-    retry_network_call,
-    safe_float,
-)
+from sonora.core.rate_limit import RateLimiter
+from sonora.core.text import is_valid_uuid, normalize_str, safe_float
+from sonora.core.titles import clean_title, score_artist_title_match
+from sonora.core.utils import retry_network_call
 
 _ACOUSTID_CACHE: dict[tuple[str, int, int], tuple[float, str]] = {}
 _ACOUSTID_LOCK = threading.RLock()
@@ -45,9 +41,8 @@ def _fingerprint_file_with_timeout(
     except (subprocess.SubprocessError, OSError) as error:
         LOG.debug(f"Direct fpcalc execution with timeout failed: {error}")
 
-    # Fallback to standard acoustid library call if direct invocation fails
-    duration_val, fp_val = acoustid.fingerprint_file(str(file_path.resolve()))
-    return float(duration_val), str(fp_val)
+        raise OSError(f"Fingerprint decoding failed for {file_path}") from error
+    raise OSError(f"fpcalc returned incomplete fingerprint for {file_path}")
 
 
 def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
@@ -85,7 +80,7 @@ def lookup_acoustid(
 ) -> str | None:
     """
     Fingerprints an audio file and fetches MusicBrainz Recording ID from AcoustID.
-    Ranks candidate matches using a combination of acoustic score and title/artist match_score.
+    Ranks candidate matches using a combination of acoustic score and artist/title identity scores.
     Returns the MBID string if found, otherwise None.
     """
     if not api_key:
@@ -124,17 +119,21 @@ def lookup_acoustid(
             candidate_title,
             candidate_artist,
         ) in acoustid.parse_lookup_result(acoustid_lookup_payload):
-            if score >= 0.80 and recording_id and is_valid_uuid(str(recording_id)):
+            if (
+                score >= get_config().acoustid_confidence_threshold
+                and recording_id
+                and is_valid_uuid(str(recording_id))
+            ):
                 combined_score = float(score) * 100.0
                 if expected_artist and expected_title:
                     if candidate_title and candidate_artist:
-                        text_score = match_score(
+                        text_score = score_artist_title_match(
                             expected_artist,
                             expected_title,
                             str(candidate_artist),
                             str(candidate_title),
                         )
-                        if text_score < 85.0:
+                        if text_score <= 0.0:
                             continue
                         combined_score = (float(score) * 40.0) + (text_score * 0.6)
                     elif candidate_title:
@@ -150,8 +149,12 @@ def lookup_acoustid(
                             len(clean_title(expected_title)),
                             len(clean_title(str(candidate_title))),
                         )
-                        title_thresh = 95.0 if min_len < 8 else 85.0
-                        if title_sim < title_thresh:
+                        title_thresh = (
+                            get_config().short_title_match_threshold
+                            if min_len < get_config().short_title_length
+                            else get_config().title_match_threshold
+                        )
+                        if title_sim <= title_thresh:
                             continue
                         combined_score = (float(score) * 40.0) + (title_sim * 0.6)
                     else:

@@ -1,11 +1,51 @@
 import atexit
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
-from sonora.core.constants import USER_AGENT
+from sonora.core.constants import (
+    RATE_LIMIT_DEEZER,
+    RATE_LIMIT_DISCOGS_AUTHENTICATED,
+    RATE_LIMIT_DISCOGS_UNAUTHENTICATED,
+    RATE_LIMIT_FANART,
+    RATE_LIMIT_GENIUS,
+    RATE_LIMIT_ITUNES,
+    RATE_LIMIT_LASTFM,
+    RATE_LIMIT_LRCLIB,
+    RATE_LIMIT_THEAUDIODB,
+    USER_AGENT,
+)
 from sonora.core.logger import LOG
+from sonora.core.rate_limit import RateLimiter
+
+_HOST_LIMITERS = {
+    "itunes.apple.com": RateLimiter(RATE_LIMIT_ITUNES),
+    "api.deezer.com": RateLimiter(RATE_LIMIT_DEEZER),
+    "api.discogs.com": RateLimiter(RATE_LIMIT_DISCOGS_AUTHENTICATED),
+    "www.theaudiodb.com": RateLimiter(RATE_LIMIT_THEAUDIODB),
+    "lrclib.net": RateLimiter(RATE_LIMIT_LRCLIB),
+    "webservice.fanart.tv": RateLimiter(RATE_LIMIT_FANART),
+    "api.genius.com": RateLimiter(RATE_LIMIT_GENIUS),
+    "ws.audioscrobbler.com": RateLimiter(RATE_LIMIT_LASTFM),
+}
+
+
+def _retry_delay(retry_after: str | None, fallback: float) -> float:
+    if not retry_after:
+        return fallback
+    try:
+        return max(0.0, float(retry_after))
+    except ValueError:
+        try:
+            deadline = parsedate_to_datetime(retry_after)
+        except ValueError:
+            return fallback
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
+        return max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
 
 
 class RetryTransport(httpx.HTTPTransport):
@@ -23,53 +63,61 @@ class RetryTransport(httpx.HTTPTransport):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        if max_retries < 1:
+            raise ValueError("max_retries must be positive")
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        last_error: Exception | None = None
-        for attempt in range(self.max_retries):
+        attempt = 0
+        while True:
             try:
+                limiter = _HOST_LIMITERS.get(request.url.host)
+                if limiter is not None:
+                    interval = (
+                        RATE_LIMIT_DISCOGS_UNAUTHENTICATED
+                        if request.url.host == "api.discogs.com"
+                        and "Authorization" not in request.headers
+                        else None
+                    )
+                    limiter.wait(interval)
                 response = super().handle_request(request)
                 if (
                     response.status_code in (429, 502, 503, 504)
                     and attempt < self.max_retries - 1
                 ):
-                    retry_after = response.headers.get("Retry-After")
-                    delay: float
-                    if retry_after and retry_after.strip().isdigit():
-                        delay = min(float(retry_after.strip()), 10.0)
-                    else:
-                        delay = self.backoff_factor * (2**attempt)
+                    delay = _retry_delay(
+                        response.headers.get("Retry-After"),
+                        self.backoff_factor * (2**attempt),
+                    )
+                    if delay > 60.0:
+                        return response
+                    response.close()
                     LOG.debug(
-                        f"HTTP {response.status_code} for {request.url}. "
+                        f"HTTP {response.status_code} for {request.url.host}. "
                         f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
                     )
                     time.sleep(delay)
+                    attempt += 1
                     continue
                 return response
             except (httpx.TransportError, OSError) as exc:
-                last_error = exc
-                if attempt < self.max_retries - 1:
-                    delay = self.backoff_factor * (2**attempt)
-                    LOG.debug(
-                        f"HTTP transport error ({type(exc).__name__}) for {request.url}. "
-                        f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
-                    )
-                    time.sleep(delay)
-                    continue
-                raise
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("Unreachable")
+                if attempt >= self.max_retries - 1:
+                    raise
+                delay = self.backoff_factor * (2**attempt)
+                LOG.debug(
+                    f"HTTP transport error ({type(exc).__name__}) for {request.url.host}. "
+                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
+                )
+                time.sleep(delay)
+                attempt += 1
 
 
 SESSION = httpx.Client(
     transport=RetryTransport(
         max_retries=3,
         http2=True,
-        retries=3,
+        retries=0,
         limits=httpx.Limits(
             max_connections=100,
             max_keepalive_connections=20,

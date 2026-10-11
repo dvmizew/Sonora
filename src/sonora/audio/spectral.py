@@ -56,7 +56,6 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
         if sample_rate < 32000 or len(audio_mono) < sample_rate * 5:
             return False, 0.0, None
 
-        # Compute Fast Fourier Transform spectrogram
         frequency_axis, _, spectrogram_matrix = scipy.signal.spectrogram(
             audio_mono, fs=sample_rate, nperseg=2048, noverlap=1024
         )

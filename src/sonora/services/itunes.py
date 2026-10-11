@@ -4,22 +4,16 @@ from typing import Any
 import httpx
 from rapidfuzz import fuzz
 
+from sonora.core.api_payloads import require_api_object, require_api_records
+from sonora.core.artists import get_primary_artist
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.constants import ALBUM_MATCH_THRESHOLD, RATE_LIMIT_ITUNES
+from sonora.core.config import get_config
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import (
-    RateLimiter,
-    extract_series_number,
-    get_primary_artist,
-    match_score,
-    normalize_country_name,
-    normalize_str,
-    safe_int,
-)
+from sonora.core.text import normalize_country_name, normalize_str, safe_int
+from sonora.core.titles import extract_series_number, score_artist_title_match
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
-_ITUNES_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_ITUNES)
 
 
 def search_itunes(
@@ -29,7 +23,7 @@ def search_itunes(
     Search iTunes Search API for album or track metadata.
     """
     query_term = f"{artist} {term}".strip()
-    cache_key = f"itunes:{normalize_str(artist)}:{normalize_str(term)}:{entity}"
+    cache_key = f"itunes:{normalize_str(artist)}:{normalize_str(term)}:{entity}:{country.upper()}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, list):
         return cached
@@ -40,19 +34,14 @@ def search_itunes(
         "country": country,
         "limit": "5",
     }
-    _ITUNES_LIMITER.wait()
+
     try:
         response = SESSION.get(ITUNES_SEARCH_URL, params=params, timeout=10)
         response.raise_for_status()
-        itunes_payload = response.json()
-        raw_results = (
-            itunes_payload.get("results", [])
-            if isinstance(itunes_payload, dict)
-            else []
+        itunes_payload = require_api_object(response.json(), "iTunes search response")
+        results = require_api_records(
+            itunes_payload.get("results"), "iTunes search results"
         )
-        results: list[dict[str, object]] = [
-            track_entry for track_entry in raw_results if isinstance(track_entry, dict)
-        ]
         set_cached_api(cache_key, results)
         return results
     except (httpx.HTTPError, OSError) as error:
@@ -64,9 +53,10 @@ def fetch_itunes_cover_art_url(
     artist: str, album: str, resolution: int = 1400
 ) -> str | None:
     """
-    Fetch high-resolution album cover art URL from iTunes.
-    Resolutions can be 600, 1400, or 3000.
-    Ensures album name matches target to avoid wrong album series artwork.
+    Match album artwork and request a best-effort larger CDN variant.
+
+    Apple's documented API supplies 60/100-pixel URLs. Larger size substitutions
+    are a CDN convention; downloaded dimensions are verified by the artwork pipeline.
     """
     results = search_itunes(artist=artist, term=album, entity="album")
     if not results:
@@ -79,51 +69,34 @@ def fetch_itunes_cover_art_url(
     normalized_target = normalize_str(album)
     best_result: dict[str, object] | None = None
     primary_orig = get_primary_artist(artist)
+    eligible_results: list[tuple[dict[str, object], str]] = []
 
-    # Step 1: Look for exact normalized title match
     for result in results:
         collection_name = str(result.get("collectionName", ""))
-        cand_artist = str(result.get("artistName", ""))
-        primary_cand = get_primary_artist(cand_artist)
-        if (
-            artist
-            and cand_artist
-            and match_score(artist, album, cand_artist, collection_name) < 60.0
-            and (
-                not primary_orig
-                or match_score(primary_orig, album, primary_cand, collection_name)
-                < 60.0
+        candidate_artist = str(result.get("artistName", ""))
+        primary_cand = get_primary_artist(candidate_artist)
+        if score_artist_title_match(
+            artist, album, candidate_artist, collection_name
+        ) <= 0.0 and (
+            not primary_orig
+            or score_artist_title_match(
+                primary_orig, album, primary_cand, collection_name
             )
+            <= 0.0
         ):
             continue
-        if normalize_str(collection_name) == normalized_target:
+        normalized_collection = normalize_str(collection_name)
+        eligible_results.append((result, normalized_collection))
+        if normalized_collection == normalized_target:
             best_result = result
             break
 
-    # Step 2: Fallback matching if no exact match found
     if best_result is None:
         target_series = extract_series_number(normalized_target)
-        for result in results:
-            collection_name = str(result.get("collectionName", ""))
-            cand_artist = str(result.get("artistName", ""))
-            primary_cand = get_primary_artist(cand_artist)
-            if (
-                artist
-                and cand_artist
-                and match_score(artist, album, cand_artist, collection_name) < 60.0
-                and (
-                    not primary_orig
-                    or match_score(primary_orig, album, primary_cand, collection_name)
-                    < 60.0
-                )
-            ):
-                continue
-            normalized_collection = normalize_str(collection_name)
-
-            # Strict similarity requirement: collection_name must be fuzzy similar to album title!
+        for result, normalized_collection in eligible_results:
             if (
                 fuzz.token_set_ratio(normalized_target, normalized_collection)
-                < ALBUM_MATCH_THRESHOLD
+                < get_config().album_match_threshold
             ):
                 continue
 
@@ -165,17 +138,14 @@ def fetch_itunes_track_metadata(artist: str, title: str) -> dict[str, object] | 
     for result in results:
         track_name = str(result.get("trackName", ""))
         result_artist = str(result.get("artistName", ""))
-        if (
-            artist
-            and result_artist
-            and match_score(artist, title, result_artist, track_name) < 60.0
-        ):
+        if score_artist_title_match(artist, title, result_artist, track_name) <= 0.0:
             continue
 
         normalized_name = normalize_str(track_name)
         if (
             normalized_name == normalized_target
-            or fuzz.token_set_ratio(normalized_target, normalized_name) >= 80.0
+            or fuzz.token_set_ratio(normalized_target, normalized_name)
+            >= get_config().album_token_match_threshold
         ):
             best_result = result
             break
@@ -223,7 +193,7 @@ def _score_itunes_album(
     score = 0.0
     coll_name = str(album_dict.get("collectionName", ""))
     cand_art = str(album_dict.get("artistName", ""))
-    score += match_score(artist, album, cand_art, coll_name)
+    score += score_artist_title_match(artist, album, cand_art, coll_name)
     if normalize_str(coll_name) == normalized_target:
         score += 30.0
     if str(album_dict.get("collectionExplicitness", "")).lower() == "explicit":
@@ -256,17 +226,17 @@ def fetch_itunes_album_details(
 
     for result in results:
         collection_name = str(result.get("collectionName", ""))
-        cand_artist = str(result.get("artistName", ""))
+        candidate_artist = str(result.get("artistName", ""))
         if (
-            artist
-            and cand_artist
-            and match_score(artist, album, cand_artist, collection_name) < 60.0
+            score_artist_title_match(artist, album, candidate_artist, collection_name)
+            <= 0.0
         ):
             continue
         normalized_name = normalize_str(collection_name)
         if (
             normalized_name == normalized_target
-            or fuzz.token_set_ratio(normalized_target, normalized_name) >= 80.0
+            or fuzz.token_set_ratio(normalized_target, normalized_name)
+            >= get_config().album_token_match_threshold
         ):
             matching_albums.append(result)
 
@@ -289,7 +259,6 @@ def fetch_itunes_album_details(
     if isinstance(cached, dict):
         return cached
 
-    _ITUNES_LIMITER.wait()
     try:
         url = "https://itunes.apple.com/lookup"
         params: dict[str, str | int] = {
@@ -299,11 +268,9 @@ def fetch_itunes_album_details(
         }
         response = SESSION.get(url, params=params, timeout=10)
         response.raise_for_status()
-        itunes_payload = response.json()
-        raw_items = (
-            itunes_payload.get("results", [])
-            if isinstance(itunes_payload, dict)
-            else []
+        itunes_payload = require_api_object(response.json(), "iTunes lookup response")
+        raw_items = require_api_records(
+            itunes_payload.get("results"), "iTunes lookup results"
         )
 
         tracks_by_number: dict[Any, dict[str, object]] = {}
@@ -326,14 +293,11 @@ def fetch_itunes_album_details(
         }
 
         for track_entry in raw_items:
-            if (
-                not isinstance(track_entry, dict)
-                or track_entry.get("wrapperType") != "track"
-            ):
+            if track_entry.get("wrapperType") != "track":
                 continue
-            t_num = safe_int(track_entry.get("trackNumber"))
+            track_number = safe_int(track_entry.get("trackNumber"))
             disc_num = safe_int(track_entry.get("discNumber")) or 1
-            t_name = str(track_entry.get("trackName", ""))
+            track_title = str(track_entry.get("trackName", ""))
             explicitness = str(track_entry.get("trackExplicitness", "")).lower()
             advisory = "Explicit" if explicitness == "explicit" else None
             r_date = (
@@ -343,7 +307,7 @@ def fetch_itunes_album_details(
             )
 
             t_info: dict[str, object] = {
-                "title": t_name,
+                "title": track_title,
                 "artist": track_entry.get("artistName"),
                 "genre": track_entry.get("primaryGenreName"),
                 "advisory": advisory,
@@ -357,19 +321,19 @@ def fetch_itunes_album_details(
                 "release_country": normalize_country_name(str(track_entry["country"]))
                 if track_entry.get("country")
                 else None,
-                "track_number": t_num,
+                "track_number": track_number,
                 "total_tracks": track_entry.get("trackCount"),
                 "disc_number": disc_num,
                 "date": r_date,
             }
-            if t_num is not None:
-                tracks_by_disc_and_position[(disc_num, t_num)] = t_info
-                tracks_by_number[(disc_num, t_num)] = t_info
-                tracks_by_number[f"{disc_num}-{t_num}"] = t_info
-                if disc_num == 1 or t_num not in tracks_by_number:
-                    tracks_by_number[t_num] = t_info
-            if t_name:
-                tracks_by_title[normalize_str(t_name)] = t_info
+            if track_number is not None:
+                tracks_by_disc_and_position[(disc_num, track_number)] = t_info
+                tracks_by_number[(disc_num, track_number)] = t_info
+                tracks_by_number[f"{disc_num}-{track_number}"] = t_info
+                if disc_num == 1 or track_number not in tracks_by_number:
+                    tracks_by_number[track_number] = t_info
+            if track_title:
+                tracks_by_title[normalize_str(track_title)] = t_info
 
         set_cached_api(cache_key, album_meta)
         return album_meta

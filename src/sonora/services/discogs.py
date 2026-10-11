@@ -2,22 +2,17 @@ from typing import Any
 
 import httpx
 
-from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.constants import (
-    RATE_LIMIT_DISCOGS_AUTHENTICATED,
-    RATE_LIMIT_DISCOGS_UNAUTHENTICATED,
+from sonora.core.api_payloads import (
+    require_api_object,
+    require_api_records,
+    require_api_strings,
 )
+from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.config import get_config
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import (
-    RateLimiter,
-    clean_disambiguation,
-    match_score,
-    normalize_country_name,
-    normalize_str,
-)
-
-_DISCOGS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_DISCOGS_AUTHENTICATED)
+from sonora.core.text import clean_disambiguation, normalize_country_name, normalize_str
+from sonora.core.titles import score_artist_title_match
 
 
 def fetch_discogs_release_details(
@@ -31,23 +26,19 @@ def fetch_discogs_release_details(
     if isinstance(cached, dict):
         return cached
 
-    _DISCOGS_LIMITER.wait(
-        RATE_LIMIT_DISCOGS_AUTHENTICATED
-        if user_token
-        else RATE_LIMIT_DISCOGS_UNAUTHENTICATED
-    )
     try:
         url = f"https://api.discogs.com/releases/{release_id}"
         headers = {"Authorization": f"Discogs token={user_token}"} if user_token else {}
         response = SESSION.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
-        discogs_payload = response.json()
-        if not isinstance(discogs_payload, dict):
-            return None
+        discogs_payload = require_api_object(
+            response.json(), "Discogs release response"
+        )
 
-        # 1. Primary Artist ID
-        artists = discogs_payload.get("artists", [])
+        artists = require_api_records(
+            discogs_payload.get("artists", []), "Discogs artists"
+        )
         artist_id = (
             str(artists[0].get("id"))
             if isinstance(artists, list)
@@ -57,8 +48,9 @@ def fetch_discogs_release_details(
             else None
         )
 
-        # 2. Labels & Catalog Number
-        labels = discogs_payload.get("labels", [])
+        labels = require_api_records(
+            discogs_payload.get("labels", []), "Discogs labels"
+        )
         label_name = None
         catalog_number = None
         if isinstance(labels, list) and labels and isinstance(labels[0], dict):
@@ -69,58 +61,107 @@ def fetch_discogs_release_details(
                 else None
             )
 
-        # 3. Barcode & Matrix Identifiers
         barcode_value = None
-        identifiers = discogs_payload.get("identifiers", [])
-        if isinstance(identifiers, list):
-            for identifier in identifiers:
-                if isinstance(identifier, dict) and identifier.get("type") == "Barcode":
-                    raw_barcode = (
-                        str(identifier.get("value", ""))
-                        .replace(" ", "")
-                        .replace("-", "")
-                    )
-                    if raw_barcode:
-                        barcode_value = raw_barcode
-                        break
+        identifiers = require_api_records(
+            discogs_payload.get("identifiers", []), "Discogs identifiers"
+        )
+        for identifier in identifiers:
+            if isinstance(identifier, dict) and identifier.get("type") == "Barcode":
+                raw_barcode = (
+                    str(identifier.get("value", "")).replace(" ", "").replace("-", "")
+                )
+                if raw_barcode:
+                    barcode_value = raw_barcode
+                    break
 
-        # 4. Media & Format Details (e.g., "Vinyl, LP, 180g" or "CD, Album, Deluxe Edition")
         media_format = None
-        formats = discogs_payload.get("formats", [])
-        if isinstance(formats, list) and formats and isinstance(formats[0], dict):
+        formats = require_api_records(
+            discogs_payload.get("formats", []), "Discogs formats"
+        )
+        if formats:
             first_format = formats[0]
             format_parts: list[str] = []
             if first_format.get("name"):
                 format_parts.append(str(first_format["name"]))
-            descriptions = first_format.get("descriptions", [])
-            if isinstance(descriptions, list):
-                format_parts.extend(str(desc) for desc in descriptions if desc)
+            descriptions = require_api_strings(
+                first_format.get("descriptions", []), "Discogs format descriptions"
+            )
+            format_parts.extend(
+                description for description in descriptions if description
+            )
             if format_parts:
                 media_format = ", ".join(format_parts)
 
-        # 5. Production & Engineering Credits
         producers: list[str] = []
         remixers: list[str] = []
         composers: list[str] = []
-        extra_artists = discogs_payload.get("extraartists", [])
-        if isinstance(extra_artists, list):
-            for extra_artist in extra_artists:
+        extra_artists = require_api_records(
+            discogs_payload.get("extraartists", []), "Discogs extraartists"
+        )
+        for extra_artist in extra_artists:
+            if (
+                isinstance(extra_artist, dict)
+                and extra_artist.get("name")
+                and extra_artist.get("role")
+            ):
+                name = clean_disambiguation(str(extra_artist["name"]))
+                role = str(extra_artist["role"]).lower()
                 if (
-                    isinstance(extra_artist, dict)
-                    and extra_artist.get("name")
-                    and extra_artist.get("role")
+                    "producer" in role or "produced by" in role
+                ) and name not in producers:
+                    producers.append(name)
+                elif "remix" in role and name not in remixers:
+                    remixers.append(name)
+                elif (
+                    any(
+                        kw in role
+                        for kw in (
+                            "written",
+                            "composer",
+                            "music by",
+                            "words by",
+                        )
+                    )
+                    and name not in composers
                 ):
-                    name = clean_disambiguation(str(extra_artist["name"]))
-                    role = str(extra_artist["role"]).lower()
+                    composers.append(name)
+
+        track_credits: dict[str, dict[str, str]] = {}
+        tracklist = require_api_records(
+            discogs_payload.get("tracklist", []), "Discogs tracklist"
+        )
+        for track in tracklist:
+            position = str(track.get("position", "")).strip()
+            track_title = str(track.get("title", "")).strip()
+            track_producers: list[str] = []
+            track_remixers: list[str] = []
+            track_composers: list[str] = []
+            track_extra_artists = require_api_records(
+                track.get("extraartists", []), "Discogs track credits"
+            )
+            for track_extra_artist in track_extra_artists:
+                if (
+                    isinstance(track_extra_artist, dict)
+                    and track_extra_artist.get("name")
+                    and track_extra_artist.get("role")
+                ):
+                    track_artist_name = clean_disambiguation(
+                        str(track_extra_artist["name"])
+                    )
+                    track_artist_role = str(track_extra_artist["role"]).lower()
                     if (
-                        "producer" in role or "produced by" in role
-                    ) and name not in producers:
-                        producers.append(name)
-                    elif "remix" in role and name not in remixers:
-                        remixers.append(name)
+                        "producer" in track_artist_role
+                        or "produced by" in track_artist_role
+                    ) and track_artist_name not in track_producers:
+                        track_producers.append(track_artist_name)
+                    elif (
+                        "remix" in track_artist_role
+                        and track_artist_name not in track_remixers
+                    ):
+                        track_remixers.append(track_artist_name)
                     elif (
                         any(
-                            kw in role
+                            kw in track_artist_role
                             for kw in (
                                 "written",
                                 "composer",
@@ -128,69 +169,20 @@ def fetch_discogs_release_details(
                                 "words by",
                             )
                         )
-                        and name not in composers
+                        and track_artist_name not in track_composers
                     ):
-                        composers.append(name)
-
-        # 6. Tracklist Level Credits
-        track_credits: dict[str, dict[str, str]] = {}
-        tracklist = discogs_payload.get("tracklist", [])
-        if isinstance(tracklist, list):
-            for track in tracklist:
-                if isinstance(track, dict):
-                    position = str(track.get("position", "")).strip()
-                    track_title = str(track.get("title", "")).strip()
-                    track_producers: list[str] = []
-                    track_remixers: list[str] = []
-                    track_composers: list[str] = []
-                    track_extra_artists = track.get("extraartists", [])
-                    if isinstance(track_extra_artists, list):
-                        for track_extra_artist in track_extra_artists:
-                            if (
-                                isinstance(track_extra_artist, dict)
-                                and track_extra_artist.get("name")
-                                and track_extra_artist.get("role")
-                            ):
-                                track_artist_name = clean_disambiguation(
-                                    str(track_extra_artist["name"])
-                                )
-                                track_artist_role = str(
-                                    track_extra_artist["role"]
-                                ).lower()
-                                if (
-                                    "producer" in track_artist_role
-                                    or "produced by" in track_artist_role
-                                ) and track_artist_name not in track_producers:
-                                    track_producers.append(track_artist_name)
-                                elif (
-                                    "remix" in track_artist_role
-                                    and track_artist_name not in track_remixers
-                                ):
-                                    track_remixers.append(track_artist_name)
-                                elif (
-                                    any(
-                                        kw in track_artist_role
-                                        for kw in (
-                                            "written",
-                                            "composer",
-                                            "music by",
-                                            "words by",
-                                        )
-                                    )
-                                    and track_artist_name not in track_composers
-                                ):
-                                    track_composers.append(track_artist_name)
-                    credits_dict: dict[str, str] = {}
-                    if track_producers:
-                        credits_dict["producers"] = ", ".join(track_producers)
-                    if track_remixers:
-                        credits_dict["remixer"] = ", ".join(track_remixers)
-                    if track_composers:
-                        credits_dict["composer"] = ", ".join(track_composers)
-                    if position:
-                        track_credits[position] = credits_dict
-                    if track_title:
-                        track_credits[track_title.lower()] = credits_dict
+                        track_composers.append(track_artist_name)
+            credits_dict: dict[str, str] = {}
+            if track_producers:
+                credits_dict["producers"] = ", ".join(track_producers)
+            if track_remixers:
+                credits_dict["remixer"] = ", ".join(track_remixers)
+            if track_composers:
+                credits_dict["composer"] = ", ".join(track_composers)
+            if position:
+                track_credits[position] = credits_dict
+            if track_title:
+                track_credits[track_title.lower()] = credits_dict
 
         release_result: dict[str, Any] = {
             "id": discogs_payload.get("id"),
@@ -212,7 +204,7 @@ def fetch_discogs_release_details(
         }
         set_cached_api(cache_key, release_result)
         return release_result
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Discogs release fetch failed for ID {release_id}: {error}")
         return None
 
@@ -225,8 +217,8 @@ def _score_discogs_candidate(
         cand_artist, cand_album = item_title.split(" - ", 1)
     else:
         cand_artist, cand_album = artist, item_title
-    base_score = match_score(artist, album, cand_artist, cand_album)
-    if base_score < 80.0:
+    base_score = score_artist_title_match(artist, album, cand_artist, cand_album)
+    if base_score <= 0.0:
         return 0.0
 
     score = base_score
@@ -285,11 +277,6 @@ def search_discogs_release(
     if isinstance(cached, dict):
         return cached
 
-    _DISCOGS_LIMITER.wait(
-        RATE_LIMIT_DISCOGS_AUTHENTICATED
-        if user_token
-        else RATE_LIMIT_DISCOGS_UNAUTHENTICATED
-    )
     try:
         url = "https://api.discogs.com/database/search"
         headers = {"Authorization": f"Discogs token={user_token}"}
@@ -302,11 +289,9 @@ def search_discogs_release(
         response = SESSION.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
-        discogs_payload = response.json()
-        results = (
-            discogs_payload.get("results", [])
-            if isinstance(discogs_payload, dict)
-            else []
+        discogs_payload = require_api_object(response.json(), "Discogs search response")
+        results = require_api_records(
+            discogs_payload.get("results"), "Discogs search results"
         )
         if not results:
             return None
@@ -314,10 +299,11 @@ def search_discogs_release(
         best_score = 0.0
         best_candidate: dict[str, Any] | None = None
         for track_candidate in results:
-            if not isinstance(track_candidate, dict):
-                continue
             score = _score_discogs_candidate(track_candidate, artist, album)
-            if score > best_score and score >= 80.0:
+            if (
+                score > best_score
+                and score >= get_config().catalog_candidate_rank_threshold
+            ):
                 best_score = score
                 best_candidate = track_candidate
 
@@ -329,7 +315,6 @@ def search_discogs_release(
         if not release_id:
             return None
 
-        # Enrich with full release details
         full_details = fetch_discogs_release_details(release_id, user_token)
         if full_details:
             set_cached_api(cache_key, full_details)
@@ -370,6 +355,6 @@ def search_discogs_release(
         }
         set_cached_api(cache_key, release_result)
         return release_result
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Discogs search failed for {artist} - {album}: {error}")
         return None

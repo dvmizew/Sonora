@@ -1,9 +1,11 @@
+from math import gcd
 from pathlib import Path
 
 import numpy as np
 import scipy.signal
 
 from sonora.audio.decode import load_audio
+from sonora.core.config import get_config
 from sonora.core.logger import LOG
 
 
@@ -20,13 +22,16 @@ def calculate_bpm(file_path: Path) -> float | None:
         if len(audio_mono) == 0:
             return None
 
-        # Downsample to ~22,050 Hz
-        decimation = sample_rate // 22050
-        if decimation > 1:
-            audio_mono = audio_mono[::decimation]
-            sample_rate = sample_rate // decimation
+        if sample_rate > 22050:
+            common_rate = gcd(sample_rate, 22050)
+            audio_mono = scipy.signal.resample_poly(
+                audio_mono, 22050 // common_rate, sample_rate // common_rate
+            )
+            sample_rate = 22050
 
-        nperseg = 512 if sample_rate <= 24000 else 1024
+        nperseg = 512
+        if len(audio_mono) < nperseg:
+            return None
         noverlap = nperseg // 2
         _, _, spectrogram = scipy.signal.spectrogram(
             audio_mono, fs=sample_rate, nperseg=nperseg, noverlap=noverlap
@@ -43,23 +48,24 @@ def calculate_bpm(file_path: Path) -> float | None:
         autocorr = autocorr[len(autocorr) // 2 :]
 
         frame_rate = sample_rate / float(nperseg - noverlap)
-        min_lag = int(frame_rate * 60 / 200)  # 200 BPM
-        max_lag = int(frame_rate * 60 / 60)  # 60 BPM
+        tempo_policy = get_config()
+        min_lag = max(1, int(frame_rate * 60 / tempo_policy.bpm_search_max))
+        max_lag = int(frame_rate * 60 / tempo_policy.bpm_search_min)
 
         if max_lag <= min_lag or len(autocorr) <= max_lag:
             return None
 
         peak_idx = min_lag + np.argmax(autocorr[min_lag:max_lag])
-        if peak_idx == 0:
-            return None
-
         bpm_value = (frame_rate * 60.0) / peak_idx
 
-        # Octave normalization to standard 75-190 BPM music tempo range
-        while bpm_value < 75.0:
-            bpm_value *= 2.0
-        while bpm_value > 190.0:
-            bpm_value /= 2.0
+        if (
+            tempo_policy.bpm_octave_min is not None
+            and tempo_policy.bpm_octave_max is not None
+        ):
+            while bpm_value < tempo_policy.bpm_octave_min:
+                bpm_value *= 2.0
+            while bpm_value > tempo_policy.bpm_octave_max:
+                bpm_value /= 2.0
 
         return round(float(bpm_value), 1)
 

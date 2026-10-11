@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import orjson
-from mutagen._util import MutagenError
+from mutagen import MutagenError
 from mutagen.flac import FLAC
 from rapidfuzz import fuzz
 from rich.markup import escape
@@ -13,6 +13,11 @@ from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.key import key_to_camelot
 from sonora.audio.metadata import read_track_metadata
 from sonora.audio.spectral import detect_fake_lossless
+from sonora.core.artists import (
+    extract_artist_features,
+    get_primary_artist,
+    is_single_group_artist,
+)
 from sonora.core.config import get_config
 from sonora.core.constants import (
     FEAT_KEYWORDS,
@@ -23,27 +28,26 @@ from sonora.core.logger import (
     LOG,
     create_progress,
     interactive_pause_listener,
+    resume_workers,
     wait_if_paused,
 )
 from sonora.core.models import CheckReport, TrackInfo
-from sonora.core.utils import (
-    InterruptedOperationError,
+from sonora.core.text import is_valid_uuid, normalize_genre, normalize_str
+from sonora.core.titles import (
     _is_corrupt_bracket,
     clean_title,
-    extract_artist_features,
     extract_bracket_tokens,
     extract_title_features,
+)
+from sonora.core.utils import (
+    InterruptedOperationError,
     find_audio_files,
     find_companion_lyrics,
-    get_primary_artist,
     is_in_singles_hierarchy,
     is_interruption,
-    is_single_group_artist,
-    is_valid_uuid,
-    normalize_genre,
-    normalize_str,
     parse_track_filename,
 )
+from sonora.modules.matching import _is_generic
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
 
@@ -66,6 +70,7 @@ def check_file(
     track_metadata: TrackInfo | None = None,
 ) -> list[str]:
     issues: list[str] = []
+    track: TrackInfo | None = track_metadata
     if not file_path.exists():
         return [f"File not found: {file_path}"]
 
@@ -89,7 +94,11 @@ def check_file(
         except (MutagenError, OSError) as error:
             LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
 
-    if check_spectral:
+    if (
+        check_spectral
+        and file_path.suffix.lower() not in {".mp3", ".ogg", ".opus", ".mpc", ".wma"}
+        and (track_metadata is None or track_metadata.is_lossless)
+    ):
         try:
             is_fake, _, description = detect_fake_lossless(file_path)
             if is_fake:
@@ -133,11 +142,11 @@ def check_file(
             ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID", False),
             ("musicbrainz_workid", "MUSICBRAINZ_WORKID", False),
         ]:
-            val = getattr(track, field_name)
-            if not val and required:
+            tag_value = getattr(track, field_name)
+            if not tag_value and required:
                 issues.append(f"Missing {tag_label} tag.")
-            elif val and not is_valid_uuid(val, allow_multivalue=True):
-                issues.append(f"Invalid UUID format in {tag_label}: '{val}'")
+            elif tag_value and not is_valid_uuid(tag_value, allow_multivalue=True):
+                issues.append(f"Invalid UUID format in {tag_label}: '{tag_value}'")
 
         if track.art_width and (
             track.art_width < MIN_COVER_ART_DIMENSION
@@ -185,7 +194,7 @@ def check_file(
         if (
             not is_album_level_collab
             and not artist_feats
-            and not is_single_group_artist(track.artist)
+            and not is_single_group_artist(track.artist, allow_network=False)
         ):
             for delimiter_pattern, delimiter_name in delimiters:
                 if delimiter_pattern in f" {track.artist} ":
@@ -211,9 +220,9 @@ def check_file(
 
         if track.sample_rate and track.sample_rate < 44100:
             issues.append(f"Sub-standard sample rate: {track.sample_rate}Hz")
-        if track.bitrate and track.bitrate < 320000 and not track.is_lossless:
+        if track.bitrate and track.bitrate < 320 and not track.is_lossless:
             issues.append(
-                f"Sub-standard lossy bitrate: {round(track.bitrate / 1000)} kbps (Recommended: 320 kbps)"
+                f"Sub-standard lossy bitrate: {track.bitrate} kbps (Recommended: 320 kbps)"
             )
 
     except OSError as error:
@@ -221,7 +230,7 @@ def check_file(
 
     companion_lrcs = find_companion_lyrics(
         file_path,
-        track_number=track.track_number if "track" in locals() and track else None,
+        track_number=track.track_number if track is not None else None,
     )
     if not companion_lrcs:
         issues.append("Missing synchronized lyrics (.lrc) file.")
@@ -257,7 +266,7 @@ def write_check_report_json(
     corrupt = report.corrupt_files
     missing_meta = report.missing_metadata
     missing_lrc = report.missing_lrc
-    issue_count = len(report.issues)
+    issue_count = report.files_with_issues
 
     status_prefix = "PARTIAL Check (aborted)" if aborted_by_user else "Check completed"
     summary_text = (
@@ -366,7 +375,7 @@ def _check_folder_album_consistency(
         if track_metadata.album_artist:
             album_artist_counts[track_metadata.album_artist] += 1
         primary_artist = get_primary_artist(track_metadata.artist)
-        if primary_artist and primary_artist != "Unknown Artist":
+        if not _is_generic(primary_artist, "artist"):
             artist_counts[primary_artist] += 1
 
     dominant_artist: str | None = None
@@ -455,11 +464,13 @@ def _check_folder_alien_tracks(
                     or norm_dominant_artist in norm_track_artist
                 )
             )
-            or fuzz.ratio(norm_track_artist, norm_dominant_artist) >= 85.0
+            or fuzz.ratio(norm_track_artist, norm_dominant_artist)
+            >= get_config().title_match_threshold
         )
         album_matches = (
             norm_track_album == norm_dominant_album
-            or fuzz.ratio(norm_track_album, norm_dominant_album) >= 80.0
+            or fuzz.ratio(norm_track_album, norm_dominant_album)
+            >= get_config().album_match_threshold
         )
 
         # 1. Unrelated alien track: neither artist nor album matches consensus
@@ -542,7 +553,7 @@ def check_library(
         task = progress.add_task(
             "[cyan]Checking library...", total=len(files_to_process)
         )
-        with interactive_pause_listener(progress, task):
+        with interactive_pause_listener(progress, task) as pause_stop_event:
             try:
                 for future in as_completed(future_to_path):
                     path, file_issues, track_metadata = future.result()
@@ -559,10 +570,7 @@ def check_library(
 
                     if file_issues:
                         report.issues[str(path)] = file_issues
-                        try:
-                            display_name = str(path.relative_to(folder_path))
-                        except ValueError:
-                            display_name = path.name
+                        display_name = str(path.relative_to(folder_path))
                         LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
                         for issue in file_issues:
                             LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
@@ -591,6 +599,7 @@ def check_library(
             except (KeyboardInterrupt, RuntimeError) as exc:
                 if not is_interruption(exc):
                     raise
+                resume_workers(pause_stop_event)
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(report) from None
 
@@ -598,10 +607,7 @@ def check_library(
         if get_config().is_generic_container(folder.name):
             continue
         folder_issues: list[str] = []
-        try:
-            rel_parts = folder.relative_to(folder_path).parts
-        except ValueError:
-            rel_parts = (folder.name,)
+        rel_parts = folder.relative_to(folder_path).parts
         is_singles_container = any(
             get_config().is_generic_container(p) for p in rel_parts
         ) or is_in_singles_hierarchy(folder, folder_path)
@@ -639,25 +645,30 @@ def check_library(
             for disc_idx, track_idx in tracks_found:
                 discs[disc_idx].add(track_idx)
             for disc_idx, track_nums in discs.items():
-                if track_nums:
-                    missing = [
-                        i for i in range(1, max(track_nums) + 1) if i not in track_nums
-                    ]
-                    if missing:
-                        folder_issues.append(
-                            f"Missing track numbers in sequence for Disc {disc_idx}: {missing}"
-                        )
+                missing = [
+                    i for i in range(1, max(track_nums) + 1) if i not in track_nums
+                ]
+                if missing:
+                    folder_issues.append(
+                        f"Missing track numbers in sequence for Disc {disc_idx}: {missing}"
+                    )
 
         if folder_issues:
             report.issues[str(folder)] = folder_issues
-            try:
-                display_folder = str(folder.relative_to(folder_path))
-            except ValueError:
-                display_folder = folder.name
+            display_folder = str(folder.relative_to(folder_path))
             LOG.warning(f"📁 [bold]{escape(display_folder)}[/bold]")
             for issue in folder_issues:
                 LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
 
+    report.missing_metadata = sum(
+        any(
+            ("missing" in issue.lower() and "lrc" not in issue.lower())
+            or issue.startswith(("Mismatched", "Alien", "Displaced"))
+            for issue in issues
+        )
+        for path, issues in report.issues.items()
+        if Path(path).suffix.lower() in SUPPORTED_EXTS
+    )
     if output_json:
         write_check_report_json(report, folder_path, output_json, aborted_by_user=False)
 

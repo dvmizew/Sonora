@@ -1,11 +1,13 @@
 import functools
 import re
+from math import gcd
 from pathlib import Path
 
 import numpy as np
 import scipy.signal
 
 from sonora.audio.decode import load_audio
+from sonora.core.config import get_config
 from sonora.core.logger import LOG
 
 PITCH_CLASSES: tuple[str, ...] = (
@@ -23,7 +25,7 @@ PITCH_CLASSES: tuple[str, ...] = (
     "B",
 )
 
-# Empirically optimized Shaath profiles (KeyFinder / Essentia standard for modern music)
+# Shaath-style profiles used by the correlation estimator; confidence is not an accuracy measure.
 SHAATH_MAJOR: np.ndarray = np.array(
     [6.6, 2.0, 3.5, 2.3, 4.6, 4.0, 2.5, 5.2, 2.4, 3.7, 2.3, 3.4], dtype=np.float32
 )
@@ -73,7 +75,7 @@ def key_to_camelot(key_str: str | None) -> str | None:
     if _CAMELOT_REGEX.match(cleaned):
         return cleaned.upper()
 
-    match = _KEY_NOTE_REGEX.match(cleaned)
+    match = _KEY_NOTE_REGEX.fullmatch(cleaned)
     if match:
         base = match.group(1)
         base = base[0].upper() + (base[1].lower() if len(base) > 1 else "")
@@ -136,7 +138,6 @@ def get_chroma_filterbank(
 
     wts = np.exp(-0.5 * (2.0 * diff_matrix / np.tile(binwidthbins, (n_chroma, 1))) ** 2)
 
-    # Normalize each frequency column
     col_norms = np.sqrt(np.sum(wts**2, axis=0, keepdims=True))
     col_norms[col_norms == 0] = 1.0
     wts = wts / col_norms
@@ -170,13 +171,13 @@ def calculate_chroma(audio: np.ndarray, sample_rate: int) -> np.ndarray | None:
     if len(audio) == 0 or np.all(audio == 0):
         return None
 
-    # Downsample to ~22,050 Hz for efficient spectral analysis
     target_sr = 22050
-    if sample_rate > 24000:
-        decimation = sample_rate // target_sr
-        if decimation > 1:
-            audio = audio[::decimation]
-            sample_rate = sample_rate // decimation
+    if sample_rate > target_sr:
+        common_rate = gcd(sample_rate, target_sr)
+        audio = scipy.signal.resample_poly(
+            audio, target_sr // common_rate, sample_rate // common_rate
+        )
+        sample_rate = target_sr
 
     nperseg = 4096
     noverlap = nperseg // 2
@@ -191,21 +192,15 @@ def calculate_chroma(audio: np.ndarray, sample_rate: int) -> np.ndarray | None:
         window="hann",
     )
 
-    if spectrogram.size == 0:
-        return None
-
     # Logarithmic magnitude compression to balance dynamic range against percussion
     spec_log = np.log1p(1000.0 * spectrogram)
 
-    # Project linear frequencies into 12 chroma pitch classes
     filterbank = get_chroma_filterbank(sr=sample_rate, n_fft=nperseg)
     chroma = filterbank @ spec_log
 
-    # L2-normalize each time frame
     frame_norms = np.linalg.norm(chroma, axis=0, keepdims=True)
     chroma_norm = chroma / np.maximum(frame_norms, 1e-6)
 
-    # Compute mean energy across all analyzed time frames
     chroma_mean: np.ndarray = np.mean(chroma_norm, axis=1)
     vector_norm = np.linalg.norm(chroma_mean)
     if vector_norm <= 0:
@@ -241,7 +236,7 @@ def detect_key_from_chroma(
             best_score = score_min
             best_key = f"{base_name}m"
 
-    if best_key is None or best_score < 0.20:
+    if best_key is None or best_score < get_config().key_confidence_threshold:
         return None
 
     camelot = CAMELOT_MAP.get(best_key, "")

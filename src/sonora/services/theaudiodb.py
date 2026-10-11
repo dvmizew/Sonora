@@ -2,24 +2,22 @@ import urllib.parse
 
 import httpx
 
+from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.constants import RATE_LIMIT_THEAUDIODB
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, normalize_str, safe_float
-
-_THEAUDIODB_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_THEAUDIODB)
+from sonora.core.text import normalize_str, safe_float
 
 
 def _download_artwork_bytes(url: str | None) -> bytes | None:
     if not url:
         return None
-    _THEAUDIODB_LIMITER.wait()
+
     try:
         response = SESSION.get(url, timeout=10)
         if response.status_code == 200:
             return response.content
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Failed to fetch artwork from {url}: {error}")
     return None
 
@@ -38,16 +36,22 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
     if isinstance(cached, tuple) and len(cached) == 2:
         return cached
 
-    _THEAUDIODB_LIMITER.wait()
     thumbnail_bytes: bytes | None = None
     banner_bytes: bytes | None = None
     try:
-        url = f"https://www.theaudiodb.com/api/v1/json/2/search.php?s={urllib.parse.quote(artist_name)}"
+        url = f"https://www.theaudiodb.com/api/v1/json/123/search.php?s={urllib.parse.quote(artist_name)}"
         response = SESSION.get(url, timeout=6)
         if response.status_code == 200:
-            theaudiodb_payload = response.json()
-            artists = theaudiodb_payload.get("artists")
-            if artists and isinstance(artists, list) and artists[0]:
+            theaudiodb_payload = require_api_object(
+                response.json(), "TheAudioDB artist response"
+            )
+            raw_artists = theaudiodb_payload["artists"]
+            artists = (
+                []
+                if raw_artists is None
+                else require_api_records(raw_artists, "TheAudioDB artists")
+            )
+            if artists:
                 artist_data = artists[0]
                 thumbnail_url = artist_data.get("strArtistThumb") or artist_data.get(
                     "strArtistFanart"
@@ -67,16 +71,20 @@ def fetch_artist_images(artist_name: str) -> tuple[bytes | None, bytes | None]:
                 if thumbnail_bytes or banner_bytes:
                     set_cached_api(cache_key, result)
                 return result
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"TheAudioDB fetch_artist_images failed for {artist_name}: {error}")
     return None, None
 
 
-def _clean_theaudiodb_str(val: object) -> str | None:
-    if val is None:
+def _clean_theaudiodb_str(metadata_value: object) -> str | None:
+    if metadata_value is None:
         return None
-    s = str(val).strip()
-    return s if s and s.lower() not in ("null", "none", "") else None
+    cleaned_value = str(metadata_value).strip()
+    return (
+        cleaned_value
+        if cleaned_value and cleaned_value.lower() not in ("null", "none", "")
+        else None
+    )
 
 
 def fetch_theaudiodb_track_details(
@@ -94,13 +102,20 @@ def fetch_theaudiodb_track_details(
     if isinstance(cached, dict):
         return cached if cached else None
 
-    _THEAUDIODB_LIMITER.wait()
     try:
-        url = f"https://www.theaudiodb.com/api/v1/json/2/searchtrack.php?s={urllib.parse.quote(artist_name)}&t={urllib.parse.quote(track_title)}"
+        url = f"https://www.theaudiodb.com/api/v1/json/123/searchtrack.php?s={urllib.parse.quote(artist_name)}&t={urllib.parse.quote(track_title)}"
         response = SESSION.get(url, timeout=6)
         if response.status_code == 200:
-            tracks = response.json().get("track", [])
-            if tracks and isinstance(tracks, list) and tracks[0]:
+            theaudiodb_payload = require_api_object(
+                response.json(), "TheAudioDB track response"
+            )
+            raw_tracks = theaudiodb_payload["track"]
+            tracks = (
+                []
+                if raw_tracks is None
+                else require_api_records(raw_tracks, "TheAudioDB tracks")
+            )
+            if tracks:
                 raw_track = tracks[0]
                 rating = safe_float(raw_track.get("intScore"))
 
@@ -121,7 +136,7 @@ def fetch_theaudiodb_track_details(
                 set_cached_api(cache_key, details)
                 return details
             set_cached_api(cache_key, {})
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(
             f"TheAudioDB track lookup failed for {artist_name} - {track_title}: {error}"
         )

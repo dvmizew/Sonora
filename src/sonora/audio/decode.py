@@ -64,8 +64,7 @@ def load_audio(
             audio_array: np.ndarray = (
                 buffer_data.reshape(-1, 2) if not mono else buffer_data
             )
-            if len(audio_array) > 0:
-                return audio_array, 44100
+            return audio_array, 44100
     except (subprocess.SubprocessError, OSError) as error:
         LOG.debug(f"ffmpeg decode failed for {file_path}: {error}")
 

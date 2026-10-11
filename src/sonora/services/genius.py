@@ -1,18 +1,26 @@
 import httpx
 
+from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.constants import GENIUS_MATCH_THRESHOLD, RATE_LIMIT_GENIUS
+from sonora.core.config import get_config
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import (
-    RateLimiter,
-    clean_disambiguation,
-    clean_title,
-    match_score,
-    normalize_str,
-)
+from sonora.core.text import clean_disambiguation, normalize_str
+from sonora.core.titles import clean_title, score_artist_title_match
 
-_GENIUS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_GENIUS)
+
+def _normalize_genius_description(plain_description: object) -> str | None:
+    if plain_description is None:
+        return None
+    if not isinstance(plain_description, str):
+        raise TypeError("Unexpected Genius plain-text description payload")
+    song_description = plain_description.strip()
+    if (
+        song_description in ("", "?")
+        or "Lyrics for this song are unavailable" in song_description
+    ):
+        return None
+    return song_description
 
 
 def fetch_genius_song_details(
@@ -25,9 +33,9 @@ def fetch_genius_song_details(
     cache_key = f"genius_song:{normalize_str(artist)}:{normalize_str(cleaned_title)}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
+        cached["description"] = _normalize_genius_description(cached.get("description"))
         return cached
 
-    _GENIUS_LIMITER.wait()
     try:
         query = f"{artist} {cleaned_title}"
         search_url = "https://api.genius.com/search"
@@ -38,8 +46,11 @@ def fetch_genius_song_details(
             timeout=5,
         )
         response.raise_for_status()
-        genius_payload = response.json()
-        hits = genius_payload.get("response", {}).get("hits", [])
+        genius_payload = require_api_object(response.json(), "Genius search response")
+        search_results = require_api_object(
+            genius_payload.get("response"), "Genius search envelope"
+        )
+        hits = require_api_records(search_results.get("hits"), "Genius search hits")
         if not hits:
             return None
 
@@ -47,55 +58,71 @@ def fetch_genius_song_details(
         best_score = 0.0
 
         for hit in hits:
-            result_item = hit.get("result", {})
+            result_item = require_api_object(hit.get("result"), "Genius search hit")
             hit_artist = str(result_item.get("primary_artist", {}).get("name", ""))
             hit_title = str(result_item.get("title", ""))
 
-            score = match_score(artist, cleaned_title, hit_artist, hit_title)
+            score = score_artist_title_match(
+                artist, cleaned_title, hit_artist, hit_title
+            )
             if score > best_score:
                 best_score = score
                 best_hit = result_item
 
-        if not best_hit or best_score < GENIUS_MATCH_THRESHOLD:
+        if not best_hit or best_score < get_config().genius_match_threshold:
             return None
 
         api_path = best_hit.get("api_path")
         if not api_path:
             return None
 
-        _GENIUS_LIMITER.wait()
         song_url = f"https://api.genius.com{api_path}"
         song_response = SESSION.get(
             song_url,
+            params={"text_format": "plain"},
             headers={"Authorization": f"Bearer {api_token}"},
             timeout=5,
         )
         song_response.raise_for_status()
-        song_genius_payload = song_response.json().get("response", {}).get("song", {})
+        genius_payload = require_api_object(
+            song_response.json(), "Genius song response"
+        )
+        song_envelope = require_api_object(
+            genius_payload.get("response"), "Genius song envelope"
+        )
+        song_genius_payload = require_api_object(
+            song_envelope.get("song"), "Genius song"
+        )
 
-        plain_description = song_genius_payload.get("description", {}).get("plain")
-        if plain_description and "Lyrics for this song are unavailable" in str(
-            plain_description
-        ):
-            plain_description = None
+        plain_description = _normalize_genius_description(
+            require_api_object(
+                song_genius_payload.get("description", {}), "Genius description"
+            ).get("plain")
+        )
 
         genius_song_id = song_genius_payload.get("id")
 
-        featured_list = song_genius_payload.get("featured_artists", [])
+        featured_list = require_api_records(
+            song_genius_payload.get("featured_artists", []), "Genius featured_artists"
+        )
         featured_names = [
             clean_disambiguation(str(featured["name"]))
             for featured in featured_list
             if isinstance(featured, dict) and featured.get("name")
         ]
 
-        producer_list = song_genius_payload.get("producer_artists", [])
+        producer_list = require_api_records(
+            song_genius_payload.get("producer_artists", []), "Genius producer_artists"
+        )
         producer_names = [
             clean_disambiguation(str(producer["name"]))
             for producer in producer_list
             if isinstance(producer, dict) and producer.get("name")
         ]
 
-        writer_list = song_genius_payload.get("writer_artists", [])
+        writer_list = require_api_records(
+            song_genius_payload.get("writer_artists", []), "Genius writer_artists"
+        )
         writer_names = [
             clean_disambiguation(str(writer["name"]))
             for writer in writer_list
@@ -115,6 +142,6 @@ def fetch_genius_song_details(
         set_cached_api(cache_key, result)
         return result
 
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {error}")
         return None

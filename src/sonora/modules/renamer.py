@@ -6,31 +6,30 @@ from pathlib import Path
 from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata
+from sonora.core.artists import get_primary_artist
 from sonora.core.config import get_config
+from sonora.core.files import atomic_write_bytes
 from sonora.core.logger import (
     LOG,
     create_progress,
     interactive_pause_listener,
+    resume_workers,
     wait_if_paused,
 )
 from sonora.core.models import RenameReport, TrackInfo
+from sonora.core.text import normalize_str, safe_int, sanitize_name
+from sonora.core.titles import clean_title, strip_corrupt_brackets
 from sonora.core.utils import (
     InterruptedOperationError,
-    clean_title,
     find_audio_files,
     find_companion_lyrics,
-    get_primary_artist,
     get_single_release_title,
     group_files_by_album_root,
     is_in_singles_hierarchy,
     is_interruption,
-    normalize_str,
     relocate_companion_lyrics,
     resolve_unique_path,
     safe_case_rename,
-    safe_int,
-    sanitize_name,
-    strip_corrupt_brackets,
 )
 
 
@@ -69,8 +68,7 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
         if headers:
             new_lines = headers + new_lines
 
-        with lrc_path.open("w", encoding="utf-8") as file_handle:
-            file_handle.writelines(new_lines)
+        atomic_write_bytes(lrc_path, "".join(new_lines).encode("utf-8"))
         return True
 
     except (OSError, ValueError) as error:
@@ -92,9 +90,7 @@ def build_new_filename(
     if not title:
         return None
 
-    cleaned_title_str = (
-        sanitize_name(strip_corrupt_brackets(clean_title(title))) or "Untitled"
-    )
+    cleaned_title_str = sanitize_name(strip_corrupt_brackets(clean_title(title)))
     track_num_int = safe_int(track_number)
 
     disc_prefix = ""
@@ -119,11 +115,8 @@ def rename_track_file(
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    try:
-        if track_info is None:
-            track_info = read_track_metadata(file_path)
-    except OSError as error:
-        raise RuntimeError(f"Cannot rename file without metadata: {error}") from error
+    if track_info is None:
+        track_info = read_track_metadata(file_path)
 
     folder = file_path.parent
     in_singles = is_in_singles_hierarchy(file_path)
@@ -154,7 +147,7 @@ def rename_track_file(
     else:
         num = 1 if in_singles else (track_info.track_number or 1)
         artist_clean = sanitize_name(track_info.artist)
-        title_clean = sanitize_name(clean_title(track_info.title)) or "Untitled"
+        title_clean = sanitize_name(clean_title(track_info.title))
         new_stem = format_pattern.format(
             track_number=num,
             artist=artist_clean,
@@ -174,26 +167,32 @@ def rename_track_file(
             sync_lrc_metadata(companion, track_info.artist, track_info.title)
 
     if file_path.name != new_name or file_path.parent != new_path.parent:
-        if new_path.exists() and (
-            file_path.parent != new_path.parent
-            or file_path.name.lower() != new_path.name.lower()
-        ):
+        if new_path.exists() and not file_path.samefile(new_path):
             new_path = resolve_unique_path(new_path, current_path=file_path)
             new_name = new_path.name
 
         if not dry_run:
             try:
-                safe_case_rename(file_path, new_path)
+                while True:
+                    try:
+                        safe_case_rename(file_path, new_path)
+                        break
+                    except FileExistsError:
+                        new_path = resolve_unique_path(new_path, current_path=file_path)
+                new_name = new_path.name
                 LOG.info(
                     f"   ∟ 🎵 [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
                 )
                 relocated = relocate_companion_lyrics(
-                    file_path, new_path, dry_run=False
+                    file_path, new_path, dry_run=False, companions=companion_lyrics
                 )
                 if relocated_lrc_collector is not None:
                     relocated_lrc_collector.extend(relocated)
             except OSError as error:
-                LOG.warning(f"Failed to rename file {escape(file_path.name)}: {error}")
+                LOG.warning(
+                    f"Failed to rename file {escape(file_path.name)}: {escape(str(error))}"
+                )
+                raise
         else:
             LOG.info(
                 f"[DRY-RUN] Would rename {escape(file_path.name)} -> {escape(new_name)}"
@@ -225,9 +224,6 @@ def rename_single_folder(
 
     primary_artist = get_primary_artist(track_info.artist)
     single_title = get_single_release_title(track_info)
-    if not primary_artist or not single_title:
-        return folder_path
-
     canonical_with_feat = (
         sanitize_name(
             f"{primary_artist} - {single_title} (feat. {track_info.featured_artists})"
@@ -242,33 +238,31 @@ def rename_single_folder(
         return folder_path
 
     expected_name = canonical_with_feat or canonical_without_feat
-    if folder_now != expected_name:
-        new_folder = folder_path.with_name(expected_name)
-        if (
-            new_folder.exists()
-            and folder_path.resolve() != new_folder.resolve()
-            and folder_path.name.lower() != new_folder.name.lower()
-        ):
-            return folder_path
+    new_folder = folder_path.with_name(expected_name)
+    if (
+        new_folder.exists()
+        and folder_path.resolve() != new_folder.resolve()
+        and folder_path.name.lower() != new_folder.name.lower()
+    ):
+        return folder_path
 
-        if not dry_run:
-            try:
-                safe_case_rename(folder_path, new_folder)
-                LOG.info(
-                    f"   ∟ 📂 Single folder renamed: [dim]{escape(folder_now)}[/] -> [cyan]{escape(expected_name)}[/]"
-                )
-                return new_folder
-            except OSError as error:
-                LOG.warning(
-                    f"Failed to rename single folder {escape(folder_now)}: {error}"
-                )
-                return folder_path
-        else:
+    if not dry_run:
+        try:
+            safe_case_rename(folder_path, new_folder)
             LOG.info(
-                f"[DRY-RUN] Would rename single folder {escape(folder_now)} -> {escape(expected_name)}"
+                f"   ∟ 📂 Single folder renamed: [dim]{escape(folder_now)}[/] -> [cyan]{escape(expected_name)}[/]"
             )
             return new_folder
-    return folder_path
+        except OSError as error:
+            LOG.warning(
+                f"Failed to rename single folder {escape(folder_now)}: {escape(str(error))}"
+            )
+            return folder_path
+    else:
+        LOG.info(
+            f"[DRY-RUN] Would rename single folder {escape(folder_now)} -> {escape(expected_name)}"
+        )
+        return new_folder
 
 
 def rename_album_folder(
@@ -319,7 +313,9 @@ def rename_album_folder(
                 )
                 return new_folder
             except OSError as error:
-                LOG.warning(f"Failed to rename folder {escape(folder_now)}: {error}")
+                LOG.warning(
+                    f"Failed to rename folder {escape(folder_now)}: {escape(str(error))}"
+                )
                 return folder_path
         else:
             LOG.info(
@@ -343,7 +339,7 @@ def _rename_single_worker(
         )
         return path, extracted_track_info, new_path, len(relocated_lrcs)
     except OSError as error:
-        LOG.warning(f"Failed to rename file {escape(str(path))}: {error}")
+        LOG.warning(f"Failed to rename file {escape(str(path))}: {escape(str(error))}")
         return path, None, None, 0
 
 
@@ -375,7 +371,7 @@ def rename_directory_files(
             "[cyan]Renaming audio files...", total=total_files_count
         )
         with (
-            interactive_pause_listener(progress, task),
+            interactive_pause_listener(progress, task) as pause_stop_event,
             ThreadPoolExecutor(max_workers=max_threads) as executor,
         ):
             try:
@@ -416,6 +412,8 @@ def rename_directory_files(
                                 report.files_renamed += 1
                             else:
                                 report.unchanged_files += 1
+                        else:
+                            report.failed_files += 1
                         progress.advance(task)
 
                     final_folder = folder
@@ -446,12 +444,17 @@ def rename_directory_files(
                                 report.folders_renamed += 1
 
                     renamed.extend(
-                        (final_folder / p.name if final_folder != folder else p)
+                        (
+                            final_folder / p.relative_to(folder)
+                            if final_folder != folder
+                            else p
+                        )
                         for p in folder_renamed_paths
                     )
             except (KeyboardInterrupt, RuntimeError) as exc:
                 if not is_interruption(exc):
                     raise
+                resume_workers(pause_stop_event)
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(report) from None
 

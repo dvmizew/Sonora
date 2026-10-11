@@ -5,14 +5,13 @@ from typing import Any
 
 import httpx
 
+from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
-from sonora.core.constants import RATE_LIMIT_FANART
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, is_valid_uuid, safe_int
+from sonora.core.text import is_valid_uuid, safe_int
 
-_FANART_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_FANART)
 _BASE_URL = "https://webservice.fanart.tv/v3.2/music"
 
 
@@ -37,24 +36,20 @@ class FanartAlbumArtwork:
 
 def _extract_image_urls(raw_items: Any) -> list[str]:
     """Extract valid image URLs from a Fanart.tv array of image descriptors sorted by likes."""
-    if not isinstance(raw_items, list):
+    if raw_items is None:
         return []
+    image_records = require_api_records(raw_items, "Fanart image descriptors")
 
     sorted_items = sorted(
-        raw_items,
-        key=lambda image_entry: (
-            safe_int(image_entry.get("likes")) or 0
-            if isinstance(image_entry, dict)
-            else 0
-        ),
+        image_records,
+        key=lambda image_entry: safe_int(image_entry.get("likes")) or 0,
         reverse=True,
     )
     urls: list[str] = []
     for image_entry in sorted_items:
-        if isinstance(image_entry, dict):
-            url = image_entry.get("url")
-            if isinstance(url, str) and url.startswith("http"):
-                urls.append(url)
+        url = image_entry.get("url")
+        if isinstance(url, str) and url.startswith("http"):
+            urls.append(url)
     return urls
 
 
@@ -62,7 +57,7 @@ def download_fanart_image_bytes(url: str | None) -> bytes | None:
     """Download image payload from Fanart.tv with rate limiting and robust error handling."""
     if not url:
         return None
-    _FANART_LIMITER.wait()
+
     try:
         response = SESSION.get(url, timeout=12)
         if response.status_code == 200:
@@ -106,16 +101,13 @@ def fetch_fanart_artist(
         headers["client-key"] = effective_client_key
 
     url = f"{_BASE_URL}/{artist_mbid}"
-    _FANART_LIMITER.wait()
 
     try:
         response = SESSION.get(url, headers=headers, timeout=10)
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        fanart_payload = response.json()
-        if not isinstance(fanart_payload, dict):
-            return None
+        fanart_payload = require_api_object(response.json(), "Fanart response")
 
         logos = _extract_image_urls(
             fanart_payload.get("hdmusiclogo")
@@ -141,7 +133,7 @@ def fetch_fanart_artist(
             },
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Fanart.tv artist fetch failed for {artist_mbid}: {error}")
         return None
 
@@ -177,16 +169,13 @@ def fetch_fanart_label(
         headers["client-key"] = effective_client_key
 
     url = f"{_BASE_URL}/labels/{label_mbid}"
-    _FANART_LIMITER.wait()
 
     try:
         response = SESSION.get(url, headers=headers, timeout=10)
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        fanart_payload = response.json()
-        if not isinstance(fanart_payload, dict):
-            return None
+        fanart_payload = require_api_object(response.json(), "Fanart response")
 
         labels = _extract_image_urls(fanart_payload.get("musiclabel"))
         artwork = FanartLabelArtwork(label_urls=tuple(labels))
@@ -196,7 +185,7 @@ def fetch_fanart_label(
             {"label_urls": list(artwork.label_urls)},
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Fanart.tv label fetch failed for {label_mbid}: {error}")
         return None
 
@@ -233,31 +222,29 @@ def fetch_fanart_album(
         headers["client-key"] = effective_client_key
 
     url = f"{_BASE_URL}/albums/{release_group_mbid}"
-    _FANART_LIMITER.wait()
 
     try:
         response = SESSION.get(url, headers=headers, timeout=10)
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        fanart_payload = response.json()
-        if not isinstance(fanart_payload, dict):
-            return None
+        fanart_payload = require_api_object(response.json(), "Fanart response")
 
         cdart_urls: list[str] = []
         cover_urls: list[str] = []
 
         album_fanart_payload = fanart_payload.get("albums")
         if isinstance(album_fanart_payload, dict):
-            entry = album_fanart_payload.get(release_group_mbid) or next(
-                iter(album_fanart_payload.values()), None
-            )
+            entry = album_fanart_payload.get(release_group_mbid)
             if isinstance(entry, dict):
                 cdart_urls.extend(_extract_image_urls(entry.get("cdart")))
                 cover_urls.extend(_extract_image_urls(entry.get("albumcover")))
         elif isinstance(album_fanart_payload, list):
             for entry in album_fanart_payload:
-                if isinstance(entry, dict):
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("release_group_id") == release_group_mbid
+                ):
                     cdart_urls.extend(_extract_image_urls(entry.get("cdart")))
                     cover_urls.extend(_extract_image_urls(entry.get("albumcover")))
         else:
@@ -277,6 +264,6 @@ def fetch_fanart_album(
             },
         )
         return artwork
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Fanart.tv album fetch failed for {release_group_mbid}: {error}")
         return None
