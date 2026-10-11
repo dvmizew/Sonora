@@ -59,7 +59,7 @@ brew install ffmpeg flac chromaprint
 
 ### Option 1: Standalone Binary (Linux x86_64)
 
-Run Sonora directly without installing Python or dependencies:
+Run Sonora without installing Python packages. The external tools listed in Requirements must still be available:
 
 ```bash
 chmod +x sonora-linux-x86_64
@@ -67,6 +67,8 @@ chmod +x sonora-linux-x86_64
 ```
 
 ### Option 2: From Source (Python 3.10+)
+
+Source installation requires Git because ShazamIO is pinned to upstream commit `8afb07c0ff31c663daa895ebc1d5db17a74fc4ed`. Its unreleased 0.9.0 package supports `shazamio-core==1.2.0`, which provides the native wheel used on Python 3.14. The released 0.8.1 SDK requires an older native core without an official Python 3.14 wheel. Replace the source pin with a released version once a compatible release is available.
 
 ```bash
 git clone https://github.com/dvmizew/Sonora.git
@@ -111,10 +113,21 @@ You can also use a configuration file at `~/.config/sonora/config.toml`:
 [sonora]
 artist_match_threshold = 85.0
 album_match_threshold = 75.0
+title_match_threshold = 85.0
+short_title_match_threshold = 95.0
+short_title_length = 8
+acoustid_confidence_threshold = 0.8
+key_confidence_threshold = 0.2
+bpm_search_min = 60.0
+bpm_search_max = 200.0
 fanart_api_key = "your_api_key"
 fanart_client_key = "your_client_key"
 enable_shazam = true
 ```
+
+Title matching retains strict scores above 85, or above 95 for titles shorter than eight characters; configuration can strengthen these safeguards. Exact normalized matches remain eligible. BPM estimates are no longer automatically doubled or halved into a preferred tempo range. Set both `bpm_octave_min` and `bpm_octave_max` to opt into octave adjustment; the interval must span at least one octave. Other application policies and structural patterns are listed in [`defaults.json`](src/sonora/defaults.json).
+
+Matching penalties and ranking weights can also be configured with `version_equivalence_penalty`, `version_mismatch_penalty`, `remix_modifier_mismatch_penalty`, and `title_score_weight`. Single-edition comparisons use `single_duration_tolerance_seconds` and `single_identifier_title_threshold`. JSON/TOML boolean settings require actual booleans, and structural lists require strings; invalid settings produce an error.
 
 | Key | Where to get it | What it unlocks |
 | :--- | :--- | :--- |
@@ -220,7 +233,7 @@ sonora rename /path/to/album --dry-run
 
 ### `sonora organize`
 
-Moves standalone 1–2 track single releases into `Singles/Artist/` and removes duplicates already present in full albums.
+Moves standalone releases into `<destination>/<artist credit> - <release>/01 - <title>.<extension>`. The default destination is `<path>/Singles`, independent of library size. Featured artists, co-billed credits, and distinct recording identifiers preserve separate editions; confirmed duplicates are quarantined in `.duplicates` with audio quality taken into account.
 
 ```bash
 sonora organize /path/to/music
@@ -237,7 +250,7 @@ sonora organize /path/to/music --dry-run
 
 ### `sonora backup`
 
-Backs up all audio tags in a library to a JSON or compressed `.json.gz` file.
+Backs up exact TagLib text values and complex properties (including embedded pictures) to a canonical `sonora_backup_v2` JSON or compressed `.json.gz` archive. Relative paths are preserved; ambiguous basename matching is never used.
 
 ```bash
 sonora backup /path/to/library
@@ -256,10 +269,12 @@ Restores audio tags from a JSON or `.json.gz` backup file.
 
 ```bash
 sonora restore my_backup.json.gz
+sonora restore my_backup.json.gz --target /path/to/relocated/library
 ```
 
 **Options:**
-- `backup_file`: Path to the backup file (required).
+- `backup_file`: Path to a canonical `sonora_backup_v2` archive (required).
+- `--target PATH`: Restore to a relocated library root, preserving relative paths.
 
 ---
 
@@ -348,8 +363,10 @@ sonora lyrics /path/to/music --force
 
 Inspects and manages Sonora cache layers and persistent scan state. Complies with the XDG Base Directory specification (`$XDG_CACHE_HOME/sonora/` or `~/.cache/sonora/`).
 
-- **API Cache**: `$XDG_CACHE_HOME/sonora/api/` (Isolated SQLite `cache.db` and data shards for external API lookups)
+- **API Cache**: `$XDG_CACHE_HOME/sonora/api-msgpack-v1/` (isolated SQLite index and MessagePack metadata/binary-asset shards)
 - **Library State**: `$XDG_CACHE_HOME/sonora/library_state.db` (Persistent SQLite tracker for processed files and tags)
+
+API metadata uses MessagePack with an explicit tuple extension for catalog indexes and artwork pairs. Cache reads never deserialize Python objects. The current format starts with an empty `api-msgpack-v1` directory; previous transient caches are not read or migrated, and `library_state.db` remains separate. MessagePack is an explicit dependency because it preserves binary assets and tuple-keyed indexes while removing executable-object deserialization.
 
 ```bash
 # Display cache overview
@@ -357,7 +374,6 @@ sonora cache
 
 # Display detailed cache statistics table
 sonora cache stats
-sonora cache stats --all
 sonora cache stats --json
 
 # Clear transient API cache and memory caches (safely preserves library scan history)
@@ -381,7 +397,6 @@ sonora cache clear --all --purge
 ```
 
 **Options for `cache stats`:**
-- `-a, --all`: Display comprehensive statistics across all cache layers.
 - `--json`: Output cache statistics in machine-readable JSON format.
 
 **Options for `cache clear` / `clear-cache`:**
@@ -392,3 +407,18 @@ sonora cache clear --all --purge
 - `-p, --purge`: Delete SQLite database files and disk cache directory completely.
 - `--dry-run`: Simulate cache clearing without modifying or deleting files.
 - `--json`: Output clearing results in machine-readable JSON format.
+
+## Development checks
+
+Install the development dependencies and run the unittest suite with statement and branch coverage:
+
+```bash
+python -m pip install ".[dev]"
+python -W error -m coverage run -m unittest discover -s tests
+python -m coverage report
+python -m coverage html
+```
+
+The coverage gate requires 100% across `src/sonora`, including the CLI and service integrations. It has no excluded lines or partial branches. Open `htmlcov/index.html` for the detailed report. CI runs the same gate on Python 3.10, 3.12, and 3.14 and publishes coverage reports.
+
+Unit tests use temporary home, configuration, and cache directories. They block outbound HTTP and SDK requests and do not load credentials from `.env`. Live API checks belong in separate, targeted `--dry-run --force` previews.
