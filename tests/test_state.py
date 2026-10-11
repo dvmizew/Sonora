@@ -3,9 +3,10 @@ import unittest
 from pathlib import Path
 
 from sonora.core.state import LibraryStateVault
+from tests.support import IsolatedTestCase
 
 
-class TestLibraryState(unittest.TestCase):
+class TestLibraryState(IsolatedTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test_state.db"

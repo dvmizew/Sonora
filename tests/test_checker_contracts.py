@@ -1,0 +1,361 @@
+import dataclasses
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from sonora.core.models import CheckReport, TrackInfo
+from sonora.modules import checker
+from tests.support import IsolatedTestCase
+
+
+class TestCheckerContracts(IsolatedTestCase):
+    def test_supplied_reports_count_worker_outcomes_without_false_issue_categories(
+        self,
+    ) -> None:
+        for issues, recording, expected_corrupt in (
+            ([], dataclasses.replace(self.recording, track_number=None), 0),
+            (["Metadata read error: broken"], None, 0),
+            (["Checksum check failed: corrupted stream"], None, 1),
+        ):
+            report = CheckReport()
+            with (
+                self.subTest(issues=issues),
+                patch.object(
+                    checker,
+                    "_check_single_file",
+                    return_value=(self.path, issues, recording),
+                ),
+            ):
+                self.assertIs(
+                    checker.check_library(self.test_directory, report=report), report
+                )
+            self.assertEqual(report.total_files, 1)
+            self.assertEqual(
+                (report.corrupt_files, report.missing_metadata, report.missing_lrc),
+                (expected_corrupt, 0, 0),
+            )
+            self.assertEqual(report.issues.get(str(self.path), []), issues)
+
+    def test_valid_pictures_and_audio_do_not_report_corruption(
+        self,
+    ) -> None:
+        path = self.path.with_suffix(".flac")
+        path.touch()
+        for is_lossless in (False, True):
+            with (
+                self.subTest(is_lossless=is_lossless),
+                patch.object(checker, "verify_flac_checksum", return_value=True),
+                patch.object(
+                    checker,
+                    "FLAC",
+                    return_value=SimpleNamespace(
+                        pictures=[SimpleNamespace(data=b"image")]
+                    ),
+                ),
+                patch.object(
+                    checker, "detect_fake_lossless", return_value=(False, 0, None)
+                ) as spectral,
+            ):
+                issues = checker.check_file(
+                    path,
+                    check_spectral=True,
+                    track_metadata=dataclasses.replace(
+                        self.recording, is_lossless=is_lossless
+                    ),
+                )
+            self.assertFalse(
+                any(
+                    "picture" in issue
+                    or "checksum" in issue
+                    or "fake lossless" in issue
+                    for issue in issues
+                )
+            )
+            self.assertEqual(spectral.call_count, int(is_lossless))
+
+    def test_missing_track_numbers_do_not_count_as_extreme_positions(self) -> None:
+        folder_issues: list[str] = []
+        checker._check_folder_alien_tracks(
+            self.test_directory,
+            [
+                (self.path, self.recording),
+                (
+                    self.path.with_name("missing.wav"),
+                    dataclasses.replace(self.recording, track_number=None),
+                ),
+            ],
+            "Record",
+            "Primary",
+            {},
+            self.test_directory,
+            CheckReport(),
+            folder_issues,
+        )
+        self.assertEqual(folder_issues, [])
+
+    def test_generic_containers_do_not_require_album_sequence(self) -> None:
+        folder = self.test_directory / "Singles"
+        folder.mkdir()
+        path = folder / "recording.wav"
+        path.touch()
+        with patch.object(
+            checker,
+            "read_track_metadata",
+            return_value=TrackInfo(
+                path, title="Recording", artist="Primary", track_number=3
+            ),
+        ):
+            report = checker.check_library(folder)
+        self.assertEqual(report.total_files, 1)
+        self.assertNotIn(str(folder), report.issues)
+
+    def setUp(self) -> None:
+        self.path = self.test_directory / "01 - Recording.wav"
+        self.path.touch()
+        self.recording = TrackInfo(
+            self.path,
+            artist="Primary",
+            title="Recording",
+            album="Record",
+            album_artist="Primary",
+            track_number=1,
+            genre="Rock",
+        )
+
+    def test_placeholder_artist_does_not_become_a_folder_consensus(self) -> None:
+        report = CheckReport()
+        folder_issues: list[str] = []
+        recording = dataclasses.replace(
+            self.recording, artist="Unknown Artist", album_artist=None
+        )
+        self.assertEqual(
+            checker._check_folder_album_consistency(
+                self.test_directory,
+                [(self.path, recording)],
+                self.test_directory,
+                report,
+                folder_issues,
+            ),
+            ("Record", None),
+        )
+
+    def test_unreadable_worker_metadata_is_reported_without_a_false_track(self) -> None:
+        with patch.object(
+            checker, "read_track_metadata", side_effect=OSError("broken audio")
+        ):
+            path, issues, recording = checker._check_single_file(self.path)
+        self.assertEqual(path, self.path)
+        self.assertIsNone(recording)
+        self.assertTrue(issues)
+
+    def test_displaced_tracks_and_position_collisions_are_reported_once(self) -> None:
+        recordings = [
+            dataclasses.replace(
+                self.recording,
+                file_path=self.path.with_name(f"{number}.wav"),
+                track_number=number,
+            )
+            for number in (1, 2, 3)
+        ]
+        displaced = dataclasses.replace(
+            self.recording,
+            file_path=self.path.with_name("15.wav"),
+            track_number=15,
+            album="Other Record",
+            artist="Unrelated",
+        )
+        recordings.append(displaced)
+        report = CheckReport()
+        folder_issues: list[str] = []
+        tracks = [(recording.file_path, recording) for recording in recordings]
+        for _ in range(2):
+            checker._check_folder_alien_tracks(
+                self.test_directory,
+                tracks,
+                "Record",
+                "Primary",
+                {(1, 15): ["15.wav", "other.wav"]},
+                self.test_directory / "different-root",
+                report,
+                folder_issues,
+            )
+        issues = report.issues[str(displaced.file_path)]
+        self.assertTrue(any("Displaced" in issue for issue in issues), issues)
+        self.assertTrue(any("Alien single" in issue for issue in issues), issues)
+        self.assertEqual(len(issues), len(set(issues)))
+        self.assertEqual(len(folder_issues), len(issues))
+
+    def test_bonus_titles_do_not_trigger_extreme_position_warnings(self) -> None:
+        recordings = [
+            dataclasses.replace(self.recording, track_number=number)
+            for number in (1, 2, 3, 15)
+        ]
+        recordings[-1].title = "Recording (Bonus)"
+        report = CheckReport()
+        folder_issues: list[str] = []
+        checker._check_folder_alien_tracks(
+            self.test_directory,
+            [(recording.file_path, recording) for recording in recordings],
+            "Record",
+            "Primary",
+            {},
+            self.test_directory,
+            report,
+            folder_issues,
+        )
+        self.assertEqual(folder_issues, [])
+
+    def test_library_reports_missing_sequence_in_the_album_folder(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(self.recording, track_number=3)
+        with patch.object(checker, "read_track_metadata", return_value=recording):
+            report = checker.check_library(self.test_directory)
+        self.assertEqual(report.total_files, 1)
+        self.assertTrue(
+            any(
+                "Missing track numbers" in issue
+                for issue in report.issues[str(self.test_directory)]
+            )
+        )
+
+    def test_missing_and_unsupported_files_have_explicit_outcomes(self) -> None:
+        self.assertEqual(
+            checker.check_file(self.path.with_name("missing.wav")),
+            [f"File not found: {self.path.with_name('missing.wav')}"],
+        )
+        unsupported = self.path.with_suffix(".txt")
+        unsupported.touch()
+        self.assertEqual(checker.check_file(unsupported), [])
+
+    def test_checksum_picture_and_spectral_corruption_are_reported(self) -> None:
+        path = self.path.with_suffix(".flac")
+        path.touch()
+        with (
+            patch.object(checker, "verify_flac_checksum", return_value=False),
+            patch.object(
+                checker,
+                "FLAC",
+                return_value=SimpleNamespace(pictures=[SimpleNamespace(data=b"")]),
+            ),
+            patch.object(
+                checker, "detect_fake_lossless", return_value=(True, 16, None)
+            ),
+        ):
+            issues = checker.check_file(
+                path, check_spectral=True, track_metadata=self.recording
+            )
+        self.assertIn(
+            "FLAC audio stream MD5 checksum verification failed (corrupted FLAC).",
+            issues,
+        )
+        self.assertIn("Corrupt 0-byte picture block at index 0.", issues)
+        self.assertIn("Possible fake lossless (spectral cutoff below 16kHz).", issues)
+        with (
+            patch.object(
+                checker, "verify_flac_checksum", side_effect=OSError("flac unavailable")
+            ),
+            patch.object(checker, "FLAC", side_effect=OSError("bad stream")),
+            patch.object(
+                checker, "detect_fake_lossless", side_effect=OSError("bad stream")
+            ),
+        ):
+            issues = checker.check_file(
+                path, check_spectral=True, track_metadata=self.recording
+            )
+        self.assertIn("Checksum check failed: flac unavailable", issues)
+
+    def test_invalid_metadata_features_and_low_bitrate_are_actionable(self) -> None:
+        path = self.test_directory / "01 - Recording (feat. Guest).mp3"
+        path.touch()
+        recording = dataclasses.replace(
+            self.recording,
+            file_path=path,
+            artist="Primary / Guest",
+            album_artist=None,
+            title="Recording (feat. Guest)",
+            genre="unknown",
+            musicbrainz_trackid="invalid",
+            initial_key="invalid",
+            art_width=100,
+            art_height=100,
+            sample_rate=22050,
+            bitrate=128,
+            is_lossless=False,
+        )
+        issues = checker.check_file(path, track_metadata=recording)
+        for fragment in (
+            "Blacklisted genre",
+            "Invalid INITIALKEY",
+            "Invalid UUID",
+            "Low resolution cover",
+            "seems unsplit",
+            "TITLE tag",
+            "Filename contains 'feat'",
+            "Sub-standard sample rate",
+            "Sub-standard lossy bitrate",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertTrue(any(fragment in issue for issue in issues), issues)
+
+    def test_supplied_metadata_and_unreadable_companions_keep_issue_categories(
+        self,
+    ) -> None:
+        self.path.with_suffix(".lrc").touch()
+        issues = checker.check_file(self.path, track_metadata=self.recording)
+        self.assertIn("Corrupt 0-byte synchronized lyrics (.lrc) file.", issues)
+        self.assertNotIn("Missing synchronized lyrics (.lrc) file.", issues)
+        artist_feature = dataclasses.replace(
+            self.recording, artist="Primary feat. Guest"
+        )
+        issues = checker.check_file(self.path, track_metadata=artist_feature)
+        self.assertTrue(any("ARTIST entry" in issue for issue in issues))
+        self.assertFalse(any("seems unsplit" in issue for issue in issues))
+
+    def test_folder_consensus_flags_specific_outliers_and_empty_input(self) -> None:
+        report = CheckReport()
+        folder_issues: list[str] = []
+        self.assertEqual(
+            checker._check_folder_album_consistency(
+                self.test_directory, [], self.test_directory, report, folder_issues
+            ),
+            (None, None),
+        )
+        recordings = [
+            self.recording,
+            dataclasses.replace(
+                self.recording, file_path=self.path.with_name("02 - Recording.wav")
+            ),
+            dataclasses.replace(
+                self.recording,
+                file_path=self.path.with_name("03 - Other.wav"),
+                album="Other Record",
+                album_artist="Other",
+            ),
+            dataclasses.replace(
+                self.recording,
+                file_path=self.path.with_name("04 - Missing.wav"),
+                album="Unknown Album",
+                album_artist=None,
+            ),
+        ]
+        album, artist = checker._check_folder_album_consistency(
+            self.test_directory,
+            [(recording.file_path, recording) for recording in recordings],
+            self.test_directory / "different-root",
+            report,
+            folder_issues,
+        )
+        self.assertEqual((album, artist), ("Record", "Primary"))
+        outlier = report.issues[str(recordings[2].file_path)]
+        self.assertTrue(any("Mismatched ALBUM tag" in issue for issue in outlier))
+        self.assertTrue(any("Mismatched ALBUMARTIST" in issue for issue in outlier))
+        self.assertNotIn(str(recordings[3].file_path), report.issues)
+
+    def test_worker_programming_failures_are_not_masked_as_audio_issues(self) -> None:
+        with (
+            patch.object(
+                checker, "_check_single_file", side_effect=RuntimeError("checker bug")
+            ),
+            self.assertRaisesRegex(RuntimeError, "checker bug"),
+        ):
+            checker.check_library(self.test_directory)
