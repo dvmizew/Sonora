@@ -184,10 +184,10 @@ def set_cached_api(
 
 def _get_api_cache_size(api_cache_dir: Path) -> int:
     """Calculate total size of API cache files on disk (in bytes)."""
-    if not api_cache_dir.exists():
-        return 0
     total = 0
     try:
+        if not api_cache_dir.exists():
+            return 0
         if api_cache_dir.is_file():
             return api_cache_dir.stat().st_size
         for entry in api_cache_dir.rglob("*"):

@@ -1,8 +1,10 @@
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import soundfile
+from numpy.typing import NDArray
 
 from sonora.core.logger import LOG
 
@@ -12,7 +14,7 @@ def load_audio(
     mono: bool = False,
     max_seconds: float | None = None,
     offset_seconds: float = 0.0,
-) -> tuple[np.ndarray, int] | None:
+) -> tuple[NDArray[np.float32], int] | None:
     """
     Load raw audio samples into a numpy float32 array and return (audio_data, sample_rate).
     Tries fast soundfile direct decoding first, falling back to ffmpeg for exotic formats.
@@ -29,7 +31,10 @@ def load_audio(
                 if (max_seconds and max_seconds > 0)
                 else -1
             )
-            audio_data = sf.read(frames=frames, dtype="float32", always_2d=True)
+            audio_data = cast(
+                NDArray[np.float32],
+                sf.read(frames=frames, dtype="float32", always_2d=True),
+            )
 
         if mono:
             audio_data = (
@@ -61,7 +66,7 @@ def load_audio(
         result = subprocess.run(command, capture_output=True, check=True, timeout=15.0)
         if result.stdout:
             buffer_data = np.frombuffer(result.stdout, dtype=np.float32)
-            audio_array: np.ndarray = (
+            audio_array: NDArray[np.float32] = (
                 buffer_data.reshape(-1, 2) if not mono else buffer_data
             )
             return audio_array, 44100

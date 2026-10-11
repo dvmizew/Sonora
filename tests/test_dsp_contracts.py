@@ -99,7 +99,9 @@ class TestMusicalKeyContracts(IsolatedTestCase):
         for samples in (np.zeros(0), np.zeros(5000), np.ones(100), np.ones(5000)):
             with self.subTest(sample_count=len(samples)):
                 self.assertIsNone(key.calculate_chroma(samples, 22050))
-        self.assertEqual(key._pearson_r(np.ones(12), np.arange(12)), 0)
+        self.assertEqual(
+            key._pearson_r(np.ones(12), np.arange(12, dtype=np.float64)), 0
+        )
         self.assertIsNone(key.detect_key_from_chroma(np.ones(11)))
         self.assertIsNone(key.detect_key_from_chroma(np.ones(12)))
 

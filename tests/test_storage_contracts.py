@@ -229,6 +229,9 @@ class TestCacheFailureContracts(IsolatedTestCase):
             cache_module.clear_cache(clear_memory=False)
 
     def test_cache_size_handles_missing_files_and_io_failures(self) -> None:
+        self.assertEqual(
+            cache_module._get_api_cache_size(self.test_directory / "missing"), 0
+        )
         audio_path = self.test_directory / "recording.val"
         audio_path.write_bytes(b"abc")
         self.assertEqual(cache_module._get_api_cache_size(audio_path), 3)
@@ -238,6 +241,10 @@ class TestCacheFailureContracts(IsolatedTestCase):
         ):
             self.assertEqual(cache_module._get_api_cache_size(self.test_directory), 0)
         with patch("pathlib.Path.stat", side_effect=PermissionError("locked file")):
+            self.assertEqual(cache_module._get_api_cache_size(self.test_directory), 0)
+        with patch(
+            "pathlib.Path.exists", side_effect=PermissionError("locked directory")
+        ):
             self.assertEqual(cache_module._get_api_cache_size(self.test_directory), 0)
 
     def test_cache_stats_tolerate_database_length_failure(self) -> None:
