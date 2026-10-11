@@ -83,21 +83,29 @@ class TestConfigurationFiles(IsolatedTestCase):
         warning.assert_called_once()
         self.assertIn(str(path), warning.call_args.args[0])
 
-    def test_python310_uses_supported_tomli_interface(self) -> None:
-        module_name = "sonora.core.configuration_python310_contract"
-        specification = importlib.util.spec_from_file_location(
-            module_name, config.__file__
-        )
-        assert specification is not None and specification.loader is not None
-        module = importlib.util.module_from_spec(specification)
-        with (
-            patch.dict(sys.modules, {module_name: module, "tomli": tomllib}),
-            patch.object(sys, "version_info", (3, 10, 0)),
-        ):
-            specification.loader.exec_module(module)
+    def test_toml_imports_follow_python_version(self) -> None:
         path = self.test_directory / "config.toml"
         path.write_text("[sonora]\nenable_shazam = false")
-        self.assertEqual(module._parse_config_data(path), {"enable_shazam": False})
+        for python_version in ((3, 10, 0), (3, 11, 0)):
+            with self.subTest(python_version=python_version):
+                module_name = "sonora.core.configuration_import_contract"
+                specification = importlib.util.spec_from_file_location(
+                    module_name, config.__file__
+                )
+                assert specification is not None and specification.loader is not None
+                module = importlib.util.module_from_spec(specification)
+                with (
+                    patch.dict(
+                        sys.modules,
+                        {module_name: module, "tomli": tomllib, "tomllib": tomllib},
+                    ),
+                    patch.object(sys, "version_info", python_version),
+                ):
+                    specification.loader.exec_module(module)
+                self.assertIs(module.tomllib, tomllib)
+                self.assertEqual(
+                    module._parse_config_data(path), {"enable_shazam": False}
+                )
 
     def test_environment_discovery_is_deduplicated_and_survives_io_errors(self) -> None:
         path = self.test_directory / ".env"

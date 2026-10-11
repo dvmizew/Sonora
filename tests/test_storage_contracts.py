@@ -247,6 +247,29 @@ class TestCacheFailureContracts(IsolatedTestCase):
         ):
             self.assertEqual(cache_module._get_api_cache_size(self.test_directory), 0)
 
+    def test_cache_size_skips_unreadable_entries_and_counts_readable_files(
+        self,
+    ) -> None:
+        readable_entry = self.test_directory / "readable.val"
+        readable_entry.write_bytes(b"abc")
+        for io_error in (
+            PermissionError("locked file"),
+            FileNotFoundError("removed file"),
+        ):
+            unreadable_entry = Mock(spec=Path)
+            unreadable_entry.is_file.return_value = True
+            unreadable_entry.stat.side_effect = io_error
+            with (
+                self.subTest(io_error=type(io_error).__name__),
+                patch.object(
+                    Path, "rglob", return_value=iter((unreadable_entry, readable_entry))
+                ),
+            ):
+                self.assertEqual(
+                    cache_module._get_api_cache_size(self.test_directory), 3
+                )
+            unreadable_entry.stat.assert_called_once_with()
+
     def test_cache_stats_tolerate_database_length_failure(self) -> None:
         cache_module.get_cache()
         failing_cache = Mock()
