@@ -90,7 +90,7 @@ stubPath = "typings"
 
 [tool.coverage.run]
 branch = true
-source = ["src/sonora"]
+source_pkgs = ["sonora"]
 relative_files = true
 
 [tool.coverage.report]
