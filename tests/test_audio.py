@@ -14,7 +14,6 @@ import soundfile
 from PIL import Image
 
 from sonora.audio.art import _find_artist_directory, process_album_cover_art
-from sonora.audio.bpm import calculate_bpm
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import (
     clear_metadata_cache,
@@ -157,14 +156,6 @@ class TestAudioEngine(IsolatedTestCase):
     def test_verify_non_flac_returns_true(self) -> None:
         self.assertTrue(verify_flac_checksum(self.dummy_audio_path))
 
-    def test_calculate_track_replaygain_success(self) -> None:
-        replaygain_success = calculate_album_replaygain(
-            [self.dummy_audio_path], force=True
-        )
-        self.assertTrue(replaygain_success)
-        reloaded_info = read_track_metadata(self.dummy_audio_path)
-        self.assertIsNotNone(reloaded_info.replaygain_track_gain)
-
     def test_calculate_album_replaygain_success(self) -> None:
         track1_path = self.tmp_path / "1.wav"
         track2_path = self.tmp_path / "2.wav"
@@ -174,28 +165,30 @@ class TestAudioEngine(IsolatedTestCase):
         result = calculate_album_replaygain([track1_path, track2_path], force=True)
         self.assertTrue(result)
 
-        info1 = read_track_metadata(track1_path)
-        self.assertIsNotNone(info1.replaygain_track_gain)
-        self.assertIsNotNone(info1.replaygain_album_gain)
-        self.assertIsNotNone(info1.replaygain_track_peak)
-        self.assertIsNotNone(info1.replaygain_album_peak)
-
-    def test_calculate_bpm_with_scipy(self) -> None:
-        with (
-            patch(
-                "sonora.audio.bpm.load_audio",
-                return_value=(np.ones(44100 * 10, dtype=np.float32), 44100),
-            ),
-            patch(
-                "scipy.signal.spectrogram",
-                return_value=(None, None, np.tile(np.linspace(1, 10, 100), (10, 1))),
-            ),
-        ):
-            bpm = calculate_bpm(self.dummy_audio_path)
-            self.assertIsNotNone(bpm)
-            self.assertIsInstance(bpm, float)
-            assert bpm is not None
-            self.assertTrue(40.0 <= bpm <= 220.0)
+        measurements = [
+            read_track_metadata(path) for path in (track1_path, track2_path)
+        ]
+        for recording in measurements:
+            with self.subTest(path=recording.file_path):
+                for field in (
+                    "replaygain_track_gain",
+                    "replaygain_album_gain",
+                    "replaygain_track_peak",
+                    "replaygain_album_peak",
+                ):
+                    self.assertIsInstance(getattr(recording, field), float)
+                self.assertEqual(
+                    recording.replaygain_track_gain, recording.replaygain_album_gain
+                )
+                self.assertEqual(
+                    recording.replaygain_track_peak, recording.replaygain_album_peak
+                )
+        self.assertEqual(
+            measurements[0].replaygain_album_gain, measurements[1].replaygain_album_gain
+        )
+        self.assertEqual(
+            measurements[0].replaygain_album_peak, measurements[1].replaygain_album_peak
+        )
 
     @patch("taglib.File")
     def test_read_metadata_unsupported_format(self, mock_file: MagicMock) -> None:

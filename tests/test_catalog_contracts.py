@@ -311,7 +311,12 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             recording,
             {
                 "tracks_by_number": {
-                    3: {"date": "2021", "disc_number": 1, "total_discs": 1}
+                    3: {
+                        "title": "Song",
+                        "date": "2021",
+                        "disc_number": 1,
+                        "total_discs": 1,
+                    }
                 }
             },
         )
@@ -502,9 +507,11 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "disc_number": 2,
             "total_discs": 2,
             "trackName": "Found",
+            "itunes_trackid": "123",
         }
         album = {"tracks_by_number": {1: track}}
         self.recording.title = "Untitled"
+        self.recording.itunes_trackid = "123"
         self.recording.track_number = 1
         with patch.object(itunes_service, "fetch_itunes_track_metadata") as lookup:
             catalog._enrich_itunes(self.recording, album, force=True)
@@ -605,6 +612,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             Path("recording.flac"),
             artist="Primary",
             title="Untitled",
+            isrc="USAAA2100001",
             track_number=1,
             disc_number=None,
         )

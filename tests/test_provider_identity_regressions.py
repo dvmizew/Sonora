@@ -4,8 +4,11 @@ from unittest.mock import patch
 
 import httpx
 
+from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.http import RetryTransport, _retry_delay
-from sonora.services import acoustid, deezer, genius
+from sonora.core.models import TrackInfo
+from sonora.modules import catalog_enrichment
+from sonora.services import acoustid, deezer, genius, itunes
 from tests.regression_support import AudioRegressionTestCase
 
 
@@ -214,3 +217,112 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 )
         with self.assertRaises(TypeError):
             genius._normalize_genius_description({"html": "unexpected format"})
+
+    def test_reordered_album_enrichment_saves_only_matching_recording_credits(
+        self,
+    ) -> None:
+        recording = TrackInfo(
+            self.audio("recording.flac"),
+            artist="Alpha",
+            title="Original Song",
+            track_number=2,
+            disc_number=1,
+            isrc="USAAA2400001",
+        )
+        wrong_recording = {
+            "title": "Different Song",
+            "isrc": "USAAA2400002",
+            "composer": "Wrong Writer",
+            "explicit_lyrics": True,
+        }
+        correct_recording = {
+            "title": "Original Song",
+            "isrc": "USAAA2400001",
+            "composer": "Correct Writer",
+            "explicit_lyrics": False,
+        }
+        album = {
+            "tracks_by_disc_and_position": {(1, 2): wrong_recording},
+            "tracks_by_title": {"original song": correct_recording},
+        }
+        with patch.object(deezer, "fetch_deezer_track_by_isrc") as lookup:
+            catalog_enrichment._enrich_deezer(recording, album, has_album_context=True)
+        lookup.assert_not_called()
+        write_track_metadata(recording)
+        saved_recording = read_track_metadata(recording.file_path)
+        self.assertEqual(saved_recording.composer, "Correct Writer")
+        self.assertEqual(saved_recording.isrc, "USAAA2400001")
+        self.assertNotEqual(saved_recording.advisory, "Explicit")
+        self.assertEqual(saved_recording.title, "Original Song")
+
+    def test_unverified_album_positions_preserve_existing_recording_tags(self) -> None:
+        for candidate in (
+            {"title": "Original Song", "isrc": "USAAA2400002"},
+            {"title": "Original Song", "artist": "Unrelated Artist"},
+            {},
+        ):
+            with self.subTest(candidate=candidate):
+                recording = TrackInfo(
+                    self.audio("recording.flac"),
+                    artist="Alpha",
+                    title="Original Song",
+                    track_number=1,
+                    isrc="USAAA2400001",
+                    composer="Verified Writer",
+                )
+                album = {
+                    "tracks_by_position": {
+                        1: {
+                            **candidate,
+                            "composer": "Wrong Writer",
+                            "explicit_lyrics": True,
+                        }
+                    }
+                }
+                with (
+                    patch.object(
+                        deezer, "fetch_deezer_track_by_isrc", return_value=None
+                    ) as lookup,
+                    patch.object(
+                        deezer, "fetch_deezer_track_details", return_value=None
+                    ),
+                ):
+                    catalog_enrichment._enrich_deezer(
+                        recording, album, has_album_context=True, force=True
+                    )
+                lookup.assert_called_once_with("USAAA2400001")
+                self.assertEqual(recording.composer, "Verified Writer")
+                self.assertIsNone(recording.advisory)
+                self.assertEqual(recording.isrc, "USAAA2400001")
+
+    def test_itunes_conflicting_track_id_cannot_override_title_match(self) -> None:
+        recording = TrackInfo(
+            self.audio("recording.flac"),
+            artist="Alpha",
+            title="Original Song",
+            track_number=1,
+            disc_number=1,
+            itunes_trackid="123",
+        )
+        album = {
+            "tracks_by_disc_and_position": {
+                (1, 1): {
+                    "trackName": "Original Song",
+                    "trackId": 456,
+                    "advisory": "Explicit",
+                }
+            },
+            "tracks_by_title": {
+                "original song": {
+                    "trackName": "Original Song",
+                    "trackId": 123,
+                    "genre": "Jazz",
+                }
+            },
+        }
+        with patch.object(itunes, "fetch_itunes_track_metadata") as lookup:
+            catalog_enrichment._enrich_itunes(recording, album, force=True)
+        lookup.assert_not_called()
+        self.assertEqual(recording.genre, "Jazz")
+        self.assertIsNone(recording.advisory)
+        self.assertEqual(recording.itunes_trackid, "123")

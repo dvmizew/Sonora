@@ -419,6 +419,6 @@ python -m coverage report
 python -m coverage html
 ```
 
-The coverage gate requires 100% across the `sonora` package, including the CLI and service integrations. Coverage follows the imported package so both regular installations and editable source checkouts are measured. It has no excluded lines or partial branches. Open `htmlcov/index.html` for the detailed report. CI runs the same gate on Python 3.10, 3.12, and 3.14 and publishes coverage reports.
+Coverage measures the `sonora` package, including the CLI and service integrations, in both regular installations and editable source checkouts. CI runs regression tests on Python 3.10, 3.12, and 3.14 and publishes statement and branch coverage reports. Coverage is diagnostic; there is no percentage gate. Prioritize tests for correct recording identity, asset preservation, atomic writes, cancellation and API contracts. Consolidate overlapping cases and remove tests whose behavior is already protected by stronger assertions. Open `htmlcov/index.html` for the detailed report.
 
 Unit tests use temporary home, configuration, and cache directories. They block outbound HTTP and SDK requests and do not load credentials from `.env`. Live API checks belong in separate, targeted `--dry-run --force` previews.

@@ -31,6 +31,7 @@ from sonora.core.titles import clean_title, extract_title_features
 from sonora.modules.matching import (
     _is_generic,
     _is_generic_title,
+    _is_strong_track_match,
     _recording_isrc_matches,
 )
 from sonora.services import deezer as deezer_service
@@ -175,6 +176,42 @@ def apply_metadata_mapping(
             track_info.metadata_sources.setdefault(target_attr, source)
 
 
+def _catalog_recording_matches_track(
+    recording: dict[str, Any],
+    title: str | None,
+    artist: str | None,
+    isrc: str | None,
+    itunes_trackid: str | None,
+) -> bool:
+    matched_identifier = False
+    expected_isrc = (isrc or "").strip().upper()
+    provider_isrcs = recording.get("isrcs") or [recording.get("isrc")]
+    if expected_isrc not in ("", "NONE", "NULL", "0") and any(provider_isrcs):
+        if not _recording_isrc_matches(expected_isrc, recording):
+            return False
+        matched_identifier = True
+    expected_itunes_id = (itunes_trackid or "").strip()
+    provider_itunes_id = str(
+        recording.get("itunes_trackid") or recording.get("trackId") or ""
+    ).strip()
+    if expected_itunes_id not in ("", "None", "null", "0") and provider_itunes_id:
+        if expected_itunes_id != provider_itunes_id:
+            return False
+        matched_identifier = True
+    if matched_identifier:
+        return True
+    if _is_generic_title(title):
+        return False
+    candidate_artist = recording.get("artist") or recording.get("artistName")
+    candidate_title = recording.get("title") or recording.get("trackName")
+    return _is_strong_track_match(
+        artist if candidate_artist and not _is_generic(artist, "artist") else None,
+        title,
+        str(candidate_artist) if candidate_artist else None,
+        str(candidate_title) if candidate_title else None,
+    )
+
+
 def _find_track_in_album_mapping(
     tracks_by_title: Any,
     tracks_by_pos: Any,
@@ -182,47 +219,44 @@ def _find_track_in_album_mapping(
     track_number: int | None,
     disc_number: int | None = None,
     tracks_by_disc_and_position: Any = None,
+    *,
+    artist: str | None = None,
+    isrc: str | None = None,
+    itunes_trackid: str | None = None,
 ) -> tuple[dict[str, Any] | None, bool]:
-    if (
-        isinstance(tracks_by_disc_and_position, dict)
-        and track_number is not None
-        and disc_number is not None
-        and (disc_number, track_number) in tracks_by_disc_and_position
-    ):
-        disc_recording = require_api_object(
-            tracks_by_disc_and_position[(disc_number, track_number)],
-            "Album disc recording",
-        )
-        return disc_recording, True
-
-    if (
-        isinstance(tracks_by_pos, dict)
-        and track_number is not None
-        and disc_number is not None
-    ):
-        disc_pos_key = (disc_number, track_number)
-        str_disc_key = f"{disc_number}-{track_number}"
-        disc_entry = tracks_by_pos.get(disc_pos_key) or tracks_by_pos.get(str_disc_key)
-        if isinstance(disc_entry, dict):
-            return disc_entry, True
-
-    if isinstance(tracks_by_title, dict) and title and not _is_generic_title(title):
-        clean_key = normalize_str(clean_title(title))
-        if clean_key in tracks_by_title:
-            return require_api_object(
-                tracks_by_title[clean_key], "Album title recording"
-            ), True
-        norm_key = normalize_str(title)
-        if norm_key in tracks_by_title:
-            return require_api_object(
-                tracks_by_title[norm_key], "Album title recording"
-            ), True
-
-    if isinstance(tracks_by_pos, dict) and track_number in tracks_by_pos:
-        track_entry = require_api_object(
-            tracks_by_pos[track_number], "Album position recording"
-        )
-        return track_entry, True
+    disc_keys: tuple[object, ...] = (
+        ((disc_number, track_number),)
+        if disc_number is not None and track_number is not None
+        else ()
+    )
+    combined_position_keys = (
+        (*disc_keys, f"{disc_number}-{track_number}") if disc_keys else ()
+    )
+    title_keys = (
+        tuple(dict.fromkeys((normalize_str(clean_title(title)), normalize_str(title))))
+        if title and not _is_generic_title(title)
+        else ()
+    )
+    candidate_indexes = (
+        (tracks_by_disc_and_position, disc_keys),
+        (tracks_by_pos, combined_position_keys),
+        (tracks_by_title, title_keys),
+        (tracks_by_pos, (track_number,) if track_number is not None else ()),
+    )
+    for recording_index, candidate_keys in candidate_indexes:
+        if not isinstance(recording_index, dict):
+            continue
+        for candidate_key in candidate_keys:
+            if candidate_key not in recording_index:
+                continue
+            recording = require_api_object(
+                recording_index[candidate_key], "Album recording"
+            )
+            # Position is an edition-specific hint; it must not import another song's fields.
+            if _catalog_recording_matches_track(
+                recording, title, artist, isrc, itunes_trackid
+            ):
+                return recording, True
     return None, False
 
 
@@ -339,6 +373,9 @@ def _enrich_itunes(
                 tracks_by_disc_and_position=album_itunes_details.get(
                     "tracks_by_disc_and_position"
                 ),
+                artist=track_info.artist,
+                isrc=track_info.isrc,
+                itunes_trackid=track_info.itunes_trackid,
             )
 
         if not api_payload and (not track_info.genre or not track_info.advisory):
@@ -591,6 +628,8 @@ def _enrich_deezer(
                 track_info.track_number,
                 disc_number=track_info.disc_number,
                 tracks_by_disc_and_position=album.get("tracks_by_disc_and_position"),
+                artist=track_info.artist,
+                isrc=track_info.isrc,
             )
 
         if not track and track_info.isrc:

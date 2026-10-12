@@ -5,6 +5,7 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 
 @contextmanager
@@ -34,23 +35,27 @@ def atomic_audio_edit(audio_path: Path) -> Iterator[Path]:
         staging_path.unlink(missing_ok=True)
 
 
-def atomic_write_bytes(destination: Path, payload: bytes) -> None:
+@contextmanager
+def atomic_write_file(destination: Path) -> Iterator[IO[bytes]]:
+    """Publish streamed output only after writing, flushing and syncing succeeds."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=destination.parent, prefix=f".{destination.name}.", delete=False
-    ) as output:
-        staging_path = Path(output.name)
-        try:
-            output.write(payload)
+    descriptor, staging_name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}."
+    )
+    staging_path = Path(staging_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            yield output
             output.flush()
             os.fsync(output.fileno())
-        except OSError:
-            staging_path.unlink(missing_ok=True)
-            raise
-    try:
         staging_path.replace(destination)
     finally:
         staging_path.unlink(missing_ok=True)
+
+
+def atomic_write_bytes(destination: Path, payload: bytes) -> None:
+    with atomic_write_file(destination) as output:
+        output.write(payload)
 
 
 def move_file_exclusively(source: Path, destination: Path) -> None:

@@ -2,7 +2,10 @@ import base64
 import datetime
 import gzip
 import os
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +14,7 @@ import taglib
 from rich.markup import escape
 
 from sonora.audio.metadata import clear_metadata_cache
-from sonora.core.files import atomic_audio_edit, atomic_write_bytes
+from sonora.core.files import atomic_audio_edit, atomic_write_file
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -115,57 +118,74 @@ def backup_library_tags(
     LOG.info(
         f"🔄 Creating full backup for {len(audio_files)} files (threads={max_threads})..."
     )
-    backup_manifest: dict[str, Any] = {}
+    backed_up = 0
     failed = 0
 
-    with (
-        create_progress() as progress,
-        ThreadPoolExecutor(max_workers=max_threads) as executor,
-    ):
-        task = progress.add_task(
-            "[cyan]Backing up audio tags...", total=len(audio_files)
-        )
-        futures = [
-            executor.submit(_read_track_for_backup, file_path)
-            for file_path in audio_files
-        ]
-        with interactive_pause_listener(progress, task) as pause_stop_event:
-            try:
-                for future in as_completed(futures):
-                    path_str, tag_dict = future.result()
-                    if tag_dict is not None:
-                        backup_manifest[str(Path(path_str).relative_to(directory))] = (
-                            tag_dict
-                        )
-                    else:
-                        failed += 1
-                    progress.advance(task)
-            except (KeyboardInterrupt, RuntimeError) as exc:
-                if not is_interruption(exc):
-                    raise
-                resume_workers(pause_stop_event)
-                executor.shutdown(wait=True, cancel_futures=True)
-                raise
-
     try:
-        raw_json_bytes = orjson.dumps(
-            {
-                "schema": "sonora_backup_v2",
-                "root": str(directory.resolve()),
-                "tracks": backup_manifest,
-            },
-            option=orjson.OPT_INDENT_2,
-        )
-        payload = (
-            gzip.compress(raw_json_bytes, compresslevel=6)
-            if output_path.name.endswith(".gz")
-            else raw_json_bytes
-        )
-
-        atomic_write_bytes(output_path, payload)
+        with (
+            atomic_write_file(output_path) as backup_output,
+            ExitStack() as output_streams,
+            create_progress() as progress,
+            ThreadPoolExecutor(max_workers=max_threads) as executor,
+        ):
+            archive_stream = (
+                output_streams.enter_context(
+                    gzip.GzipFile(
+                        filename="",
+                        mode="wb",
+                        compresslevel=6,
+                        fileobj=backup_output,
+                        mtime=0,
+                    )
+                )
+                if output_path.name.endswith(".gz")
+                else backup_output
+            )
+            archive_stream.write(
+                b'{"schema":"sonora_backup_v2","root":'
+                + orjson.dumps(str(directory.resolve()))
+                + b',"tracks":{'
+            )
+            task = progress.add_task(
+                "[cyan]Backing up audio tags...", total=len(audio_files)
+            )
+            remaining_files = iter(audio_files)
+            # Older Python versions lack Executor.map(buffersize); keep artwork bounded here.
+            pending_reads = deque(
+                executor.submit(_read_track_for_backup, file_path)
+                for file_path in islice(remaining_files, max_threads)
+            )
+            with interactive_pause_listener(progress, task) as pause_stop_event:
+                try:
+                    while pending_reads:
+                        path_str, tag_dict = pending_reads.popleft().result()
+                        if tag_dict is not None:
+                            if backed_up:
+                                archive_stream.write(b",")
+                            archive_stream.write(
+                                orjson.dumps(str(Path(path_str).relative_to(directory)))
+                            )
+                            archive_stream.write(b":")
+                            archive_stream.write(orjson.dumps(tag_dict))
+                            backed_up += 1
+                        else:
+                            failed += 1
+                        next_file = next(remaining_files, None)
+                        if next_file is not None:
+                            pending_reads.append(
+                                executor.submit(_read_track_for_backup, next_file)
+                            )
+                        progress.advance(task)
+                    archive_stream.write(b"}}")
+                except (KeyboardInterrupt, RuntimeError) as exc:
+                    if not is_interruption(exc):
+                        raise
+                    resume_workers(pause_stop_event)
+                    executor.shutdown(wait=True, cancel_futures=True)
+                    raise
 
         LOG.info(
-            f"✅ Successfully backed up {len(backup_manifest)}/{len(audio_files)} files to {escape(str(output_path))}"
+            f"✅ Successfully backed up {backed_up}/{len(audio_files)} files to {escape(str(output_path))}"
         )
         if failed > 0:
             LOG.warning(f"   ⚠️  {failed} files could not be read")

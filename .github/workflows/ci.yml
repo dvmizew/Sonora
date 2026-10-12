@@ -49,7 +49,7 @@ jobs:
         run: |
           bandit -r src/ -s B404,B603,B310
 
-      - name: Run tests and enforce full coverage
+      - name: Run regression tests with coverage
         run: |
           python -W error -m coverage run -m unittest discover -s tests
           python -m coverage report

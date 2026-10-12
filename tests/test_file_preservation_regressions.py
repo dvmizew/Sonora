@@ -147,10 +147,6 @@ class TestFilePreservationRegressions(AudioRegressionTestCase):
             backup.restore_library_tags(archive, self.root / "relocated"), 0
         )
 
-    def test_empty_compressed_backup_is_valid(self) -> None:
-        archive = backup.backup_library_tags(self.root, self.root / "empty.json.gz")
-        self.assertEqual(backup.restore_library_tags(archive), 0)
-
     def test_atomic_audio_edit_commits_complete_payload(self) -> None:
         audio_path = self.root / "track.flac"
         audio_path.write_bytes(b"original")

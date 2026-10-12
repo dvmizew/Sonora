@@ -1,5 +1,7 @@
 import gzip
 import json
+import tracemalloc
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +9,13 @@ import taglib
 
 from sonora.modules import backup
 from tests.support import IsolatedTestCase
+
+
+def _large_artwork_backup_record(audio_path: Path) -> tuple[str, dict[str, Any]]:
+    return str(audio_path), {
+        "tags": {"TITLE": [audio_path.stem]},
+        "complex_tags": {"PICTURE": [{"data": {"base64": "A" * (512 * 1024)}}]},
+    }
 
 
 class TestBackupManifestContracts(IsolatedTestCase):
@@ -19,6 +28,68 @@ class TestBackupManifestContracts(IsolatedTestCase):
         self.archive.touch()
         with self.assertRaises(ValueError):
             backup.backup_library_tags(self.archive)
+
+    def test_large_artwork_backup_keeps_peak_allocations_bounded(self) -> None:
+        audio_paths = [
+            self.test_directory / f"recording-{index}.flac" for index in range(64)
+        ]
+        archive = self.archive.with_suffix(".json.gz")
+        tracemalloc.start()
+        try:
+            with (
+                patch.object(backup, "find_audio_files", return_value=audio_paths),
+                patch.object(
+                    backup,
+                    "_read_track_for_backup",
+                    side_effect=_large_artwork_backup_record,
+                ),
+            ):
+                backup.backup_library_tags(self.test_directory, archive, max_threads=2)
+            _, peak_bytes = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak_bytes, 16 * 1024 * 1024)
+        manifest = json.loads(gzip.decompress(archive.read_bytes()))
+        self.assertEqual(len(manifest["tracks"]), 64)
+        self.assertEqual(
+            len(
+                manifest["tracks"][audio_paths[-1].name]["complex_tags"]["PICTURE"][0][
+                    "data"
+                ]["base64"]
+            ),
+            512 * 1024,
+        )
+
+    def test_empty_libraries_produce_valid_plain_and_compressed_archives(self) -> None:
+        for suffix in (".json", ".json.gz"):
+            archive = self.test_directory / f"empty{suffix}"
+            with self.subTest(suffix=suffix):
+                backup.backup_library_tags(self.test_directory, archive)
+                archive_bytes = archive.read_bytes()
+                if suffix.endswith(".gz"):
+                    archive_bytes = gzip.decompress(archive_bytes)
+                self.assertEqual(
+                    json.loads(archive_bytes),
+                    {
+                        "schema": "sonora_backup_v2",
+                        "root": str(self.test_directory),
+                        "tracks": {},
+                    },
+                )
+
+                self.assertEqual(backup.restore_library_tags(archive), 0)
+
+    def test_backup_write_failure_preserves_existing_archive_and_removes_staging(
+        self,
+    ) -> None:
+        self.archive.write_bytes(b"existing backup")
+        with (
+            patch("sonora.core.files.os.fsync", side_effect=OSError("disk full")),
+            self.assertRaisesRegex(OSError, "disk full"),
+        ):
+            backup.backup_library_tags(self.test_directory, self.archive)
+        self.assertEqual(self.archive.read_bytes(), b"existing backup")
+        self.assertEqual(list(self.test_directory.glob(".backup.json.*")), [])
 
     def test_missing_corrupt_and_wrong_schema_archives_fail_before_writing(
         self,

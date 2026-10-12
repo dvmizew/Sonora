@@ -36,46 +36,45 @@ from tests.support import IsolatedTestCase
 
 
 class TestCoreUtils(IsolatedTestCase):
-    def test_normalize_str_basic(self) -> None:
-        self.assertEqual(normalize_str("Hello World"), "hello world")
-        self.assertEqual(normalize_str("$tring!"), "string")
-
-    def test_normalize_str_diacritics_and_symbols(self) -> None:
-        self.assertEqual(normalize_str("Beyoncé"), "beyonce")
-        self.assertEqual(normalize_str("Mötley Crüe"), "motley crue")
-
-    def test_sanitize_name_filesystem_chars(self) -> None:
-        self.assertEqual(sanitize_name("AC/DC"), "AC_DC")
-        self.assertEqual(sanitize_name("Artist: Album?"), "Artist Album")
-        self.assertEqual(sanitize_name("Track 01.flac."), "Track 01.flac")
-
-    def test_sanitize_name_empty(self) -> None:
-        self.assertEqual(sanitize_name(""), "Unknown")
-        self.assertEqual(sanitize_name(None), "Unknown")
-
-    def test_normalize_str_edge_cases(self) -> None:
-        self.assertEqual(normalize_str(None), "")
-        self.assertEqual(normalize_str(""), "")
-        self.assertEqual(normalize_str("   "), "")
-        self.assertEqual(normalize_str("A$AP Rocky!"), "asap rocky")
-        self.assertEqual(normalize_str("Beyoncé - Nöél"), "beyonce noel")
-        self.assertEqual(normalize_str("Nimeni Altu'"), "nimeni altu")
-        self.assertEqual(normalize_str("Satra B.E.N.Z."), "satra b e n z")
-        self.assertEqual(normalize_str("O.$.O.D. IV"), "o s o d iv")
-        self.assertEqual(normalize_str("M.G.L."), "m g l")
-        self.assertEqual(normalize_str("DEBANDADĂ FAC"), "debandada fac")
-        self.assertEqual(normalize_str("Nopți prea lungi"), "nopti prea lungi")
-
-    def test_sanitize_name_complex_edge_cases(self) -> None:
-        self.assertEqual(sanitize_name("Artist / Title <HQ>:"), "Artist _ Title HQ")
-        self.assertEqual(sanitize_name("CON"), "CON_")
-        self.assertEqual(sanitize_name("NUL"), "NUL_")
-        self.assertEqual(sanitize_name("Nimeni Altu'"), "Nimeni Altu'")
-        self.assertEqual(sanitize_name("M.G.L."), "M.G.L")
-        self.assertEqual(
-            sanitize_name("Satra B.E.N.Z. - O.$.O.D. IV"),
-            "Satra B.E.N.Z. - O.$.O.D. IV",
+    def test_normalize_str_contracts(self) -> None:
+        cases = (
+            ("Hello World", "hello world"),
+            ("$tring!", "string"),
+            ("Beyoncé", "beyonce"),
+            ("Mötley Crüe", "motley crue"),
+            (None, ""),
+            ("", ""),
+            ("   ", ""),
+            ("A$AP Rocky!", "asap rocky"),
+            ("Beyoncé - Nöél", "beyonce noel"),
+            ("Nimeni Altu'", "nimeni altu"),
+            ("Satra B.E.N.Z.", "satra b e n z"),
+            ("O.$.O.D. IV", "o s o d iv"),
+            ("M.G.L.", "m g l"),
+            ("DEBANDADĂ FAC", "debandada fac"),
+            ("Nopți prea lungi", "nopti prea lungi"),
         )
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(normalize_str(original), expected)
+
+    def test_sanitize_name_contracts(self) -> None:
+        cases = (
+            ("AC/DC", "AC_DC"),
+            ("Artist: Album?", "Artist Album"),
+            ("Track 01.flac.", "Track 01.flac"),
+            ("", "Unknown"),
+            (None, "Unknown"),
+            ("Artist / Title <HQ>:", "Artist _ Title HQ"),
+            ("CON", "CON_"),
+            ("NUL", "NUL_"),
+            ("Nimeni Altu'", "Nimeni Altu'"),
+            ("M.G.L.", "M.G.L"),
+            ("Satra B.E.N.Z. - O.$.O.D. IV", "Satra B.E.N.Z. - O.$.O.D. IV"),
+        )
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(sanitize_name(original), expected)
 
     def test_is_valid_uuid(self) -> None:
         self.assertTrue(is_valid_uuid("c8b03190-306c-4125-9b32-3f9d86d60a12"))
