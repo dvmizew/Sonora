@@ -80,7 +80,7 @@ def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str
 
     cache_key = f"canonical_artist:{normalized}"
     cached = get_cached_api(cache_key)
-    if isinstance(cached, str):
+    if isinstance(cached, str) and cached:
         cached_words = cached.split()
         norm_words = normalized.split()
         is_corrupt_expansion = (

@@ -1,7 +1,9 @@
 import dataclasses
 import os
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter, deque
+from collections.abc import Iterator
+from concurrent.futures import Executor, Future, ThreadPoolExecutor, as_completed
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -53,13 +55,18 @@ from sonora.modules.matching import (
     _extract_known_album_entities,
     _is_generic,
     _is_generic_title,
+    _recording_matches_track_identity,
     _resolve_album_track_position,
     is_alien_album_track,
 )
+from sonora.modules.metadata_consensus import (
+    collect_provider_proposal,
+    merge_provider_proposals,
+)
 from sonora.modules.musicbrainz_enrichment import _enrich_acoustid, _enrich_musicbrainz
 from sonora.modules.track_processing import (
+    _process_audio_and_save_tags,
     _record_persisted_album,
-    _run_audio_and_tags_persistence,
 )
 from sonora.services import deezer as deezer_service
 from sonora.services import discogs as discogs_service
@@ -113,17 +120,20 @@ def _heal_and_align_album_track(
     }
 
     is_legitimate_track_artist = False
-    norm_cur = normalize_str(track_info.artist) if track_info.artist else ""
+    normalized_current_artist = (
+        normalize_str(track_info.artist) if track_info.artist else ""
+    )
     if (
-        norm_cur
+        normalized_current_artist
         and known_album_track_artists
         and (
-            norm_cur in known_album_track_artists
+            normalized_current_artist in known_album_track_artists
             or any(
-                fuzz.ratio(norm_cur, a) >= get_config().artist_similarity_threshold
-                or a in norm_cur
-                or norm_cur in a
-                for a in known_album_track_artists
+                fuzz.ratio(normalized_current_artist, known_artist)
+                >= get_config().artist_similarity_threshold
+                or known_artist in normalized_current_artist
+                or normalized_current_artist in known_artist
+                for known_artist in known_album_track_artists
             )
         )
     ):
@@ -135,12 +145,12 @@ def _heal_and_align_album_track(
         and not _is_generic(target_album_artist, "artist")
         and track_info.artist
     ):
-        norm_tgt = normalize_str(target_album_artist)
+        normalized_target_artist = normalize_str(target_album_artist)
         if (
-            norm_tgt != norm_cur
-            and norm_tgt not in norm_cur
-            and norm_cur not in norm_tgt
-            and fuzz.ratio(norm_tgt, norm_cur) < 50
+            normalized_target_artist != normalized_current_artist
+            and normalized_target_artist not in normalized_current_artist
+            and normalized_current_artist not in normalized_target_artist
+            and fuzz.ratio(normalized_target_artist, normalized_current_artist) < 50
         ):
             LOG.info(
                 f"   ∟ 🩹 [Healer] Healing corrupted artist '[bold red]{escape(track_info.artist)}[/]' -> '[bold green]{escape(target_album_artist)}[/]'"
@@ -176,8 +186,9 @@ def _run_metadata_enrichment_pipeline(
     discogs_user_token: str | None,
     genius_api_token: str | None,
     force: bool,
+    provider_executor: Executor | None = None,
 ) -> None:
-    """Sequentially enriches track metadata across external providers."""
+    """Resolve recording identity before collecting independent provider proposals."""
     _enrich_musicbrainz(
         track_info,
         album_mbid,
@@ -199,6 +210,7 @@ def _run_metadata_enrichment_pipeline(
             has_album_context=has_album_context,
             force=force,
         )
+    previous_recording_id = track_info.musicbrainz_trackid
     _enrich_acoustid(
         track_info,
         file_path,
@@ -206,23 +218,41 @@ def _run_metadata_enrichment_pipeline(
         album_track_mbids=album_track_mbids,
         force=force,
     )
-    _enrich_itunes(track_info, album_itunes_details=album_itunes_details, force=force)
-    _enrich_lastfm(track_info, lastfm_api_key)
-    _enrich_discogs(
-        track_info,
-        discogs_user_token,
-        album_discogs_release,
-        has_album_context=has_album_context,
-        force=force,
-    )
-    _enrich_deezer(
-        track_info,
-        album_deezer_details,
-        has_album_context=has_album_context,
-        force=force,
-    )
-    _enrich_genius(track_info, genius_api_token, force=force)
-    _enrich_theaudiodb(track_info, force=force)
+    if (
+        track_info.musicbrainz_trackid != previous_recording_id
+        and track_info.metadata_sources.get("musicbrainz_trackid") == "AcoustID"
+    ):
+        _enrich_musicbrainz(track_info, None, None, None, force=force)
+    providers = [
+        partial(_enrich_itunes, album_itunes_details=album_itunes_details, force=force),
+        partial(_enrich_lastfm, lastfm_api_key=lastfm_api_key),
+        partial(
+            _enrich_discogs,
+            discogs_user_token=discogs_user_token,
+            album_discogs_release=album_discogs_release,
+            has_album_context=has_album_context,
+            force=force,
+        ),
+        partial(
+            _enrich_deezer,
+            album_deezer_details=album_deezer_details,
+            has_album_context=has_album_context,
+            force=force,
+        ),
+        partial(_enrich_genius, genius_api_token=genius_api_token, force=force),
+        partial(_enrich_theaudiodb, force=force),
+    ]
+    if provider_executor is None:
+        proposals = [
+            collect_provider_proposal(track_info, enrich) for enrich in providers
+        ]
+    else:
+        futures = [
+            provider_executor.submit(collect_provider_proposal, track_info, enrich)
+            for enrich in providers
+        ]
+        proposals = [future.result() for future in futures]
+    merge_provider_proposals(track_info, proposals)
 
 
 @api_cache_session()
@@ -248,6 +278,7 @@ def process_single_track(
     album_cover_path: Path | None = None,
     target_album_artist: str | None = None,
     target_album_title: str | None = None,
+    provider_executor: Executor | None = None,
 ) -> TrackInfo:
     wait_if_paused()
     LOG.start_buffering()
@@ -256,7 +287,11 @@ def process_single_track(
             raise FileNotFoundError(f"File not found: {file_path}")
 
         track_info = metadata_module.read_track_metadata(file_path)
-        orig_info = dataclasses.replace(track_info)
+        original_metadata = dataclasses.replace(
+            track_info,
+            metadata_sources=track_info.metadata_sources.copy(),
+            metadata_conflicts=track_info.metadata_conflicts.copy(),
+        )
         track_info.artist = artists_module.resolve_artist_name(track_info.artist)
 
         if not bool(
@@ -340,11 +375,21 @@ def process_single_track(
             discogs_user_token=discogs_user_token,
             genius_api_token=genius_api_token,
             force=force,
+            provider_executor=provider_executor,
         )
 
-        return _run_audio_and_tags_persistence(
+        if (
+            "identity" in track_info.metadata_conflicts
+            or "isrc" in track_info.metadata_conflicts
+        ):
+            return dataclasses.replace(
+                original_metadata,
+                metadata_conflicts=track_info.metadata_conflicts.copy(),
+            )
+
+        return _process_audio_and_save_tags(
             track_info=track_info,
-            orig_info=orig_info,
+            original_metadata=original_metadata,
             file_path=file_path,
             cuesheet_content=cuesheet_content,
             album_cover_path=album_cover_path,
@@ -357,6 +402,20 @@ def process_single_track(
         )
     finally:
         LOG.stop_buffering()
+
+
+def _resolve_album_entity_consensus(
+    entity_votes: dict[str, int], folder_entity: str | None
+) -> str | None:
+    if not entity_votes:
+        return folder_entity
+    highest_count = max(entity_votes.values())
+    strongest_entities = [
+        entity for entity, count in entity_votes.items() if count == highest_count
+    ]
+    if len(strongest_entities) == 1:
+        return strongest_entities[0]
+    return folder_entity if folder_entity in strongest_entities else None
 
 
 def _resolve_album_folder_identity(
@@ -392,7 +451,7 @@ def _resolve_album_folder_identity(
     album_counts: dict[str, int] = {}
     artist_counts: dict[str, int] = {}
 
-    for audio_file in audio_files[:10]:
+    for audio_file in audio_files:
         try:
             track_metadata = metadata_module.read_track_metadata(audio_file)
             if track_metadata.album and not get_config().is_generic_container(
@@ -411,24 +470,8 @@ def _resolve_album_folder_identity(
         except OSError:
             pass
 
-    consensus_album = (
-        max(album_counts, key=lambda k: album_counts[k]) if album_counts else None
-    )
-    consensus_artist = (
-        max(artist_counts, key=lambda k: artist_counts[k]) if artist_counts else None
-    )
-
-    resolved_artist: str | None
-    if folder_artist and consensus_artist:
-        resolved_artist = preserve_unicode_repertoire(consensus_artist, folder_artist)
-    else:
-        resolved_artist = folder_artist or consensus_artist
-
-    resolved_album: str | None
-    if folder_album and consensus_album:
-        resolved_album = preserve_unicode_repertoire(consensus_album, folder_album)
-    else:
-        resolved_album = folder_album or consensus_album
+    resolved_album = _resolve_album_entity_consensus(album_counts, folder_album)
+    resolved_artist = _resolve_album_entity_consensus(artist_counts, folder_artist)
 
     return resolved_artist, resolved_album
 
@@ -446,6 +489,45 @@ class _AlbumMetadataContext:
     sample_album: str | None = None
 
 
+def _release_matches_album_tracks(
+    release: dict[str, Any], audio_files: list[Path]
+) -> bool:
+    recordings = release.get("tracks_by_disc_and_position")
+    if not isinstance(recordings, dict):
+        recordings = release.get("tracks_by_position")
+    if not isinstance(recordings, dict):
+        return False
+    indexed_recordings = {
+        position: recording
+        for position, recording in recordings.items()
+        if isinstance(recording, dict) and isinstance(position, (tuple, int))
+    }
+    if len(indexed_recordings) != len(audio_files):
+        return False
+    for audio_path in audio_files:
+        track = metadata_module.read_track_metadata(audio_path)
+        if _is_generic_title(track.title):
+            return False
+        candidates = [
+            position
+            for position, recording in indexed_recordings.items()
+            if _recording_matches_track_identity(track, recording)
+        ]
+        expected_position = (track.disc_number or 1, track.track_number)
+        matched_position: tuple[Any, ...] | int
+        if expected_position in candidates:
+            matched_position = expected_position
+        elif track.track_number is not None and track.track_number in candidates:
+            matched_position = track.track_number
+        elif len(candidates) == 1:
+            matched_position = candidates[0]
+        else:
+            return False
+        del indexed_recordings[matched_position]
+    return True
+
+
+@api_cache_session()
 def _resolve_album_metadata_context(
     album_dir: Path,
     audio_files: list[Path],
@@ -492,6 +574,17 @@ def _resolve_album_metadata_context(
                     album_context.musicbrainz_id
                 )
             )
+            if (
+                not album_context.mb_release_details
+                or not _release_matches_album_tracks(
+                    album_context.mb_release_details, audio_files
+                )
+            ):
+                LOG.warning(
+                    f"Release tracklist does not verify the complete album at {escape(str(album_dir))}; release metadata withheld"
+                )
+                album_context.musicbrainz_id = None
+                album_context.mb_release_details = None
             if album_context.mb_release_details:
                 raw_tracks = album_context.mb_release_details.get("tracks_by_position")
                 tracks_by_disc = album_context.mb_release_details.get(
@@ -511,10 +604,6 @@ def _resolve_album_metadata_context(
                         ):
                             track_mbids[pos] = str(recording["recording_mbid"])
                 album_context.track_mbids = track_mbids
-            if not album_context.track_mbids:
-                album_context.track_mbids = musicbrainz_service.fetch_album_track_mbids(
-                    album_context.musicbrainz_id
-                )
 
         album_context.deezer_details = deezer_service.fetch_deezer_album_details(
             sample_artist, sample_album, expected_track_count=len(audio_files)
@@ -562,35 +651,59 @@ def _harmonize_album_genres(
     if len(valid_tracks) < 2:
         return
 
-    album_level_genre = None
-    if album_deezer_details and album_deezer_details.get("genre"):
-        album_level_genre = normalize_genre(str(album_deezer_details["genre"]))
-    elif album_itunes_details and album_itunes_details.get("genre"):
-        album_level_genre = normalize_genre(str(album_itunes_details["genre"]))
+    album_genres = {
+        normalize_genre(str(album_details["genre"]))
+        for album_details in (album_deezer_details, album_itunes_details)
+        if album_details and album_details.get("genre")
+    }
+    meaningful_album_genres = {
+        genre for genre in album_genres if genre and not is_noise_genre(genre)
+    }
+    if len(meaningful_album_genres) > 1:
+        for track in valid_tracks:
+            track.metadata_conflicts["genre"] = (
+                "Album providers disagree on genre: "
+                + ", ".join(sorted(meaningful_album_genres))
+            )
+        return
+    album_level_genre = next(iter(meaningful_album_genres), None)
 
     genre_counts: dict[str, int] = {}
-    for vt in valid_tracks:
-        if vt.genre and not is_noise_genre(vt.genre):
-            genre_counts[vt.genre] = genre_counts.get(vt.genre, 0) + 1
+    for track in valid_tracks:
+        if (
+            track.genre
+            and not is_noise_genre(track.genre)
+            and "genre" not in track.metadata_conflicts
+        ):
+            genre = normalize_genre(track.genre)
+            if genre:
+                genre_counts[genre] = genre_counts.get(genre, 0) + 1
 
     dominant_genre = album_level_genre
     if not dominant_genre and genre_counts:
         top_genre, top_count = max(genre_counts.items(), key=lambda x: x[1])
-        if top_count * 2 >= len(valid_tracks):
+        if (
+            top_count * 2 >= len(valid_tracks)
+            and sum(count == top_count for count in genre_counts.values()) == 1
+        ):
             dominant_genre = top_genre
 
     if not dominant_genre:
         return
 
-    for vt in valid_tracks:
-        if (not vt.genre or is_noise_genre(vt.genre)) and vt.genre != dominant_genre:
+    for track in valid_tracks:
+        if "genre" in track.metadata_conflicts:
+            continue
+        if (
+            not track.genre or is_noise_genre(track.genre)
+        ) and track.genre != dominant_genre:
             LOG.info(
-                f"   ∟ 🏷️ [Consensus] Harmonizing genre '[bold red]{escape(str(vt.genre))}[/]' -> '[bold green]{escape(dominant_genre)}[/]' on '{escape(vt.file_path.name)}'"
+                f"   ∟ 🏷️ [Consensus] Harmonizing genre '[bold red]{escape(str(track.genre))}[/]' -> '[bold green]{escape(dominant_genre)}[/]' on '{escape(track.file_path.name)}'"
             )
-            vt.genre = dominant_genre
+            track.genre = dominant_genre
             if not dry_run:
                 try:
-                    metadata_module.write_track_metadata(vt)
+                    metadata_module.write_track_metadata(track)
                 except OSError as err:
                     LOG.debug(f"Failed to save harmonized genre: {err}")
 
@@ -603,90 +716,108 @@ def _harmonize_album_artists(
         return
 
     album_artist_counts: dict[str, int] = {}
-    for vt in valid_tracks:
-        if vt.album_artist and vt.album_artist.strip():
-            art = vt.album_artist.strip()
-            album_artist_counts[art] = album_artist_counts.get(art, 0) + 1
+    for track in valid_tracks:
+        if track.album_artist and track.album_artist.strip():
+            album_artist = track.album_artist.strip()
+            album_artist_counts[album_artist] = (
+                album_artist_counts.get(album_artist, 0) + 1
+            )
 
     dominant_album_artist: str | None = None
     if album_artist_counts:
         groups: dict[str, dict[str, int]] = {}
-        for cand, count in album_artist_counts.items():
-            norm = normalize_str(cand)
-            groups.setdefault(norm, {})[cand] = count
+        for artist_candidate, count in album_artist_counts.items():
+            normalized_artist = normalize_str(artist_candidate)
+            groups.setdefault(normalized_artist, {})[artist_candidate] = count
         dominant_norm = max(groups.keys(), key=lambda k: sum(groups[k].values()))
-        rep_artist = max(groups[dominant_norm].items(), key=lambda x: x[1])[0]
-        resolved = artists_module.resolve_artist_name(rep_artist, allow_network=False)
+        preferred_artist_casing = max(
+            groups[dominant_norm].items(), key=lambda x: x[1]
+        )[0]
+        resolved = artists_module.resolve_artist_name(
+            preferred_artist_casing, allow_network=False
+        )
         dominant_album_artist = (
-            resolved if normalize_str(resolved) == dominant_norm else rep_artist
+            resolved
+            if normalize_str(resolved) == dominant_norm
+            else preferred_artist_casing
         )
 
     track_artist_counts: dict[str, dict[str, int]] = {}
-    for vt in valid_tracks:
-        if vt.artist and vt.artist.strip():
-            art = vt.artist.strip()
-            norm = normalize_str(art)
-            track_artist_counts.setdefault(norm, {})[art] = (
-                track_artist_counts.setdefault(norm, {}).get(art, 0) + 1
+    for track in valid_tracks:
+        if track.artist and track.artist.strip():
+            track_artist = track.artist.strip()
+            normalized_artist = normalize_str(track_artist)
+            track_artist_counts.setdefault(normalized_artist, {})[track_artist] = (
+                track_artist_counts.setdefault(normalized_artist, {}).get(
+                    track_artist, 0
+                )
+                + 1
             )
 
     canonical_track_artists: dict[str, str] = {}
-    for norm, casing_map in track_artist_counts.items():
-        dom_casing = max(casing_map.items(), key=lambda x: x[1])[0]
-        resolved = artists_module.resolve_artist_name(dom_casing, allow_network=False)
-        canonical_track_artists[norm] = (
-            resolved if normalize_str(resolved) == norm else dom_casing
+    for normalized_artist, casing_map in track_artist_counts.items():
+        preferred_track_artist_casing = max(casing_map.items(), key=lambda x: x[1])[0]
+        resolved = artists_module.resolve_artist_name(
+            preferred_track_artist_casing, allow_network=False
+        )
+        canonical_track_artists[normalized_artist] = (
+            resolved
+            if normalize_str(resolved) == normalized_artist
+            else preferred_track_artist_casing
         )
 
     if dominant_album_artist:
-        norm_dom = normalize_str(dominant_album_artist)
-        if norm_dom in canonical_track_artists:
-            cand_trk = canonical_track_artists[norm_dom]
-            harmonized = harmonize_artist_casing(cand_trk, dominant_album_artist)
+        normalized_album_artist = normalize_str(dominant_album_artist)
+        if normalized_album_artist in canonical_track_artists:
+            canonical_track_artist = canonical_track_artists[normalized_album_artist]
+            harmonized = harmonize_artist_casing(
+                canonical_track_artist, dominant_album_artist
+            )
             dominant_album_artist = harmonized
-            canonical_track_artists[norm_dom] = harmonized
+            canonical_track_artists[normalized_album_artist] = harmonized
         else:
-            canonical_track_artists[norm_dom] = dominant_album_artist
+            canonical_track_artists[normalized_album_artist] = dominant_album_artist
 
-    for vt in valid_tracks:
+    for track in valid_tracks:
         modified = False
         if (
             dominant_album_artist
-            and vt.album_artist
-            and normalize_str(vt.album_artist) == normalize_str(dominant_album_artist)
-            and vt.album_artist != dominant_album_artist
+            and track.album_artist
+            and normalize_str(track.album_artist)
+            == normalize_str(dominant_album_artist)
+            and track.album_artist != dominant_album_artist
         ):
             LOG.info(
-                f"   ∟ 🏷️ [Consensus] Harmonizing album artist casing '[bold red]{escape(vt.album_artist)}[/]' -> '[bold green]{escape(dominant_album_artist)}[/]' on '{escape(vt.file_path.name)}'"
+                f"   ∟ 🏷️ [Consensus] Harmonizing album artist casing '[bold red]{escape(track.album_artist)}[/]' -> '[bold green]{escape(dominant_album_artist)}[/]' on '{escape(track.file_path.name)}'"
             )
-            vt.album_artist = dominant_album_artist
+            track.album_artist = dominant_album_artist
             modified = True
 
-        if vt.artist:
-            norm_art = normalize_str(vt.artist)
-            if norm_art in canonical_track_artists:
-                canonical_name = canonical_track_artists[norm_art]
-                if vt.artist != canonical_name:
+        if track.artist:
+            normalized_track_artist = normalize_str(track.artist)
+            if normalized_track_artist in canonical_track_artists:
+                canonical_name = canonical_track_artists[normalized_track_artist]
+                if track.artist != canonical_name:
                     LOG.info(
-                        f"   ∟ 🏷️ [Consensus] Harmonizing track artist casing '[bold red]{escape(vt.artist)}[/]' -> '[bold green]{escape(canonical_name)}[/]' on '{escape(vt.file_path.name)}'"
+                        f"   ∟ 🏷️ [Consensus] Harmonizing track artist casing '[bold red]{escape(track.artist)}[/]' -> '[bold green]{escape(canonical_name)}[/]' on '{escape(track.file_path.name)}'"
                     )
-                    vt.artist = canonical_name
+                    track.artist = canonical_name
                     modified = True
 
         if (
-            vt.album_artist
-            and vt.artist
-            and normalize_str(vt.album_artist) == normalize_str(vt.artist)
-            and vt.album_artist != vt.artist
+            track.album_artist
+            and track.artist
+            and normalize_str(track.album_artist) == normalize_str(track.artist)
+            and track.album_artist != track.artist
         ):
-            target = harmonize_artist_casing(vt.artist, vt.album_artist)
-            vt.album_artist = target
-            vt.artist = target
+            target = harmonize_artist_casing(track.artist, track.album_artist)
+            track.album_artist = target
+            track.artist = target
             modified = True
 
         if modified and not dry_run:
             try:
-                metadata_module.write_track_metadata(vt)
+                metadata_module.write_track_metadata(track)
             except OSError as write_error:
                 LOG.debug(f"Failed to save harmonized artist metadata: {write_error}")
 
@@ -714,17 +845,26 @@ def _finalize_album_assets_and_replaygain(
             max_threads=max_threads,
         )
 
-    if not current_album_results or not fetch_artwork:
+    artwork_tracks = [
+        track
+        for track in (valid_tracks or current_album_results)
+        if not {"identity", "isrc"}.intersection(track.metadata_conflicts)
+    ]
+    if not artwork_tracks or not fetch_artwork:
         return
 
     wait_if_paused()
-    rep_track = valid_tracks[0] if valid_tracks else current_album_results[0]
-    primary_artist = sample_artist or rep_track.album_artist or rep_track.artist
+    representative_track = artwork_tracks[0]
+    primary_artist = (
+        sample_artist
+        or representative_track.album_artist
+        or representative_track.artist
+    )
     try:
         art_module.process_artist_artwork(
             album_dir,
             primary_artist,
-            artist_mbid=rep_track.musicbrainz_artistid,
+            artist_mbid=representative_track.musicbrainz_artistid,
             dry_run=dry_run,
         )
     except _NETWORK_EXCEPTIONS as error:
@@ -739,7 +879,7 @@ def _finalize_album_assets_and_replaygain(
         label_name = (
             str(album_mb_release_details.get("label"))
             if album_mb_release_details and album_mb_release_details.get("label")
-            else rep_track.label
+            else representative_track.label
         )
         if label_mbid:
             art_module.process_label_artwork(
@@ -750,6 +890,47 @@ def _finalize_album_assets_and_replaygain(
             )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Label logo download failed: {error}")
+
+
+def _prefetch_album_contexts(
+    album_groups: dict[Path, list[Path]],
+    outdated_files: set[Path],
+    executor: Executor,
+    *,
+    discogs_user_token: str | None,
+    fetch_itunes_art: bool,
+    force: bool,
+    dry_run: bool,
+    failures: list[dict[str, str]] | None,
+    window: int,
+) -> Iterator[tuple[Path, list[Path], Future[_AlbumMetadataContext] | None]]:
+    albums = iter(album_groups.items())
+    pending: deque[tuple[Path, list[Path], Future[_AlbumMetadataContext] | None]] = (
+        deque()
+    )
+    exhausted = False
+    while pending or not exhausted:
+        while len(pending) < window and not exhausted:
+            album = next(albums, None)
+            if album is None:
+                exhausted = True
+                break
+            album_dir, audio_files = album
+            context = None
+            if any(path in outdated_files for path in audio_files):
+                context = executor.submit(
+                    _resolve_album_metadata_context,
+                    album_dir,
+                    audio_files,
+                    discogs_user_token=discogs_user_token,
+                    fetch_itunes_art=fetch_itunes_art,
+                    force=force,
+                    dry_run=dry_run,
+                    failures=failures,
+                )
+            pending.append((album_dir, audio_files, context))
+        if pending:
+            yield pending.popleft()
 
 
 def tag_album_folder(
@@ -815,9 +996,21 @@ def tag_album_folder(
         with (
             interactive_pause_listener(progress, task) as pause_stop_event,
             ThreadPoolExecutor(max_workers=max_threads) as executor,
+            ThreadPoolExecutor(max_workers=max_threads) as provider_executor,
+            ThreadPoolExecutor(max_workers=min(2, max_threads)) as album_executor,
         ):
             try:
-                for album_dir, audio_files in album_groups.items():
+                for album_dir, audio_files, context_future in _prefetch_album_contexts(
+                    album_groups,
+                    outdated_files,
+                    album_executor,
+                    discogs_user_token=discogs_user_token,
+                    fetch_itunes_art=fetch_itunes_art,
+                    force=force,
+                    dry_run=dry_run,
+                    failures=failures,
+                    window=min(2, max_threads),
+                ):
                     wait_if_paused()
                     if not any(
                         audio_path in outdated_files for audio_path in audio_files
@@ -846,14 +1039,18 @@ def tag_album_folder(
                         else None
                     )
 
-                    album_context = _resolve_album_metadata_context(
-                        album_dir,
-                        audio_files,
-                        discogs_user_token=discogs_user_token,
-                        fetch_itunes_art=fetch_itunes_art,
-                        force=force,
-                        dry_run=dry_run,
-                        failures=failures,
+                    album_context = (
+                        context_future.result()
+                        if context_future is not None
+                        else _resolve_album_metadata_context(
+                            album_dir,
+                            audio_files,
+                            discogs_user_token=discogs_user_token,
+                            fetch_itunes_art=fetch_itunes_art,
+                            force=force,
+                            dry_run=dry_run,
+                            failures=failures,
+                        )
                     )
 
                     current_album_results = []
@@ -881,6 +1078,7 @@ def tag_album_folder(
                             album_cover_path=album_context.cover_path,
                             target_album_artist=album_context.sample_artist,
                             target_album_title=album_context.sample_album,
+                            provider_executor=provider_executor,
                         ): audio_file
                         for audio_file in audio_files
                     }
@@ -906,7 +1104,12 @@ def tag_album_folder(
                                 )
                         progress.advance(task)
 
-                    valid_tracks = [t for t in current_album_results if not t.is_alien]
+                    valid_tracks = [
+                        t
+                        for t in current_album_results
+                        if not t.is_alien
+                        and not {"identity", "isrc"}.intersection(t.metadata_conflicts)
+                    ]
                     _harmonize_album_genres(
                         valid_tracks,
                         album_context.deezer_details,
@@ -944,7 +1147,11 @@ def tag_album_folder(
                 if not is_interruption(exc):
                     raise
                 resume_workers(pause_stop_event)
-                executor.shutdown(wait=True, cancel_futures=True)
+                # Running tracks may await provider tasks; cancel every queue before joining any pool.
+                for worker_pool in (executor, provider_executor, album_executor):
+                    worker_pool.shutdown(wait=False, cancel_futures=True)
+                for worker_pool in (executor, provider_executor, album_executor):
+                    worker_pool.shutdown(wait=True, cancel_futures=True)
                 results.extend(current_album_results)
                 raise InterruptedOperationError(results) from None
 

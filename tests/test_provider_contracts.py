@@ -112,7 +112,7 @@ class TestAcousticIdentityContracts(IsolatedTestCase):
         cases = (
             ("Recording", "Primary", 0.95, MBID),
             ("Different", "Someone Else", 0.99, None),
-            ("Recording", None, 0.95, MBID),
+            ("Recording", None, 0.95, None),
             ("Different", None, 0.95, None),
             (None, None, 0.99, None),
             ("Recording", "Primary", 0.1, None),
@@ -145,8 +145,8 @@ class TestAcousticIdentityContracts(IsolatedTestCase):
                     ),
                     expected,
                 )
-            self.assertIn(":primary:recording", store.call_args.args[0])
-            self.assertEqual(store.call_args.args[1], expected)
+            self.assertEqual(store.call_args.args[0], "acoustid:raw:v1:10:fingerprint")
+            self.assertEqual(store.call_args.args[1], payload)
 
     def test_short_title_candidates_require_near_exact_match(self) -> None:
         payload = {
@@ -172,7 +172,26 @@ class TestAcousticIdentityContracts(IsolatedTestCase):
             )
 
     def test_cached_and_missing_fingerprint_results_never_query_provider(self) -> None:
-        for cached in ("", MBID):
+        for expected in (None, MBID):
+            cached = {
+                "status": "ok",
+                "results": (
+                    [
+                        {
+                            "score": 0.99,
+                            "recordings": [
+                                {
+                                    "id": MBID,
+                                    "title": "Recording",
+                                    "artists": [{"name": "Primary"}],
+                                }
+                            ],
+                        }
+                    ]
+                    if expected
+                    else []
+                ),
+            }
             with (
                 self.subTest(cached=cached),
                 patch.object(
@@ -189,7 +208,7 @@ class TestAcousticIdentityContracts(IsolatedTestCase):
                     fingerprint_service.lookup_acoustid(
                         Path("recording.flac"), "fixture"
                     ),
-                    cached or None,
+                    expected,
                 )
             lookup.assert_not_called()
         with patch.object(
@@ -276,7 +295,12 @@ class TestSmallProviderContracts(IsolatedTestCase):
             None,
             [],
             [{}],
-            [{"strArtistThumb": "https://example.com/avatar.png"}],
+            [
+                {
+                    "strArtist": "Primary",
+                    "strArtistThumb": "https://example.com/avatar.png",
+                }
+            ],
         )
         for artists in artist_responses:
             with (

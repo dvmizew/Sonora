@@ -208,12 +208,12 @@ def process_album_cover_art(
         if artwork_result:
             new_artwork_bytes, new_dim = artwork_result
             if not dry_run:
-                # Quality Downgrade Protection (GEMINI.md Rule 9)
-                if existing_dim and (existing_dim[0] * existing_dim[1]) > (
-                    new_dim[0] * new_dim[1]
+                if existing_dim and any(
+                    current > replacement
+                    for current, replacement in zip(existing_dim, new_dim)
                 ):
                     LOG.info(
-                        f"   ∟ 🛡️  [Quality Shield] Preserved higher-resolution cover ({existing_dim[0]}x{existing_dim[1]} > {new_dim[0]}x{new_dim[1]})"
+                        f"   ∟ 🛡️  [Quality Shield] Preserved cover: replacement reduces an image dimension ({existing_dim[0]}x{existing_dim[1]} -> {new_dim[0]}x{new_dim[1]})"
                     )
                 else:
                     atomic_write_bytes(cover_image_path, new_artwork_bytes)
@@ -362,7 +362,9 @@ def process_artist_artwork(
         return
 
     try:
-        thumbnail_bytes, banner_bytes = fetch_artist_images(artist_name)
+        thumbnail_bytes, banner_bytes = fetch_artist_images(
+            artist_name, artist_mbid=artist_mbid
+        )
     except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Failed to fetch artist artwork for {artist_name}: {error}")
         return

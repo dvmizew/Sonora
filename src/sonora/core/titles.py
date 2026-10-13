@@ -379,9 +379,11 @@ def score_artist_title_match(
         elif query_artist_clean == candidate_artist_clean:
             artist_score = 100.0
         else:
-            query_primary = clean_title(get_primary_artist(query_artist_clean)).lower()
+            query_primary = clean_title(
+                get_primary_artist(query_artist_clean, allow_network=False)
+            ).lower()
             candidate_primary = clean_title(
-                get_primary_artist(candidate_artist_clean)
+                get_primary_artist(candidate_artist_clean, allow_network=False)
             ).lower()
             if query_primary == candidate_primary:
                 artist_score = 100.0
@@ -445,3 +447,31 @@ def score_artist_title_match(
     ):
         return 0.0
     return float(title_score)
+
+
+def recording_identity_matches(
+    expected_artist: str | None,
+    expected_title: str | None,
+    candidate_artist: str | None,
+    candidate_title: str | None,
+    *,
+    expected_duration: float | None = None,
+    candidate_duration: float | None = None,
+) -> bool:
+    """Require recording text and available duration evidence to agree."""
+    if (
+        score_artist_title_match(
+            expected_artist or "",
+            expected_title or "",
+            candidate_artist or "",
+            candidate_title or "",
+        )
+        <= 0
+    ):
+        return False
+    return not (
+        expected_duration is not None
+        and candidate_duration is not None
+        and abs(expected_duration - candidate_duration)
+        > get_config().single_duration_tolerance_seconds
+    )

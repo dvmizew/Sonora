@@ -2,6 +2,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from sonora.core.config import SonoraConfig
 from sonora.services.genius import fetch_genius_song_details
 from sonora.services.lyrics import (
     clean_lyrics_text,
@@ -16,6 +17,15 @@ from tests.service_support import ServiceResponseTestCase
 
 
 class TestLyricsResponses(ServiceResponseTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        configuration = patch(
+            "sonora.services.lyrics.get_config",
+            return_value=SonoraConfig(allow_unverified_lyrics=True),
+        )
+        configuration.start()
+        self.addCleanup(configuration.stop)
+
     @patch("sonora.services.lyrics.syncedlyrics")
     def test_fetch_synced_lyrics(self, mock_syncedlyrics: MagicMock) -> None:
         # 1. Basic search
@@ -23,7 +33,11 @@ class TestLyricsResponses(ServiceResponseTestCase):
         lyrics = fetch_synced_lyrics("Artist", "Title")
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
         mock_syncedlyrics.search.assert_called_with(
-            "artist - title", plain_only=False, synced_only=False, enhanced=False
+            "artist - title",
+            plain_only=False,
+            synced_only=False,
+            enhanced=False,
+            providers=["Musixmatch", "NetEase", "Megalobiz", "Genius"],
         )
 
         # 2. Options search
@@ -68,7 +82,7 @@ class TestLyricsResponses(ServiceResponseTestCase):
         self.assertIsNone(result)
         # Verify negative cache sentinel was persisted
         mock_set_cache.assert_called_with(
-            "lyrics:artist without lyrics:instrumental track::[false, false, false, [], null, null, null]",
+            "lyrics:v4:True:artist without lyrics:instrumental track::[false, false, false, [], null, null, null]",
             "",
         )
 
@@ -95,7 +109,9 @@ class TestLyricsResponses(ServiceResponseTestCase):
         mock_song_response.json.return_value = {
             "response": {
                 "song": {
-                    "description": {"plain": "Lyrics for this song are unavailable"}
+                    "title": "Title",
+                    "primary_artist": {"name": "Artist"},
+                    "description": {"plain": "Lyrics for this song are unavailable"},
                 }
             }
         }

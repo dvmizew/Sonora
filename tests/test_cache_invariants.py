@@ -191,7 +191,7 @@ class TestCacheConcurrencyAndStorageInvariants(IsolatedTestCase):
                 reset_library_state()
 
     def test_negative_caching_empty_string_and_empty_dict(self) -> None:
-        """Empty string '' and empty dict {} are stored, preserved, and distinguished from None (miss)."""
+        """Confirmed misses survive round trips while absent entries remain distinguishable."""
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.dict(os.environ, {"XDG_CACHE_HOME": tmpdir}),
@@ -217,7 +217,7 @@ class TestCacheConcurrencyAndStorageInvariants(IsolatedTestCase):
                 self.assertIsNone(get_cached_api("non_existent_key"))
 
                 set_cached_api("neg_none_val", None)
-                self.assertIsNone(get_cached_api("neg_none_val"))
+                self.assertEqual(get_cached_api("neg_none_val"), "")
             finally:
                 close_cache()
                 reset_library_state()

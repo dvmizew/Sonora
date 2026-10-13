@@ -2,11 +2,13 @@ import httpx
 
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.coordination import coalesce_lookup
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import is_valid_uuid, normalize_str
 
 
+@coalesce_lookup
 def fetch_lastfm_tags(
     artist: str,
     title: str,

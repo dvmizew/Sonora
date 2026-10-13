@@ -103,6 +103,7 @@ class TestNetwork(IsolatedTestCase):
         mock_json_response.json.return_value = {
             "artists": [
                 {
+                    "strArtist": "Artist Name",
                     "strArtistThumb": "https://www.theaudiodb.com/images/thumb.jpg",
                     "strArtistBanner": "https://www.theaudiodb.com/images/banner.jpg",
                 }
@@ -220,7 +221,7 @@ class TestNetwork(IsolatedTestCase):
             "Musixmatch connection dropped"
         )
         with self.assertRaises(RuntimeError):
-            fetch_synced_lyrics("Artist", "Title")
+            fetch_synced_lyrics("Artist", "Title", providers=["Musixmatch"])
 
         lyrics_text, lyrics_type = process_track_lyrics(
             Path("/tmp/nonexistent.flac"), "Artist", "Title"

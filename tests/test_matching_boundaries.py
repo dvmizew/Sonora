@@ -27,14 +27,13 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
             (None, None),
         )
         recording = TrackInfo(Path("recording.flac"))
-        self.assertEqual(
+        self.assertIsNone(
             matching._match_position_by_mbid(
                 recording,
                 MBID,
                 {1: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 2: MBID},
                 None,
-            ),
-            2,
+            )
         )
 
     def test_malformed_album_records_surface_schema_errors_before_healing(self) -> None:
@@ -135,7 +134,10 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
 
     def test_itunes_identifier_can_heal_corrupt_title_and_artist(self) -> None:
         recording = TrackInfo(
-            Path("03 - Wrong.flac"), title="Wrong", artist="Wrong", itunes_trackid="123"
+            Path("03 - Unknown.flac"),
+            title="Untitled",
+            artist="Unknown Artist",
+            itunes_trackid="123",
         )
         release = {
             "tracks_by_position": {
@@ -174,7 +176,14 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
         )
         self.assertEqual(
             matching._resolve_album_track_position(
-                recording, recording.file_path, album_track_mbids={(2, 4): MBID}
+                recording,
+                recording.file_path,
+                album_track_mbids={(2, 4): MBID},
+                album_mb_release_details={
+                    "tracks_by_mbid": {
+                        MBID: {"title": "Recording", "disc_number": 2, "position": 4}
+                    }
+                },
             ),
             4,
         )
@@ -205,7 +214,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
         )
 
     def test_numeric_titles_and_missing_identity_are_not_fuzzy_matches(self) -> None:
-        for title in ("123", "123 [FLAC]", "Track 3", "Audio Track 3"):
+        for title in ("Track 3", "Audio Track 3"):
             with self.subTest(title=title):
                 self.assertTrue(matching._is_generic_title(title))
         self.assertFalse(
@@ -232,11 +241,31 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
         for index, release, expected in (
             ({("bad", "bad"): MBID}, None, None),
             ({(2, "bad"): MBID}, None, None),
-            (None, {"tracks_by_mbid": {MBID: {"disc_number": "bad"}}}, None),
-            (None, {"tracks_by_mbid": {MBID: {"position": 4}}}, 4),
             (
                 None,
-                {"tracks_by_mbid": {MBID: {"disc_number": 2, "position": "bad"}}},
+                {
+                    "tracks_by_mbid": {
+                        MBID: {"title": "Recording", "disc_number": "bad"}
+                    }
+                },
+                None,
+            ),
+            (
+                None,
+                {"tracks_by_mbid": {MBID: {"title": "Recording", "position": 4}}},
+                4,
+            ),
+            (
+                None,
+                {
+                    "tracks_by_mbid": {
+                        MBID: {
+                            "title": "Recording",
+                            "disc_number": 2,
+                            "position": "bad",
+                        }
+                    }
+                },
                 None,
             ),
         ):
@@ -245,7 +274,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
                     matching._match_position_by_mbid(recording, MBID, index, release),
                     expected,
                 )
-        self.assertEqual(recording.disc_number, 2)
+        self.assertEqual(recording.disc_number, 1)
 
     def test_empty_isrc_never_matches_missing_provider_codes(self) -> None:
         self.assertFalse(matching._recording_isrc_matches(None, {"isrcs": [None, ""]}))
@@ -366,7 +395,7 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
             title="Wrong",
             musicbrainz_trackid=MBID,
         )
-        self.assertFalse(
+        self.assertTrue(
             matching.is_alien_album_track(
                 recording,
                 recording.file_path,

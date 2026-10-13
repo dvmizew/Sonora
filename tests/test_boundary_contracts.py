@@ -267,6 +267,8 @@ class TestProviderBoundaryFailures(IsolatedTestCase):
             {
                 "track": [
                     {
+                        "strArtist": "Primary",
+                        "strTrack": "Recording",
                         "strMusicVid": "https://example.com",
                         "strMood": " Chill ",
                         "strOpenKey": "Am",

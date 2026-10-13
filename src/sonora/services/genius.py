@@ -3,6 +3,7 @@ import httpx
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
+from sonora.core.coordination import coalesce_lookup
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import clean_disambiguation, normalize_str
@@ -23,6 +24,7 @@ def _normalize_genius_description(plain_description: object) -> str | None:
     return song_description
 
 
+@coalesce_lookup
 def fetch_genius_song_details(
     artist: str, title: str, api_token: str | None = None
 ) -> dict[str, object] | None:
@@ -30,8 +32,10 @@ def fetch_genius_song_details(
         return None
 
     cleaned_title = clean_title(title)
-    cache_key = f"genius_song:{normalize_str(artist)}:{normalize_str(cleaned_title)}"
+    cache_key = f"genius_song:v2:{normalize_str(artist)}:{normalize_str(title)}"
     cached = get_cached_api(cache_key)
+    if cached == "":
+        return None
     if isinstance(cached, dict):
         cached["description"] = _normalize_genius_description(cached.get("description"))
         return cached
@@ -52,22 +56,21 @@ def fetch_genius_song_details(
         )
         hits = require_api_records(search_results.get("hits"), "Genius search hits")
         if not hits:
+            set_cached_api(cache_key, None)
             return None
 
         best_hit = None
         best_score = 0.0
 
         for hit in hits:
-            result_item = require_api_object(hit.get("result"), "Genius search hit")
-            hit_artist = str(result_item.get("primary_artist", {}).get("name", ""))
-            hit_title = str(result_item.get("title", ""))
+            song_candidate = require_api_object(hit.get("result"), "Genius search hit")
+            hit_artist = str(song_candidate.get("primary_artist", {}).get("name", ""))
+            hit_title = str(song_candidate.get("title", ""))
 
-            score = score_artist_title_match(
-                artist, cleaned_title, hit_artist, hit_title
-            )
+            score = score_artist_title_match(artist, title, hit_artist, hit_title)
             if score > best_score:
                 best_score = score
-                best_hit = result_item
+                best_hit = song_candidate
 
         if not best_hit or best_score < get_config().genius_match_threshold:
             return None
@@ -93,6 +96,19 @@ def fetch_genius_song_details(
         song_genius_payload = require_api_object(
             song_envelope.get("song"), "Genius song"
         )
+        primary_artist = require_api_object(
+            song_genius_payload.get("primary_artist"), "Genius song primary artist"
+        )
+        if (
+            score_artist_title_match(
+                artist,
+                title,
+                str(primary_artist.get("name") or ""),
+                str(song_genius_payload.get("title") or ""),
+            )
+            <= 0
+        ):
+            return None
 
         plain_description = _normalize_genius_description(
             require_api_object(

@@ -45,6 +45,7 @@ _SKIP_DIFF_FIELDS: frozenset[str] = frozenset(
         "art_height",
         "is_alien",
         "metadata_sources",
+        "metadata_conflicts",
     }
 )
 
@@ -164,18 +165,24 @@ def _enrich_lyrics(
 
 
 def _compute_tag_diffs(
-    orig_info: TrackInfo, track_info: TrackInfo
+    original_metadata: TrackInfo, track_info: TrackInfo
 ) -> list[tuple[str, Any, Any]]:
     diff_entries: list[tuple[str, Any, Any]] = []
-    for field_info in dataclasses.fields(TrackInfo):
-        if field_info.name in _SKIP_DIFF_FIELDS or field_info.name.startswith("_"):
+    for metadata_field in dataclasses.fields(TrackInfo):
+        if metadata_field.name in _SKIP_DIFF_FIELDS or metadata_field.name.startswith(
+            "_"
+        ):
             continue
-        old_val = getattr(orig_info, field_info.name)
-        new_val = getattr(track_info, field_info.name)
-        old_clean = None if old_val in (None, "", [], ()) else old_val
-        new_clean = None if new_val in (None, "", [], ()) else new_val
+        previous_tag_value = getattr(original_metadata, metadata_field.name)
+        updated_tag_value = getattr(track_info, metadata_field.name)
+        old_clean = (
+            None if previous_tag_value in (None, "", [], ()) else previous_tag_value
+        )
+        new_clean = (
+            None if updated_tag_value in (None, "", [], ()) else updated_tag_value
+        )
         if old_clean != new_clean:
-            diff_entries.append((field_info.name, old_clean, new_clean))
+            diff_entries.append((metadata_field.name, old_clean, new_clean))
     return diff_entries
 
 
@@ -212,9 +219,9 @@ def _render_tag_diffs(diff_entries: list[tuple[str, Any, Any]]) -> list[str]:
     return diff_lines
 
 
-def _run_audio_and_tags_persistence(
+def _process_audio_and_save_tags(
     track_info: TrackInfo,
-    orig_info: TrackInfo,
+    original_metadata: TrackInfo,
     file_path: Path,
     cuesheet_content: str | None,
     album_cover_path: Path | None,
@@ -252,21 +259,25 @@ def _run_audio_and_tags_persistence(
         with Image.open(cover_image) as candidate_cover:
             candidate_cover.load()
             candidate_width, candidate_height = candidate_cover.size
-        embedded_area = (orig_info.art_width or 0) * (orig_info.art_height or 0)
+        embedded_area = (original_metadata.art_width or 0) * (
+            original_metadata.art_height or 0
+        )
         has_art_upgrade = candidate_width * candidate_height > embedded_area
-    diff_entries = _compute_tag_diffs(orig_info, track_info)
+    diff_entries = _compute_tag_diffs(original_metadata, track_info)
     diff_lines = _render_tag_diffs(diff_entries)
     track_info._diff_descriptions = _describe_tag_diffs(diff_entries)
     if has_art_upgrade:
-        cur_dim_str = (
-            f"{orig_info.art_width}x{orig_info.art_height}"
-            if orig_info.art_width and orig_info.art_height
+        previous_artwork_dimensions = (
+            f"{original_metadata.art_width}x{original_metadata.art_height}"
+            if original_metadata.art_width and original_metadata.art_height
             else "None"
         )
         diff_lines.append(
-            f"\n       [green][+] cover_art: upgraded to high-resolution (was {cur_dim_str})[/]"
+            f"\n       [green][+] cover_art: upgraded to high-resolution (was {previous_artwork_dimensions})[/]"
         )
-        track_info._diff_descriptions.append(f"cover_art: upgraded from {cur_dim_str}")
+        track_info._diff_descriptions.append(
+            f"cover_art: upgraded from {previous_artwork_dimensions}"
+        )
 
     if diff_lines or force or has_art_upgrade:
         if not dry_run:
@@ -311,14 +322,14 @@ def normalize_single_track(
         LOG.debug(f"Failed to read metadata for {file_path}: {error}")
         return None
 
-    orig_info = dataclasses.replace(current_info)
+    original_metadata = dataclasses.replace(current_info)
 
     _enrich_bpm(current_info, file_path, fetch_bpm, force=force)
     _enrich_key(current_info, file_path, fetch_key, force=force)
 
     normalize_track_metadata(current_info, allow_network=False)
 
-    diff_entries = _compute_tag_diffs(orig_info, current_info)
+    diff_entries = _compute_tag_diffs(original_metadata, current_info)
     diff_descriptions = _describe_tag_diffs(diff_entries)
 
     if diff_entries or force:
@@ -436,6 +447,7 @@ def _record_persisted_album(
             metadata_module.read_track_metadata(track.file_path),
             is_alien=track.is_alien,
             metadata_sources=dict(track.metadata_sources),
+            metadata_conflicts=dict(track.metadata_conflicts),
             _diff_descriptions=list(track._diff_descriptions),
         )
         for track in tracks
@@ -445,6 +457,7 @@ def _record_persisted_album(
             track.file_path
             for track in persisted_tracks
             if track.metadata_sources
+            and not track.metadata_conflicts
             and (
                 not fetch_itunes_art
                 or (track.art_width or 0) >= MIN_COVER_ART_DIMENSION

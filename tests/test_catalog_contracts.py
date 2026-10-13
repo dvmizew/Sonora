@@ -248,7 +248,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         for has_context, title, artist, expected_title in (
             (True, "Song", "Primary", "Song"),
             (True, "", "", "Recognized"),
-            (False, "Song", "Primary", "Recognized"),
+            (False, "Song", "Primary", "Song"),
         ):
             recording = TrackInfo(
                 Path("recording.flac"),
@@ -362,7 +362,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
 
     def setUp(self) -> None:
         artist_resolution = patch(
-            "sonora.core.artists.resolve_artist_name", side_effect=lambda artist: artist
+            "sonora.core.artists.resolve_artist_name",
+            side_effect=lambda artist, allow_network=True: artist,
         )
         artist_resolution.start()
         self.addCleanup(artist_resolution.stop)
@@ -527,7 +528,13 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         )
         self.recording.musicbrainz_albumid = MBID
         self.recording.date = "2019"
-        catalog._enrich_itunes(self.recording, album, force=True)
+        with (
+            patch.object(itunes_service, "lookup_itunes_track", return_value=None),
+            patch.object(
+                itunes_service, "fetch_itunes_track_metadata", return_value=None
+            ),
+        ):
+            catalog._enrich_itunes(self.recording, album, force=True)
         self.assertEqual(self.recording.date, "2019")
 
     def test_itunes_single_fallback_does_not_copy_album_positions(self) -> None:
@@ -666,6 +673,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                     deezer_service,
                     "fetch_deezer_track_by_isrc",
                     return_value={
+                        "artist": recording.artist,
+                        "title": recording.title,
                         "isrc": recording.isrc,
                         "track_position": 7,
                         "disk_number": 3,

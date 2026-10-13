@@ -93,6 +93,12 @@ class SonoraConfig:
             _default_policy()["single_identifier_title_threshold"]
         )
     )
+    allow_unverified_lyrics: bool = field(
+        default_factory=lambda: bool(_default_policy()["allow_unverified_lyrics"])
+    )
+    acoustid_match_margin: float = field(
+        default_factory=lambda: float(_default_policy()["acoustid_match_margin"])
+    )
     acoustid_confidence_threshold: float = field(
         default_factory=lambda: float(
             _default_policy()["acoustid_confidence_threshold"]
@@ -206,6 +212,7 @@ class SonoraConfig:
             )
         for confidence in (
             self.acoustid_confidence_threshold,
+            self.acoustid_match_margin,
             self.key_confidence_threshold,
             self.title_score_weight,
         ):
@@ -345,6 +352,11 @@ def get_config() -> SonoraConfig:
 
     kwargs: dict[str, Any] = {}
 
+    if "allow_unverified_lyrics" in raw_data:
+        if not isinstance(raw_data["allow_unverified_lyrics"], bool):
+            raise TypeError("allow_unverified_lyrics must be a boolean")
+        kwargs["allow_unverified_lyrics"] = raw_data["allow_unverified_lyrics"]
+
     for policy_name in (
         "artist_match_threshold",
         "album_match_threshold",
@@ -366,6 +378,7 @@ def get_config() -> SonoraConfig:
         "catalog_candidate_rank_threshold",
         "album_candidate_rank_threshold",
         "acoustid_confidence_threshold",
+        "acoustid_match_margin",
         "key_confidence_threshold",
         "bpm_search_min",
         "bpm_search_max",

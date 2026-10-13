@@ -7,8 +7,9 @@ class RateLimiter:
 
     _disabled: bool = False
 
-    def __init__(self, interval_seconds: float) -> None:
+    def __init__(self, interval_seconds: float, provider: str | None = None) -> None:
         self.interval = interval_seconds
+        self.provider = provider
         self.lock = threading.Lock()
         self.last_call = 0.0
 
@@ -22,6 +23,10 @@ class RateLimiter:
         interval = self.interval if interval_seconds is None else interval_seconds
         if interval <= 0:
             return 0.0
+        if self.provider is not None:
+            from sonora.core.coordination import wait_for_provider
+
+            return wait_for_provider(self.provider, interval)
         with self.lock:
             now = time.monotonic()
             target_time = max(now, self.last_call + interval)

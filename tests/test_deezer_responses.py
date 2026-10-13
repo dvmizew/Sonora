@@ -101,6 +101,8 @@ class TestDeezerResponses(ServiceResponseTestCase):
         mock_track = MagicMock()
         mock_track.status_code = 200
         mock_track.json.return_value = {
+            "title": "Track Title",
+            "artist": {"name": "Artist Name"},
             "isrc": "USUM71703861",
             "explicit_lyrics": True,
         }

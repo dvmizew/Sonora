@@ -92,6 +92,7 @@ class TrackInfo:
     art_height: int | None = None
     is_alien: bool = False
     metadata_sources: dict[str, MetadataSource] = field(default_factory=dict)
+    metadata_conflicts: dict[str, str] = field(default_factory=dict)
     _diff_descriptions: list[str] = field(
         default_factory=list, repr=False, compare=False
     )

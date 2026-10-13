@@ -26,6 +26,8 @@ class TestGeniusResponses(ServiceResponseTestCase):
             "response": {
                 "song": {
                     "id": 123,
+                    "title": "Title",
+                    "primary_artist": {"name": "Artist"},
                     "description": {"plain": "Song story description"},
                     "featured_artists": [{"name": "Feat Artist"}],
                     "producer_artists": [{"name": "Producer 1"}],

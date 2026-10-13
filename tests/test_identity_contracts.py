@@ -308,22 +308,27 @@ class TestAlbumIdentityContracts(IsolatedTestCase):
             matching._pos_in_album(1, disc_number=2, album_track_mbids={"2-1": MBID})
         )
 
-    def test_recording_ids_can_repair_disc_and_track_position(self) -> None:
-        for index, expected_disc, expected_position in (
-            ({(2, 3): MBID}, 2, 3),
-            ({3: MBID}, 1, 3),
-            ({("bad", 3): MBID}, 1, 3),
-            ({(2, "bad"): MBID}, 2, None),
+    def test_recording_ids_require_release_identity_before_repairing_positions(
+        self,
+    ) -> None:
+        for index in (
+            {(2, 3): MBID},
+            {3: MBID},
+            {("bad", 3): MBID},
+            {(2, "bad"): MBID},
         ):
             recording = TrackInfo(Path("recording.flac"))
             with self.subTest(index=index):
-                self.assertEqual(
-                    matching._match_position_by_mbid(recording, MBID, index, None),
-                    expected_position,
+                self.assertIsNone(
+                    matching._match_position_by_mbid(recording, MBID, index, None)
                 )
-                self.assertEqual(recording.disc_number, expected_disc)
+                self.assertEqual(recording.disc_number, 1)
         recording = TrackInfo(Path("recording.flac"))
-        release = {"tracks_by_mbid": {MBID: {"disc_number": "2", "position": "3"}}}
+        release = {
+            "tracks_by_mbid": {
+                MBID: {"title": "Recording", "disc_number": "2", "position": "3"}
+            }
+        }
         self.assertEqual(
             matching._match_position_by_mbid(recording, MBID, None, release), 3
         )
@@ -335,8 +340,8 @@ class TestAlbumIdentityContracts(IsolatedTestCase):
         recording = TrackInfo(Path("recording.flac"), disc_number=2)
         release = {
             "tracks_by_disc_and_position": {
-                (1, 1): {"isrc": "USAAA2100001"},
-                (2, 3): {"isrc": "USAAA2100001"},
+                (1, 1): {"isrc": "USAAA2100001", "title": "Original"},
+                (2, 3): {"isrc": "USAAA2100001", "title": "Original"},
             }
         }
         self.assertIsNone(
@@ -350,7 +355,11 @@ class TestAlbumIdentityContracts(IsolatedTestCase):
             ),
             3,
         )
-        single = {"tracks_by_number": {3: {"trackId": "123", "disk_number": 2}}}
+        single = {
+            "tracks_by_number": {
+                3: {"trackId": "123", "disk_number": 2, "title": "Original"}
+            }
+        }
         self.assertEqual(
             matching._match_position_by_authoritative_id(
                 recording, None, "itunes_trackid", "123", [single]
@@ -509,7 +518,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self.addCleanup(resolution.stop)
 
     def test_any_recording_isrc_can_heal_a_corrupt_release_title(self) -> None:
-        self.recording.title = "Wrong"
+        self.recording.title = "Untitled"
         self.recording.isrc = "USAAA2100002"
         candidate = {
             "title": "Recording",
@@ -579,7 +588,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         enrichment._resolve_musicbrainz_track_id(
             self.recording, {3: MBID}, None, None, False
         )
-        self.assertEqual(self.recording.musicbrainz_trackid, MBID)
+        self.assertIsNone(self.recording.musicbrainz_trackid)
 
     def test_recording_extraction_prefers_mbid_and_rejects_unrelated_titles(
         self,
@@ -664,6 +673,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             )
             self.assertEqual(self.recording.musicbrainz_trackid, MBID)
             self.recording.track_number = 1
+            self.recording.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
             enrichment._enrich_acoustid(
                 self.recording,
                 self.recording.file_path,
@@ -822,8 +832,8 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
     def test_recording_metadata_heals_corrupt_identity_and_preserves_disc_totals(
         self,
     ) -> None:
-        self.recording.artist = "Wrong"
-        self.recording.title = "Wrong"
+        self.recording.artist = "Unknown Artist"
+        self.recording.title = "Untitled"
         self.recording.isrc = "USAAA2100001"
         details = {
             **self.details,

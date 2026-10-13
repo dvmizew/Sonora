@@ -222,6 +222,8 @@
   "single_duration_tolerance_seconds": 15.0,
   "single_identifier_title_threshold": 70.0,
   "acoustid_confidence_threshold": 0.8,
+  "acoustid_match_margin": 0.02,
+  "allow_unverified_lyrics": false,
   "key_confidence_threshold": 0.2,
   "bpm_search_min": 60.0,
   "bpm_search_max": 200.0,

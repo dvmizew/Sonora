@@ -126,9 +126,7 @@ class TestAlbumIdentity(IsolatedTestCase):
                     )
 
     def test_album_identifiers_still_heal_corrupted_titles(self) -> None:
-        track = dataclasses.replace(
-            self._track("Completely wrong"), isrc="USAAA2400001"
-        )
+        track = dataclasses.replace(self._track("Untitled"), isrc="USAAA2400001")
         position = _resolve_album_track_position(
             track,
             track.file_path,
@@ -174,7 +172,7 @@ class TestAlbumIdentity(IsolatedTestCase):
                 )
                 track.isrc = "USAAA2400001"
                 recordings[1]["isrc"] = track.isrc
-                self.assertFalse(
+                self.assertTrue(
                     is_alien_album_track(
                         track,
                         track.file_path,

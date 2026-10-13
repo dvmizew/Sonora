@@ -224,7 +224,7 @@ class TestITunesCatalogContracts(IsolatedTestCase):
         self.assertEqual(set(indexes), {(1, 1), (2, 1)})
         self.assertEqual(indexes[(1, 1)]["advisory"], "Explicit")
         self.assertEqual(indexes[(1, 1)]["date"], "2020-01-02")
-        self.assertEqual(indexes[(1, 1)]["release_country"], "United States")
+        self.assertNotIn("release_country", indexes[(1, 1)])
         titles = details["tracks_by_title"]
         assert isinstance(titles, dict)
         self.assertEqual(set(titles), {"recording", "recording disc two"})

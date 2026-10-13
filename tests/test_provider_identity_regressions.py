@@ -175,7 +175,12 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
             with self.subTest(description=description):
                 song = {
                     "response": {
-                        "song": {"id": 1, "description": {"plain": description}}
+                        "song": {
+                            "id": 1,
+                            "title": "Song",
+                            "primary_artist": {"name": "Alpha"},
+                            "description": {"plain": description},
+                        }
                     }
                 }
                 replies = [

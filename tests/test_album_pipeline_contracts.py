@@ -15,6 +15,48 @@ MBID = "11111111-2222-3333-4444-555555555555"
 
 
 class TestAlbumPipelineContracts(IsolatedTestCase):
+    def test_genre_consensus_abstains_on_conflicts_and_ties(self) -> None:
+        for genres, deezer_album, itunes_album in (
+            (["Unknown", "Rock"], {"genre": "Pop"}, {"genre": "Jazz"}),
+            (["Rock", "Jazz", "Unknown", "Unknown"], None, None),
+            (["Rock", "Unknown"], {"genre": "Unknown"}, None),
+        ):
+            recordings = [
+                TrackInfo(self.test_directory / f"{index}.flac", genre=genre)
+                for index, genre in enumerate(genres)
+            ]
+            with (
+                self.subTest(genres=genres),
+                patch.object(metadata, "write_track_metadata") as write,
+            ):
+                tagger._harmonize_album_genres(
+                    recordings, deezer_album, itunes_album, dry_run=True
+                )
+                if deezer_album and itunes_album:
+                    self.assertEqual([track.genre for track in recordings], genres)
+                    self.assertTrue(
+                        all("genre" in track.metadata_conflicts for track in recordings)
+                    )
+                elif len(genres) == 4:
+                    self.assertEqual([track.genre for track in recordings], genres)
+                else:
+                    self.assertEqual(
+                        [track.genre for track in recordings], ["Rock", "Rock"]
+                    )
+            write.assert_not_called()
+
+    def test_disputed_track_genre_does_not_vote_in_album_consensus(self) -> None:
+        recordings = [
+            TrackInfo(
+                self.test_directory / "first.flac",
+                genre="Rock",
+                metadata_conflicts={"genre": "disputed"},
+            ),
+            TrackInfo(self.test_directory / "second.flac", genre="Unknown"),
+        ]
+        tagger._harmonize_album_genres(recordings, None, None, dry_run=True)
+        self.assertEqual(recordings[1].genre, "Unknown")
+
     def test_root_directory_identity_and_blank_artist_consensus_remain_unknown(
         self,
     ) -> None:
@@ -51,7 +93,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         artist.assert_called_once()
         label.assert_not_called()
 
-    def test_partial_release_indexes_fall_back_to_the_recording_id_lookup(self) -> None:
+    def test_partial_release_indexes_do_not_establish_identity(self) -> None:
         for release in (
             {"tracks_by_position": {1: {"recording_mbid": None}}},
             {"tracks_by_disc_and_position": {(1, 1): {"recording_mbid": None}}},
@@ -84,7 +126,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                     False,
                     False,
                 )
-            self.assertEqual(context.track_mbids, {1: MBID})
+            self.assertIsNone(context.track_mbids)
 
     def test_itunes_album_track_artists_are_preserved_during_identity_healing(
         self,
@@ -310,10 +352,29 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         paths = [
             self.test_directory / f"recording-{number}.flac" for number in range(3)
         ]
-        tagged = dataclasses.replace(self.recording, musicbrainz_albumid=MBID)
+        tagged_by_path = {
+            path: dataclasses.replace(
+                self.recording,
+                file_path=path,
+                title=f"Song {number}",
+                track_number=number,
+                musicbrainz_albumid=MBID,
+            )
+            for number, path in enumerate(paths, 1)
+        }
+        recordings = {
+            (1, number): {
+                "title": f"Song {number}",
+                "artist": "Primary",
+                "recording_mbid": f"00000000-0000-0000-0000-{number:012d}",
+            }
+            for number in range(1, 4)
+        }
         release = {
-            "tracks_by_position": {1: {"recording_mbid": MBID}, 2: {}},
-            "tracks_by_disc_and_position": {(1, 1): {"recording_mbid": MBID}},
+            "tracks_by_position": {
+                number: recordings[(1, number)] for number in range(1, 4)
+            },
+            "tracks_by_disc_and_position": recordings,
         }
         with (
             patch.object(
@@ -321,7 +382,9 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                 "_resolve_album_folder_identity",
                 return_value=("Primary", "Record"),
             ),
-            patch.object(metadata, "read_track_metadata", return_value=tagged),
+            patch.object(
+                metadata, "read_track_metadata", side_effect=tagged_by_path.__getitem__
+            ),
             patch.object(musicbrainz, "search_musicbrainz_release") as search,
             patch.object(
                 musicbrainz, "fetch_musicbrainz_release_details", return_value=release
@@ -342,11 +405,23 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
             )
         search.assert_not_called()
         self.assertEqual(context.musicbrainz_id, MBID)
-        self.assertEqual(context.track_mbids, {(1, 1): MBID, 1: MBID})
+        self.assertEqual(
+            context.track_mbids,
+            {
+                (1, number): f"00000000-0000-0000-0000-{number:012d}"
+                for number in range(1, 4)
+            }
+            | {
+                number: f"00000000-0000-0000-0000-{number:012d}"
+                for number in range(1, 4)
+            },
+        )
         self.assertEqual(context.discogs_release, {"label": "Publisher"})
         self.assertEqual(context.sample_artist, "Primary")
 
-    def test_prefetch_missing_recording_indexes_fetches_mbids_separately(self) -> None:
+    def test_prefetch_missing_recording_indexes_withholds_release_metadata(
+        self,
+    ) -> None:
         with (
             patch.object(
                 tagger,
@@ -376,8 +451,8 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                 False,
                 True,
             )
-        fetch.assert_called_once_with(MBID)
-        self.assertEqual(context.track_mbids, {(1, 1): MBID})
+        fetch.assert_not_called()
+        self.assertIsNone(context.track_mbids)
 
     def test_prefetch_empty_identity_and_network_error_preserve_empty_context(
         self,

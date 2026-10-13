@@ -22,5 +22,5 @@ class TestTheaudiodbResponses(ServiceResponseTestCase):
         result = fetch_theaudiodb_track_details("Unknown Artist", "Unknown Track")
         self.assertIsNone(result)
         mock_set_cache.assert_called_with(
-            "theaudiodb_track:unknown artist:unknown track", {}
+            "theaudiodb_track:v3:unknown artist:unknown track::None", {}
         )

@@ -8,6 +8,7 @@ import httpx
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
+from sonora.core.coordination import coalesce_lookup
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import is_valid_uuid, safe_int
@@ -67,6 +68,7 @@ def download_fanart_image_bytes(url: str | None) -> bytes | None:
     return None
 
 
+@coalesce_lookup
 def fetch_fanart_artist(
     artist_mbid: str,
     api_key: str | None = None,
@@ -138,6 +140,7 @@ def fetch_fanart_artist(
         return None
 
 
+@coalesce_lookup
 def fetch_fanart_label(
     label_mbid: str,
     api_key: str | None = None,
@@ -190,6 +193,7 @@ def fetch_fanart_label(
         return None
 
 
+@coalesce_lookup
 def fetch_fanart_album(
     release_group_mbid: str,
     api_key: str | None = None,

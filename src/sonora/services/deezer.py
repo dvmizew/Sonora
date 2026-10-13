@@ -2,16 +2,23 @@ import urllib.parse
 from typing import Any
 
 import httpx
+from rich.markup import escape
 
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
+from sonora.core.coordination import coalesce_lookup
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.text import normalize_str, safe_int
-from sonora.core.titles import clean_title, score_artist_title_match
+from sonora.core.text import normalize_str, safe_float, safe_int
+from sonora.core.titles import (
+    clean_title,
+    recording_identity_matches,
+    score_artist_title_match,
+)
 
 
+@coalesce_lookup
 def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
     if not (artist and album):
         return None
@@ -28,7 +35,8 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
     try:
         response = SESSION.get(url, timeout=6)
         if response.status_code != 200:
-            set_cached_api(cache_key, None)
+            if response.status_code == 404:
+                set_cached_api(cache_key, None)
             return None
 
         deezer_payload = require_api_object(response.json(), "Deezer search response")
@@ -38,10 +46,10 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
             deezer_payload.get("data"), "Deezer search results"
         )
         if not catalog_candidates:
-            query2 = f"{artist} {clean_album}"
-            url2 = f"https://api.deezer.com/search/album?q={urllib.parse.quote(query2)}"
+            fallback_query = f"{artist} {clean_album}"
+            fallback_url = f"https://api.deezer.com/search/album?q={urllib.parse.quote(fallback_query)}"
 
-            fallback_response = SESSION.get(url2, timeout=6)
+            fallback_response = SESSION.get(fallback_url, timeout=6)
             if fallback_response.status_code == 200:
                 fallback_payload = require_api_object(
                     fallback_response.json(), "Deezer fallback response"
@@ -79,6 +87,7 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
         return None
 
 
+@coalesce_lookup
 def fetch_deezer_album_details(
     artist: str, album: str, expected_track_count: int | None = None
 ) -> dict[str, Any] | None:
@@ -87,10 +96,12 @@ def fetch_deezer_album_details(
 
     clean_album = clean_title(album)
     cache_suffix = f":{expected_track_count}" if expected_track_count else ""
-    cache_key = f"deezer_meta:{normalize_str(artist)}:{normalize_str(clean_album)}{cache_suffix}"
+    cache_key = f"deezer_meta:v3:{normalize_str(artist)}:{normalize_str(clean_album)}{cache_suffix}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
+    if cached == "":
+        return None
 
     query = f'artist:"{artist}" album:"{clean_album}"'
     url = f"https://api.deezer.com/search/album?q={urllib.parse.quote(query)}"
@@ -98,7 +109,8 @@ def fetch_deezer_album_details(
     try:
         response = SESSION.get(url, timeout=6)
         if response.status_code != 200:
-            set_cached_api(cache_key, None)
+            if response.status_code == 404:
+                set_cached_api(cache_key, None)
             return None
 
         deezer_payload = require_api_object(response.json(), "Deezer search response")
@@ -113,6 +125,7 @@ def fetch_deezer_album_details(
 
         best_candidate = None
         best_score = 0.0
+        tied_candidates = False
         for track_candidate in catalog_candidates:
             candidate_title = str(track_candidate.get("title", ""))
             candidate_artist = str(track_candidate.get("artist", {}).get("name", ""))
@@ -124,15 +137,17 @@ def fetch_deezer_album_details(
             if normalize_str(candidate_title) == normalize_str(clean_album):
                 score += 50.0
 
-            nb_tracks = safe_int(track_candidate.get("nb_tracks"))
+            candidate_track_count = safe_int(track_candidate.get("nb_tracks"))
             record_type = str(track_candidate.get("record_type", "")).lower()
-            if expected_track_count is not None and nb_tracks is not None:
-                diff = abs(nb_tracks - expected_track_count)
-                if diff == 0:
+            if expected_track_count is not None and candidate_track_count is not None:
+                track_count_difference = abs(
+                    candidate_track_count - expected_track_count
+                )
+                if track_count_difference == 0:
                     score += 40.0
-                elif diff <= 2:
+                elif track_count_difference <= 2:
                     score += 20.0
-                elif expected_track_count >= 3 and nb_tracks == 1:
+                elif expected_track_count >= 3 and candidate_track_count == 1:
                     score -= 60.0
             if (
                 expected_track_count is not None
@@ -147,7 +162,19 @@ def fetch_deezer_album_details(
             ):
                 best_score = score
                 best_candidate = track_candidate
+                tied_candidates = False
+            elif (
+                best_candidate is not None
+                and score == best_score
+                and track_candidate.get("id") != best_candidate.get("id")
+            ):
+                tied_candidates = True
 
+        if tied_candidates:
+            LOG.warning(
+                f"Ambiguous Deezer album for {escape(artist)} - {escape(album)}"
+            )
+            return None
         if not best_candidate:
             set_cached_api(cache_key, None)
             return None
@@ -176,6 +203,7 @@ def fetch_deezer_album_details(
         tracks_by_position: dict[Any, dict[str, object]] = {}
         tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
+        repeated_titles: set[str] = set()
         tracks_page = require_api_object(
             album_deezer_payload.get("tracks", {}), "Deezer album tracks"
         )
@@ -224,6 +252,7 @@ def fetch_deezer_album_details(
                 "track_position": track_position,
                 "disk_number": disc_number,
                 "isrc": track_candidate.get("isrc"),
+                "duration": track_candidate.get("duration"),
                 "bpm": track_candidate.get("bpm"),
                 "gain": track_candidate.get("gain"),
                 "explicit_lyrics": explicit,
@@ -236,8 +265,15 @@ def fetch_deezer_album_details(
             if disc_number == 1 or track_position not in tracks_by_position:
                 tracks_by_position[track_position] = track_dict
             if track_title:
-                tracks_by_title[normalize_str(clean_title(track_title))] = track_dict
-                tracks_by_title[normalize_str(track_title)] = track_dict
+                for title_key in {
+                    normalize_str(clean_title(track_title)),
+                    normalize_str(track_title),
+                }:
+                    if title_key in tracks_by_title or title_key in repeated_titles:
+                        repeated_titles.add(title_key)
+                        tracks_by_title.pop(title_key, None)
+                    else:
+                        tracks_by_title[title_key] = track_dict
 
         result = {
             "title": album_deezer_payload.get("title"),
@@ -313,6 +349,7 @@ def _parse_deezer_track_payload(
         "artist": artist_name,
         "album": album_title,
         "isrc": track_deezer_payload.get("isrc"),
+        "duration": safe_float(track_deezer_payload.get("duration")),
         "explicit_lyrics": track_deezer_payload.get("explicit_lyrics"),
         "featured_artists": ", ".join(dict.fromkeys(featured)) if featured else None,
         "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
@@ -324,6 +361,7 @@ def _parse_deezer_track_payload(
     }
 
 
+@coalesce_lookup
 def fetch_deezer_track_by_isrc(
     isrc: str,
 ) -> dict[str, str | int | float | bool | None] | None:
@@ -335,20 +373,25 @@ def fetch_deezer_track_by_isrc(
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
+    if cached == "":
+        return None
 
     url = f"https://api.deezer.com/track/isrc:{urllib.parse.quote(clean_isrc)}"
 
     try:
         response = SESSION.get(url, timeout=6)
         if response.status_code != 200:
-            set_cached_api(cache_key, None)
+            if response.status_code == 404:
+                set_cached_api(cache_key, None)
             return None
 
         track_deezer_payload = require_api_object(
             response.json(), "Deezer ISRC response"
         )
         if track_deezer_payload.get("error") or not track_deezer_payload.get("id"):
-            set_cached_api(cache_key, None)
+            error = track_deezer_payload.get("error")
+            if isinstance(error, dict) and error.get("code") == 800:
+                set_cached_api(cache_key, None)
             return None
 
         result = _parse_deezer_track_payload(track_deezer_payload)
@@ -359,19 +402,23 @@ def fetch_deezer_track_by_isrc(
         return None
 
 
+@coalesce_lookup
 def fetch_deezer_track_details(
-    artist: str, title: str
+    artist: str,
+    title: str,
+    *,
+    duration: float | None = None,
 ) -> dict[str, str | int | float | bool | None] | None:
     if not (artist and title):
         return None
 
     clean_track_title = clean_title(title)
-    cache_key = (
-        f"deezer_track:{normalize_str(artist)}:{normalize_str(clean_track_title)}"
-    )
+    cache_key = f"deezer_track:v2:{normalize_str(artist)}:{normalize_str(clean_track_title)}:{duration}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
+    if cached == "":
+        return None
 
     query = f"{artist} {clean_track_title}"
     url = f"https://api.deezer.com/search/track?q={urllib.parse.quote(query)}"
@@ -379,7 +426,8 @@ def fetch_deezer_track_details(
     try:
         response = SESSION.get(url, timeout=6)
         if response.status_code != 200:
-            set_cached_api(cache_key, None)
+            if response.status_code == 404:
+                set_cached_api(cache_key, None)
             return None
 
         deezer_payload = require_api_object(response.json(), "Deezer search response")
@@ -389,20 +437,37 @@ def fetch_deezer_track_details(
             deezer_payload.get("data"), "Deezer search results"
         )
         if not catalog_candidates:
+            set_cached_api(cache_key, None)
             return None
 
         best_candidate = None
         best_score = 0.0
+        candidate_scores: dict[str, float] = {}
         for track_candidate in catalog_candidates:
             candidate_artist = str(track_candidate.get("artist", {}).get("name", ""))
             candidate_title = str(track_candidate.get("title", ""))
             score = score_artist_title_match(
                 artist, clean_track_title, candidate_artist, candidate_title
             )
+            if not recording_identity_matches(
+                artist,
+                title,
+                candidate_artist,
+                candidate_title,
+                expected_duration=duration,
+                candidate_duration=safe_float(track_candidate.get("duration")),
+            ):
+                continue
+            candidate_scores[str(track_candidate.get("id") or "")] = score
             if score > best_score:
                 best_score = score
                 best_candidate = track_candidate
 
+        if sum(score == best_score for score in candidate_scores.values()) > 1:
+            LOG.warning(
+                f"Ambiguous Deezer recording for {escape(artist)} - {escape(title)}"
+            )
+            return None
         if not best_candidate:
             set_cached_api(cache_key, None)
             return None
@@ -424,6 +489,15 @@ def fetch_deezer_track_details(
             return None
 
         result = _parse_deezer_track_payload(track_deezer_payload)
+        if not recording_identity_matches(
+            artist,
+            title,
+            str(result.get("artist") or ""),
+            str(result.get("title") or ""),
+            expected_duration=duration,
+            candidate_duration=safe_float(result.get("duration")),
+        ):
+            return None
         set_cached_api(cache_key, result)
         return result
     except (httpx.HTTPError, OSError) as error:

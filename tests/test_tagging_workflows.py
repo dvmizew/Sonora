@@ -64,6 +64,8 @@ class TestTaggingWorkflows(ModuleTestCase):
             patch(
                 "sonora.services.musicbrainz.fetch_musicbrainz_recording_details",
                 return_value={
+                    "artist": "Nane",
+                    "title": "Piesa",
                     "track_number": 3,
                     "date": "2021-04-30",
                     "isrc": "ROGRA2101575",
@@ -184,11 +186,11 @@ class TestTaggingWorkflows(ModuleTestCase):
         )
         self.assertEqual(pos, 2)
 
-        # Case 2: Authoritative ISRC match heals corrupted leak title
+        # A stored identifier can fill a missing title, but cannot erase meaningful text.
         track_corrupted = TrackInfo(
             file_path=Path("/music/Akcent - That's My Name/02 - Leaked Audio.flac"),
             artist="Akcent",
-            title="Leaked Audio",
+            title="Untitled",
             isrc="RO002",
             track_number=2,
             album="That's My Name",
@@ -259,7 +261,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         track = TrackInfo(
             file_path=Path("dummy.wav"),
             artist="James Arthur",
-            title="Lust for Life (feat. Lana Del Rey & The Weeknd)",
+            title="Untitled",
             album="Back From the Edge",
             isrc="DEE861600588",
             track_number=4,
@@ -452,10 +454,10 @@ class TestTaggingWorkflows(ModuleTestCase):
         self.assertEqual(trk2.artist, "Original Artist")
         mock_recognize.assert_not_called()
 
-        # Case 3: When force=True, non-generic title is updated
+        # Forced recognition still requires the existing identity to match.
         _enrich_shazam(trk2, audio_file, force=True)
-        self.assertEqual(trk2.title, "Recognized Title")
-        self.assertEqual(trk2.artist, "Recognized Artist")
+        self.assertEqual(trk2.title, "Original Title")
+        self.assertEqual(trk2.artist, "Original Artist")
 
     def test_apply_mapping_genre_noise_rejection(self) -> None:
         trk = TrackInfo(
@@ -501,7 +503,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         # Corrupted artist on disk
         trk = TrackInfo(
             file_path=audio_file,
-            artist="Kavinsky",
+            artist="Unknown Artist",
             title="Renegade",
             track_number=5,
             isrc="TCADM1875890",

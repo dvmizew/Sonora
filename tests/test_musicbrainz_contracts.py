@@ -49,8 +49,15 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
         self,
     ) -> None:
         lower_rank = {**self.release, "status": "Bootleg"}
-        with patch.object(
-            service, "fetch_artist_discography", return_value=[self.release, lower_rank]
+        with (
+            patch.object(
+                service,
+                "fetch_artist_discography",
+                return_value=[self.release, lower_rank],
+            ),
+            patch.object(
+                service, "_call_musicbrainz", return_value={"release-list": []}
+            ),
         ):
             self.assertEqual(
                 service.search_musicbrainz_release("Primary", "Record"), self.release
@@ -161,20 +168,22 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
             service.search_musicbrainz_release("Primary", "Unknown Album")
         )
 
-    def test_discography_match_avoids_another_request(self) -> None:
+    def test_discography_match_checks_other_release_candidates(self) -> None:
         with (
             patch.object(
                 service,
                 "fetch_artist_discography",
                 return_value=[{"title": "Other"}, self.release],
             ),
-            patch.object(service, "_call_musicbrainz") as request,
+            patch.object(
+                service, "_call_musicbrainz", return_value={"release-list": []}
+            ) as request,
         ):
             self.assertEqual(
                 service.search_musicbrainz_release("Primary", "Record", 10),
                 self.release,
             )
-        request.assert_not_called()
+        request.assert_called_once()
 
     def test_discography_wrong_track_count_triggers_better_search(self) -> None:
         incomplete = {**self.release, "medium-track-count": "8"}
@@ -226,7 +235,7 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
         ):
             self.assertEqual(service.search_musicbrainz_artists("Primary"), artists)
         with patch.object(service, "_call_musicbrainz", side_effect=OSError("offline")):
-            self.assertEqual(service.search_musicbrainz_artists("Primary"), [])
+            self.assertEqual(service.search_musicbrainz_artists("Uncached Primary"), [])
 
     def test_response_retry_policy_uses_documented_http_statuses(self) -> None:
         self.assertTrue(

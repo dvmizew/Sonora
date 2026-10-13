@@ -9,8 +9,12 @@ from sonora.core.api_payloads import require_api_object
 from sonora.core.artists import get_primary_artist
 from sonora.core.config import get_config
 from sonora.core.models import TrackInfo
-from sonora.core.text import is_valid_uuid, normalize_str, safe_int
-from sonora.core.titles import clean_title, score_artist_title_match
+from sonora.core.text import is_valid_uuid, normalize_str, safe_float, safe_int
+from sonora.core.titles import (
+    clean_title,
+    recording_identity_matches,
+    score_artist_title_match,
+)
 from sonora.core.utils import extract_disc_number_from_folder, parse_track_filename
 
 
@@ -32,11 +36,9 @@ def _is_generic_title(title: str | None) -> bool:
     if _is_generic(title, "title"):
         return True
     normalized_text = str(title).strip().lower()
-    if normalized_text.isdigit():
-        return True
-    clean_val = re.sub(r"[\(\[\{].*?[\)\]\}]", "", normalized_text).strip()
-    return clean_val.isdigit() or bool(
-        re.match(r"^(track|audio\s*track|audiotrack|title)\s*\d*$", clean_val)
+    unbracketed_title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", normalized_text).strip()
+    return bool(
+        re.match(r"^(track|audio\s*track|audiotrack|title)\s*\d*$", unbracketed_title)
     )
 
 
@@ -49,9 +51,9 @@ def _is_strong_track_match(
     """Verifies track match respecting Rule 7 short-string fuzzy thresholds."""
     if not candidate_title or not cur_title:
         return False
-    clean_cur = clean_title(cur_title).lower()
+    normalized_current_title = clean_title(cur_title).lower()
     normalized_candidate_title = clean_title(candidate_title).lower()
-    if clean_cur == normalized_candidate_title and not cur_artist:
+    if normalized_current_title == normalized_candidate_title and not cur_artist:
         return True
     score = score_artist_title_match(
         cur_artist or "",
@@ -59,13 +61,40 @@ def _is_strong_track_match(
         candidate_artist or "",
         candidate_title,
     )
-    min_len = min(len(clean_cur), len(normalized_candidate_title))
+    min_len = min(len(normalized_current_title), len(normalized_candidate_title))
     required_score = (
         get_config().short_title_match_threshold
         if min_len < get_config().short_title_length
         else get_config().artist_match_threshold
     )
     return score >= required_score
+
+
+def _recording_matches_track_identity(
+    track_info: TrackInfo, recording: dict[str, Any]
+) -> bool:
+    candidate_title = str(recording.get("title") or recording.get("trackName") or "")
+    candidate_duration = safe_float(recording.get("duration"))
+    if (
+        track_info.duration is not None
+        and candidate_duration is not None
+        and abs(track_info.duration - candidate_duration)
+        > get_config().single_duration_tolerance_seconds
+    ):
+        return False
+    candidate_artist = recording.get("artist") or recording.get("artistName")
+    if not candidate_title:
+        return False
+    return recording_identity_matches(
+        track_info.artist
+        if candidate_artist and not _is_generic(track_info.artist, "artist")
+        else None,
+        candidate_title if _is_generic_title(track_info.title) else track_info.title,
+        str(candidate_artist) if candidate_artist else None,
+        candidate_title,
+        expected_duration=track_info.duration,
+        candidate_duration=safe_float(recording.get("duration")),
+    )
 
 
 def _get_album_track_details(
@@ -162,33 +191,52 @@ def _match_position_by_mbid(
     album_track_mbids: dict[Any, str] | None,
     album_mb_release_details: dict[str, Any] | None,
 ) -> int | None:
-    """Matches track position and disc number directly from recording MBID."""
-    if album_track_mbids:
-        for key, rec_mbid in album_track_mbids.items():
-            if is_valid_uuid(rec_mbid) and str(rec_mbid).strip().lower() == clean_mbid:
-                if isinstance(key, tuple) and len(key) == 2:
-                    disc_num = safe_int(key[0])
-                    pos_num = safe_int(key[1])
-                    if disc_num is not None:
-                        track_info.disc_number = disc_num
-                    if pos_num is not None:
-                        return pos_num
-                pos_val = safe_int(key)
-                if pos_val is not None:
-                    return pos_val
-    if album_mb_release_details:
-        t_by_mbid = album_mb_release_details.get("tracks_by_mbid")
-        if isinstance(t_by_mbid, dict) and clean_mbid in t_by_mbid:
-            recording = require_api_object(
-                t_by_mbid[clean_mbid], "Album MusicBrainz recording"
+    """Resolve a recording only when its compatible release position is unique."""
+    if not album_mb_release_details:
+        return None
+    positions = (
+        album_mb_release_details.get("tracks_by_disc_and_position")
+        or album_mb_release_details.get("tracks_by_position")
+        or {}
+    )
+    candidates: list[tuple[Any, dict[str, Any]]] = []
+    if isinstance(positions, dict):
+        for position_key, recording in positions.items():
+            recording = require_api_object(recording, "Album recording")
+            recording_id = recording.get("recording_mbid") or (
+                (album_track_mbids or {}).get(position_key)
             )
-            if recording.get("disc_number"):
-                rec_disc = safe_int(recording["disc_number"])
-                if rec_disc is not None:
-                    track_info.disc_number = rec_disc
-            if recording.get("position") is not None:
-                return safe_int(recording["position"])
-    return None
+            if str(recording_id or "").strip().lower() == clean_mbid:
+                candidates.append((position_key, recording))
+    if not candidates:
+        indexed = album_mb_release_details.get("tracks_by_mbid", {})
+        if isinstance(indexed, dict) and clean_mbid in indexed:
+            recording = require_api_object(indexed[clean_mbid], "Album recording")
+            candidates.append((recording.get("position"), recording))
+    compatible_positions: set[tuple[int, int]] = set()
+    for position_key, recording in candidates:
+        if not _recording_matches_track_identity(track_info, recording):
+            continue
+        if isinstance(position_key, tuple) and len(position_key) == 2:
+            disc_number = safe_int(position_key[0])
+            position = safe_int(position_key[1])
+        else:
+            disc_number = safe_int(recording.get("disc_number"))
+            position = safe_int(recording.get("position")) or safe_int(position_key)
+        if position is not None:
+            compatible_positions.add((disc_number or 1, position))
+    if len(compatible_positions) > 1:
+        if track_info.track_number is None:
+            return None
+        current_position = (track_info.disc_number or 1, track_info.track_number)
+        if current_position not in compatible_positions:
+            return None
+        compatible_positions = {current_position}
+    if not compatible_positions:
+        return None
+    matched_disc, matched_position = compatible_positions.pop()
+    track_info.disc_number = matched_disc
+    return matched_position
 
 
 def _recording_isrc_matches(track_isrc: str | None, recording: dict[str, Any]) -> bool:
@@ -241,6 +289,8 @@ def _match_position_by_authoritative_id(
             )
             if not identifier_matches:
                 continue
+            if not _recording_matches_track_identity(track_info, recording):
+                continue
             if isinstance(position_key, tuple) and len(position_key) == 2:
                 disc = safe_int(position_key[0])
                 position = safe_int(position_key[1])
@@ -290,28 +340,36 @@ def _build_album_tracks_by_disc_map(
     default_disc = effective_disc or 1
 
     if album_track_mbids:
-        for k in album_track_mbids:
-            if isinstance(k, tuple) and len(k) == 2:
-                _add_album_position(tracks_by_disc, k[0], k[1], default_disc)
+        for position_key in album_track_mbids:
+            if isinstance(position_key, tuple) and len(position_key) == 2:
+                _add_album_position(
+                    tracks_by_disc, position_key[0], position_key[1], default_disc
+                )
             else:
-                _add_album_position(tracks_by_disc, default_disc, k, default_disc)
+                _add_album_position(
+                    tracks_by_disc, default_disc, position_key, default_disc
+                )
 
     for details in release_details_list:
         if details and isinstance(details, dict):
             disc_tracks = details.get("tracks_by_disc_and_position")
             if isinstance(disc_tracks, dict):
-                for d, p in disc_tracks:
-                    _add_album_position(tracks_by_disc, d, p, default_disc)
+                for disc_number, position in disc_tracks:
+                    _add_album_position(
+                        tracks_by_disc, disc_number, position, default_disc
+                    )
             pos_tracks = details.get("tracks_by_position") or details.get(
                 "tracks_by_number"
             )
             if isinstance(pos_tracks, dict):
-                for p in pos_tracks:
-                    if isinstance(p, tuple) and len(p) == 2:
-                        _add_album_position(tracks_by_disc, p[0], p[1], default_disc)
+                for position in pos_tracks:
+                    if isinstance(position, tuple) and len(position) == 2:
+                        _add_album_position(
+                            tracks_by_disc, position[0], position[1], default_disc
+                        )
                     else:
                         _add_album_position(
-                            tracks_by_disc, default_disc, p, default_disc
+                            tracks_by_disc, default_disc, position, default_disc
                         )
     return tracks_by_disc
 
@@ -325,13 +383,11 @@ def _search_release_positions_by_title(
     album_itunes_details: dict[str, Any] | None,
 ) -> int | None:
     """Searches across candidate album track titles for fuzzy or exact title matches."""
-    best_match_disc: int | None = None
-    best_pos: int | None = None
-    best_score: float = 0.0
+    position_scores: dict[tuple[int, int], float] = {}
 
     for disc in discs_to_search:
         for pos in sorted(tracks_by_disc_map.get(disc, ())):
-            _, candidate_title = _get_album_track_details(
+            candidate_artist, candidate_title = _get_album_track_details(
                 pos,
                 disc_number=disc,
                 album_mb_release_details=album_mb_release_details,
@@ -339,22 +395,29 @@ def _search_release_positions_by_title(
                 album_itunes_details=album_itunes_details,
             )
             if candidate_title:
-                # Album membership is checked separately; recording variants still matter.
                 score = score_artist_title_match(
-                    "", track_info.title, "", candidate_title
+                    ""
+                    if _is_generic(track_info.artist, "artist")
+                    else track_info.artist,
+                    track_info.title,
+                    candidate_artist or "",
+                    candidate_title,
                 )
-                if score == 100:
-                    track_info.disc_number = disc
-                    return pos
-                if score > best_score:
-                    best_score = score
-                    best_pos = pos
-                    best_match_disc = disc
+                if score > 0:
+                    position_scores[(disc, pos)] = score
 
-    if best_pos is not None:
-        track_info.disc_number = best_match_disc
-        return best_pos
-    return None
+    if not position_scores:
+        return None
+    ranked_positions = sorted(
+        position_scores, key=position_scores.__getitem__, reverse=True
+    )
+    if len(ranked_positions) > 1 and (
+        position_scores[ranked_positions[0]] == position_scores[ranked_positions[1]]
+    ):
+        return None
+    matched_disc, matched_position = ranked_positions[0]
+    track_info.disc_number = matched_disc
+    return matched_position
 
 
 def _resolve_album_track_position(
@@ -470,9 +533,9 @@ def _resolve_album_track_position(
     discs_to_search: list[int] = []
     if effective_disc and effective_disc in tracks_by_disc_map:
         discs_to_search.append(effective_disc)
-    for d in sorted(tracks_by_disc_map):
-        if d not in discs_to_search:
-            discs_to_search.append(d)
+    for disc_number in sorted(tracks_by_disc_map):
+        if disc_number not in discs_to_search:
+            discs_to_search.append(disc_number)
 
     return _search_release_positions_by_title(
         track_info,
@@ -516,12 +579,12 @@ def _extract_known_album_entities(
     for details in release_details_list:
         if not details or not isinstance(details, dict):
             continue
-        art = details.get("album_artist") or details.get("artist")
-        if art and isinstance(art, str):
-            artists.add(art)
-        alb = details.get("title")
-        if alb and isinstance(alb, str):
-            albums.add(alb)
+        release_artist = details.get("album_artist") or details.get("artist")
+        if release_artist and isinstance(release_artist, str):
+            artists.add(release_artist)
+        release_title = details.get("title")
+        if release_title and isinstance(release_title, str):
+            albums.add(release_title)
 
         for tracks_map in (
             details.get("tracks_by_position"),
@@ -546,11 +609,11 @@ def _extract_known_album_entities(
                     )
                     if album_track.get("recording_mbid"):
                         mbids.add(str(album_track["recording_mbid"]).strip().lower())
-                    t_id = album_track.get("itunes_trackid") or album_track.get(
-                        "trackId"
-                    )
-                    if t_id:
-                        itunes_ids.add(str(t_id).strip())
+                    itunes_track_id = album_track.get(
+                        "itunes_trackid"
+                    ) or album_track.get("trackId")
+                    if itunes_track_id:
+                        itunes_ids.add(str(itunes_track_id).strip())
 
         tracks_by_mbid = details.get("tracks_by_mbid")
         if isinstance(tracks_by_mbid, dict):
@@ -559,10 +622,10 @@ def _extract_known_album_entities(
 
         tracks_by_pos = details.get("tracks_by_position")
         if isinstance(tracks_by_pos, dict):
-            for p in tracks_by_pos:
-                p_int = safe_int(p)
-                if p_int is not None:
-                    positions.add(p_int)
+            for position in tracks_by_pos:
+                parsed_position = safe_int(position)
+                if parsed_position is not None:
+                    positions.add(parsed_position)
 
     return _KnownAlbumEntities(
         artists, titles, albums, isrcs, itunes_ids, mbids, positions
@@ -591,13 +654,21 @@ def is_alien_album_track(
     ):
         return False
 
-    _, _, fn_clean = parse_track_filename(file_path.name)
-    fn_parts = [p.strip() for p in fn_clean.split(" - ") if p.strip()]
-    filename_artist = fn_parts[0] if len(fn_parts) >= 2 else None
+    _, _, filename_identity = parse_track_filename(file_path.name)
+    filename_parts = [
+        position.strip()
+        for position in filename_identity.split(" - ")
+        if position.strip()
+    ]
+    filename_artist = filename_parts[0] if len(filename_parts) >= 2 else None
     filename_title = (
-        " - ".join(fn_parts[1:])
-        if len(fn_parts) >= 2
-        else (fn_clean if fn_clean and not fn_clean.isdigit() else None)
+        " - ".join(filename_parts[1:])
+        if len(filename_parts) >= 2
+        else (
+            filename_identity
+            if filename_identity and not filename_identity.isdigit()
+            else None
+        )
     )
 
     effective_artist = (
@@ -627,7 +698,11 @@ def is_alien_album_track(
         and str(track_info.isrc).strip().upper() not in ("", "NONE", "NULL", "0")
         else None
     )
-    if clean_isrc and clean_isrc in entities.isrcs:
+    if (
+        _is_generic_title(effective_title)
+        and clean_isrc
+        and clean_isrc in entities.isrcs
+    ):
         return False
 
     clean_itunes_id = (
@@ -636,11 +711,16 @@ def is_alien_album_track(
         and str(track_info.itunes_trackid).strip() not in ("", "0", "None", "null")
         else None
     )
-    if clean_itunes_id and clean_itunes_id in entities.itunes_ids:
+    if (
+        _is_generic_title(effective_title)
+        and clean_itunes_id
+        and clean_itunes_id in entities.itunes_ids
+    ):
         return False
 
     if (
-        is_valid_uuid(track_info.musicbrainz_trackid)
+        _is_generic_title(effective_title)
+        and is_valid_uuid(track_info.musicbrainz_trackid)
         and str(track_info.musicbrainz_trackid).strip().lower() in entities.mbids
     ):
         return False

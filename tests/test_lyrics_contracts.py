@@ -193,7 +193,7 @@ class TestLyricsParsingContracts(IsolatedTestCase):
                 "Plain",
             ),
             ("Recording", False, True, [{"plainLyrics": "Plain"}], None),
-            ("Recording", False, False, [{"plainLyrics": "Plain"}], "Plain"),
+            ("Recording", False, False, [{"plainLyrics": "Plain"}], None),
             ("Recording", False, False, [], None),
             (
                 "Primary - Recording",
@@ -211,6 +211,13 @@ class TestLyricsParsingContracts(IsolatedTestCase):
             ),
         )
         for query, plain, synced, payload, expected in scenarios:
+            if isinstance(payload, dict):
+                payload = {
+                    "artistName": "Primary",
+                    "trackName": "Recording",
+                    "duration": 100,
+                    **payload,
+                }
             with (
                 self.subTest(query=query, plain=plain, synced=synced, payload=payload),
                 patch.object(lyrics._LRCLIB_LIMITER, "wait"),
@@ -239,7 +246,7 @@ class TestLyricsParsingContracts(IsolatedTestCase):
                     },
                 )
             else:
-                self.assertEqual(request.call_args.kwargs["params"], {"q": query})
+                request.assert_not_called()
         for field in ("syncedLyrics", "plainLyrics"):
             with (
                 self.subTest(field=field),

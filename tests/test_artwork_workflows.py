@@ -55,6 +55,7 @@ class TestArtworkWorkflows(ModuleTestCase):
         mock_response.json.return_value = {
             "artists": [
                 {
+                    "strArtist": "21 Savage",
                     "strArtistThumb": "http://example.com/thumb.jpg",
                     "strArtistBanner": "http://example.com/banner.jpg",
                 }

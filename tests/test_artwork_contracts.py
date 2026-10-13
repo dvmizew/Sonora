@@ -48,7 +48,7 @@ class TestArtworkContracts(IsolatedTestCase):
             ) as fallback,
         ):
             art.process_artist_artwork(self.test_directory, "Primary", MBID)
-        fallback.assert_called_once_with("Primary")
+        fallback.assert_called_once_with("Primary", artist_mbid=MBID)
         self.assertEqual(list(self.test_directory.iterdir()), [])
 
     def test_cdart_transport_failure_does_not_create_an_asset(self) -> None:
@@ -163,7 +163,7 @@ class TestArtworkContracts(IsolatedTestCase):
             ) as fallback,
         ):
             art.process_artist_artwork(self.test_directory, "Primary", MBID)
-        fallback.assert_called_once_with("Primary")
+        fallback.assert_called_once_with("Primary", artist_mbid=MBID)
         self.assertEqual(list(self.test_directory.iterdir()), [])
 
     def test_image_modes_transparency_and_invalid_content(self) -> None:

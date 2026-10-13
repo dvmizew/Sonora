@@ -182,11 +182,11 @@ class TestProviderContracts(IsolatedTestCase):
             ["https://example.com/second.jpg", "https://example.com/first.jpg"],
         )
 
-    def test_lrclib_lyrics_types_and_search_records(self) -> None:
+    def test_lrclib_get_rejects_invalid_response_types(self) -> None:
         for query, payload in (
             ("Artist - Title", {"syncedLyrics": 42}),
-            ("Title", [None]),
-            ("Title", {}),
+            ("Artist - Title", [None]),
+            ("Artist - Title", []),
         ):
             with (
                 self.subTest(query=query, payload=payload),

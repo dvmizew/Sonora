@@ -184,6 +184,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             return dataclasses.replace(
                 cached,
                 metadata_sources=dict(cached.metadata_sources),
+                metadata_conflicts=dict(cached.metadata_conflicts),
                 _diff_descriptions=list(cached._diff_descriptions),
             )
 
@@ -342,6 +343,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 _METADATA_CACHE[cache_key] = dataclasses.replace(
                     track_info,
                     metadata_sources=dict(track_info.metadata_sources),
+                    metadata_conflicts=dict(track_info.metadata_conflicts),
                     _diff_descriptions=list(track_info._diff_descriptions),
                 )
             return track_info

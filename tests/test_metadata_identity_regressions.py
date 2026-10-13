@@ -45,7 +45,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             )
         )
         unrelated.isrc = "USAAA0000001"
-        self.assertFalse(
+        self.assertTrue(
             matching.is_alien_album_track(
                 unrelated,
                 audio_path,
@@ -68,7 +68,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
         for id_field in ("isrc", "itunes_trackid"):
             with self.subTest(id_field=id_field):
                 track = TrackInfo(
-                    self.root / "99 - Corrupt.flac", title="Corrupt", track_number=99
+                    self.root / "99 - Corrupt.flac", title="Untitled", track_number=99
                 )
                 position = matching._match_position_by_authoritative_id(
                     track,
@@ -90,8 +90,8 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
         track = TrackInfo(self.root / "track.flac", title="Original", track_number=99)
         release = {
             "tracks_by_disc_and_position": {
-                (1, 2): {"isrc": "KNOWN"},
-                (2, 4): {"isrc": "KNOWN"},
+                (1, 2): {"isrc": "KNOWN", "title": "Original"},
+                (2, 4): {"isrc": "KNOWN", "title": "Original"},
             }
         }
         self.assertIsNone(
@@ -122,7 +122,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
 
     def test_multiple_musicbrainz_isrcs_preserve_valid_existing_code(self) -> None:
         track = TrackInfo(self.root / "track.flac", isrc="SECOND")
-        recording = {"isrc": "FIRST", "isrcs": ["FIRST", "SECOND"]}
+        recording = {"title": "Original", "isrc": "FIRST", "isrcs": ["FIRST", "SECOND"]}
         catalog_enrichment_module.apply_metadata_mapping(
             track, recording, {"isrc": "isrc"}, force=True, source="MusicBrainz"
         )
@@ -169,7 +169,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             [],
         )
 
-    def test_standalone_verified_isrc_heals_corrupt_identity(self) -> None:
+    def test_album_verified_isrc_heals_corrupt_identity(self) -> None:
         recording = {
             "title": "Original Song",
             "artist": "Alpha",
@@ -178,8 +178,8 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
         }
         for isrc, expected_title in (
             ("SECOND", "Original Song"),
-            ("UNKNOWN", "Corrupt Song"),
-            (None, "Corrupt Song"),
+            ("UNKNOWN", "Original Song"),
+            (None, "Original Song"),
         ):
             with (
                 self.subTest(isrc=isrc),
@@ -189,13 +189,13 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             ):
                 track = TrackInfo(
                     self.root / "track.flac",
-                    artist="Corrupt Artist",
-                    title="Corrupt Song",
+                    artist="Unknown Artist",
+                    title="Untitled",
                     isrc=isrc,
                     track_number=98,
                 )
                 musicbrainz_enrichment_module._apply_mb_recording_metadata(
-                    track, recording, False, None, False
+                    track, recording, True, None, False
                 )
                 self.assertEqual(track.title, expected_title)
                 self.assertEqual(track.track_number, 98)

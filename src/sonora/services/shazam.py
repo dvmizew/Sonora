@@ -25,6 +25,7 @@ from sonora.core.api_payloads import (
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.constants import RATE_LIMIT_SHAZAM
+from sonora.core.coordination import coalesce_lookup
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
 
@@ -67,6 +68,7 @@ async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
         return None
 
 
+@coalesce_lookup
 def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
     """
     Recognize an audio track via acoustic fingerprinting against the Shazam catalog.

@@ -22,14 +22,22 @@ from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
 
 _HOST_LIMITERS = {
-    "itunes.apple.com": RateLimiter(RATE_LIMIT_ITUNES),
-    "api.deezer.com": RateLimiter(RATE_LIMIT_DEEZER),
-    "api.discogs.com": RateLimiter(RATE_LIMIT_DISCOGS_AUTHENTICATED),
-    "www.theaudiodb.com": RateLimiter(RATE_LIMIT_THEAUDIODB),
-    "lrclib.net": RateLimiter(RATE_LIMIT_LRCLIB),
-    "webservice.fanart.tv": RateLimiter(RATE_LIMIT_FANART),
-    "api.genius.com": RateLimiter(RATE_LIMIT_GENIUS),
-    "ws.audioscrobbler.com": RateLimiter(RATE_LIMIT_LASTFM),
+    "itunes.apple.com": RateLimiter(RATE_LIMIT_ITUNES, provider="itunes.apple.com"),
+    "api.deezer.com": RateLimiter(RATE_LIMIT_DEEZER, provider="api.deezer.com"),
+    "api.discogs.com": RateLimiter(
+        RATE_LIMIT_DISCOGS_AUTHENTICATED, provider="api.discogs.com"
+    ),
+    "www.theaudiodb.com": RateLimiter(
+        RATE_LIMIT_THEAUDIODB, provider="www.theaudiodb.com"
+    ),
+    "lrclib.net": RateLimiter(RATE_LIMIT_LRCLIB, provider="lrclib.net"),
+    "webservice.fanart.tv": RateLimiter(
+        RATE_LIMIT_FANART, provider="webservice.fanart.tv"
+    ),
+    "api.genius.com": RateLimiter(RATE_LIMIT_GENIUS, provider="api.genius.com"),
+    "ws.audioscrobbler.com": RateLimiter(
+        RATE_LIMIT_LASTFM, provider="ws.audioscrobbler.com"
+    ),
 }
 
 

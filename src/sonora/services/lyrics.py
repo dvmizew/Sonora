@@ -13,16 +13,18 @@ import httpx
 import syncedlyrics
 
 from sonora.audio.metadata import get_audio_duration
-from sonora.core.api_payloads import require_api_object, require_api_records
+from sonora.core.api_payloads import require_api_object
 from sonora.core.artists import get_primary_artist
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.constants import RATE_LIMIT_LRCLIB, RATE_LIMIT_LYRICS
+from sonora.core.config import get_config
+from sonora.core.constants import RATE_LIMIT_LRCLIB, RATE_LIMIT_LYRICS, USER_AGENT
+from sonora.core.coordination import coalesce_lookup
 from sonora.core.files import atomic_write_bytes
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
 from sonora.core.text import normalize_str
-from sonora.core.titles import clean_title
+from sonora.core.titles import clean_title, score_artist_title_match
 from sonora.core.utils import retry_network_call
 
 logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
@@ -146,13 +148,18 @@ def clean_lyrics_text(text: str | None) -> str | None:
                 cleaned.append("")
             continue
 
-        ts_match = _LYRICS_TIMESTAMP_REGEX.match(stripped_line)
-        content_to_check = ts_match.group(1).strip() if ts_match else stripped_line
+        timestamp_match = _LYRICS_TIMESTAMP_REGEX.match(stripped_line)
+        content_to_check = (
+            timestamp_match.group(1).strip() if timestamp_match else stripped_line
+        )
 
-        if ts_match and not content_to_check:
+        if timestamp_match and not content_to_check:
             continue
 
-        if any(pat.search(content_to_check) for pat in _LYRICS_JUNK_PATTERNS):
+        if any(
+            junk_pattern.search(content_to_check)
+            for junk_pattern in _LYRICS_JUNK_PATTERNS
+        ):
             continue
 
         cleaned.append(stripped_line)
@@ -264,49 +271,54 @@ def _query_lrclib(
     album_name: str | None = None,
     duration: float | None = None,
 ) -> str | None:
+    if " - " not in query_str:
+        return None
     try:
         _LRCLIB_LIMITER.wait()
-        if " - " in query_str:
-            artist_name, track_name = query_str.split(" - ", 1)
-            params: dict[str, str | int | float] = {
-                "artist_name": artist_name.strip(),
-                "track_name": track_name.strip(),
-            }
-            if album_name:
-                params["album_name"] = album_name
-            if duration is not None:
-                params["duration"] = int(duration)
-            response = SESSION.get(
-                "https://lrclib.net/api/get",
-                params=params,
-                timeout=5.0,
-                headers={
-                    "User-Agent": "Sonora/1.0 (https://github.com/dvmizew/Sonora)"
-                },
-            )
-            if response.status_code != 200:
-                return None
-            lyrics_payload = require_api_object(
-                response.json(), "LRCLIB lyrics response"
-            )
-        else:
-            response = SESSION.get(
-                "https://lrclib.net/api/search", params={"q": query_str}, timeout=5.0
-            )
-            if response.status_code != 200:
-                return None
-            search_results = require_api_records(
-                response.json(), "LRCLIB search results"
-            )
-            if not search_results:
-                return None
-            lyrics_payload = search_results[0]
+        artist_name, track_name = query_str.split(" - ", 1)
+        params: dict[str, str | int | float] = {
+            "artist_name": artist_name.strip(),
+            "track_name": track_name.strip(),
+        }
+        if album_name:
+            params["album_name"] = album_name
+        if duration is not None:
+            params["duration"] = int(duration)
+        response = SESSION.get(
+            "https://lrclib.net/api/get",
+            params=params,
+            timeout=5.0,
+            headers={"User-Agent": USER_AGENT},
+        )
+        if response.status_code != 200:
+            return None
+        lyrics_payload = require_api_object(response.json(), "LRCLIB lyrics response")
 
         synced_lyrics = lyrics_payload.get("syncedLyrics")
         plain_lyrics = lyrics_payload.get("plainLyrics")
         for lyrics_text in (synced_lyrics, plain_lyrics):
             if lyrics_text is not None and not isinstance(lyrics_text, str):
                 raise TypeError("LRCLIB lyrics must be strings or null")
+        provider_artist = lyrics_payload.get("artistName")
+        provider_title = lyrics_payload.get("trackName")
+        if (
+            not provider_artist
+            or not provider_title
+            or score_artist_title_match(
+                artist_name, track_name, str(provider_artist), str(provider_title)
+            )
+            <= 0
+        ):
+            return None
+        provider_duration = lyrics_payload.get("duration")
+        if (
+            duration is not None
+            and isinstance(provider_duration, (int, float))
+            and abs(provider_duration - duration)
+            > get_config().single_duration_tolerance_seconds
+        ):
+            return None
+
         if synced_lyrics and not plain_only:
             cleaned_synced = clean_lyrics_text(synced_lyrics.strip())
             if cleaned_synced and is_lyrics_duration_valid(cleaned_synced, duration):
@@ -328,7 +340,8 @@ def _query_syncedlyrics(
     album_name: str | None = None,
     duration: float | None = None,
 ) -> str | None:
-    if (not providers or "Lrclib" in providers) and not lang:
+    checked_lrclib = (not providers or "Lrclib" in providers) and not lang
+    if checked_lrclib:
         lrclib_result = _query_lrclib(
             query_str,
             plain_only=plain_only,
@@ -339,12 +352,30 @@ def _query_syncedlyrics(
         if lrclib_result:
             return lrclib_result
 
+    if not providers and not get_config().allow_unverified_lyrics:
+        return None
+    LOG.warning(
+        "Using an explicitly enabled lyrics source without returned recording identity"
+    )
+
     kwargs: dict[str, Any] = {
         "plain_only": plain_only,
         "synced_only": synced_only,
         "enhanced": enhanced,
     }
-    if providers is not None:
+    if checked_lrclib:
+        # The SDK's text-only LRCLIB search must not bypass the identity checks above.
+        fallback_providers = [
+            provider
+            for provider in (
+                providers or ["Musixmatch", "NetEase", "Megalobiz", "Genius"]
+            )
+            if provider != "Lrclib"
+        ]
+        if not fallback_providers:
+            return None
+        kwargs["providers"] = fallback_providers
+    elif providers is not None:
         kwargs["providers"] = providers
     if lang:
         kwargs["lang"] = lang
@@ -367,6 +398,7 @@ def _query_syncedlyrics(
     return None
 
 
+@coalesce_lookup
 def fetch_synced_lyrics(
     artist: str,
     title: str,
@@ -382,7 +414,6 @@ def fetch_synced_lyrics(
     """
     Search and fetch LRC lyrics for a track using syncedlyrics.
     Quality preference order: Enhanced (word-synced) -> Line-synced -> Plain text.
-    Uses the 3-step surgical approach from the initial prototype.
     """
     if not artist or not title:
         return None
@@ -399,7 +430,7 @@ def fetch_synced_lyrics(
         ],
         ensure_ascii=False,
     )
-    cache_key = f"lyrics:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}:{constraints}"
+    cache_key = f"lyrics:v4:{get_config().allow_unverified_lyrics}:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}:{constraints}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
         cached_quality = get_lyrics_quality(cached)
@@ -435,7 +466,14 @@ def fetch_synced_lyrics(
     if not lyrics_content and ("(" in title or "[" in title or "feat" in title.lower()):
         cleaned_track_title = clean_title(title)
         primary_artist = get_primary_artist(artist)
-        query = f"{cleaned_track_title} {primary_artist}".strip()
+        if (
+            score_artist_title_match(artist, title, primary_artist, cleaned_track_title)
+            <= 0
+        ):
+            if last_exception:
+                raise last_exception
+            return None
+        query = f"{primary_artist} - {cleaned_track_title}".strip()
         try:
             lyrics_content = _query_syncedlyrics(
                 query, *search_args, album_name=album_name, duration=duration

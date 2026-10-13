@@ -16,9 +16,14 @@ from sonora.core.text import (
     is_valid_uuid,
     normalize_date,
     preserve_unicode_repertoire,
+    safe_float,
     safe_int,
 )
-from sonora.core.titles import clean_title, score_artist_title_match
+from sonora.core.titles import (
+    clean_title,
+    recording_identity_matches,
+    score_artist_title_match,
+)
 from sonora.modules.catalog_enrichment import (
     _NETWORK_EXCEPTIONS,
     apply_metadata_mapping,
@@ -28,6 +33,7 @@ from sonora.modules.matching import (
     _is_generic_title,
     _is_strong_track_match,
     _recording_isrc_matches,
+    _recording_matches_track_identity,
 )
 from sonora.services import acoustid as acoustid_service
 from sonora.services import musicbrainz as musicbrainz_service
@@ -47,7 +53,8 @@ def _enrich_acoustid(
     if (
         track_info.track_number
         and track_info.track_number in album_mbids
-        and is_valid_uuid(album_mbids[track_info.track_number])
+        and track_info.musicbrainz_trackid == album_mbids[track_info.track_number]
+        and track_info.metadata_sources.get("musicbrainz_trackid") == "MusicBrainz"
     ):
         return
     if is_valid_uuid(track_info.musicbrainz_trackid) and not force:
@@ -56,30 +63,35 @@ def _enrich_acoustid(
         acoustid_mbid = acoustid_service.lookup_acoustid(
             file_path,
             api_key=acoustid_api_key,
-            expected_artist=track_info.artist,
-            expected_title=track_info.title,
+            expected_artist=None
+            if _is_generic(track_info.artist, "artist")
+            else track_info.artist,
+            expected_title=None
+            if _is_generic_title(track_info.title)
+            else track_info.title,
         )
         if is_valid_uuid(acoustid_mbid):
             if not _is_generic_title(track_info.title) and not _is_generic(
                 track_info.artist, "artist"
             ):
-                rec_details = musicbrainz_service.fetch_musicbrainz_recording_details(
-                    acoustid_mbid
+                recording_details = (
+                    musicbrainz_service.fetch_musicbrainz_recording_details(
+                        acoustid_mbid
+                    )
                 )
-                if not rec_details or not isinstance(rec_details, dict):
+                if not recording_details or not isinstance(recording_details, dict):
                     return
-                cand_artist = str(rec_details.get("artist") or "")
-                cand_title = str(rec_details.get("title") or "")
-                isrc_matches = _recording_isrc_matches(track_info.isrc, rec_details)
+                candidate_artist = str(recording_details.get("artist") or "")
+                candidate_title = str(recording_details.get("title") or "")
                 score = score_artist_title_match(
                     track_info.artist or "",
                     track_info.title or "",
-                    cand_artist,
-                    cand_title,
+                    candidate_artist,
+                    candidate_title,
                 )
-                if not isrc_matches and score <= 0.0:
+                if score <= 0.0:
                     LOG.debug(
-                        f"Rejecting AcoustID MBID {acoustid_mbid} ('{cand_artist} - {cand_title}') "
+                        f"Rejecting AcoustID MBID {acoustid_mbid} ('{candidate_artist} - {candidate_title}') "
                         f"conflicting with ('{track_info.artist} - {track_info.title}')"
                     )
                     return
@@ -122,13 +134,15 @@ def _heal_track_identity_from_release(
     track_info: TrackInfo,
     candidate_rec: dict[str, Any] | None,
 ) -> bool:
-    """Heals corrupted track title if ISRC matches album recording."""
+    """Fill a missing title when the release agrees with the remaining identity."""
     if not candidate_rec or not track_info.isrc:
         return False
     rec_title = candidate_rec.get("title")
     if (
         _recording_isrc_matches(track_info.isrc, candidate_rec)
         and rec_title
+        and _is_generic_title(track_info.title)
+        and _recording_matches_track_identity(track_info, candidate_rec)
         and clean_title(track_info.title).lower() != clean_title(str(rec_title)).lower()
     ):
         LOG.info(
@@ -172,20 +186,10 @@ def _resolve_musicbrainz_track_id(
             or album_mbids.get(str_disc_pos_key)
             or album_mbids.get(track_info.track_number)
         )
-        is_match = (
-            has_corrupt_identity
-            or not track_info.title
-            or _is_generic_title(track_info.title)
+        is_match = bool(
+            candidate_rec
+            and _recording_matches_track_identity(track_info, candidate_rec)
         )
-        if not is_match and candidate_rec:
-            cand_title = str(candidate_rec.get("title") or "")
-            cand_artist = str(candidate_rec.get("artist") or "")
-            if _is_strong_track_match(
-                track_info.artist, track_info.title, cand_artist, cand_title
-            ):
-                is_match = True
-        elif not album_mb_release_details:
-            is_match = True
 
         if is_match and is_valid_uuid(potential_mbid):
             candidate_mbid = potential_mbid
@@ -249,25 +253,14 @@ def _extract_release_recording(
         isinstance(tracks_by_id, dict)
         and track_info.musicbrainz_trackid in tracks_by_id
     ):
-        return require_api_object(
+        indexed_recording = require_api_object(
             tracks_by_id[track_info.musicbrainz_trackid], "Album MusicBrainz recording"
         )
+        if _recording_matches_track_identity(track_info, indexed_recording):
+            return indexed_recording
 
-    if candidate_rec:
-        cand_title = str(candidate_rec.get("title") or "")
-        cand_artist = str(candidate_rec.get("artist") or "")
-        isrc_match = _recording_isrc_matches(track_info.isrc, candidate_rec)
-        title_match = _is_strong_track_match(
-            track_info.artist, track_info.title, cand_artist, cand_title
-        )
-        if (
-            has_corrupt_identity
-            or isrc_match
-            or title_match
-            or not track_info.title
-            or _is_generic_title(track_info.title)
-        ):
-            return candidate_rec
+    if candidate_rec and _recording_matches_track_identity(track_info, candidate_rec):
+        return candidate_rec
     return None
 
 
@@ -286,21 +279,13 @@ def _fetch_standalone_recording(
     isrc_matches = _recording_isrc_matches(track_info.isrc, fetched_rec)
     rec_artist = str(fetched_rec.get("artist") or "")
     rec_title = str(fetched_rec.get("title") or "")
-    cand_artists = [
-        a
-        for a in (
-            track_info.artist,
-            track_info.album_artist,
-            track_info.featured_artists,
-        )
-        if a
-    ]
-    title_sim = max(
-        (
-            score_artist_title_match(a, track_info.title, rec_artist, rec_title)
-            for a in cand_artists
-        ),
-        default=0.0,
+    expected_artist = (
+        track_info.album_artist
+        if _is_generic(track_info.artist, "artist")
+        else track_info.artist
+    )
+    title_sim = score_artist_title_match(
+        expected_artist or "", track_info.title, rec_artist, rec_title
     )
     min_len = (
         min(len(clean_title(track_info.title)), len(clean_title(rec_title)))
@@ -312,7 +297,43 @@ def _fetch_standalone_recording(
         if min_len < get_config().short_title_length
         else get_config().artist_match_threshold
     )
-    if not rec_title or isrc_matches or title_sim == 100 or title_sim > thresh:
+    # Stored identifiers can be wrong; they cannot override a coherent standalone identity.
+    has_missing_identity = _is_generic_title(track_info.title) or _is_generic(
+        track_info.artist, "artist"
+    )
+    acoustic_identity = (
+        has_missing_identity
+        and track_info.metadata_sources.get("musicbrainz_trackid") == "AcoustID"
+        and recording_identity_matches(
+            None if _is_generic(track_info.artist, "artist") else track_info.artist,
+            rec_title if _is_generic_title(track_info.title) else track_info.title,
+            rec_artist,
+            rec_title,
+            expected_duration=track_info.duration,
+            candidate_duration=safe_float(fetched_rec.get("duration")),
+        )
+    )
+    candidate_duration = safe_float(fetched_rec.get("duration"))
+    duration_matches = not (
+        track_info.duration is not None
+        and candidate_duration is not None
+        and abs(track_info.duration - candidate_duration)
+        > get_config().single_duration_tolerance_seconds
+    )
+    if (
+        duration_matches
+        and rec_title
+        and (
+            acoustic_identity
+            or title_sim == 100
+            or title_sim > thresh
+            or (
+                isrc_matches
+                and has_missing_identity
+                and _recording_matches_track_identity(track_info, fetched_rec)
+            )
+        )
+    ):
         return fetched_rec
 
     LOG.debug(
@@ -328,11 +349,7 @@ def _fetch_standalone_recording(
         )
         if is_valid_uuid(new_mbid):
             track_info.musicbrainz_trackid = new_mbid
-            fresh_rec = musicbrainz_service.fetch_musicbrainz_recording_details(
-                new_mbid
-            )
-            if fresh_rec and isinstance(fresh_rec, dict):
-                return fresh_rec
+            return _fetch_standalone_recording(track_info)
     return None
 
 
@@ -359,7 +376,7 @@ def _fetch_or_extract_mb_recording(
 
 def _should_update_track_artist(
     track_info: TrackInfo,
-    mb_rec: dict[str, Any],
+    recording_details: dict[str, Any],
     cleaned_artist: str,
     is_album_rec: bool,
     target_album_artist: str | None,
@@ -394,7 +411,7 @@ def _should_update_track_artist(
         )
     )
 
-    rec_title_str = str(mb_rec.get("title") or track_info.title)
+    rec_title_str = str(recording_details.get("title") or track_info.title)
     is_strong = _is_strong_track_match(
         track_info.artist, track_info.title, cleaned_artist, rec_title_str
     )
@@ -420,7 +437,7 @@ def _should_update_track_artist(
 
 def _apply_mb_recording_metadata(
     track_info: TrackInfo,
-    mb_rec: dict[str, Any],
+    recording_details: dict[str, Any],
     is_album_rec: bool,
     target_album_artist: str | None,
     has_corrupt_identity: bool,
@@ -441,12 +458,17 @@ def _apply_mb_recording_metadata(
         "total_discs": "total_discs",
         "disc_subtitle": "disc_subtitle",
     }
-    rec_title = str(mb_rec.get("title") or "")
-    rec_artist = str(mb_rec.get("artist") or "")
+    rec_title = str(recording_details.get("title") or "")
+    rec_artist = str(recording_details.get("artist") or "")
     has_corrupt_identity = has_corrupt_identity or bool(
-        rec_title
+        is_album_rec
+        and rec_title
         and rec_artist
-        and _recording_isrc_matches(track_info.isrc, mb_rec)
+        and (
+            _is_generic_title(track_info.title)
+            or _is_generic(track_info.artist, "artist")
+        )
+        and _recording_isrc_matches(track_info.isrc, recording_details)
         and not _is_strong_track_match(
             track_info.artist, track_info.title, rec_artist, rec_title
         )
@@ -454,7 +476,7 @@ def _apply_mb_recording_metadata(
     title_matches = _is_strong_track_match(
         track_info.artist, track_info.title, rec_artist, rec_title
     )
-    fn_title_matches = _is_strong_track_match(
+    filename_title_matches = _is_strong_track_match(
         track_info.artist,
         clean_title(track_info.file_path.stem),
         rec_artist,
@@ -465,35 +487,37 @@ def _apply_mb_recording_metadata(
         or not track_info.title
         or track_info.title == "Untitled"
         or _is_generic_title(track_info.title)
-        or (force and (title_matches or fn_title_matches))
+        or (force and (title_matches or filename_title_matches))
     ) and rec_title:
         mb_map["title"] = "title"
 
-    if mb_rec.get("first-release-date") and (force or not track_info.date):
+    if recording_details.get("first-release-date") and (force or not track_info.date):
         mb_map["first-release-date"] = "date"
 
     apply_metadata_mapping(
         track_info,
-        mb_rec,
+        recording_details,
         mb_map,
         force=force or has_corrupt_identity,
         source="MusicBrainz",
     )
 
-    if mb_rec.get("disc_total_tracks") and (force or not track_info.total_tracks):
-        disc_tot = safe_int(mb_rec["disc_total_tracks"])
-        if disc_tot is not None:
-            track_info.total_tracks = disc_tot
+    if recording_details.get("disc_total_tracks") and (
+        force or not track_info.total_tracks
+    ):
+        disc_total_tracks = safe_int(recording_details["disc_total_tracks"])
+        if disc_total_tracks is not None:
+            track_info.total_tracks = disc_total_tracks
 
-    mb_artist_val = mb_rec.get("artist")
-    if mb_artist_val and isinstance(mb_artist_val, str):
+    recording_artist = recording_details.get("artist")
+    if recording_artist and isinstance(recording_artist, str):
         cleaned_artist = preserve_unicode_repertoire(
             track_info.artist,
-            clean_unicode_punct(artists_module.resolve_artist_name(mb_artist_val)),
+            clean_unicode_punct(artists_module.resolve_artist_name(recording_artist)),
         )
         if _should_update_track_artist(
             track_info,
-            mb_rec,
+            recording_details,
             cleaned_artist,
             is_album_rec,
             target_album_artist,
@@ -503,17 +527,23 @@ def _apply_mb_recording_metadata(
             track_info.artist = cleaned_artist
 
 
-def _validate_mb_release_artist(rel_art: str, cmp_art: str) -> bool:
+def _validate_mb_release_artist(release_artist: str, expected_artist: str) -> bool:
     """Validates that release artist matches album artist or track artist."""
-    if not rel_art or not cmp_art or _is_generic(cmp_art, "artist"):
+    if (
+        not release_artist
+        or not expected_artist
+        or _is_generic(expected_artist, "artist")
+    ):
         return True
     rel_primary = (
-        re.sub(r"^(?:the|a|an)\s+", "", clean_title(get_primary_artist(rel_art)))
+        re.sub(r"^(?:the|a|an)\s+", "", clean_title(get_primary_artist(release_artist)))
         .strip()
         .lower()
     )
     cmp_primary = (
-        re.sub(r"^(?:the|a|an)\s+", "", clean_title(get_primary_artist(cmp_art)))
+        re.sub(
+            r"^(?:the|a|an)\s+", "", clean_title(get_primary_artist(expected_artist))
+        )
         .strip()
         .lower()
     )
@@ -526,11 +556,11 @@ def _validate_mb_release_artist(rel_art: str, cmp_art: str) -> bool:
     )
 
 
-def _validate_mb_release_title(rel_title: str, cur_album: str | None) -> bool:
+def _validate_mb_release_title(release_title: str, cur_album: str | None) -> bool:
     """Validates that release title matches current album title."""
-    if not rel_title or not cur_album or _is_generic(cur_album, "album"):
+    if not release_title or not cur_album or _is_generic(cur_album, "album"):
         return True
-    norm_rel = clean_title(rel_title).lower()
+    norm_rel = clean_title(release_title).lower()
     norm_alb = clean_title(cur_album).lower()
     thresh = (
         get_config().short_title_match_threshold
@@ -570,15 +600,15 @@ def _apply_mb_release_metadata(
     if not mb_rel or not isinstance(mb_rel, dict):
         return
 
-    rel_art = str(mb_rel.get("album_artist") or mb_rel.get("artist") or "")
-    cmp_art = track_info.album_artist or track_info.artist or ""
-    if not _validate_mb_release_artist(rel_art, cmp_art):
+    release_artist = str(mb_rel.get("album_artist") or mb_rel.get("artist") or "")
+    expected_artist = track_info.album_artist or track_info.artist or ""
+    if not _validate_mb_release_artist(release_artist, expected_artist):
         track_info.musicbrainz_albumid = None
         track_info.musicbrainz_releasegroupid = None
         return
 
-    rel_title = str(mb_rel.get("title") or "").strip()
-    if not _validate_mb_release_title(rel_title, track_info.album):
+    release_title = str(mb_rel.get("title") or "").strip()
+    if not _validate_mb_release_title(release_title, track_info.album):
         track_info.musicbrainz_albumid = None
         track_info.musicbrainz_releasegroupid = None
         return
@@ -609,13 +639,24 @@ def _apply_mb_release_metadata(
         track_info, mb_rel, mb_rel_map, force=force, source="MusicBrainz"
     )
 
-    if mb_rel.get("title") and (
-        (
-            album_mb_release_details is not None
-            and (force or track_info.album != mb_rel.get("title"))
+    # Equivalent base titles do not prove that a release has the same edition.
+    preserves_album_edition = bool(
+        track_info.album
+        and clean_title(track_info.album).casefold()
+        == clean_title(release_title).casefold()
+        and track_info.album.casefold() != release_title.casefold()
+    )
+    if (
+        not preserves_album_edition
+        and mb_rel.get("title")
+        and (
+            (
+                album_mb_release_details is not None
+                and (force or track_info.album != mb_rel.get("title"))
+            )
+            or not track_info.album
+            or track_info.album.lower() in ("unknown", "unknown album")
         )
-        or not track_info.album
-        or track_info.album.lower() in ("unknown", "unknown album")
     ):
         track_info.album = preserve_unicode_repertoire(
             track_info.album, clean_unicode_punct(str(mb_rel["title"]))
@@ -679,17 +720,17 @@ def _enrich_musicbrainz(
             track_info, album_mbid, album_mb_release_details, force=force
         )
 
-        mb_rec, is_album_rec = _fetch_or_extract_mb_recording(
+        recording_details, is_album_rec = _fetch_or_extract_mb_recording(
             track_info,
             album_mb_release_details,
             candidate_rec,
             has_corrupt_identity,
             force=force,
         )
-        if mb_rec:
+        if recording_details:
             _apply_mb_recording_metadata(
                 track_info,
-                mb_rec,
+                recording_details,
                 is_album_rec,
                 target_album_artist,
                 has_corrupt_identity,

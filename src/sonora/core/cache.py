@@ -17,6 +17,8 @@ from sonora.core.constants import DIRS
 from sonora.core.logger import LOG
 
 DEFAULT_API_TTL_SECONDS: int = 2419200  # 28 days
+NEGATIVE_API_TTL_SECONDS: int = 1800  # Retry confirmed catalog misses after 30 minutes.
+API_CACHE_MISS = ""
 _CACHE_INSTANCE: diskcache.Cache | None = None
 _CACHE_LOCK = threading.RLock()
 _IGNORE_CACHE = False
@@ -169,7 +171,10 @@ def set_cached_api(
 ) -> None:
     """Store value into disk cache with expiration (default 28 days)."""
     if value is None:
-        return
+        value = API_CACHE_MISS
+        expire_seconds = min(expire_seconds, NEGATIVE_API_TTL_SECONDS)
+    elif not value or (isinstance(value, dict) and value.get("results") == []):
+        expire_seconds = min(expire_seconds, NEGATIVE_API_TTL_SECONDS)
     cache = get_cache()
     if cache is not None:
         try:

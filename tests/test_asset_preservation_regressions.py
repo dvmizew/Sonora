@@ -148,7 +148,7 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
         with patch.object(
             track_processing_module, "_enrich_artwork"
         ) as artwork_provider:
-            track_processing_module._run_audio_and_tags_persistence(
+            track_processing_module._process_audio_and_save_tags(
                 track,
                 original,
                 track.file_path,
@@ -178,7 +178,7 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
         original = read_track_metadata(audio_path)
         Image.new("RGB", (900, 900), "red").save(cover_path)
         updated = dataclasses.replace(original)
-        track_processing_module._run_audio_and_tags_persistence(
+        track_processing_module._process_audio_and_save_tags(
             updated,
             original,
             audio_path,
@@ -214,7 +214,7 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
                 with patch.object(
                     metadata_module, "write_track_metadata"
                 ) as tag_writer:
-                    track_processing_module._run_audio_and_tags_persistence(
+                    track_processing_module._process_audio_and_save_tags(
                         dataclasses.replace(original),
                         original,
                         original.file_path,

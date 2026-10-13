@@ -77,7 +77,9 @@ class TestDiskCache(IsolatedTestCase):
     @patch("sonora.core.cache.get_cache")
     def test_set_cached_api_none_value(self, mock_get_cache: MagicMock) -> None:
         set_cached_api("key_none", None)
-        mock_get_cache.assert_not_called()
+        mock_get_cache.return_value.set.assert_called_once_with(
+            "key_none", "", expire=1800
+        )
 
     @patch("sonora.core.cache.get_cache")
     def test_get_cached_api_exception(self, mock_get_cache: MagicMock) -> None:

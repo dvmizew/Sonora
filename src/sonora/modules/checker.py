@@ -38,6 +38,7 @@ from sonora.core.titles import (
     clean_title,
     extract_bracket_tokens,
     extract_title_features,
+    recording_identity_matches,
 )
 from sonora.core.utils import (
     InterruptedOperationError,
@@ -374,7 +375,7 @@ def _check_folder_album_consistency(
     for _, track_metadata in tracks_in_folder:
         if track_metadata.album_artist:
             album_artist_counts[track_metadata.album_artist] += 1
-        primary_artist = get_primary_artist(track_metadata.artist)
+        primary_artist = get_primary_artist(track_metadata.artist, allow_network=False)
         if not _is_generic(primary_artist, "artist"):
             artist_counts[primary_artist] += 1
 
@@ -441,7 +442,9 @@ def _check_folder_alien_tracks(
         return
 
     norm_dominant_album = normalize_str(clean_title(dominant_album))
-    norm_dominant_artist = normalize_str(get_primary_artist(dominant_artist or ""))
+    norm_dominant_artist = normalize_str(
+        get_primary_artist(dominant_artist or "", allow_network=False)
+    )
 
     disc_sequences: dict[int, list[int]] = defaultdict(list)
     for _, track_metadata in tracks_in_folder:
@@ -451,7 +454,9 @@ def _check_folder_alien_tracks(
 
     for file_path, track_metadata in tracks_in_folder:
         track_issues: list[str] = []
-        norm_track_artist = normalize_str(get_primary_artist(track_metadata.artist))
+        norm_track_artist = normalize_str(
+            get_primary_artist(track_metadata.artist, allow_network=False)
+        )
         norm_track_album = normalize_str(clean_title(track_metadata.album))
 
         artist_matches = bool(norm_dominant_artist) and (
@@ -520,6 +525,47 @@ def _check_folder_alien_tracks(
                         display_name = file_path.name
                     LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
                     LOG.warning(f"   ∟ ⚠️  {escape(issue_msg)}")
+
+
+def _check_identifier_conflicts(
+    folder_tracks: dict[Path, list[tuple[Path, TrackInfo]]],
+    report: CheckReport,
+) -> None:
+    identifiers: dict[tuple[str, str], list[tuple[Path, TrackInfo]]] = defaultdict(list)
+    for tracks in folder_tracks.values():
+        for path, track in tracks:
+            for field, tag in (
+                ("isrc", "ISRC"),
+                ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID"),
+                ("itunes_trackid", "ITUNESTRACKID"),
+            ):
+                identifier = getattr(track, field)
+                if identifier:
+                    identifiers[(tag, str(identifier).strip().upper())].append(
+                        (path, track)
+                    )
+    for (tag, identifier), tracks in identifiers.items():
+        if len(tracks) < 2:
+            continue
+        reference = tracks[0][1]
+        if all(
+            recording_identity_matches(
+                reference.artist,
+                reference.title,
+                track.artist,
+                track.title,
+                expected_duration=reference.duration,
+                candidate_duration=track.duration,
+            )
+            for _, track in tracks[1:]
+        ):
+            continue
+        description = f"Shared {tag} {identifier} has conflicting recording identity or duration; verify before tagging."
+        for path, _ in tracks:
+            existing = report.issues.setdefault(str(path), [])
+            if description not in existing:
+                existing.append(description)
+                LOG.warning(f"{escape(str(path))}: {escape(description)}")
 
 
 def check_library(
@@ -603,6 +649,7 @@ def check_library(
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(report) from None
 
+    _check_identifier_conflicts(folder_tracks, report)
     for folder, tracks_in_folder in folder_tracks.items():
         if get_config().is_generic_container(folder.name):
             continue
