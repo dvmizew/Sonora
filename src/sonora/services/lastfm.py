@@ -1,14 +1,14 @@
 import httpx
 
+from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
-from sonora.core.constants import RATE_LIMIT_LASTFM
+from sonora.core.coordination import coalesce_lookup
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter, is_valid_uuid, normalize_str
-
-_LASTFM_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LASTFM)
+from sonora.core.text import is_valid_uuid, normalize_str
 
 
+@coalesce_lookup
 def fetch_lastfm_tags(
     artist: str,
     title: str,
@@ -28,7 +28,6 @@ def fetch_lastfm_tags(
     if isinstance(cached, list):
         return cached
 
-    _LASTFM_LIMITER.wait()
     params: dict[str, str] = {
         "method": "track.getTopTags",
         "api_key": api_key,
@@ -47,8 +46,12 @@ def fetch_lastfm_tags(
         url = "https://ws.audioscrobbler.com/2.0/"
         response = SESSION.get(url, params=params, timeout=5)
         response.raise_for_status()
-        lastfm_payload = response.json()
-        tags = lastfm_payload.get("toptags", {}).get("tag", [])
+        lastfm_payload = require_api_object(response.json(), "Last.fm response")
+        if lastfm_payload.get("error"):
+            LOG.debug(f"Last.fm API error: {lastfm_payload.get('message', '')}")
+            return []
+        top_tags = require_api_object(lastfm_payload.get("toptags"), "Last.fm top tags")
+        tags = require_api_records(top_tags.get("tag", []), "Last.fm tag records")
         tag_names = [
             tag["name"].title()
             for tag in tags
@@ -64,7 +67,7 @@ def fetch_lastfm_tags(
         final_tags = tag_names[:5]
         set_cached_api(cache_key, final_tags)
         return final_tags
-    except (httpx.HTTPError, OSError, ValueError) as error:
+    except (httpx.HTTPError, OSError) as error:
         if mbid and artist and title and not _retried:
             return fetch_lastfm_tags(
                 artist, title, api_key=api_key, mbid=None, _retried=True

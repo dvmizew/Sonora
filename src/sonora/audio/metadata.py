@@ -3,25 +3,33 @@ import io
 import os
 import threading
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import mutagen.flac
-import mutagen.mp4
-import mutagen.wave
 import taglib
-from mutagen._util import MutagenError
+from mutagen import MutagenError
+from mutagen.flac import FLAC
+from mutagen.mp4 import MP4
+from mutagen.wave import WAVE
 from PIL import Image
 
+from sonora.core.artists import (
+    extract_featured_artist_tokens,
+    normalize_featured_artists,
+)
 from sonora.core.constants import SUPPORTED_EXTS
+from sonora.core.files import atomic_audio_edit
+from sonora.core.library_paths import (
+    extract_disc_number_from_folder,
+    parse_track_filename,
+)
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
-from sonora.core.utils import (
-    extract_disc_number_from_folder,
+from sonora.core.text import (
     is_valid_uuid,
+    normalize_advisory,
     normalize_date,
-    normalize_featured_artists,
     normalize_genre,
-    parse_track_filename,
+    normalize_str,
     safe_float,
     safe_int,
     safe_int_pair,
@@ -79,10 +87,10 @@ _TAG_SCHEMA: dict[str, tuple[str, ...]] = {
     "release_type": ("RELEASETYPE",),
     "release_status": ("RELEASESTATUS",),
     "release_country": ("RELEASECOUNTRY", "COUNTRY"),
-    "label": ("LABEL", "PUBLISHER"),
-    "catalog_number": ("CATALOGNUMBER",),
+    "label": ("LABEL", "PUBLISHER", "ORGANIZATION", "TPUB"),
+    "catalog_number": ("CATALOGNUMBER", "CATALOG_NUMBER"),
     "barcode": ("BARCODE",),
-    "media": ("MEDIA",),
+    "media": ("MEDIA", "TMED"),
     "comment": ("COMMENT", "COMM"),
     "advisory": ("ITUNESADVISORY", "ADVISORY"),
     "cuesheet": ("CUESHEET",),
@@ -113,6 +121,81 @@ def _get_tag(tags: dict[str, list[str]], *keys: str) -> str | None:
     return None
 
 
+def _read_advisory(
+    file_path: Path, tags: dict[str, list[str]]
+) -> tuple[str | None, bool]:
+    advisory = normalize_advisory(_get_tag(tags, *_TAG_SCHEMA["advisory"]))
+    existing = {key: tags[key] for key in _TAG_SCHEMA["advisory"] if key in tags}
+    if file_path.suffix.lower() in {".m4a", ".mp4"}:
+        # TagLib's property map does not expose the native MP4 content-rating atom.
+        rating = MP4(file_path).get("rtng")
+        if rating is not None:
+            advisory = "Explicit" if rating == [4] else None
+        return advisory, bool(existing) or rating != ([4] if advisory else None)
+    expected = {"ITUNESADVISORY": ["1"], "ADVISORY": ["Explicit"]} if advisory else {}
+    return advisory, existing != expected
+
+
+def _write_mp4_advisory(file_path: Path, advisory: str | None) -> None:
+    recording = MP4(file_path)
+    if normalize_advisory(advisory):
+        recording["rtng"] = [4]
+    else:
+        recording.pop("rtng", None)
+    recording.save()
+
+
+def _read_audio_encoding(file_path: Path) -> tuple[bool, int | None]:
+    file_ext = file_path.suffix.lower()
+    if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
+        is_lossless = True
+    elif file_ext in {".mp3", ".ogg", ".opus", ".mpc", ".wma"}:
+        is_lossless = False
+    elif file_ext in {".m4a", ".mp4"}:
+        try:
+            mp4_audio = MP4(file_path)
+            is_lossless = str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
+        except (MutagenError, OSError):
+            is_lossless = False
+    else:
+        is_lossless = True
+
+    bits_per_sample: int | None = None
+    if file_ext == ".flac":
+        try:
+            flac_info = FLAC(file_path).info
+            bits_per_sample = safe_int(getattr(flac_info, "bits_per_sample", None))
+        except (MutagenError, OSError):
+            pass
+    elif file_ext == ".wav":
+        try:
+            wav_info = WAVE(file_path).info
+            bits_per_sample = safe_int(getattr(wav_info, "bits_per_sample", None))
+        except (MutagenError, OSError):
+            pass
+
+    return is_lossless, bits_per_sample
+
+
+def _featured_artists_from_tags(
+    tags: dict[str, list[str]], primary_artist: str
+) -> str | None:
+    raw_artists = [*tags.get("ARTISTS", []), *tags.get("ARTIST", [])]
+    primary_tokens = extract_featured_artist_tokens(primary_artist)
+    primary_keys = {normalize_str(artist) for artist in primary_tokens if artist}
+    primary_keys.add(normalize_str(primary_artist))
+    extra_artists = [
+        artist.strip()
+        for artist in raw_artists
+        if artist
+        and artist.strip()
+        and normalize_str(artist.strip()) not in primary_keys
+    ]
+    if not extra_artists:
+        return None
+    return normalize_featured_artists(extra_artists, primary_artist=primary_artist)
+
+
 def read_track_metadata(file_path: Path) -> TrackInfo:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -124,7 +207,12 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
     with _METADATA_CACHE_LOCK:
         cached = _METADATA_CACHE.get(cache_key)
         if cached is not None:
-            return dataclasses.replace(cached)
+            return dataclasses.replace(
+                cached,
+                metadata_sources=dict(cached.metadata_sources),
+                metadata_conflicts=dict(cached.metadata_conflicts),
+                _diff_descriptions=list(cached._diff_descriptions),
+            )
 
     try:
         with taglib.File(str(file_path)) as song:
@@ -138,9 +226,19 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             )
             date = normalize_date(_get_tag(tags, "DATE", "TDRC", "YEAR", "WM/YEAR"))
             original_date = _get_tag(tags, "ORIGINALDATE", "ORIGINALYEAR")
-            genre = normalize_genre(_get_tag(tags, "GENRE", "TCON", "WM/GENRE"))
+            genre_values: list[str] = next(
+                (tags[key] for key in ("GENRE", "TCON", "WM/GENRE") if tags.get(key)),
+                [],
+            )
+            genre = next(
+                (
+                    normalized
+                    for value in genre_values
+                    if (normalized := normalize_genre(value))
+                ),
+                None,
+            )
 
-            # Track and disc numbering
             track_num_tag = _get_tag(tags, "TRACKNUMBER", "TRCK", "TRACK")
             track_number, track_total_fallback = safe_int_pair(track_num_tag)
 
@@ -170,7 +268,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             if total_discs is None and disc_number > 1:
                 total_discs = disc_number
 
-            # Numerical and audio stats
             bpm = safe_float(_get_tag(tags, "BPM", "TBPM", "WM/BEATSPERMINUTE"))
             raw_rating = _get_tag(tags, "RATING", "POPM")
             rating = safe_float(raw_rating)
@@ -184,7 +281,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 else None
             )
 
-            # ReplayGain
             replaygain_track_gain = safe_float(
                 _get_tag(tags, "REPLAYGAIN_TRACK_GAIN", "TXXX:REPLAYGAIN_TRACK_GAIN")
             )
@@ -200,7 +296,14 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
 
             art_width, art_height = None, None
             if hasattr(song, "pictures") and song.pictures:
-                first_picture = song.pictures[0]
+                first_picture = next(
+                    (
+                        picture
+                        for picture in song.pictures
+                        if picture.picture_type == "Front Cover"
+                    ),
+                    song.pictures[0],
+                )
                 art_width = getattr(first_picture, "width", None) or None
                 art_height = getattr(first_picture, "height", None) or None
                 if (not art_width or not art_height) and getattr(
@@ -217,64 +320,17 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 for field, tag_keys in _TAG_SCHEMA.items()
             }
             if not mapped_fields.get("featured_artists"):
-                raw_artists_list = tags.get("ARTISTS") or []
-                extra_artists = [
-                    a.strip()
-                    for a in raw_artists_list
-                    if a and a.strip() and a.strip().lower() != artist.lower()
-                ]
-                if extra_artists:
-                    mapped_fields["featured_artists"] = normalize_featured_artists(
-                        extra_artists, primary_artist=artist, allow_network=False
-                    )
-            raw_advisory = mapped_fields.get("advisory")
-            if raw_advisory:
-                raw_str = str(raw_advisory).strip().lower()
-                if raw_str in ("1", "explicit"):
-                    mapped_fields["advisory"] = "Explicit"
-                elif raw_str in ("2", "clean"):
-                    mapped_fields["advisory"] = "Clean"
-                elif raw_str in ("0", "none"):
-                    mapped_fields["advisory"] = None
-                else:
-                    mapped_fields["advisory"] = str(raw_advisory).strip().capitalize()
+                additional_features = _featured_artists_from_tags(tags, artist)
+                if additional_features:
+                    mapped_fields["featured_artists"] = additional_features
+            advisory, advisory_needs_normalization = _read_advisory(file_path, tags)
+            mapped_fields["advisory"] = advisory
 
-            file_ext = file_path.suffix.lower()
-            if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
-                is_lossless = True
-            elif file_ext in {".mp3", ".ogg", ".opus", ".mpc", ".wma"}:
-                is_lossless = False
-            elif file_ext in {".m4a", ".mp4"}:
-                try:
-                    mp4_audio = cast(Any, mutagen.mp4.MP4)(file_path)
-                    is_lossless = (
-                        str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
-                    )
-                except (MutagenError, OSError):
-                    is_lossless = False
-            else:
-                is_lossless = True
-
-            bits_per_sample: int | None = None
-            if file_ext == ".flac":
-                try:
-                    flac_info = cast(Any, mutagen.flac.FLAC)(file_path).info
-                    bits_per_sample = safe_int(
-                        getattr(flac_info, "bits_per_sample", None)
-                    )
-                except (MutagenError, OSError):
-                    pass
-            elif file_ext == ".wav":
-                try:
-                    wav_info = cast(Any, mutagen.wave.WAVE)(file_path).info
-                    bits_per_sample = safe_int(
-                        getattr(wav_info, "bits_per_sample", None)
-                    )
-                except (MutagenError, OSError):
-                    pass
+            is_lossless, bits_per_sample = _read_audio_encoding(file_path)
 
             track_info = TrackInfo(
                 file_path=file_path,
+                _advisory_needs_normalization=advisory_needs_normalization,
                 artist=artist,
                 title=title,
                 album=album,
@@ -306,12 +362,262 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             with _METADATA_CACHE_LOCK:
                 if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
                     _METADATA_CACHE.clear()
-                _METADATA_CACHE[cache_key] = dataclasses.replace(track_info)
+                _METADATA_CACHE[cache_key] = dataclasses.replace(
+                    track_info,
+                    metadata_sources=dict(track_info.metadata_sources),
+                    metadata_conflicts=dict(track_info.metadata_conflicts),
+                    _diff_descriptions=list(track_info._diff_descriptions),
+                )
             return track_info
     except FileNotFoundError:
         raise
     except (OSError, ValueError) as error:
         raise OSError(f"Failed to read metadata for {file_path}: {error}") from error
+
+
+def _write_artist_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> None:
+    tags["ARTIST"] = [track_info.artist]
+    tags["TITLE"] = [track_info.title]
+    tags["ALBUM"] = [track_info.album]
+
+    primary_tokens = (
+        extract_featured_artist_tokens(track_info.artist) if track_info.artist else []
+    )
+    if not primary_tokens and track_info.artist:
+        primary_tokens = [track_info.artist]
+
+    feat_tokens = (
+        extract_featured_artist_tokens(
+            track_info.featured_artists,
+            primary_artist=track_info.artist,
+        )
+        if track_info.featured_artists
+        else []
+    )
+
+    all_track_artists: list[str] = []
+    for art_candidate in [*primary_tokens, *feat_tokens]:
+        clean_art = str(art_candidate).strip()
+        if clean_art and clean_art not in all_track_artists:
+            all_track_artists.append(clean_art)
+
+    if len(all_track_artists) > 1:
+        tags["ARTISTS"] = all_track_artists
+    else:
+        tags.pop("ARTISTS", None)
+        tags.pop("TXXX:ARTISTS", None)
+
+    if track_info.album_artist:
+        tags["ALBUMARTIST"] = [track_info.album_artist]
+        album_tokens = extract_featured_artist_tokens(track_info.album_artist)
+        if not album_tokens:
+            album_tokens = [track_info.album_artist]
+        unique_album_artists: list[str] = []
+        for alb_candidate in album_tokens:
+            clean_alb = str(alb_candidate).strip()
+            if clean_alb and clean_alb not in unique_album_artists:
+                unique_album_artists.append(clean_alb)
+        if len(unique_album_artists) > 1 and normalize_str(
+            track_info.album_artist
+        ) not in ("various artists", "soundtrack"):
+            tags["ALBUMARTISTS"] = unique_album_artists
+        else:
+            tags.pop("ALBUMARTISTS", None)
+            tags.pop("TXXX:ALBUMARTISTS", None)
+    else:
+        tags.pop("ALBUMARTIST", None)
+        tags.pop("ALBUM ARTIST", None)
+        tags.pop("ALBUMARTISTS", None)
+        tags.pop("TXXX:ALBUMARTISTS", None)
+
+
+def _write_numbering_and_dates(
+    tags: dict[str, list[str]], track_info: TrackInfo
+) -> None:
+    total_tracks_str = str(track_info.total_tracks) if track_info.total_tracks else None
+    if track_info.track_number is not None:
+        tags["TRACKNUMBER"] = [
+            f"{track_info.track_number}/{total_tracks_str}"
+            if total_tracks_str
+            else str(track_info.track_number)
+        ]
+    else:
+        tags.pop("TRACKNUMBER", None)
+
+    if total_tracks_str:
+        tags["TRACKTOTAL"] = [total_tracks_str]
+        tags["TOTALTRACKS"] = [total_tracks_str]
+    else:
+        tags.pop("TRACKTOTAL", None)
+        tags.pop("TOTALTRACKS", None)
+
+    total_discs_str = str(track_info.total_discs) if track_info.total_discs else None
+    if track_info.disc_number is not None:
+        tags["DISCNUMBER"] = [
+            f"{track_info.disc_number}/{total_discs_str}"
+            if total_discs_str
+            else str(track_info.disc_number)
+        ]
+    else:
+        tags.pop("DISCNUMBER", None)
+
+    if total_discs_str:
+        tags["DISCTOTAL"] = [total_discs_str]
+        tags["TOTALDISCS"] = [total_discs_str]
+    else:
+        tags.pop("DISCTOTAL", None)
+        tags.pop("TOTALDISCS", None)
+
+    if track_info.date:
+        tags["DATE"] = [track_info.date]
+    else:
+        tags.pop("DATE", None)
+        tags.pop("YEAR", None)
+
+    if track_info.original_date:
+        tags["ORIGINALDATE"] = [track_info.original_date]
+        tags["ORIGINALYEAR"] = [track_info.original_date[:4]]
+    else:
+        tags.pop("ORIGINALDATE", None)
+        tags.pop("ORIGINALYEAR", None)
+
+    if track_info.genre:
+        tags["GENRE"] = [track_info.genre]
+    else:
+        tags.pop("GENRE", None)
+
+
+def _write_audio_properties_tags(
+    tags: dict[str, list[str]], track_info: TrackInfo
+) -> None:
+    if track_info.bpm is not None:
+        tags["BPM"] = [f"{track_info.bpm:.1f}"]
+    else:
+        tags.pop("BPM", None)
+
+    if track_info.rating is not None:
+        tags["RATING"] = [f"{track_info.rating:.1f}"]
+    else:
+        tags.pop("RATING", None)
+
+    if track_info.compilation is not None:
+        tags["COMPILATION"] = ["1" if track_info.compilation else "0"]
+    elif track_info.album_artist and normalize_str(track_info.album_artist) in (
+        "various artists",
+        "soundtrack",
+    ):
+        tags["COMPILATION"] = ["1"]
+    else:
+        tags.pop("COMPILATION", None)
+
+    if track_info.replaygain_track_gain is not None:
+        tags["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
+    else:
+        tags.pop("REPLAYGAIN_TRACK_GAIN", None)
+
+    if track_info.replaygain_track_peak is not None:
+        tags["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
+    else:
+        tags.pop("REPLAYGAIN_TRACK_PEAK", None)
+
+    if track_info.replaygain_album_gain is not None:
+        tags["REPLAYGAIN_ALBUM_GAIN"] = [f"{track_info.replaygain_album_gain:+.2f} dB"]
+    else:
+        tags.pop("REPLAYGAIN_ALBUM_GAIN", None)
+
+    if track_info.replaygain_album_peak is not None:
+        tags["REPLAYGAIN_ALBUM_PEAK"] = [f"{track_info.replaygain_album_peak:.6f}"]
+    else:
+        tags.pop("REPLAYGAIN_ALBUM_PEAK", None)
+
+
+def _write_schema_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> None:
+    for field, tag_keys in _TAG_SCHEMA.items():
+        tag_value = getattr(track_info, field, None)
+        canonical_key = tag_keys[0]
+        if tag_value:
+            if field in _UUID_FIELDS and not is_valid_uuid(
+                tag_value, allow_multivalue=True
+            ):
+                for k in tag_keys:
+                    tags.pop(k, None)
+                continue
+            if field == "advisory":
+                if normalize_advisory(str(tag_value)):
+                    tags["ITUNESADVISORY"] = ["1"]
+                    tags["ADVISORY"] = ["Explicit"]
+                else:
+                    tags.pop("ITUNESADVISORY", None)
+                    tags.pop("ADVISORY", None)
+                continue
+            if field == "disc_subtitle":
+                for k in tag_keys:
+                    tags[k] = [str(tag_value)]
+                continue
+            if field == "lyrics":
+                tags["LYRICS"] = [str(tag_value)]
+                tags["UNSYNCEDLYRICS"] = [str(tag_value)]
+                continue
+            tags[canonical_key] = [str(tag_value)]
+            for alias_key in tag_keys[1:]:
+                tags.pop(alias_key, None)
+        else:
+            for k in tag_keys:
+                tags.pop(k, None)
+            if field == "lyrics":
+                tags.pop("UNSYNCEDLYRICS", None)
+
+
+def _preserve_unchanged_multivalues(
+    original_tags: dict[str, list[str]],
+    updated_tags: dict[str, list[str]],
+) -> None:
+    original_genres = [
+        normalized
+        for value in original_tags.get("GENRE", [])
+        if (normalized := normalize_genre(value))
+    ]
+    updated_genres = updated_tags.get("GENRE")
+    if (
+        original_genres
+        and updated_genres
+        and len(updated_genres) == 1
+        and normalize_genre(updated_genres[0]) == original_genres[0]
+    ):
+        updated_tags["GENRE"] = [updated_genres[0], *original_genres[1:]]
+    for tag_key, original_values in original_tags.items():
+        updated_values = updated_tags.get(tag_key)
+        if (
+            len(original_values) > 1
+            and updated_values
+            and len(updated_values) == 1
+            and normalize_str(updated_values[0]) == normalize_str(original_values[0])
+        ):
+            updated_tags[tag_key] = [updated_values[0], *original_values[1:]]
+    for tag_keys in _TAG_SCHEMA.values():
+        original_values = next(
+            (original_tags[key] for key in tag_keys if original_tags.get(key)), []
+        )
+        updated_values = updated_tags.get(tag_keys[0])
+        if (
+            len(original_values) > 1
+            and updated_values
+            and len(updated_values) == 1
+            and normalize_str(updated_values[0]) == normalize_str(original_values[0])
+        ):
+            updated_tags[tag_keys[0]] = [updated_values[0], *original_values[1:]]
+    original_album_artist = _get_tag(
+        original_tags, "ALBUMARTIST", "ALBUM ARTIST", "ALBUMARTISTS"
+    )
+    updated_album_artist = _get_tag(updated_tags, "ALBUMARTIST", "ALBUM ARTIST")
+    if (
+        original_album_artist
+        and updated_album_artist
+        and normalize_str(original_album_artist) == normalize_str(updated_album_artist)
+    ):
+        for tag_key in ("ALBUMARTISTS", "TXXX:ALBUMARTISTS"):
+            if tag_key not in updated_tags and original_tags.get(tag_key):
+                updated_tags[tag_key] = original_tags[tag_key]
 
 
 def write_track_metadata(
@@ -325,191 +631,66 @@ def write_track_metadata(
         )
 
     try:
-        with taglib.File(str(track_info.file_path)) as song:
-            # Core tags
-            song.tags["ARTIST"] = [track_info.artist]
-            song.tags["TITLE"] = [track_info.title]
-            song.tags["ALBUM"] = [track_info.album]
+        with atomic_audio_edit(track_info.file_path) as staging_path:
+            with taglib.File(str(staging_path)) as song:
+                original_tags = {key: list(values) for key, values in song.tags.items()}
+                _write_artist_tags(song.tags, track_info)
+                _write_numbering_and_dates(song.tags, track_info)
+                _write_audio_properties_tags(song.tags, track_info)
+                _write_schema_tags(song.tags, track_info)
+                if track_info.file_path.suffix.lower() in {".m4a", ".mp4"}:
+                    for key in _TAG_SCHEMA["advisory"]:
+                        song.tags.pop(key, None)
+                _preserve_unchanged_multivalues(original_tags, song.tags)
 
-            if track_info.album_artist:
-                song.tags["ALBUMARTIST"] = [track_info.album_artist]
-            else:
-                song.tags.pop("ALBUMARTIST", None)
-                song.tags.pop("ALBUM ARTIST", None)
-
-            # Track & Disc numbering
-            total_tracks_str = (
-                str(track_info.total_tracks) if track_info.total_tracks else None
-            )
-            if track_info.track_number is not None:
-                song.tags["TRACKNUMBER"] = [
-                    f"{track_info.track_number}/{total_tracks_str}"
-                    if total_tracks_str
-                    else str(track_info.track_number)
-                ]
-            else:
-                song.tags.pop("TRACKNUMBER", None)
-
-            if total_tracks_str:
-                song.tags["TRACKTOTAL"] = [total_tracks_str]
-                song.tags["TOTALTRACKS"] = [total_tracks_str]
-            else:
-                song.tags.pop("TRACKTOTAL", None)
-                song.tags.pop("TOTALTRACKS", None)
-
-            total_discs_str = (
-                str(track_info.total_discs) if track_info.total_discs else None
-            )
-            if track_info.disc_number is not None:
-                song.tags["DISCNUMBER"] = [
-                    f"{track_info.disc_number}/{total_discs_str}"
-                    if total_discs_str
-                    else str(track_info.disc_number)
-                ]
-            else:
-                song.tags.pop("DISCNUMBER", None)
-
-            if total_discs_str:
-                song.tags["DISCTOTAL"] = [total_discs_str]
-                song.tags["TOTALDISCS"] = [total_discs_str]
-            else:
-                song.tags.pop("DISCTOTAL", None)
-                song.tags.pop("TOTALDISCS", None)
-
-            if track_info.date:
-                song.tags["DATE"] = [track_info.date]
-            else:
-                song.tags.pop("DATE", None)
-                song.tags.pop("YEAR", None)
-
-            if track_info.original_date:
-                song.tags["ORIGINALDATE"] = [track_info.original_date]
-                song.tags["ORIGINALYEAR"] = [track_info.original_date[:4]]
-            else:
-                song.tags.pop("ORIGINALDATE", None)
-                song.tags.pop("ORIGINALYEAR", None)
-
-            if track_info.genre:
-                song.tags["GENRE"] = [track_info.genre]
-            else:
-                song.tags.pop("GENRE", None)
-
-            # Numeric & audio tags
-            if track_info.bpm is not None:
-                song.tags["BPM"] = [f"{track_info.bpm:.1f}"]
-            else:
-                song.tags.pop("BPM", None)
-
-            if track_info.rating is not None:
-                song.tags["RATING"] = [f"{track_info.rating:.1f}"]
-            else:
-                song.tags.pop("RATING", None)
-
-            if track_info.compilation is not None:
-                song.tags["COMPILATION"] = ["1" if track_info.compilation else "0"]
-            else:
-                song.tags.pop("COMPILATION", None)
-
-            # ReplayGain
-            if track_info.replaygain_track_gain is not None:
-                song.tags["REPLAYGAIN_TRACK_GAIN"] = [
-                    f"{track_info.replaygain_track_gain:+.2f} dB"
-                ]
-            else:
-                song.tags.pop("REPLAYGAIN_TRACK_GAIN", None)
-
-            if track_info.replaygain_track_peak is not None:
-                song.tags["REPLAYGAIN_TRACK_PEAK"] = [
-                    f"{track_info.replaygain_track_peak:.6f}"
-                ]
-            else:
-                song.tags.pop("REPLAYGAIN_TRACK_PEAK", None)
-
-            if track_info.replaygain_album_gain is not None:
-                song.tags["REPLAYGAIN_ALBUM_GAIN"] = [
-                    f"{track_info.replaygain_album_gain:+.2f} dB"
-                ]
-            else:
-                song.tags.pop("REPLAYGAIN_ALBUM_GAIN", None)
-
-            if track_info.replaygain_album_peak is not None:
-                song.tags["REPLAYGAIN_ALBUM_PEAK"] = [
-                    f"{track_info.replaygain_album_peak:.6f}"
-                ]
-            else:
-                song.tags.pop("REPLAYGAIN_ALBUM_PEAK", None)
-
-            # Declarative schema write
-            for field, tag_keys in _TAG_SCHEMA.items():
-                tag_value = getattr(track_info, field, None)
-                canonical_key = tag_keys[0]
-                if tag_value:
-                    if field in _UUID_FIELDS and not is_valid_uuid(
-                        tag_value, allow_multivalue=True
-                    ):
-                        for k in tag_keys:
-                            song.tags.pop(k, None)
-                        continue
-                    if field == "advisory":
-                        norm_adv = str(tag_value).strip().capitalize()
-                        if norm_adv == "Explicit":
-                            song.tags["ITUNESADVISORY"] = ["1"]
-                            song.tags["ADVISORY"] = ["Explicit"]
-                        elif norm_adv == "Clean":
-                            song.tags["ITUNESADVISORY"] = ["2"]
-                            song.tags["ADVISORY"] = ["Clean"]
-                        else:
-                            song.tags.pop("ITUNESADVISORY", None)
-                            song.tags.pop("ADVISORY", None)
-                        continue
-                    if field == "disc_subtitle":
-                        for k in tag_keys:
-                            song.tags[k] = [str(tag_value)]
-                        continue
-                    song.tags[canonical_key] = [str(tag_value)]
-                    for alias_key in tag_keys[1:]:
-                        song.tags.pop(alias_key, None)
-                else:
-                    for k in tag_keys:
-                        song.tags.pop(k, None)
-
-            # Front cover
-            if cover_art_path and cover_art_path.exists():
-                mime = (
-                    "image/jpeg"
-                    if cover_art_path.suffix.lower() in [".jpg", ".jpeg"]
-                    else "image/png"
-                )
-                if hasattr(song, "pictures"):
-                    song.pictures = [
-                        taglib.Picture(
-                            data=cover_art_path.read_bytes(),
-                            mime_type=mime,
-                            description="Cover",
-                            picture_type="Front Cover",
-                        )
+                if cover_art_path and cover_art_path.exists():
+                    cover_bytes = cover_art_path.read_bytes()
+                    with Image.open(io.BytesIO(cover_bytes)) as cover_image:
+                        cover_image.load()
+                        cover_dimensions = cover_image.size
+                        mime = Image.MIME.get(cover_image.format or "", "image/jpeg")
+                    existing_pictures = song.pictures
+                    front_covers = [
+                        picture
+                        for picture in existing_pictures
+                        if picture.picture_type == "Front Cover"
                     ]
+                    existing_dimensions: list[tuple[int, int]] = []
+                    for picture in front_covers:
+                        try:
+                            with Image.open(io.BytesIO(picture.data)) as embedded_image:
+                                existing_dimensions.append(embedded_image.size)
+                        except OSError:
+                            continue
+                    if not any(
+                        width * height > cover_dimensions[0] * cover_dimensions[1]
+                        for width, height in existing_dimensions
+                    ):
+                        song.pictures = [
+                            picture
+                            for picture in existing_pictures
+                            if picture.picture_type != "Front Cover"
+                        ] + [
+                            taglib.Picture(
+                                data=cover_bytes,
+                                mime_type=mime,
+                                description="Cover",
+                                picture_type="Front Cover",
+                            )
+                        ]
 
-            unsaved = song.save()
-            if unsaved:
-                LOG.debug(f"TagLib unsaved tags for {track_info.file_path}: {unsaved}")
-
-            try:
-                new_stat = track_info.file_path.stat()
-                new_key = (
-                    str(track_info.file_path.resolve()),
-                    new_stat.st_mtime_ns,
-                    new_stat.st_size,
-                )
-                with _METADATA_CACHE_LOCK:
-                    if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
-                        _METADATA_CACHE.clear()
-                    _METADATA_CACHE[new_key] = dataclasses.replace(track_info)
-            except OSError as e:
-                LOG.debug(f"Failed to cache track metadata by inode: {e}")
+                unsaved = song.save()
+                if unsaved:
+                    raise OSError(
+                        f"Unsupported tags for {track_info.file_path}: {', '.join(unsaved)}"
+                    )
+            if track_info.file_path.suffix.lower() in {".m4a", ".mp4"}:
+                _write_mp4_advisory(staging_path, track_info.advisory)
+            track_info._advisory_needs_normalization = False
+            clear_metadata_cache()
     except FileNotFoundError:
         raise
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, MutagenError) as error:
         raise OSError(
             f"Failed to write metadata for {track_info.file_path}: {error}"
         ) from error
@@ -533,7 +714,7 @@ def get_audio_duration(file_path: Path) -> float | None:
     try:
         import mutagen
 
-        m_file = cast(Any, mutagen).File(file_path)
+        m_file = mutagen.File(file_path)
         if m_file and getattr(m_file, "info", None):
             return safe_float(m_file.info.length)
     except (OSError, MutagenError):

@@ -11,7 +11,7 @@ import musicbrainzngs
 from sonora.core.constants import USER_AGENT
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
-from sonora.core.utils import RateLimiter
+from sonora.core.rate_limit import RateLimiter
 from sonora.modules.tagger import process_single_track
 from sonora.services.deezer import (
     fetch_deezer_album_details,
@@ -42,9 +42,10 @@ from sonora.services.theaudiodb import (
     fetch_artist_images,
     fetch_theaudiodb_track_details,
 )
+from tests.support import IsolatedTestCase
 
 
-class TestNetwork(unittest.TestCase):
+class TestNetwork(IsolatedTestCase):
     @classmethod
     def setUpClass(cls) -> None:
         RateLimiter.set_disabled(True)
@@ -54,6 +55,15 @@ class TestNetwork(unittest.TestCase):
         RateLimiter.set_disabled(False)
 
     def setUp(self) -> None:
+        lrclib_patch = patch("sonora.services.lyrics._query_lrclib", return_value=None)
+        lrclib_patch.start()
+        self.addCleanup(lrclib_patch.stop)
+        artist_normalization = patch(
+            "sonora.services.artist_resolution.resolve_artist_name",
+            side_effect=lambda name: name,
+        )
+        artist_normalization.start()
+        self.addCleanup(artist_normalization.stop)
         services = [
             "sonora.services.itunes",
             "sonora.services.lyrics",
@@ -70,16 +80,14 @@ class TestNetwork(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_http_session_transport_configuration(self) -> None:
-        self.assertEqual(SESSION.headers.get("User-Agent"), USER_AGENT)
-        transport = SESSION._transport
-        self.assertIsInstance(transport, httpx.HTTPTransport)
-        if isinstance(transport, httpx.HTTPTransport):
-            pool = getattr(transport, "_pool", None)
-            if pool and hasattr(pool, "_http2"):
-                self.assertTrue(pool._http2)
-
-    # --- TheAudioDB Tests ---
+    def test_session_sends_application_user_agent(self) -> None:
+        with patch(
+            "httpx.HTTPTransport.handle_request",
+            return_value=httpx.Response(200, json={"ok": True}),
+        ) as send:
+            response = SESSION.get("https://api.deezer.com/test")
+        self.assertEqual(response.json(), {"ok": True})
+        self.assertEqual(send.call_args.args[0].headers["User-Agent"], USER_AGENT)
 
     @patch("sonora.services.theaudiodb.SESSION.get")
     def test_theaudiodb_server_disconnect(self, mock_get: MagicMock) -> None:
@@ -95,6 +103,7 @@ class TestNetwork(unittest.TestCase):
         mock_json_response.json.return_value = {
             "artists": [
                 {
+                    "strArtist": "Artist Name",
                     "strArtistThumb": "https://www.theaudiodb.com/images/thumb.jpg",
                     "strArtistBanner": "https://www.theaudiodb.com/images/banner.jpg",
                 }
@@ -123,13 +132,12 @@ class TestNetwork(unittest.TestCase):
         mock_broken_json.status_code = 200
         mock_broken_json.json.side_effect = ValueError("Invalid JSON")
         mock_get.return_value = mock_broken_json
-        self.assertIsNone(fetch_theaudiodb_track_details("Artist", "Title"))
+        with self.assertRaisesRegex(ValueError, "Invalid JSON"):
+            fetch_theaudiodb_track_details("Artist", "Title")
 
     def test_download_artwork_bytes_empty_url(self) -> None:
         self.assertIsNone(_download_artwork_bytes(None))
         self.assertIsNone(_download_artwork_bytes(""))
-
-    # --- MusicBrainz & Cover Art Archive Tests ---
 
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_recording_lookup_network_errors(
@@ -162,8 +170,6 @@ class TestNetwork(unittest.TestCase):
             fetch_cover_art_archive_url("c8b03190-306c-4125-9b32-3f9d86d60a12")
         )
 
-    # --- iTunes Tests ---
-
     @patch("sonora.services.itunes.SESSION.get")
     def test_itunes_rate_limit_and_timeout(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.HTTPStatusError(
@@ -177,8 +183,6 @@ class TestNetwork(unittest.TestCase):
 
         mock_get.side_effect = httpx.ReadTimeout("Read timed out")
         self.assertEqual(search_itunes("Artist", "Title"), [])
-
-    # --- Deezer & Discogs Tests ---
 
     @patch("sonora.services.deezer.SESSION.get")
     def test_deezer_server_disconnect(self, mock_get: MagicMock) -> None:
@@ -197,8 +201,6 @@ class TestNetwork(unittest.TestCase):
             fetch_discogs_release_details("12345", user_token="bad_token")
         )
 
-    # --- Last.fm & Genius Tests ---
-
     @patch("sonora.services.lastfm.SESSION.get")
     def test_lastfm_disconnect(self, mock_get: MagicMock) -> None:
         mock_get.side_effect = httpx.RemoteProtocolError("Server disconnected")
@@ -213,23 +215,19 @@ class TestNetwork(unittest.TestCase):
             fetch_genius_song_details("Artist", "Title", api_token="dummy_token")
         )
 
-    # --- SyncedLyrics Tests ---
-
     @patch("sonora.services.lyrics.syncedlyrics.search")
     def test_lyrics_upstream_exception(self, mock_search: MagicMock) -> None:
         mock_search.side_effect = httpx.RemoteProtocolError(
             "Musixmatch connection dropped"
         )
         with self.assertRaises(RuntimeError):
-            fetch_synced_lyrics("Artist", "Title")
+            fetch_synced_lyrics("Artist", "Title", providers=["Musixmatch"])
 
         lyrics_text, lyrics_type = process_track_lyrics(
             Path("/tmp/nonexistent.flac"), "Artist", "Title"
         )
         self.assertIsNone(lyrics_text)
         self.assertIsNone(lyrics_type)
-
-    # --- Concurrency & Rate Limiting Tests ---
 
     def test_rate_limiter_spacing(self) -> None:
         RateLimiter.set_disabled(False)
@@ -261,10 +259,8 @@ class TestNetwork(unittest.TestCase):
         finally:
             RateLimiter.set_disabled(True)
 
-    # --- Smart Field Gating Tests ---
-
-    @patch("sonora.modules.tagger.fetch_theaudiodb_track_details")
-    @patch("sonora.modules.tagger.read_track_metadata")
+    @patch("sonora.services.theaudiodb.fetch_theaudiodb_track_details")
+    @patch("sonora.audio.metadata.read_track_metadata")
     def test_smart_gating_skips_complete_tracks(
         self,
         mock_read: MagicMock,
@@ -290,35 +286,37 @@ class TestNetwork(unittest.TestCase):
 
             with (
                 patch(
-                    "sonora.modules.tagger.fetch_genius_song_details",
+                    "sonora.services.genius.fetch_genius_song_details",
                     return_value=None,
                 ),
                 patch(
-                    "sonora.modules.tagger.fetch_deezer_track_details",
+                    "sonora.services.deezer.fetch_deezer_track_details",
                     return_value=None,
                 ),
                 patch(
-                    "sonora.modules.tagger.fetch_deezer_album_details",
+                    "sonora.services.deezer.fetch_deezer_album_details",
                     return_value=None,
                 ),
                 patch(
-                    "sonora.modules.tagger.fetch_musicbrainz_recording_details",
-                    return_value=None,
-                ),
-                patch("sonora.modules.tagger.fetch_track_mbid", return_value=None),
-                patch(
-                    "sonora.modules.tagger.search_musicbrainz_release",
+                    "sonora.services.musicbrainz.fetch_musicbrainz_recording_details",
                     return_value=None,
                 ),
                 patch(
-                    "sonora.modules.tagger.fetch_itunes_track_metadata",
+                    "sonora.services.musicbrainz.fetch_track_mbid", return_value=None
+                ),
+                patch(
+                    "sonora.services.musicbrainz.search_musicbrainz_release",
                     return_value=None,
                 ),
                 patch(
-                    "sonora.modules.tagger.resolve_artist_name",
+                    "sonora.services.itunes.fetch_itunes_track_metadata",
+                    return_value=None,
+                ),
+                patch(
+                    "sonora.services.artist_resolution.resolve_artist_name",
                     side_effect=lambda x: x,
                 ),
-                patch("sonora.modules.tagger.write_track_metadata"),
+                patch("sonora.audio.metadata.write_track_metadata"),
             ):
                 result = process_single_track(
                     file_path=song_path,

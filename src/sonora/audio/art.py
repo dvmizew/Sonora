@@ -10,10 +10,14 @@ from rapidfuzz import fuzz
 from rich.markup import escape
 
 from sonora.core.config import get_config
-from sonora.core.constants import ARTIST_MATCH_THRESHOLD
+from sonora.core.constants import (
+    MIN_COVER_ART_DIMENSION,
+)
+from sonora.core.files import atomic_write_bytes
 from sonora.core.http import SESSION
+from sonora.core.library_paths import get_album_root_directory
 from sonora.core.logger import LOG
-from sonora.core.utils import normalize_str
+from sonora.core.text import normalize_str
 from sonora.services.deezer import fetch_deezer_cover_art_url
 from sonora.services.fanart import (
     download_fanart_image_bytes,
@@ -74,7 +78,7 @@ def check_image_similarity(
         return bool((first_hash - second_hash) <= max_distance)
     except (OSError, ValueError, UnidentifiedImageError) as error:
         LOG.debug(f"Perceptual image comparison failed: {error}")
-        return True
+        return False
     finally:
         if first_image is not None:
             first_image.close()
@@ -123,11 +127,15 @@ def _fetch_candidate_artwork(
             candidate_dim: tuple[int, int] | None = None
             try:
                 with Image.open(io.BytesIO(image_bytes)) as img:
+                    img.load()
                     candidate_dim = img.size
             except (OSError, UnidentifiedImageError):
                 continue
 
-            if candidate_dim[0] >= 500 and candidate_dim[1] >= 500:
+            if (
+                candidate_dim[0] >= MIN_COVER_ART_DIMENSION
+                and candidate_dim[1] >= MIN_COVER_ART_DIMENSION
+            ):
                 return (image_bytes, candidate_dim)
 
             if not best_candidate:
@@ -151,22 +159,14 @@ def process_album_cover_art(
     musicbrainz_album_id: str | None = None,
     force: bool = False,
     dry_run: bool = False,
+    musicbrainz_releasegroup_id: str | None = None,
 ) -> Path | None:
     """
     Downloads and validates high-resolution album cover art (cover.jpg).
     Tries Cover Art Archive, iTunes API, and Deezer fallback.
     Returns Path to cover.jpg if present/downloaded, else None.
     """
-    target_dir = folder_path
-    if (
-        get_config().is_disc_folder(folder_path.name)
-        and folder_path.parent != folder_path
-    ):
-        parent_cover = folder_path.parent / "cover.jpg"
-        if parent_cover.exists() and parent_cover.stat().st_size > 0:
-            return parent_cover
-        target_dir = folder_path.parent
-
+    target_dir = get_album_root_directory(folder_path)
     cover_image_path = target_dir / "cover.jpg"
     is_low_res = False
     existing_bytes: bytes | None = None
@@ -175,11 +175,15 @@ def process_album_cover_art(
         try:
             existing_bytes = cover_image_path.read_bytes()
             with Image.open(io.BytesIO(existing_bytes)) as cur_img:
+                cur_img.load()
                 existing_dim = cur_img.size
-                if cur_img.width < 500 or cur_img.height < 500:
+                if (
+                    cur_img.width < MIN_COVER_ART_DIMENSION
+                    or cur_img.height < MIN_COVER_ART_DIMENSION
+                ):
                     is_low_res = True
         except (OSError, UnidentifiedImageError):
-            pass
+            is_low_res = True
 
     artwork_already_present = (
         cover_image_path.exists()
@@ -204,27 +208,15 @@ def process_album_cover_art(
         if artwork_result:
             new_artwork_bytes, new_dim = artwork_result
             if not dry_run:
-                # Quality Downgrade Protection (GEMINI.md Rule 9)
-                if (
-                    existing_dim
-                    and existing_dim[0] >= 500
-                    and existing_dim[1] >= 500
-                    and (existing_dim[0] * existing_dim[1]) > (new_dim[0] * new_dim[1])
+                if existing_dim and any(
+                    current > replacement
+                    for current, replacement in zip(existing_dim, new_dim)
                 ):
                     LOG.info(
-                        f"   ∟ 🛡️  [Quality Shield] Preserved higher-resolution cover ({existing_dim[0]}x{existing_dim[1]} > {new_dim[0]}x{new_dim[1]})"
+                        f"   ∟ 🛡️  [Quality Shield] Preserved cover: replacement reduces an image dimension ({existing_dim[0]}x{existing_dim[1]} -> {new_dim[0]}x{new_dim[1]})"
                     )
-                elif (
-                    existing_bytes
-                    and not force
-                    and not is_low_res
-                    and not check_image_similarity(existing_bytes, new_artwork_bytes)
-                ):
-                    LOG.info("   ∟ 🖼️  Skipped cover upgrade: visual mismatch")
                 else:
-                    temp_path = cover_image_path.with_suffix(".tmp")
-                    temp_path.write_bytes(new_artwork_bytes)
-                    temp_path.replace(cover_image_path)
+                    atomic_write_bytes(cover_image_path, new_artwork_bytes)
                     if existing_dim and (new_dim[0] * new_dim[1]) > (
                         existing_dim[0] * existing_dim[1]
                     ):
@@ -238,11 +230,11 @@ def process_album_cover_art(
                     f"[DRY-RUN] Would download cover art to {cover_image_path.name}"
                 )
 
-    if musicbrainz_album_id and get_config().fanart_api_key:
+    if musicbrainz_releasegroup_id and get_config().fanart_api_key:
         cdart_path = target_dir / "cdart.png"
         if not cdart_path.exists() and not dry_run:
             try:
-                fanart_album = fetch_fanart_album(musicbrainz_album_id)
+                fanart_album = fetch_fanart_album(musicbrainz_releasegroup_id)
                 if fanart_album and fanart_album.cdart_urls:
                     cdart_bytes = download_fanart_image_bytes(
                         fanart_album.cdart_urls[0]
@@ -283,7 +275,7 @@ def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
             and (
                 clean_artist in normalize_str(cand.name)
                 or fuzz.ratio(clean_artist, normalize_str(cand.name))
-                >= ARTIST_MATCH_THRESHOLD
+                >= get_config().artist_match_threshold
             )
         ):
             return cand
@@ -370,7 +362,9 @@ def process_artist_artwork(
         return
 
     try:
-        thumbnail_bytes, banner_bytes = fetch_artist_images(artist_name)
+        thumbnail_bytes, banner_bytes = fetch_artist_images(
+            artist_name, artist_mbid=artist_mbid
+        )
     except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Failed to fetch artist artwork for {artist_name}: {error}")
         return

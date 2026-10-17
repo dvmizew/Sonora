@@ -59,7 +59,7 @@ brew install ffmpeg flac chromaprint
 
 ### Option 1: Standalone Binary (Linux x86_64)
 
-Run Sonora directly without installing Python or dependencies:
+Run Sonora without installing Python packages. The external tools listed in Requirements must still be available:
 
 ```bash
 chmod +x sonora-linux-x86_64
@@ -67,6 +67,8 @@ chmod +x sonora-linux-x86_64
 ```
 
 ### Option 2: From Source (Python 3.10+)
+
+Source installation requires Git because ShazamIO is pinned to upstream commit `8afb07c0ff31c663daa895ebc1d5db17a74fc4ed`. Its unreleased 0.9.0 package supports `shazamio-core==1.2.0`, which provides the native wheel used on Python 3.14. The released 0.8.1 SDK requires an older native core without an official Python 3.14 wheel. Replace the source pin with a released version once a compatible release is available.
 
 ```bash
 git clone https://github.com/dvmizew/Sonora.git
@@ -97,7 +99,7 @@ Sonora works out of the box without keys. To unlock full metadata and higher rat
 
 ```env
 DISCOGS_TOKEN="your_token"          # https://www.discogs.com/settings/developers -> Generate token
-ACOUSTID_API_KEY="your_api_key"     # https://acoustid.org/api-key -> Get API key
+ACOUSTID_API_KEY="your_api_key"     # https://acoustid.org/new-application -> Register application
 GENIUS_API_TOKEN="your_token"       # https://genius.com/api-clients -> Create client -> Generate Access Token
 LASTFM_API_KEY="your_api_key"       # https://www.lastfm.com/api/account/create -> Create API account
 FANART_API_KEY="your_api_key"       # https://fanart.tv/get-an-api-key -> Get Personal API Key
@@ -111,15 +113,36 @@ You can also use a configuration file at `~/.config/sonora/config.toml`:
 [sonora]
 artist_match_threshold = 85.0
 album_match_threshold = 75.0
+title_match_threshold = 85.0
+short_title_match_threshold = 95.0
+short_title_length = 8
+acoustid_confidence_threshold = 0.8
+acoustid_match_margin = 0.02
+allow_unverified_lyrics = false
+key_confidence_threshold = 0.2
+bpm_search_min = 60.0
+bpm_search_max = 200.0
 fanart_api_key = "your_api_key"
 fanart_client_key = "your_client_key"
 enable_shazam = true
 ```
 
+Title matching retains strict scores above 85, or above 95 for titles shorter than eight characters; configuration can strengthen these safeguards. Exact normalized matches remain eligible. BPM estimates are no longer automatically doubled or halved into a preferred tempo range. Set both `bpm_octave_min` and `bpm_octave_max` to opt into octave adjustment; the interval must span at least one octave. Other application policies and structural patterns are listed in [`defaults.json`](src/sonora/defaults.json).
+
+Independent enrichment providers receive separate copies of one resolved recording identity. Their proposals merge in a fixed order: conflicting recording identities or ISRCs prevent tag and asset writes, and conflicting individual fields preserve existing values. JSON reports include `metadata_conflicts` keyed by the disputed field. Tracks with unresolved conflicts are not recorded as complete. Provider agreement is evidence, not a correctness guarantee.
+
+Tagging uses bounded worker pools for tracks and provider queries, and prefetches at most two album contexts while retaining album finalization order. `--threads` controls each main pool; total worker count can therefore exceed that number. API quotas and identical cache-backed lookups are coordinated between Sonora processes using the same cache directory. The portable `filelock` dependency supplies native process locks; coordination files remain outside DiskCache's managed directory. Confirmed catalog misses expire after 30 minutes, successful metadata normally after 28 days, and transient network failures are not stored as misses. Fingerprints persist with file path, size, modification time, change time and decoder-setting invalidation. `--ignore-cache` deliberately bypasses cache reads; `--force` does not.
+
+Identification can abstain when recordings or releases are ambiguous. Stored recording IDs must agree with meaningful artist/title tags and available duration evidence; an ID alone cannot overwrite a conflicting identity. AcoustID uses whole-file duration, validates candidate metadata, and rejects near ties within `acoustid_match_margin`. Cached fingerprint evidence is validated again against current metadata and settings.
+
+Lyrics sources that return only text cannot establish recording identity. They are disabled by default; `allow_unverified_lyrics = true` explicitly enables those fallbacks with a warning. LRCLIB responses still require matching artist/title and duration. These safeguards reduce coverage when evidence is insufficient; they do not guarantee universal identification accuracy.
+
+Matching penalties and ranking weights can also be configured with `version_equivalence_penalty`, `version_mismatch_penalty`, `remix_modifier_mismatch_penalty`, and `title_score_weight`. Single-edition comparisons use `single_duration_tolerance_seconds` and `single_identifier_title_threshold`. JSON/TOML boolean settings require actual booleans, and structural lists require strings; invalid settings produce an error.
+
 | Key | Where to get it | What it unlocks |
 | :--- | :--- | :--- |
 | **`DISCOGS_TOKEN`** | [Discogs Developers](https://www.discogs.com/settings/developers) | 60 req/min limit, labels, catalog numbers, barcodes |
-| **`ACOUSTID_API_KEY`** | [AcoustID API](https://acoustid.org/api-key) | Audio fingerprinting (identifies tracks with 0 initial tags) |
+| **`ACOUSTID_API_KEY`** | [AcoustID application registration](https://acoustid.org/new-application) | Audio fingerprinting with an application/client key; user submission keys do not authorize lookups |
 | **`GENIUS_API_TOKEN`** | [Genius API Clients](https://genius.com/api-clients) | Song descriptions and background stories in comment tag |
 | **`LASTFM_API_KEY`** | [Last.fm API](https://www.last.fm/api) | Dynamic mood & style tags |
 | **`FANART_API_KEY`** | [Fanart.tv API](https://fanart.tv/get-an-api-key) | CD art (`cdart.png`), transparent artist logos (`logo.png`), 4K fanart |
@@ -220,7 +243,7 @@ sonora rename /path/to/album --dry-run
 
 ### `sonora organize`
 
-Moves standalone 1–2 track single releases into `Singles/Artist/` and removes duplicates already present in full albums.
+Moves standalone releases into `<destination>/<artist credit> - <release>/01 - <title>.<extension>`. The default destination is `<path>/Singles`, independent of library size. Featured artists, co-billed credits, and distinct recording identifiers preserve separate editions; confirmed duplicates are quarantined in `.duplicates` with audio quality taken into account.
 
 ```bash
 sonora organize /path/to/music
@@ -237,7 +260,7 @@ sonora organize /path/to/music --dry-run
 
 ### `sonora backup`
 
-Backs up all audio tags in a library to a JSON or compressed `.json.gz` file.
+Backs up exact TagLib text values and complex properties (including embedded pictures) to a canonical `sonora_backup_v2` JSON or compressed `.json.gz` archive. Relative paths are preserved; ambiguous basename matching is never used.
 
 ```bash
 sonora backup /path/to/library
@@ -256,10 +279,12 @@ Restores audio tags from a JSON or `.json.gz` backup file.
 
 ```bash
 sonora restore my_backup.json.gz
+sonora restore my_backup.json.gz --target /path/to/relocated/library
 ```
 
 **Options:**
-- `backup_file`: Path to the backup file (required).
+- `backup_file`: Path to a canonical `sonora_backup_v2` archive (required).
+- `--target PATH`: Restore to a relocated library root, preserving relative paths.
 
 ---
 
@@ -348,8 +373,10 @@ sonora lyrics /path/to/music --force
 
 Inspects and manages Sonora cache layers and persistent scan state. Complies with the XDG Base Directory specification (`$XDG_CACHE_HOME/sonora/` or `~/.cache/sonora/`).
 
-- **API Cache**: `$XDG_CACHE_HOME/sonora/api/` (Isolated SQLite `cache.db` and data shards for external API lookups)
+- **API Cache**: `$XDG_CACHE_HOME/sonora/api-msgpack-v1/` (isolated SQLite index and MessagePack metadata/binary-asset shards)
 - **Library State**: `$XDG_CACHE_HOME/sonora/library_state.db` (Persistent SQLite tracker for processed files and tags)
+
+API metadata uses MessagePack with an explicit tuple extension for catalog indexes and artwork pairs. Cache reads never deserialize Python objects. The current format starts with an empty `api-msgpack-v1` directory; previous transient caches are not read or migrated, and `library_state.db` remains separate. MessagePack is an explicit dependency because it preserves binary assets and tuple-keyed indexes while removing executable-object deserialization.
 
 ```bash
 # Display cache overview
@@ -357,7 +384,6 @@ sonora cache
 
 # Display detailed cache statistics table
 sonora cache stats
-sonora cache stats --all
 sonora cache stats --json
 
 # Clear transient API cache and memory caches (safely preserves library scan history)
@@ -381,7 +407,6 @@ sonora cache clear --all --purge
 ```
 
 **Options for `cache stats`:**
-- `-a, --all`: Display comprehensive statistics across all cache layers.
 - `--json`: Output cache statistics in machine-readable JSON format.
 
 **Options for `cache clear` / `clear-cache`:**
