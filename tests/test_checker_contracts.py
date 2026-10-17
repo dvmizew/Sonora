@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from sonora.core.models import CheckReport, TrackInfo
 from sonora.modules import checker
+from sonora.modules.checker import check_file
 from tests.support import IsolatedTestCase
 
 
@@ -359,3 +360,94 @@ class TestCheckerContracts(IsolatedTestCase):
             self.assertRaisesRegex(RuntimeError, "checker bug"),
         ):
             checker.check_library(self.test_directory)
+
+
+class TestCheckerMetadataValidation(IsolatedTestCase):
+    def test_conflicting_lyrics_headers_and_timestamps_are_reported(self) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        track = TrackInfo(
+            audio_path,
+            artist="Artist",
+            title="Song",
+            duration=60,
+            lyrics="[ar:Artist]\n[ti:Unrelated Song]\n[00:01.00] words",
+        )
+        audio_path.with_suffix(".lrc").write_text(
+            "[ar:Artist]\n[ti:Song]\n[02:00.00] words"
+        )
+        issues = check_file(audio_path, track_metadata=track)
+        self.assertIn(
+            "Embedded lyrics headers conflict with ARTIST or TITLE; verify recording identity.",
+            issues,
+        )
+        self.assertIn(
+            "Lyrics timestamps exceed audio duration: '01 - Song.lrc'.", issues
+        )
+
+    def test_matching_and_headerless_lyrics_are_not_reported_as_mismatches(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        for lyrics in (
+            "[ar:Artist]\n[ti:Song]\n[00:01.00] words",
+            "[00:01.00] words",
+            "",
+        ):
+            with self.subTest(lyrics=lyrics):
+                track = TrackInfo(
+                    audio_path,
+                    artist="Artist",
+                    title="Song",
+                    duration=60,
+                    lyrics=lyrics,
+                )
+                audio_path.with_suffix(".lrc").write_text(lyrics or "[00:01.00] words")
+                issues = check_file(audio_path, track_metadata=track)
+                self.assertFalse(
+                    any(
+                        "headers conflict" in issue or "timestamps exceed" in issue
+                        for issue in issues
+                    )
+                )
+
+    def test_invalid_utf8_lyrics_are_reported(self) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        audio_path.with_suffix(".lrc").write_bytes(b"\xff\xfe")
+        issues = check_file(audio_path, track_metadata=TrackInfo(audio_path))
+        self.assertTrue(
+            any("Cannot read synchronized lyrics" in issue for issue in issues)
+        )
+
+    def test_positions_exceeding_declared_release_totals_are_reported(self) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        track = TrackInfo(
+            audio_path, track_number=14, total_tracks=12, disc_number=2, total_discs=1
+        )
+        issues = check_file(audio_path, track_metadata=track)
+        self.assertIn(
+            "TRACKNUMBER 14 exceeds TRACKTOTAL 12; verify the release edition.", issues
+        )
+        self.assertIn(
+            "DISCNUMBER 2 exceeds DISCTOTAL 1; verify the release edition.", issues
+        )
+
+    def test_consistent_missing_and_pregap_positions_are_not_out_of_bounds(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        for position, total in ((None, None), (1, None), (None, 12), (12, 12), (0, 12)):
+            with self.subTest(position=position, total=total):
+                track = dataclasses.replace(
+                    TrackInfo(audio_path),
+                    track_number=position,
+                    total_tracks=total,
+                    disc_number=1,
+                    total_discs=1,
+                )
+                issues = check_file(audio_path, track_metadata=track)
+                self.assertFalse(any("exceeds" in issue for issue in issues))

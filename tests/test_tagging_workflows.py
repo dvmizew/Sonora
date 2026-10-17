@@ -76,7 +76,10 @@ class TestTaggingWorkflows(ModuleTestCase):
                 "sonora.services.musicbrainz.search_musicbrainz_release",
                 return_value=None,
             ),
-            patch("sonora.core.artists.resolve_artist_name", return_value="Nane"),
+            patch(
+                "sonora.services.artist_resolution.resolve_artist_name",
+                return_value="Nane",
+            ),
             patch(
                 "sonora.services.itunes.fetch_itunes_track_metadata", return_value=None
             ),
@@ -389,7 +392,7 @@ class TestTaggingWorkflows(ModuleTestCase):
                 return_value=None,
             ),
             patch(
-                "sonora.core.artists.resolve_artist_name",
+                "sonora.services.artist_resolution.resolve_artist_name",
                 side_effect=lambda x: str(x).strip(),
             ),
             patch(
@@ -770,7 +773,7 @@ class TestTaggingWorkflows(ModuleTestCase):
             patch("sonora.modules.tagger._enrich_theaudiodb"),
             patch("sonora.modules.tagger._enrich_genius"),
             patch(
-                "sonora.core.artists.resolve_artist_name",
+                "sonora.services.artist_resolution.resolve_artist_name",
                 side_effect=lambda name, **kwargs: name,
             ),
         ):

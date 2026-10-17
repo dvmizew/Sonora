@@ -24,7 +24,7 @@ def tagging_state_status(
     fetch_itunes_art: bool,
 ) -> str:
     state_policy = {
-        "metadata_policy": "consensus-v2",
+        "metadata_policy": "consensus-v3",
         "bpm": fetch_bpm,
         "key": fetch_key,
         "replaygain": fetch_replaygain,

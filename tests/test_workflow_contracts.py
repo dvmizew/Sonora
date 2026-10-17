@@ -109,12 +109,13 @@ class TestTrackProcessingContracts(IsolatedTestCase):
             )
             with (
                 self.subTest(artist=artist, title=title),
-                patch.object(
-                    normalization, "resolve_artist_name", side_effect=lambda name: name
+                patch(
+                    "sonora.services.artist_resolution.resolve_artist_name",
+                    side_effect=lambda name: name,
                 ) as resolve,
             ):
                 normalized = normalization.normalize_track_metadata(
-                    recording, allow_network=True
+                    recording, artist_resolver=resolve
                 )
             self.assertIs(normalized, recording)
             self.assertEqual(normalized.artist, artist)

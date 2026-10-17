@@ -9,8 +9,8 @@ from sonora.core.config import (
     get_config,
 )
 from sonora.core.models import TrackInfo
+from sonora.core.retry import retry_network_call
 from sonora.core.text import normalize_language_name
-from sonora.core.utils import retry_network_call
 from sonora.modules.checker import check_file
 from sonora.modules.track_processing import (
     _compute_tag_diffs,

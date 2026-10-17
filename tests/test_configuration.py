@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import (
     SonoraConfig,
     _parse_config_data,
@@ -12,6 +13,7 @@ from sonora.core.config import (
     get_duplicate_feat_pattern,
     get_feat_tokens_pattern,
 )
+from sonora.core.library_paths import get_single_release_title, is_in_singles_hierarchy
 from sonora.core.models import TrackInfo
 from sonora.core.text import (
     clean_unicode_punct,
@@ -24,12 +26,6 @@ from sonora.core.text import (
 from sonora.core.titles import (
     extract_version_modifier,
     score_artist_title_match,
-)
-from sonora.core.utils import (
-    InterruptedOperationError,
-    get_single_release_title,
-    is_in_singles_hierarchy,
-    is_interruption,
 )
 from tests.support import IsolatedTestCase
 

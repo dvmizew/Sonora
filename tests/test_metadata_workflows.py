@@ -2,22 +2,21 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
-from sonora.core.artists import resolve_artist_name
+from sonora.core.audio_files import find_audio_files
 from sonora.core.models import TrackInfo
 from sonora.core.titles import score_artist_title_match, strip_corrupt_brackets
-from sonora.core.utils import find_audio_files
 from sonora.modules.matching import is_alien_album_track
+from sonora.services.artist_resolution import resolve_artist_name
 from tests.fixtures import write_silent_wav
 from tests.module_support import ModuleTestCase
 
 
 class TestMetadataWorkflows(ModuleTestCase):
-    @patch("sonora.core.artists.get_cached_api", return_value=None)
+    @patch("sonora.services.artist_resolution.get_cached_api", return_value=None)
     @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
     def test_resolve_artist_name(
         self, mock_search: MagicMock, mock_get_cache: MagicMock
     ) -> None:
-        resolve_artist_name.cache_clear()
         mock_search.return_value = [
             {
                 "name": "M.G.L.",

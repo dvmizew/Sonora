@@ -8,13 +8,13 @@ from sonora.audio.metadata import (
     read_track_metadata,
     write_track_metadata,
 )
-from sonora.core import artists as artists_module
 from sonora.core.artists import get_primary_artist
 from sonora.core.models import TrackInfo
 from sonora.modules import catalog_enrichment as catalog_enrichment_module
 from sonora.modules import matching
 from sonora.modules import musicbrainz_enrichment as musicbrainz_enrichment_module
 from sonora.modules import track_processing as track_processing_module
+from sonora.services import artist_resolution as artists_module
 from tests.regression_support import AudioRegressionTestCase
 
 
@@ -57,11 +57,9 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
 
     def test_offline_artist_resolution_ignores_api_cache(self) -> None:
         with patch(
-            "sonora.core.artists.get_cached_api", return_value=True
+            "sonora.services.artist_resolution.get_cached_api", return_value=True
         ) as api_cache:
-            self.assertEqual(
-                get_primary_artist("Example & Partners", allow_network=False), "Example"
-            )
+            self.assertEqual(get_primary_artist("Example & Partners"), "Example")
             api_cache.assert_not_called()
 
     def test_identifier_heals_corrupt_title_and_position(self) -> None:

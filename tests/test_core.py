@@ -4,9 +4,16 @@ from unittest.mock import MagicMock, patch
 from sonora.core.artists import (
     extract_featured_artist_tokens,
     get_primary_artist,
-    is_single_group_artist,
     normalize_featured_artists,
 )
+from sonora.core.audio_files import group_files_by_parent
+from sonora.core.library_paths import (
+    extract_disc_number_from_folder,
+    group_files_by_album_root,
+    parse_track_filename,
+    safe_case_rename,
+)
+from sonora.core.sidecars import relocate_companion_lyrics
 from sonora.core.text import (
     clean_disambiguation,
     clean_unicode_punct,
@@ -24,14 +31,8 @@ from sonora.core.titles import (
     extract_title_features,
     score_artist_title_match,
 )
-from sonora.core.utils import (
-    extract_disc_number_from_folder,
-    group_files_by_album_root,
-    group_files_by_parent,
-    parse_track_filename,
-    relocate_companion_lyrics,
-    safe_case_rename,
-)
+from sonora.services import artist_resolution
+from sonora.services.artist_resolution import is_single_group_artist
 from tests.support import IsolatedTestCase
 
 
@@ -331,7 +332,7 @@ class TestCoreUtils(IsolatedTestCase):
         )
 
         # Registered duo/group entity preservation
-        with patch("sonora.core.utils.is_single_group_artist", return_value=True):
+        with patch("sonora.core.artists.is_single_group_artist", return_value=True):
             self.assertEqual(
                 normalize_featured_artists("Agnes, Vargas & Lagola"),
                 "Agnes, Vargas & Lagola",
@@ -474,9 +475,9 @@ class TestCoreUtils(IsolatedTestCase):
         self.assertIsNone(normalize_date("1899"))
         self.assertIsNone(normalize_date("2099"))
 
-    @patch("sonora.core.artists.get_cached_api", return_value=None)
+    @patch("sonora.services.artist_resolution.get_cached_api", return_value=None)
     def test_resolve_artist_name_exact_match(self, mock_get_cache: MagicMock) -> None:
-        from sonora.core.artists import resolve_artist_name
+        from sonora.services.artist_resolution import resolve_artist_name
 
         with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
             # Simulate MusicBrainz returning Enrico Rava with score 100 and RAVA with score 90
@@ -488,14 +489,13 @@ class TestCoreUtils(IsolatedTestCase):
             self.assertEqual(resolve_artist_name("RAVA"), "RAVA")
             self.assertEqual(resolve_artist_name("rava"), "RAVA")
 
-    @patch("sonora.core.artists.get_cached_api", return_value=None)
-    @patch("sonora.core.artists.set_cached_api")
+    @patch("sonora.services.artist_resolution.get_cached_api", return_value=None)
+    @patch("sonora.services.artist_resolution.set_cached_api")
     def test_resolve_artist_name_preserves_titlecase_over_allcaps(
         self, mock_set_cache: MagicMock, mock_get_cache: MagicMock
     ) -> None:
-        from sonora.core.artists import resolve_artist_name
+        from sonora.services.artist_resolution import resolve_artist_name
 
-        resolve_artist_name.cache_clear()
         with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
             # MusicBrainz returns CRUSH (Group, score 100)
             mock_mb.return_value = [
@@ -504,34 +504,32 @@ class TestCoreUtils(IsolatedTestCase):
             # TitleCase "Crush" must not be converted to screaming "CRUSH"
             self.assertEqual(resolve_artist_name("Crush"), "Crush")
 
-    def test_resolve_artist_name_heals_corrupted_cached_expansion(self) -> None:
+    def test_offline_resolution_ignores_corrupt_cached_expansion(self) -> None:
         from sonora.core.artists import resolve_artist_name
 
-        resolve_artist_name.cache_clear()
         with (
-            patch("sonora.core.artists.get_cached_api", return_value="Gruppe Drei"),
-            patch("sonora.core.artists.set_cached_api") as mock_set_cache,
+            patch(
+                "sonora.services.artist_resolution.get_cached_api",
+                return_value="Gruppe Drei",
+            ),
+            patch("sonora.services.artist_resolution.set_cached_api") as mock_set_cache,
         ):
-            # When cache has corrupt multi-word expansion "Gruppe Drei" for single word "Drei"
-            # It must purge cache and return "Drei" (when network is disabled)
-            resolved_artist_name = resolve_artist_name("Drei", allow_network=False)
+            # Local normalization must not consult or mutate a provider cache.
+            resolved_artist_name = resolve_artist_name("Drei")
             mock_set_cache.assert_not_called()
             self.assertEqual(resolved_artist_name, "Drei")
 
-    @patch("sonora.core.artists.get_cached_api", return_value=None)
-    def test_resolve_artist_name_allow_network_false(
+    @patch("sonora.services.artist_resolution.get_cached_api", return_value=None)
+    def test_offline_artist_resolution_does_not_query_providers(
         self, mock_get_cache: MagicMock
     ) -> None:
         from sonora.core.artists import get_primary_artist, resolve_artist_name
 
-        resolve_artist_name.cache_clear()
         with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
-            # When allow_network is False, MusicBrainz search must NEVER be called
-            result = resolve_artist_name("Unknown Indierock Band", allow_network=False)
+            result = resolve_artist_name("Unknown Indierock Band")
             self.assertEqual(result, "Unknown Indierock Band")
             mock_mb.assert_not_called()
 
-            # Similarly, get_primary_artist must never invoke network
             primary = get_primary_artist("New Artist feat. Guest Singer")
             self.assertEqual(primary, "New Artist")
             mock_mb.assert_not_called()
@@ -592,7 +590,6 @@ class TestCoreUtils(IsolatedTestCase):
 
     @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
     def test_is_single_group_artist(self, mock_search: MagicMock) -> None:
-        is_single_group_artist.cache_clear()
         mock_search.return_value = [
             {
                 "name": "Above & Beyond",
@@ -601,8 +598,6 @@ class TestCoreUtils(IsolatedTestCase):
             }
         ]
         self.assertTrue(is_single_group_artist("Above & Beyond"))
-
-        is_single_group_artist.cache_clear()
         mock_search.return_value = [
             {"name": "Drake", "type": "Person", "ext:score": "80"}
         ]
@@ -613,7 +608,6 @@ class TestCoreUtils(IsolatedTestCase):
 
     @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
     def test_get_primary_artist(self, mock_search: MagicMock) -> None:
-        is_single_group_artist.cache_clear()
         mock_search.return_value = [
             {
                 "name": "Above & Beyond",
@@ -622,11 +616,13 @@ class TestCoreUtils(IsolatedTestCase):
             }
         ]
         self.assertEqual(
-            get_primary_artist("Above & Beyond", allow_network=True),
+            get_primary_artist(
+                "Above & Beyond",
+                artist_resolver=artist_resolution.resolve_artist_name,
+                group_classifier=artist_resolution.is_single_group_artist,
+            ),
             "Above & Beyond",
         )
-
-        is_single_group_artist.cache_clear()
         mock_search.return_value = [
             {
                 "name": "Alan & Kepa",
@@ -635,10 +631,13 @@ class TestCoreUtils(IsolatedTestCase):
             }
         ]
         self.assertEqual(
-            get_primary_artist("Alan & Kepa", allow_network=True), "Alan & Kepa"
+            get_primary_artist(
+                "Alan & Kepa",
+                artist_resolver=artist_resolution.resolve_artist_name,
+                group_classifier=artist_resolution.is_single_group_artist,
+            ),
+            "Alan & Kepa",
         )
-
-        is_single_group_artist.cache_clear()
         mock_search.return_value = [
             {
                 "name": "Play & Win",
@@ -647,13 +646,21 @@ class TestCoreUtils(IsolatedTestCase):
             }
         ]
         self.assertEqual(
-            get_primary_artist("Play & Win", allow_network=True), "Play & Win"
+            get_primary_artist(
+                "Play & Win",
+                artist_resolver=artist_resolution.resolve_artist_name,
+                group_classifier=artist_resolution.is_single_group_artist,
+            ),
+            "Play & Win",
         )
         self.assertEqual(
-            get_primary_artist("Play&Win", allow_network=True), "Play & Win"
+            get_primary_artist(
+                "Play&Win",
+                artist_resolver=artist_resolution.resolve_artist_name,
+                group_classifier=artist_resolution.is_single_group_artist,
+            ),
+            "Play & Win",
         )
-
-        is_single_group_artist.cache_clear()
         mock_search.return_value = [
             {
                 "name": "Simon & Garfunkel",
@@ -662,11 +669,13 @@ class TestCoreUtils(IsolatedTestCase):
             }
         ]
         self.assertEqual(
-            get_primary_artist("Simon & Garfunkel", allow_network=True),
+            get_primary_artist(
+                "Simon & Garfunkel",
+                artist_resolver=artist_resolution.resolve_artist_name,
+                group_classifier=artist_resolution.is_single_group_artist,
+            ),
             "Simon & Garfunkel",
         )
-
-        is_single_group_artist.cache_clear()
         mock_search.return_value = []
         self.assertEqual(
             get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"

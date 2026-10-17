@@ -4,9 +4,14 @@ from unittest.mock import patch
 from sonora.audio.cuesheet import read_cuesheet_content
 from sonora.core.models import TrackInfo
 from sonora.modules.normalization import normalize_track_metadata
-from sonora.modules.track_processing import normalize_library, normalize_single_track
+from sonora.modules.track_processing import (
+    _enrich_lyrics,
+    normalize_library,
+    normalize_single_track,
+)
 from tests.fixtures import write_silent_wav
 from tests.module_support import ModuleTestCase
+from tests.support import IsolatedTestCase
 
 
 class TestAudioWorkflows(ModuleTestCase):
@@ -25,7 +30,7 @@ class TestAudioWorkflows(ModuleTestCase):
             total_tracks=1,
             release_type="Single",
         )
-        normalized = normalize_track_metadata(track, allow_network=False)
+        normalized = normalize_track_metadata(track)
         self.assertEqual(normalized.artist, "D'banj")
         self.assertEqual(normalized.album_artist, "D'banj")
         self.assertEqual(normalized.title, "Fall Back")
@@ -181,3 +186,64 @@ class TestAudioWorkflows(ModuleTestCase):
             self.assertEqual(already_clean_results.total_unchanged, 1)
             self.assertEqual(len(already_clean_results.modified_files), 0)
             mock_write.assert_not_called()
+
+
+class TestLyricsEnrichment(IsolatedTestCase):
+    def test_unresolved_local_lyrics_conflicts_remain_visible_in_tagging_results(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "recording.flac"
+        for lyrics in (
+            b"[ar:Unrelated Artist]\n[ti:Song]\n[00:01.00] words",
+            b"[ar:Alpha]\n[ti:Song]\n[02:00.00] words",
+            b"\xff\xfe",
+        ):
+            with self.subTest(lyrics=lyrics):
+                lrc_path = audio_path.with_suffix(".lrc")
+                lrc_path.write_bytes(lyrics)
+                track = TrackInfo(audio_path, artist="Alpha", title="Song")
+                with (
+                    patch("sonora.audio.metadata.get_audio_duration", return_value=60),
+                    patch(
+                        "sonora.services.lyrics.process_track_lyrics",
+                        return_value=(None, None),
+                    ),
+                ):
+                    _enrich_lyrics(track, audio_path, True, dry_run=True)
+                self.assertIn("lyrics", track.metadata_conflicts)
+                self.assertEqual(lrc_path.read_bytes(), lyrics)
+
+    def test_accepted_replacement_clears_only_the_lyrics_conflict(self) -> None:
+        audio_path = self.test_directory / "recording.flac"
+        track = TrackInfo(
+            audio_path,
+            artist="Alpha",
+            title="Song",
+            lyrics="[ti:Wrong Song]\n[00:01.00] words",
+            metadata_conflicts={"genre": "Providers disagree"},
+        )
+        replacement = "[ar:Alpha]\n[ti:Song]\n[00:01.00] words"
+        with (
+            patch("sonora.audio.metadata.get_audio_duration", return_value=60),
+            patch(
+                "sonora.services.lyrics.process_track_lyrics",
+                return_value=(replacement, "synced"),
+            ),
+        ):
+            _enrich_lyrics(track, audio_path, True, dry_run=True)
+        self.assertEqual(track.lyrics, replacement)
+        self.assertEqual(track.metadata_conflicts, {"genre": "Providers disagree"})
+
+    def test_headerless_lyrics_are_not_claimed_to_be_a_conflict(self) -> None:
+        audio_path = self.test_directory / "recording.flac"
+        track = TrackInfo(
+            audio_path, artist="Alpha", title="Song", lyrics="[00:01.00] words"
+        )
+        with (
+            patch("sonora.audio.metadata.get_audio_duration", return_value=60),
+            patch(
+                "sonora.services.lyrics.process_track_lyrics", return_value=(None, None)
+            ),
+        ):
+            _enrich_lyrics(track, audio_path, True, dry_run=True)
+        self.assertNotIn("lyrics", track.metadata_conflicts)

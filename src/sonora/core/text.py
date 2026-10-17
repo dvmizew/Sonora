@@ -196,6 +196,13 @@ def normalize_str(text: str | None) -> str:
     return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned_text).strip()
 
 
+def normalize_advisory(value: str | None) -> str | None:
+    """Represent content advisory as Explicit or absent, never as a clean label."""
+    return (
+        "Explicit" if value and value.strip().casefold() in {"1", "explicit"} else None
+    )
+
+
 @lru_cache(maxsize=8192)
 def normalize_date(date_value: str | None) -> str | None:
     """Ensure date is in YYYY-MM-DD or YYYY format, rejecting invalid/zero dates."""

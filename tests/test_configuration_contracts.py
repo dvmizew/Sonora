@@ -12,6 +12,7 @@ else:
 
 from sonora.core import config
 from sonora.core.artists import get_primary_artist
+from sonora.core.cache import clear_normalization_cache
 from sonora.core.constants import DIRS
 from sonora.core.models import TrackInfo
 from sonora.core.text import (
@@ -31,7 +32,6 @@ from sonora.core.titles import (
     extract_title_features,
     score_artist_title_match,
 )
-from sonora.core.utils import clear_utils_cache
 from tests.support import IsolatedTestCase
 
 
@@ -240,7 +240,7 @@ class TestTextContracts(IsolatedTestCase):
             score_artist_title_match(
                 "Artist", "Song (Album Version)", "Artist", "Song"
             ),
-            0,
+            100,
         )
 
     def test_invalid_dates_and_identifiers_never_become_metadata(self) -> None:
@@ -301,7 +301,7 @@ class TestTextContracts(IsolatedTestCase):
         normalize_legacy_diacritics("Cafe")
         self.assertGreater(clean_title.cache_info().currsize, 0)
         self.assertGreater(normalize_country_name.cache_info().currsize, 0)
-        clear_utils_cache()
+        clear_normalization_cache()
         self.assertEqual(clean_title.cache_info().currsize, 0)
         self.assertEqual(normalize_country_name.cache_info().currsize, 0)
         self.assertEqual(normalize_str.cache_info().currsize, 0)

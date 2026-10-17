@@ -1,14 +1,18 @@
 import dataclasses
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import taglib
+from mutagen.mp4 import MP4
 
 from sonora.audio import metadata
 from sonora.core.models import TrackInfo
+from sonora.modules.track_processing import normalize_single_track
 from tests.fixtures import image_bytes
+from tests.regression_support import AudioRegressionTestCase
 from tests.support import IsolatedTestCase
 
 
@@ -311,3 +315,96 @@ class TestMetadataContracts(IsolatedTestCase):
         ):
             metadata.write_track_metadata(recording)
         self.assertEqual(path.read_bytes(), b"original audio")
+
+
+class TestAdvisoryPersistence(AudioRegressionTestCase):
+    def test_clean_native_tags_are_removed_without_force_and_dry_run_is_read_only(
+        self,
+    ) -> None:
+        path = self.audio("recording.flac")
+        metadata.write_track_metadata(TrackInfo(path, artist="Alpha", title="Song"))
+        with taglib.File(str(path)) as recording:
+            recording.tags["ITUNESADVISORY"] = ["2"]
+            recording.tags["ADVISORY"] = ["Clean"]
+            recording.save()
+        metadata.clear_metadata_cache()
+        before = path.read_bytes()
+        preview = normalize_single_track(path, dry_run=True)
+        assert preview is not None
+        self.assertTrue(
+            any("advisory" in change for change in preview._diff_descriptions)
+        )
+        self.assertEqual(path.read_bytes(), before)
+        result = normalize_single_track(path)
+        assert result is not None
+        self.assertIsNone(result.advisory)
+        with taglib.File(str(path)) as recording:
+            self.assertNotIn("ITUNESADVISORY", recording.tags)
+            self.assertNotIn("ADVISORY", recording.tags)
+        unchanged = path.read_bytes()
+        result = normalize_single_track(path)
+        assert result is not None
+        self.assertFalse(result._diff_descriptions)
+        self.assertEqual(path.read_bytes(), unchanged)
+
+    def test_explicit_advisory_round_trips_native_flac_mp3_and_mp4_tags(self) -> None:
+        source = self.audio("source.wav")
+        for suffix, codec in (("flac", "flac"), ("mp3", "libmp3lame"), ("m4a", "aac")):
+            with self.subTest(format=suffix):
+                path = self.root / f"recording.{suffix}"
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-v",
+                        "error",
+                        "-i",
+                        str(source),
+                        "-c:a",
+                        codec,
+                        str(path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                for value in (" explicit ", "1", "Clean", None):
+                    expected = "Explicit" if value in (" explicit ", "1") else None
+                    metadata.write_track_metadata(
+                        TrackInfo(path, artist="Alpha", title="Song", advisory=value)
+                    )
+                    self.assertEqual(
+                        metadata.read_track_metadata(path).advisory, expected
+                    )
+                    if suffix == "m4a":
+                        native = MP4(path)
+                        self.assertEqual(native.get("rtng"), [4] if expected else None)
+                        self.assertNotIn("----:com.apple.iTunes:ITUNESADVISORY", native)
+                        self.assertNotIn("----:com.apple.iTunes:ADVISORY", native)
+                    else:
+                        with taglib.File(str(path)) as native_tags:
+                            self.assertEqual(
+                                native_tags.tags.get("ITUNESADVISORY"),
+                                ["1"] if expected else None,
+                            )
+
+    def test_native_mp4_rating_takes_precedence_over_conflicting_freeform_tags(
+        self,
+    ) -> None:
+        source = self.audio("source.wav")
+        path = self.root / "recording.m4a"
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(source), "-c:a", "aac", str(path)],
+            check=True,
+            capture_output=True,
+        )
+        for rating, expected in ((4, "Explicit"), (2, None), (0, None)):
+            with self.subTest(rating=rating):
+                native = MP4(path)
+                native["rtng"] = [rating]
+                native["----:com.apple.iTunes:ADVISORY"] = [b"Explicit"]
+                native.save()
+                metadata.clear_metadata_cache()
+                recording = metadata.read_track_metadata(path)
+                self.assertEqual(recording.advisory, expected)
+                self.assertTrue(recording._advisory_needs_normalization)
+                metadata.write_track_metadata(recording)
+                self.assertEqual(MP4(path).get("rtng"), [4] if expected else None)

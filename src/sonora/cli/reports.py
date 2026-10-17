@@ -111,62 +111,83 @@ def _emit_tag_summary_and_report(
         k: (v / total_tracks * 100) if total_tracks > 0 else 0.0
         for k, v in counts.items()
     }
+    tracks_with_conflicts = [
+        track for track in tagged_tracks if track.metadata_conflicts
+    ]
+    recording_identifier_fields = ("musicbrainz_trackid", "isrc", "itunes_trackid")
+    tracks_with_recording_evidence = sum(
+        any(
+            getattr(track, field) and track.metadata_sources.get(field)
+            for field in recording_identifier_fields
+        )
+        for track in tagged_tracks
+    )
 
     tag_summary_rows = [
         ("Total Tracks Processed", str(total_tracks), None),
         (
             "Tracks with MusicBrainz ID",
-            f"{counts['mb']}/{total_tracks} ({pcts['mb']:.0f}%)",
+            f"{counts['mb']}/{total_tracks} ({pcts['mb']:.2f}%)",
             None,
         ),
         (
             "Genre & Styles Tagged",
-            f"{counts['genre']}/{total_tracks} ({pcts['genre']:.0f}%)",
+            f"{counts['genre']}/{total_tracks} ({pcts['genre']:.2f}%)",
             None,
         ),
         (
             "Tracks with Lyrics",
-            f"{counts['lyrics']}/{total_tracks} ({pcts['lyrics']:.0f}%)",
+            f"{counts['lyrics']}/{total_tracks} ({pcts['lyrics']:.2f}%)",
             None,
         ),
         (
-            "ISRC Registered",
-            f"{counts['isrc']}/{total_tracks} ({pcts['isrc']:.0f}%)",
+            "Tracks with ISRC",
+            f"{counts['isrc']}/{total_tracks} ({pcts['isrc']:.2f}%)",
             None,
         ),
         (
             "Tracks with BPM",
-            f"{counts['bpm']}/{total_tracks} ({pcts['bpm']:.0f}%)",
+            f"{counts['bpm']}/{total_tracks} ({pcts['bpm']:.2f}%)",
             None,
         ),
         (
             "Tracks with ReplayGain",
-            f"{counts['rg']}/{total_tracks} ({pcts['rg']:.0f}%)",
+            f"{counts['rg']}/{total_tracks} ({pcts['rg']:.2f}%)",
             None,
         ),
         (
             "Musical Key / Tonality",
-            f"{counts['key']}/{total_tracks} ({pcts['key']:.0f}%)",
+            f"{counts['key']}/{total_tracks} ({pcts['key']:.2f}%)",
             None,
         ),
         (
             "Composers & Writers",
-            f"{counts['composer']}/{total_tracks} ({pcts['composer']:.0f}%)",
+            f"{counts['composer']}/{total_tracks} ({pcts['composer']:.2f}%)",
             None,
         ),
         (
             "Producers & Studio Credits",
-            f"{counts['producers']}/{total_tracks} ({pcts['producers']:.0f}%)",
+            f"{counts['producers']}/{total_tracks} ({pcts['producers']:.2f}%)",
             None,
         ),
         (
             "Tracks with Genius Metadata",
-            f"{counts['genius']}/{total_tracks} ({pcts['genius']:.0f}%)",
+            f"{counts['genius']}/{total_tracks} ({pcts['genius']:.2f}%)",
             None,
         ),
         (
             "Parental Advisory",
-            f"{counts['advisory']}/{total_tracks} ({pcts['advisory']:.0f}%)",
+            f"{counts['advisory']}/{total_tracks} ({pcts['advisory']:.2f}%)",
+            None,
+        ),
+        (
+            "Tracks with Provider Conflicts",
+            str(len(tracks_with_conflicts)),
+            "yellow" if tracks_with_conflicts else None,
+        ),
+        (
+            "Recording ID Evidence This Run",
+            f"{tracks_with_recording_evidence}/{total_tracks}",
             None,
         ),
         (
@@ -180,11 +201,11 @@ def _emit_tag_summary_and_report(
     if json_report:
         summary_text = (
             f"Processed {total_tracks} tracks ({len(failures)} failures). "
-            f"MusicBrainz {counts['mb']}/{total_tracks} ({pcts['mb']:.0f}%), "
-            f"Genre {counts['genre']}/{total_tracks} ({pcts['genre']:.0f}%), "
-            f"Lyrics {counts['lyrics']}/{total_tracks} ({pcts['lyrics']:.0f}%), "
-            f"BPM tags present {counts['bpm']}/{total_tracks} ({pcts['bpm']:.0f}%), "
-            f"ReplayGain {counts['rg']}/{total_tracks} ({pcts['rg']:.0f}%)."
+            f"MusicBrainz {counts['mb']}/{total_tracks} ({pcts['mb']:.2f}%), "
+            f"Genre {counts['genre']}/{total_tracks} ({pcts['genre']:.2f}%), "
+            f"Lyrics {counts['lyrics']}/{total_tracks} ({pcts['lyrics']:.2f}%), "
+            f"BPM tags present {counts['bpm']}/{total_tracks} ({pcts['bpm']:.2f}%), "
+            f"ReplayGain {counts['rg']}/{total_tracks} ({pcts['rg']:.2f}%)."
         )
         report_data = {
             "schema": "tag_report_v1",
@@ -203,31 +224,31 @@ def _emit_tag_summary_and_report(
                 "total_failures": len(failures),
                 "enrichment": {
                     "musicbrainz_matched_count": counts["mb"],
-                    "musicbrainz_percentage": round(pcts["mb"], 1),
+                    "musicbrainz_percentage": round(pcts["mb"], 2),
                     "genre_tagged_count": counts["genre"],
-                    "genre_percentage": round(pcts["genre"], 1),
+                    "genre_percentage": round(pcts["genre"], 2),
                     "lyrics_tagged_count": counts["lyrics"],
-                    "lyrics_percentage": round(pcts["lyrics"], 1),
+                    "lyrics_percentage": round(pcts["lyrics"], 2),
                     "isrc_tagged_count": counts["isrc"],
-                    "isrc_percentage": round(pcts["isrc"], 1),
+                    "isrc_percentage": round(pcts["isrc"], 2),
                     "bpm_calculated_count": counts["bpm"],
-                    "bpm_percentage": round(pcts["bpm"], 1),
+                    "bpm_percentage": round(pcts["bpm"], 2),
                     "replaygain_calculated_count": counts["rg"],
-                    "replaygain_percentage": round(pcts["rg"], 1),
+                    "replaygain_percentage": round(pcts["rg"], 2),
                     "initial_key_count": counts["key"],
-                    "initial_key_percentage": round(pcts["key"], 1),
+                    "initial_key_percentage": round(pcts["key"], 2),
                     "composer_tagged_count": counts["composer"],
-                    "composer_percentage": round(pcts["composer"], 1),
+                    "composer_percentage": round(pcts["composer"], 2),
                     "producers_tagged_count": counts["producers"],
-                    "producers_percentage": round(pcts["producers"], 1),
+                    "producers_percentage": round(pcts["producers"], 2),
                     "advisory_tagged_count": counts["advisory"],
-                    "advisory_percentage": round(pcts["advisory"], 1),
+                    "advisory_percentage": round(pcts["advisory"], 2),
                     "discogs_matched_count": counts["discogs"],
-                    "discogs_percentage": round(pcts["discogs"], 1),
+                    "discogs_percentage": round(pcts["discogs"], 2),
                     "genius_matched_count": counts["genius"],
-                    "genius_percentage": round(pcts["genius"], 1),
+                    "genius_percentage": round(pcts["genius"], 2),
                     "theaudiodb_matched_count": counts["theaudiodb"],
-                    "theaudiodb_percentage": round(pcts["theaudiodb"], 1),
+                    "theaudiodb_percentage": round(pcts["theaudiodb"], 2),
                 },
                 "audio_formats": {
                     "lossless_tracks": counts["lossless"],
@@ -236,6 +257,24 @@ def _emit_tag_summary_and_report(
             },
             "verification": {
                 "meaning": "Tag presence is coverage, not independently established API accuracy",
+                "tracks_with_recording_identifier_evidence": tracks_with_recording_evidence,
+                "tracks_with_metadata_conflicts": len(tracks_with_conflicts),
+                "metadata_conflicts": [
+                    {
+                        "file_path": str(track.file_path),
+                        "conflicts": dict(track.metadata_conflicts),
+                    }
+                    for track in tracks_with_conflicts
+                ],
+                "recording_identifiers_without_provider_evidence": {
+                    field: [
+                        str(track.file_path)
+                        for track in tagged_tracks
+                        if getattr(track, field)
+                        and not track.metadata_sources.get(field)
+                    ]
+                    for field in recording_identifier_fields
+                },
                 "tracks_with_provider_evidence": sum(
                     bool(track.metadata_sources) for track in tagged_tracks
                 ),

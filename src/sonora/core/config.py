@@ -298,8 +298,8 @@ def _safe_load_dotenv(path: Path, seen_paths: set[Path]) -> None:
 
 def load_app_environment(target_path: Path | None = None) -> None:
     """
-    Centralized discovery and loading of .env files from XDG config directories,
-    current working directory, and target directory hierarchies.
+    Load .env files from XDG config directories, the working directory,
+    and target directory hierarchies.
     """
     seen_paths: set[Path] = set()
 

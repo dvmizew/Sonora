@@ -18,6 +18,8 @@ import taglib
 from rich.markup import escape
 
 from sonora.audio.metadata import clear_metadata_cache
+from sonora.core.audio_files import find_audio_files
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.files import atomic_audio_edit, atomic_write_file
 from sonora.core.logger import (
     LOG,
@@ -25,11 +27,6 @@ from sonora.core.logger import (
     interactive_pause_listener,
     resume_workers,
     wait_if_paused,
-)
-from sonora.core.utils import (
-    InterruptedOperationError,
-    find_audio_files,
-    is_interruption,
 )
 
 _GZIP_MAGIC_HEADER = b"\x1f\x8b"

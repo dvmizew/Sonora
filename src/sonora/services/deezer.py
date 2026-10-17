@@ -18,6 +18,12 @@ from sonora.core.titles import (
 )
 
 
+def _read_explicit_lyrics(explicit_lyrics: object) -> bool | None:
+    if explicit_lyrics is None or isinstance(explicit_lyrics, bool):
+        return explicit_lyrics
+    raise TypeError("Deezer explicit_lyrics must be a boolean or null")
+
+
 @coalesce_lookup
 def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
     if not (artist and album):
@@ -96,7 +102,7 @@ def fetch_deezer_album_details(
 
     clean_album = clean_title(album)
     cache_suffix = f":{expected_track_count}" if expected_track_count else ""
-    cache_key = f"deezer_meta:v3:{normalize_str(artist)}:{normalize_str(clean_album)}{cache_suffix}"
+    cache_key = f"deezer_meta:v4:{normalize_str(artist)}:{normalize_str(clean_album)}{cache_suffix}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -243,7 +249,7 @@ def fetch_deezer_album_details(
                 if isinstance(track_candidate.get("artist"), dict)
                 else None
             )
-            explicit = bool(track_candidate.get("explicit_lyrics"))
+            explicit = _read_explicit_lyrics(track_candidate.get("explicit_lyrics"))
 
             track_dict: dict[str, object] = {
                 "id": track_candidate.get("id"),
@@ -350,7 +356,9 @@ def _parse_deezer_track_payload(
         "album": album_title,
         "isrc": track_deezer_payload.get("isrc"),
         "duration": safe_float(track_deezer_payload.get("duration")),
-        "explicit_lyrics": track_deezer_payload.get("explicit_lyrics"),
+        "explicit_lyrics": _read_explicit_lyrics(
+            track_deezer_payload.get("explicit_lyrics")
+        ),
         "featured_artists": ", ".join(dict.fromkeys(featured)) if featured else None,
         "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
         "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
@@ -369,7 +377,7 @@ def fetch_deezer_track_by_isrc(
     if not clean_isrc:
         return None
 
-    cache_key = f"deezer_isrc:{clean_isrc}"
+    cache_key = f"deezer_isrc:v2:{clean_isrc}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -413,7 +421,7 @@ def fetch_deezer_track_details(
         return None
 
     clean_track_title = clean_title(title)
-    cache_key = f"deezer_track:v2:{normalize_str(artist)}:{normalize_str(clean_track_title)}:{duration}"
+    cache_key = f"deezer_track:v4:{normalize_str(artist)}:{normalize_str(clean_track_title)}:{duration}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached

@@ -8,15 +8,18 @@ from rapidfuzz import fuzz
 from rich.markup import escape
 
 from sonora.audio import key as key_module
-from sonora.core import artists as artists_module
 from sonora.core.api_payloads import require_api_object
-from sonora.core.artists import normalize_featured_artists
+from sonora.core.artists import (
+    extract_featured_artist_tokens,
+    normalize_featured_artists,
+)
 from sonora.core.config import get_config
 from sonora.core.logger import LOG
 from sonora.core.models import MetadataSource, TrackInfo
 from sonora.core.text import (
     clean_unicode_punct,
     is_valid_uuid,
+    normalize_advisory,
     normalize_country_name,
     normalize_date,
     normalize_genre,
@@ -31,6 +34,7 @@ from sonora.core.titles import (
     clean_title,
     extract_title_features,
     recording_identity_matches,
+    score_artist_title_match,
 )
 from sonora.modules.matching import (
     _is_generic,
@@ -38,6 +42,7 @@ from sonora.modules.matching import (
     _is_strong_track_match,
     _recording_isrc_matches,
 )
+from sonora.services import artist_resolution
 from sonora.services import deezer as deezer_service
 from sonora.services import discogs as discogs_service
 from sonora.services import genius as genius_service
@@ -110,9 +115,9 @@ def apply_metadata_mapping(
                 str(existing_val) if existing_val else None, normalized_value
             )
         elif target_attr == "advisory":
-            if str(normalized_value).strip().capitalize() != "Explicit":
+            normalized_value = normalize_advisory(normalized_value)
+            if normalized_value is None:
                 continue
-            normalized_value = "Explicit"
         elif (
             target_attr == "initial_key"
             and key_module.key_to_camelot(normalized_value) is None
@@ -143,6 +148,19 @@ def apply_metadata_mapping(
             val_int = safe_int(normalized_value)
             if val_int is None:
                 continue
+            if val_int < 0 or (target_attr != "track_number" and val_int == 0):
+                continue
+            if target_attr in ("total_tracks", "total_discs"):
+                position_attribute = (
+                    "track_number" if target_attr == "total_tracks" else "disc_number"
+                )
+                current_position = getattr(track_info, position_attribute)
+                if current_position is not None and val_int < current_position:
+                    track_info.metadata_conflicts[target_attr] = (
+                        f"Provider {target_attr}={val_int} is below existing "
+                        f"{position_attribute}={current_position}; existing value preserved."
+                    )
+                    continue
             cur_int = safe_int(getattr(track_info, target_attr, None))
             if target_attr in ("disc_number", "total_discs"):
                 if cur_int is None or cur_int != val_int:
@@ -211,10 +229,21 @@ def _catalog_recording_matches_track(
         if expected_itunes_id != provider_itunes_id:
             return False
         matched_identifier = True
-    if _is_generic_title(title):
-        return matched_identifier
     candidate_artist = recording.get("artist") or recording.get("artistName")
     candidate_title = recording.get("title") or recording.get("trackName")
+    if _is_generic_title(title):
+        return bool(
+            matched_identifier
+            and candidate_title
+            and recording_identity_matches(
+                None if _is_generic(artist, "artist") else artist,
+                str(candidate_title),
+                str(candidate_artist) if candidate_artist else None,
+                str(candidate_title),
+                expected_duration=duration,
+                candidate_duration=candidate_duration,
+            )
+        )
     return _is_strong_track_match(
         artist if candidate_artist and not _is_generic(artist, "artist") else None,
         title,
@@ -305,6 +334,10 @@ def _enrich_shazam(
         if not is_missing_metadata and not _is_strong_track_match(
             track_info.artist, track_info.title, shazam_match.artist, shazam_match.title
         ):
+            track_info.metadata_conflicts["identity"] = (
+                f"Shazam recognized {shazam_match.artist} - {shazam_match.title}; "
+                "existing artist/title preserved pending independent verification."
+            )
             LOG.debug(
                 "Rejected acoustic recognition conflicting with existing track identity"
             )
@@ -337,7 +370,7 @@ def _enrich_shazam(
                 if not target_album_artist or _is_generic(
                     target_album_artist, "artist"
                 ):
-                    track_info.artist = artists_module.resolve_artist_name(
+                    track_info.artist = artist_resolution.resolve_artist_name(
                         shazam_match.artist
                     )
                 else:
@@ -354,7 +387,9 @@ def _enrich_shazam(
             track_info.title = preserve_unicode_repertoire(
                 track_info.title, shazam_match.title
             )
-            track_info.artist = artists_module.resolve_artist_name(shazam_match.artist)
+            track_info.artist = artist_resolution.resolve_artist_name(
+                shazam_match.artist
+            )
             if shazam_match.album and (
                 not track_info.album or _is_generic(track_info.album, "album") or force
             ):
@@ -404,41 +439,101 @@ def _enrich_itunes(
                 duration=track_info.duration,
             )
 
+        if (
+            not api_payload
+            and track_info.itunes_trackid
+            and not _is_generic_title(track_info.title)
+        ):
+            stored_recording = itunes_service.lookup_itunes_track(
+                track_info.itunes_trackid
+            )
+            if (
+                stored_recording
+                and stored_recording.get("artistName")
+                and stored_recording.get("trackName")
+                and track_info.artist
+                and not recording_identity_matches(
+                    track_info.artist,
+                    track_info.title,
+                    str(stored_recording.get("artistName") or ""),
+                    str(stored_recording.get("trackName") or ""),
+                    expected_duration=track_info.duration,
+                    candidate_duration=(
+                        safe_float(stored_recording.get("trackTimeMillis")) or 0
+                    )
+                    / 1000
+                    or None,
+                )
+            ):
+                if (
+                    "*" in str(stored_recording["trackName"]) + track_info.title
+                    and track_info.duration is not None
+                    and (
+                        stored_duration := safe_float(
+                            stored_recording.get("trackTimeMillis")
+                        )
+                    )
+                    is not None
+                    and stored_duration > 0
+                    and recording_identity_matches(
+                        track_info.artist,
+                        track_info.title,
+                        str(stored_recording["artistName"]),
+                        track_info.title,
+                        expected_duration=track_info.duration,
+                        candidate_duration=stored_duration / 1000,
+                    )
+                ):
+                    track_info.metadata_conflicts["itunes_trackid"] = (
+                        "Apple title may be censored; artist and duration agree, "
+                        "but recording identity requires independent verification."
+                    )
+                    return
+                LOG.warning(
+                    f"Discarding conflicting iTunes identifier for {escape(track_info.artist)} - {escape(track_info.title)}"
+                )
+                track_info.itunes_trackid = None
+                track_info.itunes_collectionid = None
+                track_info.itunes_artistid = None
+                track_info.metadata_sources.pop("itunes_trackid", None)
+                track_info.metadata_sources.pop("itunes_collectionid", None)
+                track_info.metadata_sources.pop("itunes_artistid", None)
+            elif (
+                stored_recording
+                and stored_recording.get("artistName")
+                and stored_recording.get("trackName")
+                and track_info.artist
+            ):
+                if (
+                    track_info.advisory == "Explicit"
+                    and stored_recording.get("trackExplicitness") == "cleaned"
+                ):
+                    track_info.metadata_conflicts["itunes_trackid"] = (
+                        "Apple identifies a cleaned edition while local tags mark "
+                        "the recording explicit; identifier requires edition verification."
+                    )
+                    return
+                track_info.metadata_sources["itunes_trackid"] = "iTunes"
+                apply_metadata_mapping(
+                    track_info,
+                    {
+                        "itunes_collectionid": stored_recording.get("collectionId"),
+                        "itunes_artistid": stored_recording.get("artistId"),
+                    },
+                    {
+                        "itunes_collectionid": "itunes_collectionid",
+                        "itunes_artistid": "itunes_artistid",
+                    },
+                    force=True,
+                    source="iTunes",
+                )
+
         if not api_payload and (
             force
             or not track_info.itunes_trackid
             or not track_info.genre
             or not track_info.advisory
         ):
-            if track_info.itunes_trackid and not _is_generic_title(track_info.title):
-                stored_recording = itunes_service.lookup_itunes_track(
-                    track_info.itunes_trackid
-                )
-                if (
-                    stored_recording
-                    and stored_recording.get("artistName")
-                    and stored_recording.get("trackName")
-                    and track_info.artist
-                    and not recording_identity_matches(
-                        track_info.artist,
-                        track_info.title,
-                        str(stored_recording.get("artistName") or ""),
-                        str(stored_recording.get("trackName") or ""),
-                        expected_duration=track_info.duration,
-                        candidate_duration=(
-                            safe_float(stored_recording.get("trackTimeMillis")) or 0
-                        )
-                        / 1000
-                        or None,
-                    )
-                ):
-                    LOG.warning(
-                        f"Discarding conflicting iTunes identifier for {escape(track_info.artist)} - {escape(track_info.title)}"
-                    )
-                    track_info.itunes_trackid = None
-                    track_info.itunes_collectionid = None
-                    track_info.metadata_sources.pop("itunes_trackid", None)
-                    track_info.metadata_sources.pop("itunes_collectionid", None)
             api_payload = itunes_service.fetch_itunes_track_metadata(
                 track_info.artist,
                 track_info.title,
@@ -446,7 +541,29 @@ def _enrich_itunes(
                 duration=track_info.duration,
             )
 
+        if api_payload and not _catalog_recording_matches_track(
+            api_payload,
+            track_info.title,
+            track_info.artist,
+            track_info.isrc,
+            track_info.itunes_trackid,
+            track_info.duration,
+        ):
+            LOG.warning(
+                f"Rejecting conflicting iTunes metadata for {escape(track_info.artist)} - {escape(track_info.title)}"
+            )
+            return
+
         if api_payload and isinstance(api_payload, dict):
+            if (
+                track_info.advisory == "Explicit"
+                and api_payload.get("explicitness") == "cleaned"
+            ):
+                track_info.metadata_conflicts["itunes_trackid"] = (
+                    "Apple identifies a cleaned edition while local tags mark "
+                    "the recording explicit; enrichment withheld."
+                )
+                return
             if api_payload.get("itunes_trackid") and recording_identity_matches(
                 track_info.artist,
                 track_info.title,
@@ -461,10 +578,20 @@ def _enrich_itunes(
                     {
                         "itunes_trackid": "itunes_trackid",
                         "itunes_collectionid": "itunes_collectionid",
+                        "itunes_artistid": "itunes_artistid",
                     },
                     force=True,
                     source="iTunes",
                 )
+            if api_payload.get("explicitness") in {
+                "explicit",
+                "notexplicit",
+                "cleaned",
+            }:
+                track_info.advisory = (
+                    "Explicit" if api_payload["explicitness"] == "explicit" else None
+                )
+                track_info.metadata_sources["advisory"] = "iTunes"
             itunes_map = {
                 "genre": "genre",
                 "advisory": "advisory",
@@ -619,10 +746,20 @@ def _enrich_discogs(
                 str(track_info.track_number) if track_info.track_number else None
             )
             specific = None
-            if track_key and track_key in track_credits_dict:
-                specific = track_credits_dict[track_key]
-            elif track_info.title and track_info.title.lower() in track_credits_dict:
-                specific = track_credits_dict[track_info.title.lower()]
+            for candidate_key in (track_key, track_info.title.lower()):
+                candidate_credits = track_credits_dict.get(candidate_key)
+                if isinstance(
+                    candidate_credits, dict
+                ) and _catalog_recording_matches_track(
+                    candidate_credits,
+                    track_info.title,
+                    track_info.artist,
+                    None,
+                    None,
+                    track_info.duration,
+                ):
+                    specific = candidate_credits
+                    break
             if isinstance(specific, dict):
                 discogs_track_map = {
                     "producers": "producers",
@@ -728,6 +865,10 @@ def _enrich_deezer(
             ):
                 track = candidate
             elif candidate:
+                track_info.metadata_conflicts["isrc"] = (
+                    "Stored ISRC resolves to a conflicting Deezer recording; "
+                    "existing value requires independent verification."
+                )
                 LOG.warning(
                     f"Rejected conflicting Deezer ISRC result for {escape(track_info.file_path.name)}"
                 )
@@ -756,8 +897,10 @@ def _enrich_deezer(
             and (track_is_from_album or not has_album_context)
         ):
             track_info.disc_number = disk_num
-        if track.get("explicit_lyrics"):
-            track_info.advisory = "Explicit"
+        explicit_lyrics = track.get("explicit_lyrics")
+        if isinstance(explicit_lyrics, bool):
+            track_info.advisory = "Explicit" if explicit_lyrics else None
+            track_info.metadata_sources["advisory"] = "Deezer"
         deezer_track_map = {
             "isrc": "isrc",
             "composer": "composer",
@@ -797,16 +940,64 @@ def _enrich_genius(
 ) -> None:
     if not genius_api_token:
         return
-    if track_info.composer and track_info.producers and not force:
-        return
     try:
         genius_details = genius_service.fetch_genius_song_details(
             track_info.artist, track_info.title, api_token=genius_api_token
         )
         if not genius_details:
-            return
+            if not track_info.genius_song_id:
+                return
+            stored_song = genius_service.lookup_genius_song_details(
+                track_info.genius_song_id, api_token=genius_api_token
+            )
+            if (
+                not stored_song
+                or _is_generic(track_info.artist, "artist")
+                or _is_generic_title(track_info.title)
+                or not stored_song.get("artist")
+                or not stored_song.get("title")
+            ):
+                return
+            identity_score = max(
+                score_artist_title_match(
+                    credited_artist,
+                    track_info.title,
+                    str(stored_song["artist"]),
+                    str(stored_song["title"]),
+                )
+                for credited_artist in (
+                    extract_featured_artist_tokens(track_info.artist)
+                    or [track_info.artist]
+                )
+            )
+            validated_score = genius_service.score_genius_song_match(
+                track_info.artist, track_info.title, stored_song
+            )
+            if identity_score <= 0 and validated_score <= 0:
+                track_info.genius_song_id = None
+                track_info.metadata_sources.pop("genius_song_id", None)
+                track_info.metadata_conflicts["genius_song_id_validation"] = (
+                    "Stored Genius ID identifies a different artist or title; ID removed."
+                )
+                return
+            if (
+                validated_score <= 0
+                or validated_score < get_config().genius_match_threshold
+            ):
+                track_info.metadata_conflicts["genius_song_id_validation"] = (
+                    "Stored Genius title or collaboration differs; credits "
+                    "withheld pending recording verification."
+                )
+                return
+            genius_details = stored_song
+        apply_metadata_mapping(
+            track_info,
+            genius_details,
+            {"genius_song_id": "genius_song_id"},
+            force=True,
+            source="Genius",
+        )
         genius_map = {
-            "genius_song_id": "genius_song_id",
             "writers": "composer",
             "description": "comment",
             "featured_artists": "featured_artists",

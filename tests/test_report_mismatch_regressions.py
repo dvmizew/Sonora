@@ -4,15 +4,15 @@ from unittest.mock import patch
 import httpx
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
-from sonora.core import artists
 from sonora.core.cache import set_cached_api
 from sonora.core.config import SonoraConfig
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
 from sonora.modules import catalog_enrichment, musicbrainz_enrichment
-from sonora.services import lyrics, musicbrainz, shazam
+from sonora.services import artist_resolution, itunes, lyrics, musicbrainz, shazam
 from sonora.services.shazam import ShazamTrackInfo
 from tests.regression_support import AudioRegressionTestCase
+from tests.support import IsolatedTestCase
 
 MBID = "11111111-2222-3333-4444-555555555555"
 
@@ -145,6 +145,7 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
                 ("Alpha", "Original Song", "Original Album"),
             )
             self.assertIsNone(recording.genre)
+            self.assertIn("identity", recording.metadata_conflicts)
 
     def test_lrclib_rejects_wrong_artist_title_and_recording_duration(self) -> None:
         for overrides in (
@@ -190,7 +191,7 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
                 )
                 release = {"title": album.split(" (")[0], "album_artist": "Alpha"}
                 with patch.object(
-                    artists,
+                    artist_resolution,
                     "resolve_artist_name",
                     return_value="Alpha",
                 ):
@@ -229,3 +230,259 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
                     )
                 )
             search.assert_not_called()
+
+
+CONFLICTING_RECORDING_ID = "11111111-1111-4111-8111-111111111111"
+
+MATCHING_RECORDING_ID = "22222222-2222-4222-8222-222222222222"
+
+
+class TestRecordingIdentifierValidation(IsolatedTestCase):
+    def test_validated_album_slot_repairs_stored_mbid_without_force(self) -> None:
+        for stored_id in (CONFLICTING_RECORDING_ID, MATCHING_RECORDING_ID, None):
+            with self.subTest(stored_id=stored_id):
+                track = TrackInfo(
+                    Path("song.flac"),
+                    artist="Alpha",
+                    title="Original Song",
+                    duration=180,
+                    track_number=2,
+                    musicbrainz_trackid=stored_id,
+                )
+                candidate = {
+                    "title": "Original Song",
+                    "artist": "Alpha",
+                    "duration": 180,
+                    "recording_mbid": MATCHING_RECORDING_ID,
+                }
+                musicbrainz_enrichment._resolve_musicbrainz_track_id(
+                    track,
+                    {(1, 2): MATCHING_RECORDING_ID},
+                    {"title": "Album"},
+                    candidate,
+                    False,
+                )
+                self.assertEqual(track.musicbrainz_trackid, MATCHING_RECORDING_ID)
+                self.assertEqual(
+                    track.metadata_sources.get("musicbrainz_trackid"), "MusicBrainz"
+                )
+
+    def test_album_mbid_assignment_rejects_conflicting_index_or_duration(self) -> None:
+        for candidate_id, duration in (
+            (CONFLICTING_RECORDING_ID, 180),
+            (MATCHING_RECORDING_ID, 240),
+            ("invalid", 180),
+        ):
+            with self.subTest(candidate_id=candidate_id, duration=duration):
+                track = TrackInfo(
+                    Path("song.flac"),
+                    artist="Alpha",
+                    title="Original Song",
+                    duration=180,
+                    track_number=2,
+                    musicbrainz_trackid=CONFLICTING_RECORDING_ID,
+                )
+                candidate = {
+                    "artist": "Alpha",
+                    "title": "Original Song",
+                    "duration": duration,
+                    "recording_mbid": candidate_id,
+                }
+                musicbrainz_enrichment._resolve_musicbrainz_track_id(
+                    track,
+                    {2: MATCHING_RECORDING_ID},
+                    {"title": "Album"},
+                    candidate,
+                    False,
+                )
+                self.assertEqual(track.musicbrainz_trackid, CONFLICTING_RECORDING_ID)
+                self.assertNotIn("musicbrainz_trackid", track.metadata_sources)
+
+    def test_release_extraction_and_standalone_validation_record_provenance(
+        self,
+    ) -> None:
+        candidate = {
+            "artist": "Alpha",
+            "title": "Original Song",
+            "duration": 180,
+            "recording_mbid": MATCHING_RECORDING_ID,
+        }
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Alpha",
+            title="Original Song",
+            duration=180,
+            musicbrainz_trackid=CONFLICTING_RECORDING_ID,
+        )
+        self.assertEqual(
+            musicbrainz_enrichment._extract_release_recording(
+                track, {"tracks_by_mbid": {}}, candidate, False
+            ),
+            candidate,
+        )
+        self.assertEqual(track.musicbrainz_trackid, MATCHING_RECORDING_ID)
+        self.assertEqual(
+            track.metadata_sources.get("musicbrainz_trackid"), "MusicBrainz"
+        )
+        track.metadata_sources.clear()
+        with patch.object(
+            musicbrainz, "fetch_musicbrainz_recording_details", return_value=candidate
+        ):
+            self.assertEqual(
+                musicbrainz_enrichment._fetch_standalone_recording(track), candidate
+            )
+        self.assertEqual(
+            track.metadata_sources.get("musicbrainz_trackid"), "MusicBrainz"
+        )
+
+    def test_placeholder_catalog_match_preserves_known_artist_and_duration(
+        self,
+    ) -> None:
+        for artist, duration, expected in (
+            ("Alpha", 180, True),
+            ("Beta", 180, False),
+            ("Alpha", 240, False),
+        ):
+            with self.subTest(artist=artist, duration=duration):
+                self.assertEqual(
+                    catalog_enrichment._catalog_recording_matches_track(
+                        {
+                            "artist": artist,
+                            "title": "Original Song",
+                            "duration": duration,
+                            "isrc": "KNOWN",
+                        },
+                        "Untitled",
+                        "Alpha",
+                        "KNOWN",
+                        None,
+                        180,
+                    ),
+                    expected,
+                )
+        self.assertFalse(
+            catalog_enrichment._catalog_recording_matches_track(
+                {"artist": "Alpha", "title": "Original Song"},
+                "Untitled",
+                "Alpha",
+                None,
+                None,
+                180,
+            )
+        )
+
+    def test_complete_itunes_tags_still_validate_existing_id_without_force(
+        self,
+    ) -> None:
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Alpha",
+            title="Original Song",
+            duration=180,
+            itunes_trackid="123",
+            itunes_collectionid="456",
+            genre="Pop",
+            advisory="Explicit",
+        )
+        with (
+            patch.object(
+                itunes,
+                "lookup_itunes_track",
+                return_value={
+                    "artistName": "Alpha",
+                    "trackName": "Wrong Song",
+                    "trackTimeMillis": 180000,
+                },
+            ) as lookup,
+            patch.object(
+                itunes, "fetch_itunes_track_metadata", return_value=None
+            ) as search,
+        ):
+            catalog_enrichment._enrich_itunes(track)
+        lookup.assert_called_once_with("123")
+        self.assertIsNone(track.itunes_trackid)
+        self.assertIsNone(track.itunes_collectionid)
+        search.assert_called_once()
+        self.assertEqual(track.genre, "Pop")
+
+    def test_itunes_payload_conflict_blocks_all_fields(self) -> None:
+        for title, duration in (("Wrong Song", 180), ("Original Song", 240)):
+            with self.subTest(title=title, duration=duration):
+                track = TrackInfo(
+                    Path("song.flac"),
+                    artist="Alpha",
+                    title="Original Song",
+                    duration=180,
+                    genre="Pop",
+                )
+                payload = {
+                    "artist": "Alpha",
+                    "title": title,
+                    "duration": duration,
+                    "genre": "Rock",
+                    "advisory": "Explicit",
+                    "itunes_trackid": "123",
+                    "itunes_collectionid": "456",
+                }
+                with patch.object(
+                    itunes, "fetch_itunes_track_metadata", return_value=payload
+                ):
+                    catalog_enrichment._enrich_itunes(track, force=True)
+                self.assertEqual(track.genre, "Pop")
+                self.assertIsNone(track.itunes_trackid)
+                self.assertIsNone(track.advisory)
+
+    def test_unavailable_itunes_lookup_preserves_existing_identifier(self) -> None:
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Alpha",
+            title="Original Song",
+            itunes_trackid="123",
+            genre="Pop",
+            advisory="Explicit",
+        )
+        with (
+            patch.object(itunes, "lookup_itunes_track", return_value=None),
+            patch.object(itunes, "fetch_itunes_track_metadata") as search,
+        ):
+            catalog_enrichment._enrich_itunes(track)
+        self.assertEqual(track.itunes_trackid, "123")
+        self.assertNotIn("itunes_trackid", track.metadata_sources)
+        search.assert_not_called()
+        with (
+            patch.object(
+                itunes,
+                "lookup_itunes_track",
+                return_value={"artistName": "Alpha", "trackName": "Original Song"},
+            ),
+            patch.object(itunes, "fetch_itunes_track_metadata") as search,
+        ):
+            catalog_enrichment._enrich_itunes(track)
+        self.assertEqual(track.metadata_sources.get("itunes_trackid"), "iTunes")
+        self.assertNotIn("itunes_collectionid", track.metadata_sources)
+        search.assert_not_called()
+
+    def test_structural_counts_cannot_be_below_existing_positions(self) -> None:
+        for field, position_field, total, position in (
+            ("total_tracks", "track_number", 10, 12),
+            ("total_discs", "disc_number", 1, 2),
+        ):
+            with self.subTest(field=field):
+                track = TrackInfo(Path("song.flac"))
+                setattr(track, position_field, position)
+                setattr(track, field, 20)
+                catalog_enrichment.apply_metadata_mapping(
+                    track,
+                    {field: total},
+                    {field: field},
+                    force=True,
+                    source="MusicBrainz",
+                )
+                self.assertEqual(getattr(track, field), 20)
+                self.assertIn(field, track.metadata_conflicts)
+        track = TrackInfo(Path("song.flac"), track_number=0, total_tracks=12)
+        catalog_enrichment.apply_metadata_mapping(
+            track, {"total": 12}, {"total": "total_tracks"}, force=True
+        )
+        self.assertEqual(track.track_number, 0)
+        self.assertFalse(track.metadata_conflicts)

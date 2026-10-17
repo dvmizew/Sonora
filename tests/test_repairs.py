@@ -10,10 +10,10 @@ import numpy as np
 
 from sonora.audio.bpm import calculate_bpm
 from sonora.core.api_payloads import require_api_object, require_api_records
+from sonora.core.cancellation import is_interruption
 from sonora.core.config import SonoraConfig, clear_config_cache, get_config
 from sonora.core.rate_limit import RateLimiter
 from sonora.core.titles import score_artist_title_match
-from sonora.core.utils import is_interruption
 from sonora.services.deezer import fetch_deezer_track_details
 from sonora.services.discogs import search_discogs_release
 from sonora.services.fanart import _extract_image_urls, fetch_fanart_artist
@@ -631,7 +631,7 @@ class TestCacheErrorBoundaries(IsolatedTestCase):
 
 class TestArtistResponseContracts(IsolatedTestCase):
     def test_artist_resolution_exposes_malformed_deezer_responses(self) -> None:
-        from sonora.core.artists import resolve_artist_name
+        from sonora.services.artist_resolution import resolve_artist_name
 
         payload: object
         for payload in ([], {"data": "wrong"}, {"data": [None]}):
@@ -641,9 +641,8 @@ class TestArtistResponseContracts(IsolatedTestCase):
                     "sonora.services.musicbrainz.search_musicbrainz_artists",
                     return_value=[],
                 ),
-                patch("sonora.core.artists.SESSION.get") as request,
+                patch("sonora.services.artist_resolution.SESSION.get") as request,
             ):
-                resolve_artist_name.cache_clear()
                 request.return_value.status_code = 200
                 request.return_value.json.return_value = payload
                 with self.assertRaises(TypeError):

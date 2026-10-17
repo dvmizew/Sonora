@@ -237,6 +237,21 @@ class TestITunesCatalogContracts(IsolatedTestCase):
 
 
 class TestDeezerCatalogContracts(IsolatedTestCase):
+    def test_explicitness_distinguishes_missing_evidence_from_false(self) -> None:
+        for explicit_lyrics in (None, False, True):
+            with self.subTest(explicit_lyrics=explicit_lyrics):
+                details = deezer._parse_deezer_track_payload(
+                    {"explicit_lyrics": explicit_lyrics}
+                )
+                self.assertIs(details["explicit_lyrics"], explicit_lyrics)
+        invalid_values: tuple[object, ...] = ("false", "true", 0, 1, [])
+        for invalid in invalid_values:
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(TypeError, "boolean or null"),
+            ):
+                deezer._parse_deezer_track_payload({"explicit_lyrics": invalid})
+
     def test_cover_rank_ties_preserve_the_first_candidate(self) -> None:
         candidates = [
             {**self.album, "cover_xl": "https://example.com/first.jpg"},
@@ -663,7 +678,12 @@ class TestDiscogsCatalogContracts(IsolatedTestCase):
         )
         self.assertEqual(
             details["track_credits"]["1"],
-            {"producers": "Producer", "remixer": "Remixer", "composer": "Composer"},
+            {
+                "title": "Recording",
+                "producers": "Producer",
+                "remixer": "Remixer",
+                "composer": "Composer",
+            },
         )
         self.assertEqual(details["barcode"], "1234")
         self.assertIsNone(details["catalog_number"])

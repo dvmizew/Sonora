@@ -27,6 +27,41 @@ _WORKER_CACHE: ContextVar[diskcache.Cache | None] = ContextVar(
 )
 
 
+def clear_normalization_cache() -> None:
+    """Reset offline artist and metadata normalization caches."""
+    from sonora.core.artists import (
+        _load_user_overrides,
+        is_single_group_artist,
+        resolve_artist_name,
+    )
+    from sonora.core.text import (
+        clean_disambiguation,
+        normalize_country_name,
+        normalize_date,
+        normalize_genre,
+        normalize_language_name,
+        normalize_legacy_diacritics,
+        normalize_script_name,
+        normalize_str,
+        preserve_unicode_repertoire,
+    )
+    from sonora.core.titles import clean_title
+
+    clean_disambiguation.cache_clear()
+    _load_user_overrides.cache_clear()
+    resolve_artist_name.cache_clear()
+    is_single_group_artist.cache_clear()
+    clean_title.cache_clear()
+    normalize_str.cache_clear()
+    normalize_date.cache_clear()
+    normalize_genre.cache_clear()
+    normalize_country_name.cache_clear()
+    normalize_language_name.cache_clear()
+    normalize_script_name.cache_clear()
+    preserve_unicode_repertoire.cache_clear()
+    normalize_legacy_diacritics.cache_clear()
+
+
 def get_cache_dir() -> Path:
     """
     Return Sonora cache directory following standard platform and XDG specifications.
@@ -350,10 +385,9 @@ def clear_cache(
 
     if clear_memory:
         from sonora.audio.metadata import clear_metadata_cache
-        from sonora.core.utils import clear_utils_cache
 
         memory_metadata_cleared = clear_metadata_cache()
-        clear_utils_cache()
+        clear_normalization_cache()
 
     return ClearResult(
         cache_dir=cache_dir,

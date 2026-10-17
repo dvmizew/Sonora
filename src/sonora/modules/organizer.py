@@ -11,8 +11,16 @@ from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.artists import extract_featured_artist_tokens, get_primary_artist
+from sonora.core.audio_files import find_audio_files, group_files_by_parent
 from sonora.core.cache import api_cache_session
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import get_config
+from sonora.core.library_paths import (
+    get_single_release_title,
+    is_in_singles_hierarchy,
+    resolve_unique_path,
+    safe_case_rename,
+)
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -21,21 +29,13 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import TrackInfo
-from sonora.core.text import normalize_str, sanitize_name
-from sonora.core.titles import clean_title
-from sonora.core.utils import (
-    InterruptedOperationError,
-    find_audio_files,
+from sonora.core.sidecars import (
     find_companion_lyrics,
-    get_single_release_title,
-    group_files_by_parent,
-    is_in_singles_hierarchy,
-    is_interruption,
     relocate_companion_artwork,
     relocate_companion_lyrics,
-    resolve_unique_path,
-    safe_case_rename,
 )
+from sonora.core.text import normalize_str, sanitize_name
+from sonora.core.titles import clean_title
 from sonora.modules.normalization import normalize_track_metadata
 
 
@@ -91,22 +91,18 @@ class _RegisteredSingle:
 def _single_recording(
     track_info: TrackInfo, target_path: Path | None = None
 ) -> _RegisteredSingle:
-    normalized_track = normalize_track_metadata(
-        replace(track_info), allow_network=False
-    )
+    normalized_track = normalize_track_metadata(replace(track_info))
     return _RegisteredSingle(
         primary_artist_key=normalize_str(get_primary_artist(normalized_track.artist)),
         artist_key=frozenset(
             normalize_str(artist)
-            for artist in extract_featured_artist_tokens(
-                normalized_track.artist, allow_network=False
-            )
+            for artist in extract_featured_artist_tokens(normalized_track.artist)
         ),
         title_key=normalize_str(clean_title(normalized_track.title)),
         featured_key=frozenset(
             normalize_str(artist)
             for artist in extract_featured_artist_tokens(
-                normalized_track.featured_artists, allow_network=False
+                normalized_track.featured_artists
             )
         ),
         isrc=normalized_track.isrc.strip().upper() if normalized_track.isrc else None,
@@ -291,9 +287,7 @@ def _resolve_single_target_file(
     target_singles_dir: Path,
 ) -> Path:
     """Calculates canonical target path for a single audio track."""
-    normalized_track = normalize_track_metadata(
-        replace(track_info), allow_network=False
-    )
+    normalized_track = normalize_track_metadata(replace(track_info))
     artist_credit = normalized_track.artist or get_primary_artist(track_info.artist)
     single_release_title = get_single_release_title(normalized_track)
     has_feat_in_title = bool(

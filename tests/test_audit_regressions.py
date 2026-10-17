@@ -8,9 +8,9 @@ from unittest.mock import patch
 import httpx
 
 from sonora.audio import art
+from sonora.core.cancellation import InterruptedOperationError
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
-from sonora.core.utils import InterruptedOperationError
 from sonora.modules import metadata_consensus, tagger
 from sonora.services import theaudiodb
 from tests.support import IsolatedTestCase

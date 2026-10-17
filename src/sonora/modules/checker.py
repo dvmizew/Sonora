@@ -18,12 +18,15 @@ from sonora.core.artists import (
     get_primary_artist,
     is_single_group_artist,
 )
+from sonora.core.audio_files import find_audio_files
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import get_config
 from sonora.core.constants import (
     FEAT_KEYWORDS,
     MIN_COVER_ART_DIMENSION,
     SUPPORTED_EXTS,
 )
+from sonora.core.library_paths import is_in_singles_hierarchy, parse_track_filename
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -32,6 +35,7 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import CheckReport, TrackInfo
+from sonora.core.sidecars import find_companion_lyrics
 from sonora.core.text import is_valid_uuid, normalize_genre, normalize_str
 from sonora.core.titles import (
     _is_corrupt_bracket,
@@ -40,15 +44,8 @@ from sonora.core.titles import (
     extract_title_features,
     recording_identity_matches,
 )
-from sonora.core.utils import (
-    InterruptedOperationError,
-    find_audio_files,
-    find_companion_lyrics,
-    is_in_singles_hierarchy,
-    is_interruption,
-    parse_track_filename,
-)
 from sonora.modules.matching import _is_generic
+from sonora.services.lyrics import is_lyrics_duration_valid, lyrics_identity_matches
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
 
@@ -132,8 +129,29 @@ def check_file(
             if condition:
                 issues.append(msg)
 
+        for position, total, position_label, total_label in (
+            (track.track_number, track.total_tracks, "TRACKNUMBER", "TRACKTOTAL"),
+            (track.disc_number, track.total_discs, "DISCNUMBER", "DISCTOTAL"),
+        ):
+            if position is not None and total is not None and position > total:
+                issues.append(
+                    f"{position_label} {position} exceeds {total_label} {total}; verify the release edition."
+                )
+
         if track.initial_key and key_to_camelot(track.initial_key) is None:
             issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
+
+        for lyric_text in (track.lyrics, track.synced_lyrics):
+            if not lyric_text:
+                continue
+            if not lyrics_identity_matches(lyric_text, track.artist, track.title):
+                issues.append(
+                    "Embedded lyrics headers conflict with ARTIST or TITLE; verify recording identity."
+                )
+                break
+            if not is_lyrics_duration_valid(lyric_text, track.duration):
+                issues.append("Embedded lyrics timestamps exceed audio duration.")
+                break
 
         for field_name, tag_label, required in [
             ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID", True),
@@ -163,7 +181,7 @@ def check_file(
                 f"Filename does not start with track number: '{file_path.name}'"
             )
 
-        _, artist_feats = extract_artist_features(track.artist, allow_network=False)
+        _, artist_feats = extract_artist_features(track.artist)
         if artist_feats:
             issues.append(
                 f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: clean artist, use FEATURED_ARTISTS tag)"
@@ -195,7 +213,7 @@ def check_file(
         if (
             not is_album_level_collab
             and not artist_feats
-            and not is_single_group_artist(track.artist, allow_network=False)
+            and not is_single_group_artist(track.artist)
         ):
             for delimiter_pattern, delimiter_name in delimiters:
                 if delimiter_pattern in f" {track.artist} ":
@@ -237,6 +255,24 @@ def check_file(
         issues.append("Missing synchronized lyrics (.lrc) file.")
     elif any(lrc.stat().st_size == 0 for lrc in companion_lrcs):
         issues.append("Corrupt 0-byte synchronized lyrics (.lrc) file.")
+
+    if track is not None:
+        for lrc_path in companion_lrcs:
+            try:
+                lyric_text = lrc_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                issues.append(
+                    f"Cannot read synchronized lyrics: {lrc_path.name}: {error}"
+                )
+                continue
+            if not lyrics_identity_matches(lyric_text, track.artist, track.title):
+                issues.append(
+                    f"Lyrics headers conflict with ARTIST or TITLE: '{lrc_path.name}'; verify recording identity."
+                )
+            if not is_lyrics_duration_valid(lyric_text, track.duration):
+                issues.append(
+                    f"Lyrics timestamps exceed audio duration: '{lrc_path.name}'."
+                )
 
     return issues
 
@@ -375,7 +411,7 @@ def _check_folder_album_consistency(
     for _, track_metadata in tracks_in_folder:
         if track_metadata.album_artist:
             album_artist_counts[track_metadata.album_artist] += 1
-        primary_artist = get_primary_artist(track_metadata.artist, allow_network=False)
+        primary_artist = get_primary_artist(track_metadata.artist)
         if not _is_generic(primary_artist, "artist"):
             artist_counts[primary_artist] += 1
 
@@ -442,9 +478,7 @@ def _check_folder_alien_tracks(
         return
 
     norm_dominant_album = normalize_str(clean_title(dominant_album))
-    norm_dominant_artist = normalize_str(
-        get_primary_artist(dominant_artist or "", allow_network=False)
-    )
+    norm_dominant_artist = normalize_str(get_primary_artist(dominant_artist or ""))
 
     disc_sequences: dict[int, list[int]] = defaultdict(list)
     for _, track_metadata in tracks_in_folder:
@@ -454,9 +488,7 @@ def _check_folder_alien_tracks(
 
     for file_path, track_metadata in tracks_in_folder:
         track_issues: list[str] = []
-        norm_track_artist = normalize_str(
-            get_primary_artist(track_metadata.artist, allow_network=False)
-        )
+        norm_track_artist = normalize_str(get_primary_artist(track_metadata.artist))
         norm_track_album = normalize_str(clean_title(track_metadata.album))
 
         artist_matches = bool(norm_dominant_artist) and (

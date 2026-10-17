@@ -16,8 +16,14 @@ from sonora.audio import metadata as metadata_module
 from sonora.audio import replaygain as replaygain_module
 from sonora.core import artists as artists_module
 from sonora.core.artists import harmonize_artist_casing
+from sonora.core.audio_files import find_audio_files
 from sonora.core.cache import api_cache_session
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import clear_config_cache, get_config
+from sonora.core.library_paths import (
+    get_album_root_directory,
+    group_files_by_album_root,
+)
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -33,13 +39,6 @@ from sonora.core.text import (
     normalize_genre,
     normalize_str,
     preserve_unicode_repertoire,
-)
-from sonora.core.utils import (
-    InterruptedOperationError,
-    find_audio_files,
-    get_album_root_directory,
-    group_files_by_album_root,
-    is_interruption,
 )
 from sonora.modules.catalog_enrichment import (
     _NETWORK_EXCEPTIONS,
@@ -68,6 +67,7 @@ from sonora.modules.track_processing import (
     _process_audio_and_save_tags,
     _record_persisted_album,
 )
+from sonora.services import artist_resolution
 from sonora.services import deezer as deezer_service
 from sonora.services import discogs as discogs_service
 from sonora.services import itunes as itunes_service
@@ -197,6 +197,8 @@ def _run_metadata_enrichment_pipeline(
         target_album_artist=target_album_artist,
         force=force,
     )
+    if "identity" in track_info.metadata_conflicts:
+        return
     if (
         _is_generic_title(track_info.title)
         or _is_generic(track_info.artist, "artist")
@@ -292,7 +294,7 @@ def process_single_track(
             metadata_sources=track_info.metadata_sources.copy(),
             metadata_conflicts=track_info.metadata_conflicts.copy(),
         )
-        track_info.artist = artists_module.resolve_artist_name(track_info.artist)
+        track_info.artist = artist_resolution.resolve_artist_name(track_info.artist)
 
         if not bool(
             album_track_mbids or album_mb_release_details or target_album_title
@@ -565,7 +567,15 @@ def _resolve_album_metadata_context(
             }
         else:
             release_info = musicbrainz_service.search_musicbrainz_release(
-                sample_artist, sample_album, expected_track_count=len(audio_files)
+                sample_artist,
+                sample_album,
+                expected_track_count=len(audio_files),
+                expected_advisory="Explicit"
+                if any(
+                    metadata_module.read_track_metadata(path).advisory == "Explicit"
+                    for path in audio_files
+                )
+                else None,
             )
         if release_info and release_info.get("id"):
             album_context.musicbrainz_id = str(release_info["id"])
@@ -733,9 +743,7 @@ def _harmonize_album_artists(
         preferred_artist_casing = max(
             groups[dominant_norm].items(), key=lambda x: x[1]
         )[0]
-        resolved = artists_module.resolve_artist_name(
-            preferred_artist_casing, allow_network=False
-        )
+        resolved = artists_module.resolve_artist_name(preferred_artist_casing)
         dominant_album_artist = (
             resolved
             if normalize_str(resolved) == dominant_norm
@@ -757,9 +765,7 @@ def _harmonize_album_artists(
     canonical_track_artists: dict[str, str] = {}
     for normalized_artist, casing_map in track_artist_counts.items():
         preferred_track_artist_casing = max(casing_map.items(), key=lambda x: x[1])[0]
-        resolved = artists_module.resolve_artist_name(
-            preferred_track_artist_casing, allow_network=False
-        )
+        resolved = artists_module.resolve_artist_name(preferred_track_artist_casing)
         canonical_track_artists[normalized_artist] = (
             resolved
             if normalize_str(resolved) == normalized_artist

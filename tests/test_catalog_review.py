@@ -305,7 +305,7 @@ class TestCatalogReview(ServiceResponseTestCase):
                     accepted,
                 )
 
-    def test_lyrics_retry_cannot_remove_recording_versions(self) -> None:
+    def test_lyrics_retry_preserves_editions_and_allows_generic_labels(self) -> None:
         for title in (
             "Recording (Clean Version)",
             "Recording (Album Version)",
@@ -316,4 +316,7 @@ class TestCatalogReview(ServiceResponseTestCase):
                 patch.object(lyrics, "_query_syncedlyrics", return_value=None) as query,
             ):
                 self.assertIsNone(lyrics.fetch_synced_lyrics("Primary", title))
-            self.assertEqual(query.call_count, 2 if "feat." in title else 1)
+            self.assertEqual(
+                query.call_count,
+                2 if "feat." in title or "Album Version" in title else 1,
+            )

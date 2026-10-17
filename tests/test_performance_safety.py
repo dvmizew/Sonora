@@ -360,7 +360,10 @@ class TestPerformanceSafety(IsolatedTestCase):
         recording = TrackInfo(path, artist="Alpha", title="Original Song")
         with (
             patch("sonora.audio.metadata.read_track_metadata", return_value=recording),
-            patch("sonora.core.artists.resolve_artist_name", return_value="Alpha"),
+            patch(
+                "sonora.services.artist_resolution.resolve_artist_name",
+                return_value="Alpha",
+            ),
             patch.object(
                 tagger,
                 "_run_metadata_enrichment_pipeline",

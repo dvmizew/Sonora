@@ -15,9 +15,9 @@ from sonora.core.constants import (
 )
 from sonora.core.files import atomic_write_bytes
 from sonora.core.http import SESSION
+from sonora.core.library_paths import get_album_root_directory
 from sonora.core.logger import LOG
 from sonora.core.text import normalize_str
-from sonora.core.utils import get_album_root_directory
 from sonora.services.deezer import fetch_deezer_cover_art_url
 from sonora.services.fanart import (
     download_fanart_image_bytes,

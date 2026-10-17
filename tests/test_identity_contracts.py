@@ -14,7 +14,7 @@ from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
 from sonora.modules import matching
 from sonora.modules import musicbrainz_enrichment as enrichment
-from sonora.services import acoustid, musicbrainz
+from sonora.services import acoustid, artist_resolution, musicbrainz
 from tests.support import IsolatedTestCase
 
 MBID = "11111111-2222-3333-4444-555555555555"
@@ -39,14 +39,10 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         alias_path.write_text(
             json.dumps({"Legal Name": "Stage", "Alpha & Beta": "Ensemble"})
         )
+        self.assertEqual(artists.resolve_artist_name("Legal Name"), "Stage")
+        self.assertTrue(artists.is_single_group_artist("Alpha & Beta"))
         self.assertEqual(
-            artists.resolve_artist_name("Legal Name", allow_network=False), "Stage"
-        )
-        self.assertTrue(
-            artists.is_single_group_artist("Alpha & Beta", allow_network=False)
-        )
-        self.assertEqual(
-            artists.extract_featured_artist_tokens("Legal Name", allow_network=False),
+            artists.extract_featured_artist_tokens("Legal Name"),
             ["Stage"],
         )
         with patch.object(
@@ -77,7 +73,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         )
         self.assertEqual(artists.extract_featured_artist_tokens([None, ""]), [])
         policy = SonoraConfig(known_group_artists=frozenset({"Alpha & Beta"}))
-        with patch("sonora.core.config.get_config", return_value=policy):
+        with patch("sonora.core.artists.get_config", return_value=policy):
             self.assertEqual(
                 artists.extract_featured_artist_tokens("Guest; Alpha & Beta"),
                 ["Guest", "Alpha & Beta"],
@@ -182,12 +178,11 @@ class TestArtistResolutionContracts(IsolatedTestCase):
             ("Nobody", [{}, {"name": "Unrelated"}], [], "Nobody"),
         )
         for query, mb_candidates, deezer_candidates, expected in cases:
-            artists.resolve_artist_name.cache_clear()
             with (
                 self.subTest(
                     query=query, candidates=mb_candidates, deezer=deezer_candidates
                 ),
-                patch.object(artists, "get_cached_api", return_value=None),
+                patch.object(artist_resolution, "get_cached_api", return_value=None),
                 patch.object(
                     musicbrainz,
                     "search_musicbrainz_artists",
@@ -199,7 +194,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
                     return_value=httpx.Response(200, json={"data": deezer_candidates}),
                 ),
             ):
-                self.assertEqual(artists.resolve_artist_name(query), expected)
+                self.assertEqual(artist_resolution.resolve_artist_name(query), expected)
 
     def test_cached_corrupt_expansions_and_branding_do_not_poison_names(self) -> None:
         for query, cached, expected in (
@@ -209,25 +204,22 @@ class TestArtistResolutionContracts(IsolatedTestCase):
             ("ABC", "ABC", "ABC"),
             ("Primary", "Primary", "Primary"),
         ):
-            artists.resolve_artist_name.cache_clear()
             with (
                 self.subTest(query=query, cached=cached),
-                patch.object(artists, "get_cached_api", return_value=cached),
+                patch.object(artist_resolution, "get_cached_api", return_value=cached),
                 patch.object(
                     musicbrainz, "search_musicbrainz_artists", return_value=[]
                 ),
                 patch.object(SESSION, "get", return_value=httpx.Response(404)),
             ):
-                self.assertEqual(artists.resolve_artist_name(query), expected)
-        self.assertEqual(artists.resolve_artist_name(" "), "Unknown Artist")
-        self.assertEqual(artists.resolve_artist_name("!!!"), "!!!")
+                self.assertEqual(artist_resolution.resolve_artist_name(query), expected)
+        self.assertEqual(artist_resolution.resolve_artist_name(" "), "Unknown Artist")
+        self.assertEqual(artist_resolution.resolve_artist_name("!!!"), "!!!")
 
     def test_registered_groups_and_featured_subtokens_are_preserved(self) -> None:
         policy = SonoraConfig(known_group_artists=frozenset({"Alpha & Beta"}))
-        with patch("sonora.core.config.get_config", return_value=policy):
-            self.assertTrue(
-                artists.is_single_group_artist("Alpha & Beta", allow_network=False)
-            )
+        with patch("sonora.core.artists.get_config", return_value=policy):
+            self.assertTrue(artist_resolution.is_single_group_artist("Alpha & Beta"))
             self.assertEqual(
                 artists.extract_artist_features("Alpha & Beta"), ("Alpha & Beta", [])
             )
@@ -240,7 +232,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         self.assertEqual(artists.extract_featured_artist_tokens([None, " "]), [])
         self.assertEqual(artists.extract_artist_features(None), ("", []))
         self.assertFalse(artists.is_artist_acronym(None))
-        self.assertFalse(artists.is_single_group_artist("!!!"))
+        self.assertFalse(artist_resolution.is_single_group_artist("!!!"))
         for candidate, expected in (
             ({"name": "Alpha & Beta", "type": "Group"}, True),
             ({"name": "Alpha & Beta", "ext:score": "95"}, True),
@@ -249,21 +241,21 @@ class TestArtistResolutionContracts(IsolatedTestCase):
             artists.is_single_group_artist.cache_clear()
             with (
                 self.subTest(candidate=candidate),
-                patch.object(artists, "get_cached_api", return_value=None),
+                patch.object(artist_resolution, "get_cached_api", return_value=None),
                 patch.object(
                     musicbrainz, "search_musicbrainz_artists", return_value=[candidate]
                 ),
             ):
                 self.assertEqual(
-                    artists.is_single_group_artist("Alpha & Beta"), expected
+                    artist_resolution.is_single_group_artist("Alpha & Beta"), expected
                 )
         artists.is_single_group_artist.cache_clear()
-        with patch.object(artists, "get_cached_api", return_value=True):
-            self.assertTrue(artists.is_single_group_artist("Alpha & Beta"))
+        with patch.object(artist_resolution, "get_cached_api", return_value=True):
+            self.assertTrue(artist_resolution.is_single_group_artist("Alpha & Beta"))
 
     def test_artist_provider_failures_preserve_clean_input(self) -> None:
         with (
-            patch.object(artists, "get_cached_api", return_value=None),
+            patch.object(artist_resolution, "get_cached_api", return_value=None),
             patch.object(
                 musicbrainz,
                 "search_musicbrainz_artists",
@@ -271,8 +263,8 @@ class TestArtistResolutionContracts(IsolatedTestCase):
             ),
             patch.object(SESSION, "get", side_effect=OSError("offline")),
         ):
-            self.assertEqual(artists.resolve_artist_name("Singer"), "Singer")
-            self.assertFalse(artists.is_single_group_artist("Alpha & Beta"))
+            self.assertEqual(artist_resolution.resolve_artist_name("Singer"), "Singer")
+            self.assertFalse(artist_resolution.is_single_group_artist("Alpha & Beta"))
 
 
 class TestAlbumIdentityContracts(IsolatedTestCase):
@@ -510,9 +502,9 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             "isrc": "USAAA2100001",
         }
         resolution = patch.object(
-            artists,
+            artist_resolution,
             "resolve_artist_name",
-            side_effect=lambda name, *, allow_network=True: name,
+            side_effect=lambda name: name,
         )
         resolution.start()
         self.addCleanup(resolution.stop)

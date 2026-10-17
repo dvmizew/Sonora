@@ -5,7 +5,6 @@ from typing import Any
 from rapidfuzz import fuzz
 from rich.markup import escape
 
-from sonora.core import artists as artists_module
 from sonora.core.api_payloads import require_api_object
 from sonora.core.artists import get_primary_artist
 from sonora.core.config import get_config
@@ -15,6 +14,7 @@ from sonora.core.text import (
     clean_unicode_punct,
     is_valid_uuid,
     normalize_date,
+    normalize_str,
     preserve_unicode_repertoire,
     safe_float,
     safe_int,
@@ -36,6 +36,7 @@ from sonora.modules.matching import (
     _recording_matches_track_identity,
 )
 from sonora.services import acoustid as acoustid_service
+from sonora.services import artist_resolution
 from sonora.services import musicbrainz as musicbrainz_service
 
 
@@ -176,11 +177,7 @@ def _resolve_musicbrainz_track_id(
         )
     )
     candidate_mbid: str | None = None
-    if (
-        not is_valid_uuid(track_info.musicbrainz_trackid)
-        or force
-        or has_corrupt_identity
-    ) and has_pos_match:
+    if has_pos_match:
         potential_mbid = (
             album_mbids.get(disc_pos_key)
             or album_mbids.get(str_disc_pos_key)
@@ -189,6 +186,7 @@ def _resolve_musicbrainz_track_id(
         is_match = bool(
             candidate_rec
             and _recording_matches_track_identity(track_info, candidate_rec)
+            and candidate_rec.get("recording_mbid") == potential_mbid
         )
 
         if is_match and is_valid_uuid(potential_mbid):
@@ -204,7 +202,7 @@ def _resolve_musicbrainz_track_id(
         mbid = musicbrainz_service.fetch_track_mbid(track_info.artist, track_info.title)
         if is_valid_uuid(mbid):
             track_info.musicbrainz_trackid = mbid
-            track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
+            track_info.metadata_sources.pop("musicbrainz_trackid", None)
             LOG.info(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
 
 
@@ -228,6 +226,7 @@ def _resolve_musicbrainz_album_id(
             search_artist,
             track_info.album,
             expected_track_count=track_info.total_tracks,
+            expected_advisory=track_info.advisory,
         )
         if release:
             musicbrainz_id = release.get("id")
@@ -257,10 +256,15 @@ def _extract_release_recording(
             tracks_by_id[track_info.musicbrainz_trackid], "Album MusicBrainz recording"
         )
         if _recording_matches_track_identity(track_info, indexed_recording):
+            track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
             return indexed_recording
 
     if candidate_rec and _recording_matches_track_identity(track_info, candidate_rec):
-        return candidate_rec
+        recording_id = candidate_rec.get("recording_mbid")
+        if is_valid_uuid(recording_id):
+            track_info.musicbrainz_trackid = str(recording_id)
+            track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
+            return candidate_rec
     return None
 
 
@@ -334,6 +338,8 @@ def _fetch_standalone_recording(
             )
         )
     ):
+        if track_info.metadata_sources.get("musicbrainz_trackid") != "AcoustID":
+            track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
         return fetched_rec
 
     LOG.debug(
@@ -343,6 +349,12 @@ def _fetch_standalone_recording(
     )
     track_info.musicbrainz_trackid = None
     track_info.metadata_sources.pop("musicbrainz_trackid", None)
+    if (
+        track_info.musicbrainz_workid
+        and fetched_rec.get("musicbrainz_workid") == track_info.musicbrainz_workid
+    ):
+        track_info.musicbrainz_workid = None
+        track_info.metadata_sources.pop("musicbrainz_workid", None)
     if force:
         new_mbid = musicbrainz_service.fetch_track_mbid(
             track_info.artist, track_info.title
@@ -502,18 +514,22 @@ def _apply_mb_recording_metadata(
         source="MusicBrainz",
     )
 
-    if recording_details.get("disc_total_tracks") and (
-        force or not track_info.total_tracks
-    ):
-        disc_total_tracks = safe_int(recording_details["disc_total_tracks"])
-        if disc_total_tracks is not None:
-            track_info.total_tracks = disc_total_tracks
+    if recording_details.get("disc_total_tracks"):
+        apply_metadata_mapping(
+            track_info,
+            recording_details,
+            {"disc_total_tracks": "total_tracks"},
+            force=force,
+            source="MusicBrainz",
+        )
 
     recording_artist = recording_details.get("artist")
     if recording_artist and isinstance(recording_artist, str):
         cleaned_artist = preserve_unicode_repertoire(
             track_info.artist,
-            clean_unicode_punct(artists_module.resolve_artist_name(recording_artist)),
+            clean_unicode_punct(
+                artist_resolution.resolve_artist_name(recording_artist)
+            ),
         )
         if _should_update_track_artist(
             track_info,
@@ -576,6 +592,25 @@ def _validate_mb_release_title(release_title: str, cur_album: str | None) -> boo
     )
 
 
+def _release_edition_conflicts(
+    track_info: TrackInfo, release: dict[str, Any] | None
+) -> bool:
+    if not release or track_info.advisory != "Explicit":
+        return False
+    edition_tokens = set(
+        normalize_str(str(release.get("disambiguation") or "")).split()
+    )
+    if {"clean", "cleaned"}.intersection(
+        edition_tokens
+    ) and "explicit" not in edition_tokens:
+        track_info.metadata_conflicts["identity"] = (
+            "MusicBrainz release is described as clean while local tags "
+            "mark the recording explicit; edition verification required."
+        )
+        return True
+    return False
+
+
 def _apply_mb_release_metadata(
     track_info: TrackInfo,
     album_mbid: str | None,
@@ -600,6 +635,9 @@ def _apply_mb_release_metadata(
     if not mb_rel or not isinstance(mb_rel, dict):
         return
 
+    if _release_edition_conflicts(track_info, mb_rel):
+        return
+
     release_artist = str(mb_rel.get("album_artist") or mb_rel.get("artist") or "")
     expected_artist = track_info.album_artist or track_info.artist or ""
     if not _validate_mb_release_artist(release_artist, expected_artist):
@@ -611,6 +649,25 @@ def _apply_mb_release_metadata(
     if not _validate_mb_release_title(release_title, track_info.album):
         track_info.musicbrainz_albumid = None
         track_info.musicbrainz_releasegroupid = None
+        return
+
+    release_recordings = mb_rel.get("tracks_by_mbid")
+    if (
+        isinstance(release_recordings, dict)
+        and not _is_generic(track_info.artist, "artist")
+        and not _is_generic_title(track_info.title)
+        and not any(
+            _recording_matches_track_identity(track_info, recording)
+            for recording in release_recordings.values()
+            if isinstance(recording, dict)
+        )
+    ):
+        track_info.musicbrainz_albumid = None
+        track_info.metadata_sources.pop("musicbrainz_albumid", None)
+        track_info.metadata_conflicts["musicbrainz_albumid"] = (
+            "MusicBrainz release does not contain the verified recording; "
+            "release identifier removed and release metadata withheld."
+        )
         return
 
     mb_rel_map = {
@@ -632,7 +689,10 @@ def _apply_mb_release_metadata(
         mb_rel_map["musicbrainz_artistid"] = "musicbrainz_artistid"
     if mb_rel.get("date") and (force or not track_info.date):
         mb_rel_map["date"] = "date"
-    if mb_rel.get("original_date"):
+    original_date = normalize_date(str(mb_rel.get("original_date") or ""))
+    if original_date and (
+        not track_info.original_date or original_date <= track_info.original_date
+    ):
         mb_rel_map["original_date"] = "original_date"
 
     apply_metadata_mapping(
@@ -673,7 +733,7 @@ def _apply_mb_release_metadata(
         track_info.album_artist = preserve_unicode_repertoire(
             track_info.album_artist,
             clean_unicode_punct(
-                artists_module.resolve_artist_name(str(mb_rel["album_artist"]))
+                artist_resolution.resolve_artist_name(str(mb_rel["album_artist"]))
             ),
         )
 
@@ -700,6 +760,8 @@ def _enrich_musicbrainz(
     force: bool = False,
 ) -> None:
     try:
+        if _release_edition_conflicts(track_info, album_mb_release_details):
+            return
         disc_num = track_info.disc_number or 1
         candidate_rec = _find_album_release_recording(
             track_info, album_mb_release_details, disc_num

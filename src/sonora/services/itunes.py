@@ -231,6 +231,7 @@ def fetch_itunes_track_metadata(
         or None,
         "genre": best_result.get("primaryGenreName"),
         "advisory": advisory,
+        "explicitness": explicitness,
         "copyright": best_result.get("copyright"),
         "itunes_trackid": str(best_result["trackId"])
         if best_result.get("trackId")
@@ -335,7 +336,7 @@ def fetch_itunes_album_details(
     if not collection_id:
         return None
 
-    cache_key = f"itunes_album_lookup:v3:{collection_id}"
+    cache_key = f"itunes_album_lookup:v4:{collection_id}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -394,6 +395,7 @@ def fetch_itunes_album_details(
                 or None,
                 "genre": track_entry.get("primaryGenreName"),
                 "advisory": advisory,
+                "explicitness": explicitness,
                 "itunes_trackid": str(track_entry["trackId"])
                 if track_entry.get("trackId")
                 else None,

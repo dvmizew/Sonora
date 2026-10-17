@@ -7,8 +7,17 @@ from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.artists import get_primary_artist
+from sonora.core.audio_files import find_audio_files
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import get_config
 from sonora.core.files import atomic_write_bytes
+from sonora.core.library_paths import (
+    get_single_release_title,
+    group_files_by_album_root,
+    is_in_singles_hierarchy,
+    resolve_unique_path,
+    safe_case_rename,
+)
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -17,20 +26,9 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import RenameReport, TrackInfo
+from sonora.core.sidecars import find_companion_lyrics, relocate_companion_lyrics
 from sonora.core.text import normalize_str, safe_int, sanitize_name
 from sonora.core.titles import clean_title, strip_corrupt_brackets
-from sonora.core.utils import (
-    InterruptedOperationError,
-    find_audio_files,
-    find_companion_lyrics,
-    get_single_release_title,
-    group_files_by_album_root,
-    is_in_singles_hierarchy,
-    is_interruption,
-    relocate_companion_lyrics,
-    resolve_unique_path,
-    safe_case_rename,
-)
 
 
 def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
@@ -205,7 +203,7 @@ def rename_track_file(
                     f"   ∟ 🎵 [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
                 )
                 relocated = relocate_companion_lyrics(
-                    file_path, new_path, dry_run=False, companions=companion_lyrics
+                    file_path, new_path, dry_run=False, sidecars=companion_lyrics
                 )
                 if relocated_lrc_collector is not None:
                     relocated_lrc_collector.extend(relocated)

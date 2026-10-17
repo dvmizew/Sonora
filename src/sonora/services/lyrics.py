@@ -1,6 +1,7 @@
 import html
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -11,10 +12,11 @@ from typing import Any
 import ftfy
 import httpx
 import syncedlyrics
+from rich.markup import escape
 
 from sonora.audio.metadata import get_audio_duration
 from sonora.core.api_payloads import require_api_object
-from sonora.core.artists import get_primary_artist
+from sonora.core.artists import get_primary_artist, resolve_artist_name
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.constants import RATE_LIMIT_LRCLIB, RATE_LIMIT_LYRICS, USER_AGENT
@@ -23,9 +25,9 @@ from sonora.core.files import atomic_write_bytes
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
+from sonora.core.retry import retry_network_call
 from sonora.core.text import normalize_str
 from sonora.core.titles import clean_title, score_artist_title_match
-from sonora.core.utils import retry_network_call
 
 logging.getLogger("syncedlyrics").setLevel(logging.CRITICAL)
 for _provider in ["Musixmatch", "Lrclib", "NetEase", "Megalobiz", "RentAnAdviser"]:
@@ -125,6 +127,60 @@ _LYRICS_JUNK_PATTERNS = [
     re.compile(r"<!--.*?-->", re.IGNORECASE),
 ]
 _LYRICS_EMBED_END_REGEX = re.compile(r"\d*\s*Embed\s*$", re.IGNORECASE)
+_LRC_METADATA_HEADER_PATTERN = re.compile(
+    r"\[(ar|ti|al|au|by|re|ve|length|offset)\s*:([^\]\r\n]*)\]", re.IGNORECASE
+)
+
+
+def lyrics_identity_matches(
+    lyrics_text: str | None, artist: str | None, title: str | None
+) -> bool:
+    """Reject conflicting available LRC headers; missing headers establish no identity."""
+    if not lyrics_text:
+        return True
+    for line in lyrics_text.splitlines():
+        header_line = line.lstrip("\ufeff \t")
+        header_matches = list(_LRC_METADATA_HEADER_PATTERN.finditer(header_line))
+        if not header_matches or header_matches[0].start() != 0:
+            continue
+        for header in header_matches:
+            field_name, header_value = header.groups()
+            field_name = field_name.lower()
+            if field_name not in {"ar", "ti"}:
+                continue
+            expected_value = artist if field_name == "ar" else title
+            # Placeholder labels provide no usable evidence against a local asset.
+            if any(
+                normalize_str(metadata_value)
+                in {
+                    "",
+                    "unknown",
+                    "unknown artist",
+                    "unknown title",
+                    "unknown track",
+                    "untitled",
+                    "artist",
+                    "title",
+                }
+                or re.fullmatch(
+                    r"(?:audio\s*)?track\s*\d*", normalize_str(metadata_value)
+                )
+                for metadata_value in (expected_value, header_value)
+            ):
+                continue
+            if field_name == "ar":
+                expected_artist = get_primary_artist(
+                    resolve_artist_name(expected_value)
+                )
+                header_artist = get_primary_artist(resolve_artist_name(header_value))
+                if normalize_str(expected_artist) != normalize_str(header_artist):
+                    return False
+            elif (
+                score_artist_title_match("", expected_value or "", "", header_value)
+                <= 0
+            ):
+                return False
+    return True
 
 
 def clean_lyrics_text(text: str | None) -> str | None:
@@ -251,7 +307,7 @@ def detect_lrc_quality(audio_path: Path, audio_duration: float | None = None) ->
     if not lrc_path.exists() or lrc_path.stat().st_size == 0:
         return 0
     try:
-        content = lrc_path.read_text(encoding="utf-8", errors="ignore")
+        content = lrc_path.read_text(encoding="utf-8-sig")
         resolved_duration = (
             audio_duration
             if audio_duration is not None
@@ -304,6 +360,8 @@ def _query_lrclib(
         if (
             not provider_artist
             or not provider_title
+            or normalize_str(clean_title(str(provider_title)))
+            != normalize_str(clean_title(track_name))
             or score_artist_title_match(
                 artist_name, track_name, str(provider_artist), str(provider_title)
             )
@@ -311,10 +369,12 @@ def _query_lrclib(
         ):
             return None
         provider_duration = lyrics_payload.get("duration")
-        if (
-            duration is not None
-            and isinstance(provider_duration, (int, float))
-            and abs(provider_duration - duration)
+        if duration is not None and (
+            isinstance(provider_duration, bool)
+            or not isinstance(provider_duration, (int, float))
+            or not math.isfinite(provider_duration)
+            or provider_duration <= 0
+            or abs(provider_duration - duration)
             > get_config().single_duration_tolerance_seconds
         ):
             return None
@@ -430,7 +490,7 @@ def fetch_synced_lyrics(
         ],
         ensure_ascii=False,
     )
-    cache_key = f"lyrics:v4:{get_config().allow_unverified_lyrics}:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}:{constraints}"
+    cache_key = f"lyrics:v5:{get_config().allow_unverified_lyrics}:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}:{constraints}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
         cached_quality = get_lyrics_quality(cached)
@@ -526,16 +586,47 @@ def process_track_lyrics(
     )
     current_quality = detect_lrc_quality(file_path, audio_duration=resolved_duration)
     existing_content: str | None = None
+    rejected_content: str | None = None
 
     if lrc_path.exists() and lrc_path.stat().st_size > 0:
         try:
-            existing_content = lrc_path.read_text(
-                encoding="utf-8", errors="ignore"
-            ).strip()
-        except (OSError, ValueError):
+            existing_content = lrc_path.read_text(encoding="utf-8-sig").strip()
+        except UnicodeDecodeError:
+            existing_content = None
+            current_quality = 0
+        except OSError:
             existing_content = None
 
+    if existing_content and (
+        not lyrics_identity_matches(existing_content, artist, title)
+        or not is_lyrics_duration_valid(existing_content, resolved_duration)
+    ):
+        LOG.warning(
+            f"Local lyrics require review for {escape(file_path.name)}: "
+            "headers or timestamps conflict with the requested recording; reuse withheld."
+        )
+        rejected_content = existing_content
+        existing_content = None
+        current_quality = 0
+
     embedded_quality = get_lyrics_quality(existing_lyrics)
+    if existing_lyrics and (
+        not lyrics_identity_matches(existing_lyrics, artist, title)
+        or (
+            rejected_content is not None
+            and _LRC_METADATA_HEADER_PATTERN.sub(
+                "", clean_lyrics_text(existing_lyrics) or ""
+            ).strip()
+            == _LRC_METADATA_HEADER_PATTERN.sub(
+                "", clean_lyrics_text(rejected_content) or ""
+            ).strip()
+        )
+    ):
+        LOG.warning(
+            f"Embedded lyrics require review for {escape(file_path.name)}: "
+            "recording identity conflicts with local evidence; reuse withheld."
+        )
+        embedded_quality = 0
     if embedded_quality > current_quality and is_lyrics_duration_valid(
         existing_lyrics, resolved_duration
     ):
@@ -579,6 +670,12 @@ def process_track_lyrics(
         LOG.warning(
             f"   ∟ ⚠️  Rejected mismatched lyrics for {title}: "
             f"lyrics duration exceeds audio length ({int(resolved_duration or 0)}s)."
+        )
+        lyrics_text = None
+    if lyrics_text and not lyrics_identity_matches(lyrics_text, artist, title):
+        LOG.warning(
+            f"Fetched lyrics require review for {escape(file_path.name)}: "
+            "returned headers conflict with the requested recording."
         )
         lyrics_text = None
 

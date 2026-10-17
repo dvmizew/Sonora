@@ -11,6 +11,82 @@ from tests.service_support import ServiceResponseTestCase
 
 class TestDiscogsResponses(ServiceResponseTestCase):
     @patch("sonora.services.discogs.SESSION.get")
+    def test_release_credits_respect_documented_track_scopes(
+        self, mock_get: MagicMock
+    ) -> None:
+        cases: tuple[tuple[str, tuple[str, ...], set[str]], ...] = (
+            ("A1, B1", ("A1", "A2", "B1"), {"A1", "B1"}),
+            ("A2 to B1", ("A1", "A2", "B1"), {"A2", "B1"}),
+            ("A1 to Missing", ("A1", "A2", "B1"), set()),
+            ("A1", ("A1", "A1", "B1"), set()),
+            ("B1 to A1", ("A1", "A2", "B1"), set()),
+        )
+        for scope, positions, expected_positions in cases:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {
+                "extraartists": [
+                    {"name": "Album Producer", "role": "Producer", "tracks": ""},
+                    {"name": "Scoped Composer", "role": "Written-By", "tracks": scope},
+                ],
+                "tracklist": [
+                    {"position": position, "title": f"Recording {index}"}
+                    for index, position in enumerate(positions, 1)
+                ],
+            }
+            mock_get.return_value = response
+            with self.subTest(scope=scope, positions=positions):
+                details = fetch_discogs_release_details(1)
+                self.assertIsNotNone(details)
+                assert details is not None
+                self.assertEqual(details["producers"], "Album Producer")
+                self.assertIsNone(details["composer"])
+                for position in positions:
+                    self.assertEqual(
+                        details["track_credits"][position].get("composer"),
+                        "Scoped Composer" if position in expected_positions else None,
+                    )
+
+    @patch("sonora.services.discogs.SESSION.get")
+    def test_track_credit_indexes_retain_provider_identity(
+        self, mock_get: MagicMock
+    ) -> None:
+        title_cases: tuple[tuple[str, str], ...] = (
+            ("Second Song", "First Song"),
+            ("Recording", "Recording"),
+            ("", "Recording"),
+        )
+        for titles in title_cases:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {
+                "id": 1,
+                "tracklist": [
+                    {
+                        "position": str(position),
+                        "title": title,
+                        "extraartists": [
+                            {"name": f"Producer {position}", "role": "Producer"}
+                        ],
+                    }
+                    for position, title in enumerate(titles, start=1)
+                ],
+            }
+            mock_get.return_value = response
+            with self.subTest(titles=titles):
+                details = fetch_discogs_release_details(1)
+                self.assertIsNotNone(details)
+                assert details is not None
+                credits = details["track_credits"]
+                for position, title in enumerate(titles, start=1):
+                    self.assertEqual(credits[str(position)]["title"], title)
+                    self.assertEqual(
+                        credits[str(position)]["producers"], f"Producer {position}"
+                    )
+                if titles[0] and titles[0] != titles[1]:
+                    self.assertIs(credits[titles[0].lower()], credits["1"])
+                if titles[0] == titles[1]:
+                    self.assertNotIn(titles[0].lower(), credits)
+
+    @patch("sonora.services.discogs.SESSION.get")
     def test_search_discogs_release(self, mock_get: MagicMock) -> None:
         # 1. Search response
         mock_search_response = MagicMock()

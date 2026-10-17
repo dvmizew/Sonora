@@ -1,8 +1,8 @@
 import dataclasses
 from unittest.mock import patch
 
+from sonora.core.cancellation import InterruptedOperationError
 from sonora.core.models import TrackInfo
-from sonora.core.utils import InterruptedOperationError
 from sonora.modules import organizer
 from tests.support import IsolatedTestCase
 

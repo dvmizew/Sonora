@@ -24,19 +24,17 @@ from sonora.cli.options import (
     ThreadsOpt,
 )
 from sonora.cli.reports import _write_json_report
+from sonora.core.audio_files import find_audio_files
 from sonora.core.cache import api_cache_session
+from sonora.core.cancellation import is_interruption
 from sonora.core.config import get_config
+from sonora.core.library_paths import group_files_by_album_root
 from sonora.core.logger import (
     LOG,
     create_progress,
     interactive_pause_listener,
     resume_workers,
     wait_if_paused,
-)
-from sonora.core.utils import (
-    find_audio_files,
-    group_files_by_album_root,
-    is_interruption,
 )
 from sonora.services.lyrics import init_musixmatch_token, process_track_lyrics
 

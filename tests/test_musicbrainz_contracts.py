@@ -37,6 +37,35 @@ def credited_recording() -> dict[str, Any]:
 
 
 class TestMusicBrainzCatalogContracts(IsolatedTestCase):
+    def test_explicit_release_search_excludes_clean_candidates_and_separates_cache(
+        self,
+    ) -> None:
+        for description, accepted in (
+            ("clean", False),
+            ("16bit cleaned version", False),
+            ("explicit", True),
+            ("", True),
+        ):
+            with self.subTest(description=description):
+                release = {**self.release, "disambiguation": description}
+                with (
+                    patch.object(service, "get_cached_api", return_value=None) as cache,
+                    patch.object(service, "set_cached_api"),
+                    patch.object(
+                        service, "fetch_artist_discography", return_value=[release]
+                    ),
+                    patch.object(
+                        service,
+                        "_call_musicbrainz",
+                        return_value={"release-list": [release]},
+                    ),
+                ):
+                    result = service.search_musicbrainz_release(
+                        "Primary", "Record", expected_advisory="Explicit"
+                    )
+                self.assertEqual(result is not None, accepted)
+                self.assertIn(":Explicit", cache.call_args.args[0])
+
     def test_malformed_nested_release_artist_is_a_schema_error(self) -> None:
         with self.assertRaisesRegex(TypeError, "JSON object"):
             service._score_musicbrainz_candidate(

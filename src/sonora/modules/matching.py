@@ -8,6 +8,10 @@ from rapidfuzz import fuzz
 from sonora.core.api_payloads import require_api_object
 from sonora.core.artists import get_primary_artist
 from sonora.core.config import get_config
+from sonora.core.library_paths import (
+    extract_disc_number_from_folder,
+    parse_track_filename,
+)
 from sonora.core.models import TrackInfo
 from sonora.core.text import is_valid_uuid, normalize_str, safe_float, safe_int
 from sonora.core.titles import (
@@ -15,7 +19,6 @@ from sonora.core.titles import (
     recording_identity_matches,
     score_artist_title_match,
 )
-from sonora.core.utils import extract_disc_number_from_folder, parse_track_filename
 
 
 def _is_generic(text: str | None, placeholder: str) -> bool:

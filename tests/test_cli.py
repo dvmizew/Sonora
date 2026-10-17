@@ -2,12 +2,14 @@
 Unit tests for Sonora CLI main entrypoint and subcommands.
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from sonora.cli.main import main
+from sonora.cli.reports import _emit_tag_summary_and_report
 from sonora.core.models import CheckReport, NormalizeReport, TrackInfo
 from tests.support import IsolatedTestCase
 
@@ -337,6 +339,77 @@ class TestCLIInterface(IsolatedTestCase):
                 with self.subTest(args=args):
                     exit_code = main(args)
                     self.assertEqual(exit_code, 130)
+
+
+class TestTagReportVerification(IsolatedTestCase):
+    def test_metadata_coverage_does_not_imply_recording_identity_evidence(self) -> None:
+        recording_id = "11111111-2222-3333-4444-555555555555"
+        tracks = [
+            TrackInfo(
+                Path("inherited.flac"),
+                musicbrainz_trackid=recording_id,
+                metadata_sources={"genre": "iTunes"},
+            ),
+            TrackInfo(
+                Path("verified.flac"),
+                musicbrainz_trackid=recording_id,
+                metadata_sources={"musicbrainz_trackid": "MusicBrainz"},
+                metadata_conflicts={"genre": "Providers disagree"},
+            ),
+            TrackInfo(Path("unmatched.flac")),
+        ]
+        output = self.test_directory / "report.json"
+        with patch("sonora.cli.reports.LOG.summary_table"):
+            _emit_tag_summary_and_report(
+                tracks, [], False, self.test_directory, 1, output
+            )
+        report = json.loads(output.read_text())
+        verification = report["verification"]
+        self.assertEqual(verification["tracks_with_provider_evidence"], 2)
+        self.assertEqual(verification["tracks_with_recording_identifier_evidence"], 1)
+        self.assertEqual(verification["tracks_with_metadata_conflicts"], 1)
+        self.assertEqual(
+            verification["metadata_conflicts"],
+            [
+                {
+                    "file_path": "verified.flac",
+                    "conflicts": {"genre": "Providers disagree"},
+                }
+            ],
+        )
+        self.assertEqual(
+            verification["recording_identifiers_without_provider_evidence"][
+                "musicbrainz_trackid"
+            ],
+            ["inherited.flac"],
+        )
+        self.assertEqual(
+            verification["tracks_without_provider_evidence"], ["unmatched.flac"]
+        )
+
+    def test_empty_report_has_no_identity_evidence_or_conflicts(self) -> None:
+        output = self.test_directory / "report.json"
+        with patch("sonora.cli.reports.LOG.summary_table"):
+            _emit_tag_summary_and_report([], [], False, self.test_directory, 1, output)
+        verification = json.loads(output.read_text())["verification"]
+        self.assertEqual(verification["tracks_with_recording_identifier_evidence"], 0)
+        self.assertEqual(verification["tracks_with_metadata_conflicts"], 0)
+        self.assertEqual(verification["metadata_conflicts"], [])
+
+    def test_incomplete_coverage_is_not_rounded_to_one_hundred_percent(self) -> None:
+        tracks = [TrackInfo(Path("recording.flac"), genre="Pop") for _ in range(6507)]
+        tracks.extend(
+            [TrackInfo(Path("missing.flac")), TrackInfo(Path("also-missing.flac"))]
+        )
+        output = self.test_directory / "report.json"
+        with patch("sonora.cli.reports.LOG.summary_table") as summary:
+            _emit_tag_summary_and_report(
+                tracks, [], False, self.test_directory, 1, output
+            )
+        report = json.loads(output.read_text())
+        self.assertEqual(report["statistics"]["enrichment"]["genre_percentage"], 99.97)
+        rows = summary.call_args.args[1]
+        self.assertIn(("Genre & Styles Tagged", "6507/6509 (99.97%)", None), rows)
 
 
 if __name__ == "__main__":

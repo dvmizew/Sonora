@@ -1,4 +1,5 @@
 import re
+from collections.abc import Callable
 from functools import lru_cache
 
 import ftfy
@@ -125,7 +126,10 @@ _UNBRACKETED_FEAT_PATTERN = re.compile(
 
 
 def extract_title_features(
-    title: str | None, primary_artist: str | None = None
+    title: str | None,
+    primary_artist: str | None = None,
+    *,
+    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> tuple[str, list[str]]:
     """
     Extract featuring artists from a track title and return (clean_title, list_of_featured_artists).
@@ -150,7 +154,9 @@ def extract_title_features(
 
     all_raw_feats = bracket_feats + unbracketed_feats
     featured_tokens = extract_featured_artist_tokens(
-        all_raw_feats, primary_artist=primary_artist, allow_network=False
+        all_raw_feats,
+        primary_artist=primary_artist,
+        group_classifier=group_classifier,
     )
     return cleaned_title, featured_tokens
 
@@ -167,6 +173,7 @@ def clean_title(title: str | None) -> str:
 _VERSION_OR_REMIX_KEYWORDS = frozenset(
     {
         "remix",
+        "extended",
         "rework",
         "edit",
         "mix",
@@ -179,6 +186,10 @@ _VERSION_OR_REMIX_KEYWORDS = frozenset(
         "slowed",
         "freestyle",
     }
+)
+
+_ALBUM_VERSION_PATTERN = re.compile(
+    r"[\(\[\{]\s*album\s+version\s*[\)\]\}]", re.IGNORECASE
 )
 
 _REMIX_MODIFIER_PATTERN = re.compile(
@@ -253,8 +264,8 @@ def _title_identity_score(query_title: str, candidate_title: str) -> float:
     query_title_clean = clean_title(query_title).lower()
     candidate_title_clean = clean_title(candidate_title).lower()
 
-    query_series = extract_series_number(query_title)
-    candidate_series = extract_series_number(candidate_title)
+    query_series = extract_series_number(query_title_clean)
+    candidate_series = extract_series_number(candidate_title_clean)
     if (
         query_series is not None
         and candidate_series is not None
@@ -322,12 +333,12 @@ def _title_identity_score(query_title: str, candidate_title: str) -> float:
             )
             title_score = max(title_score, art_ratio, art_sort)
 
-    query_version = is_version_or_remix(query_title) or is_version_or_remix(
-        query_title_clean
-    )
-    candidate_version = is_version_or_remix(candidate_title) or is_version_or_remix(
-        candidate_title_clean
-    )
+    query_version = is_version_or_remix(
+        _ALBUM_VERSION_PATTERN.sub("", query_title)
+    ) or is_version_or_remix(query_title_clean)
+    candidate_version = is_version_or_remix(
+        _ALBUM_VERSION_PATTERN.sub("", candidate_title)
+    ) or is_version_or_remix(candidate_title_clean)
     if query_version != candidate_version:
         if query_title_clean == candidate_title_clean:
             title_score -= config.version_equivalence_penalty
@@ -379,11 +390,9 @@ def score_artist_title_match(
         elif query_artist_clean == candidate_artist_clean:
             artist_score = 100.0
         else:
-            query_primary = clean_title(
-                get_primary_artist(query_artist_clean, allow_network=False)
-            ).lower()
+            query_primary = clean_title(get_primary_artist(query_artist_clean)).lower()
             candidate_primary = clean_title(
-                get_primary_artist(candidate_artist_clean, allow_network=False)
+                get_primary_artist(candidate_artist_clean)
             ).lower()
             if query_primary == candidate_primary:
                 artist_score = 100.0

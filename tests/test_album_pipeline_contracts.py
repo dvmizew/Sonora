@@ -507,8 +507,8 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         ]
         with (
             patch(
-                "sonora.core.artists.resolve_artist_name",
-                side_effect=lambda name, *, allow_network=True: name,
+                "sonora.services.artist_resolution.resolve_artist_name",
+                side_effect=lambda name: name,
             ),
             patch.object(
                 metadata, "write_track_metadata", side_effect=OSError("read-only")

@@ -1,4 +1,5 @@
 import re
+from collections.abc import Callable
 
 from rapidfuzz import fuzz
 
@@ -7,13 +8,13 @@ from sonora.core.artists import (
     get_primary_artist,
     harmonize_artist_casing,
     normalize_featured_artists,
-    resolve_artist_name,
 )
 from sonora.core.config import get_config
 from sonora.core.models import TrackInfo
 from sonora.core.text import (
     clean_disambiguation,
     clean_unicode_punct,
+    normalize_advisory,
     normalize_country_name,
     normalize_date,
     normalize_genre,
@@ -32,7 +33,8 @@ _PROD_BRACKET_PATTERN = re.compile(
 def normalize_track_metadata(
     track_info: TrackInfo,
     *,
-    allow_network: bool = False,
+    artist_resolver: Callable[[str | None], str] | None = None,
+    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> TrackInfo:
     """
     Apply canonical, deterministic normalization to all metadata fields of a TrackInfo object.
@@ -56,37 +58,41 @@ def normalize_track_metadata(
 
         track_info.title = strip_corrupt_brackets(track_info.title)
         clean_base, title_feats = extract_title_features(
-            track_info.title, primary_artist=track_info.artist
+            track_info.title,
+            primary_artist=track_info.artist,
+            group_classifier=group_classifier,
         )
         if title_feats:
             track_info.featured_artists = normalize_featured_artists(
                 [track_info.featured_artists, *title_feats],
                 primary_artist=track_info.artist,
-                allow_network=allow_network,
+                group_classifier=group_classifier,
             )
         track_info.title = clean_unicode_punct(clean_base)
 
     if track_info.artist:
         track_info.artist = strip_corrupt_brackets(track_info.artist)
-        base_artist, extracted_features = extract_artist_features(track_info.artist)
+        base_artist, extracted_features = extract_artist_features(
+            track_info.artist, group_classifier=group_classifier
+        )
         if base_artist:
             track_info.artist = base_artist
         if extracted_features:
             track_info.featured_artists = normalize_featured_artists(
                 [track_info.featured_artists, *extracted_features],
                 primary_artist=track_info.artist,
-                allow_network=allow_network,
+                group_classifier=group_classifier,
             )
         track_info.artist = clean_disambiguation(track_info.artist)
-        if allow_network:
-            track_info.artist = resolve_artist_name(track_info.artist)
+        if artist_resolver is not None:
+            track_info.artist = artist_resolver(track_info.artist)
         track_info.artist = clean_unicode_punct(track_info.artist)
 
     if track_info.featured_artists:
         track_info.featured_artists = normalize_featured_artists(
             track_info.featured_artists,
             primary_artist=track_info.artist,
-            allow_network=allow_network,
+            group_classifier=group_classifier,
         )
 
     if track_info.album:
@@ -94,8 +100,8 @@ def normalize_track_metadata(
 
     if track_info.album_artist:
         track_info.album_artist = clean_disambiguation(track_info.album_artist)
-        if allow_network:
-            track_info.album_artist = resolve_artist_name(track_info.album_artist)
+        if artist_resolver is not None:
+            track_info.album_artist = artist_resolver(track_info.album_artist)
         track_info.album_artist = clean_unicode_punct(track_info.album_artist)
 
     if (
@@ -172,7 +178,6 @@ def normalize_track_metadata(
     track_info.release_country = normalize_country_name(track_info.release_country)
     track_info.language = normalize_language_name(track_info.language)
     track_info.script = normalize_script_name(track_info.script)
-    if track_info.advisory != "Explicit":
-        track_info.advisory = None
+    track_info.advisory = normalize_advisory(track_info.advisory)
 
     return track_info

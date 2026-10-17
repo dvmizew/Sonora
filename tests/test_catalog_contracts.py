@@ -362,8 +362,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
 
     def setUp(self) -> None:
         artist_resolution = patch(
-            "sonora.core.artists.resolve_artist_name",
-            side_effect=lambda artist, allow_network=True: artist,
+            "sonora.services.artist_resolution.resolve_artist_name",
+            side_effect=lambda artist: artist,
         )
         artist_resolution.start()
         self.addCleanup(artist_resolution.stop)
@@ -508,6 +508,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "disc_number": 2,
             "total_discs": 2,
             "trackName": "Found",
+            "artistName": "Primary",
             "itunes_trackid": "123",
         }
         album = {"tracks_by_number": {1: track}}
@@ -546,6 +547,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 "disc_number": 4,
                 "total_discs": 4,
                 "date": "2020",
+                "artist": "Primary",
+                "title": "Song",
             },
         ):
             catalog._enrich_itunes(self.recording)
@@ -579,7 +582,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "track_credits": {"2": {"title": "Found Song", "producers": "Producer"}},
             "country": "US",
         }
-        self.recording.title = "Untitled"
+        self.recording.title = "Found Song"
         self.recording.track_number = 2
         catalog._enrich_discogs(
             self.recording, "fixture", release, has_album_context=True
@@ -598,7 +601,9 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         )
         self.recording.musicbrainz_albumid = MBID
         release["year"] = 2022
-        release["track_credits"] = {"found song": {"composer": "Composer"}}
+        release["track_credits"] = {
+            "found song": {"title": "Found Song", "composer": "Composer"}
+        }
         catalog._enrich_discogs(self.recording, "fixture", release, force=True)
         self.assertEqual(self.recording.date, "2020")
         self.assertEqual(self.recording.composer, "Composer")
@@ -625,6 +630,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         )
         track = {
             "title": "Found Song",
+            "artist": "Primary",
             "track_position": 1,
             "disk_number": 2,
             "explicit_lyrics": True,
@@ -754,7 +760,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             genius_service, "fetch_genius_song_details", return_value=None
         ) as genius:
             catalog._enrich_genius(self.recording, "fixture")
-            genius.assert_not_called()
+            genius.assert_called_once()
+            genius.reset_mock()
             catalog._enrich_genius(self.recording, "fixture", force=True)
             genius.assert_called_once()
         self.recording.music_video_url = "https://example.com"

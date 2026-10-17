@@ -18,10 +18,15 @@ from sonora.core.artists import (
 )
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.files import atomic_audio_edit
+from sonora.core.library_paths import (
+    extract_disc_number_from_folder,
+    parse_track_filename,
+)
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
 from sonora.core.text import (
     is_valid_uuid,
+    normalize_advisory,
     normalize_date,
     normalize_genre,
     normalize_str,
@@ -29,7 +34,6 @@ from sonora.core.text import (
     safe_int,
     safe_int_pair,
 )
-from sonora.core.utils import extract_disc_number_from_folder, parse_track_filename
 
 _METADATA_CACHE: dict[tuple[str, int, int], TrackInfo] = {}
 _METADATA_CACHE_LOCK = threading.RLock()
@@ -117,6 +121,30 @@ def _get_tag(tags: dict[str, list[str]], *keys: str) -> str | None:
     return None
 
 
+def _read_advisory(
+    file_path: Path, tags: dict[str, list[str]]
+) -> tuple[str | None, bool]:
+    advisory = normalize_advisory(_get_tag(tags, *_TAG_SCHEMA["advisory"]))
+    existing = {key: tags[key] for key in _TAG_SCHEMA["advisory"] if key in tags}
+    if file_path.suffix.lower() in {".m4a", ".mp4"}:
+        # TagLib's property map does not expose the native MP4 content-rating atom.
+        rating = MP4(file_path).get("rtng")
+        if rating is not None:
+            advisory = "Explicit" if rating == [4] else None
+        return advisory, bool(existing) or rating != ([4] if advisory else None)
+    expected = {"ITUNESADVISORY": ["1"], "ADVISORY": ["Explicit"]} if advisory else {}
+    return advisory, existing != expected
+
+
+def _write_mp4_advisory(file_path: Path, advisory: str | None) -> None:
+    recording = MP4(file_path)
+    if normalize_advisory(advisory):
+        recording["rtng"] = [4]
+    else:
+        recording.pop("rtng", None)
+    recording.save()
+
+
 def _read_audio_encoding(file_path: Path) -> tuple[bool, int | None]:
     file_ext = file_path.suffix.lower()
     if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
@@ -153,7 +181,7 @@ def _featured_artists_from_tags(
     tags: dict[str, list[str]], primary_artist: str
 ) -> str | None:
     raw_artists = [*tags.get("ARTISTS", []), *tags.get("ARTIST", [])]
-    primary_tokens = extract_featured_artist_tokens(primary_artist, allow_network=False)
+    primary_tokens = extract_featured_artist_tokens(primary_artist)
     primary_keys = {normalize_str(artist) for artist in primary_tokens if artist}
     primary_keys.add(normalize_str(primary_artist))
     extra_artists = [
@@ -165,9 +193,7 @@ def _featured_artists_from_tags(
     ]
     if not extra_artists:
         return None
-    return normalize_featured_artists(
-        extra_artists, primary_artist=primary_artist, allow_network=False
-    )
+    return normalize_featured_artists(extra_artists, primary_artist=primary_artist)
 
 
 def read_track_metadata(file_path: Path) -> TrackInfo:
@@ -297,18 +323,14 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 additional_features = _featured_artists_from_tags(tags, artist)
                 if additional_features:
                     mapped_fields["featured_artists"] = additional_features
-            raw_advisory = mapped_fields.get("advisory")
-            if raw_advisory:
-                raw_str = str(raw_advisory).strip().lower()
-                if raw_str in ("1", "explicit"):
-                    mapped_fields["advisory"] = "Explicit"
-                else:
-                    mapped_fields["advisory"] = None
+            advisory, advisory_needs_normalization = _read_advisory(file_path, tags)
+            mapped_fields["advisory"] = advisory
 
             is_lossless, bits_per_sample = _read_audio_encoding(file_path)
 
             track_info = TrackInfo(
                 file_path=file_path,
+                _advisory_needs_normalization=advisory_needs_normalization,
                 artist=artist,
                 title=title,
                 album=album,
@@ -359,9 +381,7 @@ def _write_artist_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> Non
     tags["ALBUM"] = [track_info.album]
 
     primary_tokens = (
-        extract_featured_artist_tokens(track_info.artist, allow_network=False)
-        if track_info.artist
-        else []
+        extract_featured_artist_tokens(track_info.artist) if track_info.artist else []
     )
     if not primary_tokens and track_info.artist:
         primary_tokens = [track_info.artist]
@@ -370,7 +390,6 @@ def _write_artist_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> Non
         extract_featured_artist_tokens(
             track_info.featured_artists,
             primary_artist=track_info.artist,
-            allow_network=False,
         )
         if track_info.featured_artists
         else []
@@ -390,9 +409,7 @@ def _write_artist_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> Non
 
     if track_info.album_artist:
         tags["ALBUMARTIST"] = [track_info.album_artist]
-        album_tokens = extract_featured_artist_tokens(
-            track_info.album_artist, allow_network=False
-        )
+        album_tokens = extract_featured_artist_tokens(track_info.album_artist)
         if not album_tokens:
             album_tokens = [track_info.album_artist]
         unique_album_artists: list[str] = []
@@ -526,8 +543,7 @@ def _write_schema_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> Non
                     tags.pop(k, None)
                 continue
             if field == "advisory":
-                norm_adv = str(tag_value).strip().capitalize() if tag_value else None
-                if norm_adv == "Explicit":
+                if normalize_advisory(str(tag_value)):
                     tags["ITUNESADVISORY"] = ["1"]
                     tags["ADVISORY"] = ["Explicit"]
                 else:
@@ -615,62 +631,66 @@ def write_track_metadata(
         )
 
     try:
-        with (
-            atomic_audio_edit(track_info.file_path) as staging_path,
-            taglib.File(str(staging_path)) as song,
-        ):
-            original_tags = {key: list(values) for key, values in song.tags.items()}
-            _write_artist_tags(song.tags, track_info)
-            _write_numbering_and_dates(song.tags, track_info)
-            _write_audio_properties_tags(song.tags, track_info)
-            _write_schema_tags(song.tags, track_info)
-            _preserve_unchanged_multivalues(original_tags, song.tags)
+        with atomic_audio_edit(track_info.file_path) as staging_path:
+            with taglib.File(str(staging_path)) as song:
+                original_tags = {key: list(values) for key, values in song.tags.items()}
+                _write_artist_tags(song.tags, track_info)
+                _write_numbering_and_dates(song.tags, track_info)
+                _write_audio_properties_tags(song.tags, track_info)
+                _write_schema_tags(song.tags, track_info)
+                if track_info.file_path.suffix.lower() in {".m4a", ".mp4"}:
+                    for key in _TAG_SCHEMA["advisory"]:
+                        song.tags.pop(key, None)
+                _preserve_unchanged_multivalues(original_tags, song.tags)
 
-            if cover_art_path and cover_art_path.exists():
-                cover_bytes = cover_art_path.read_bytes()
-                with Image.open(io.BytesIO(cover_bytes)) as cover_image:
-                    cover_image.load()
-                    cover_dimensions = cover_image.size
-                    mime = Image.MIME.get(cover_image.format or "", "image/jpeg")
-                existing_pictures = song.pictures
-                front_covers = [
-                    picture
-                    for picture in existing_pictures
-                    if picture.picture_type == "Front Cover"
-                ]
-                existing_dimensions: list[tuple[int, int]] = []
-                for picture in front_covers:
-                    try:
-                        with Image.open(io.BytesIO(picture.data)) as embedded_image:
-                            existing_dimensions.append(embedded_image.size)
-                    except OSError:
-                        continue
-                if not any(
-                    width * height > cover_dimensions[0] * cover_dimensions[1]
-                    for width, height in existing_dimensions
-                ):
-                    song.pictures = [
+                if cover_art_path and cover_art_path.exists():
+                    cover_bytes = cover_art_path.read_bytes()
+                    with Image.open(io.BytesIO(cover_bytes)) as cover_image:
+                        cover_image.load()
+                        cover_dimensions = cover_image.size
+                        mime = Image.MIME.get(cover_image.format or "", "image/jpeg")
+                    existing_pictures = song.pictures
+                    front_covers = [
                         picture
                         for picture in existing_pictures
-                        if picture.picture_type != "Front Cover"
-                    ] + [
-                        taglib.Picture(
-                            data=cover_bytes,
-                            mime_type=mime,
-                            description="Cover",
-                            picture_type="Front Cover",
-                        )
+                        if picture.picture_type == "Front Cover"
                     ]
+                    existing_dimensions: list[tuple[int, int]] = []
+                    for picture in front_covers:
+                        try:
+                            with Image.open(io.BytesIO(picture.data)) as embedded_image:
+                                existing_dimensions.append(embedded_image.size)
+                        except OSError:
+                            continue
+                    if not any(
+                        width * height > cover_dimensions[0] * cover_dimensions[1]
+                        for width, height in existing_dimensions
+                    ):
+                        song.pictures = [
+                            picture
+                            for picture in existing_pictures
+                            if picture.picture_type != "Front Cover"
+                        ] + [
+                            taglib.Picture(
+                                data=cover_bytes,
+                                mime_type=mime,
+                                description="Cover",
+                                picture_type="Front Cover",
+                            )
+                        ]
 
-            unsaved = song.save()
-            if unsaved:
-                raise OSError(
-                    f"Unsupported tags for {track_info.file_path}: {', '.join(unsaved)}"
-                )
+                unsaved = song.save()
+                if unsaved:
+                    raise OSError(
+                        f"Unsupported tags for {track_info.file_path}: {', '.join(unsaved)}"
+                    )
+            if track_info.file_path.suffix.lower() in {".m4a", ".mp4"}:
+                _write_mp4_advisory(staging_path, track_info.advisory)
+            track_info._advisory_needs_normalization = False
             clear_metadata_cache()
     except FileNotFoundError:
         raise
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, MutagenError) as error:
         raise OSError(
             f"Failed to write metadata for {track_info.file_path}: {error}"
         ) from error

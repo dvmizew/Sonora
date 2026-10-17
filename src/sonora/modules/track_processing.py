@@ -12,8 +12,11 @@ from sonora.audio import cuesheet as cuesheet_module
 from sonora.audio import key as key_module
 from sonora.audio import metadata as metadata_module
 from sonora.audio import replaygain as replaygain_module
+from sonora.core.audio_files import find_audio_files
 from sonora.core.cache import api_cache_session
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.constants import MIN_COVER_ART_DIMENSION
+from sonora.core.library_paths import group_files_by_album_root
 from sonora.core.logger import (
     LOG,
     create_progress,
@@ -23,12 +26,6 @@ from sonora.core.logger import (
 )
 from sonora.core.models import NormalizeReport, TrackInfo
 from sonora.core.state import LibraryStateVault
-from sonora.core.utils import (
-    InterruptedOperationError,
-    find_audio_files,
-    group_files_by_album_root,
-    is_interruption,
-)
 from sonora.modules.catalog_enrichment import _NETWORK_EXCEPTIONS
 from sonora.modules.normalization import normalize_track_metadata
 from sonora.services import lyrics as lyrics_service
@@ -139,6 +136,29 @@ def _enrich_lyrics(
         lrc_path = file_path.with_suffix(".lrc")
         had_lrc = lrc_path.exists() and lrc_path.stat().st_size > 0
         resolved_duration = metadata_module.get_audio_duration(file_path)
+        local_lyrics = [track_info.lyrics, track_info.synced_lyrics]
+        if had_lrc:
+            try:
+                local_lyrics.append(lrc_path.read_text(encoding="utf-8-sig"))
+            except (OSError, UnicodeError):
+                track_info.metadata_conflicts["lyrics"] = (
+                    "Existing lyrics cannot be read as UTF-8; review before reuse."
+                )
+        if any(
+            lyric_text
+            and (
+                not lyrics_service.lyrics_identity_matches(
+                    lyric_text, track_info.artist, track_info.title
+                )
+                or not lyrics_service.is_lyrics_duration_valid(
+                    lyric_text, resolved_duration
+                )
+            )
+            for lyric_text in local_lyrics
+        ):
+            track_info.metadata_conflicts["lyrics"] = (
+                "Existing lyrics headers or timestamps conflict with the recording; review required."
+            )
         lyrics_text, tag_type = lyrics_service.process_track_lyrics(
             file_path,
             track_info.artist,
@@ -152,6 +172,7 @@ def _enrich_lyrics(
         )
         if lyrics_text and tag_type:
             track_info.lyrics = lyrics_text
+            track_info.metadata_conflicts.pop("lyrics", None)
             if not had_lrc:
                 LOG.info(
                     f"   ∟ [green]✅ Saved {tag_type} lyrics for {escape(file_path.name)}[/]"
@@ -183,6 +204,12 @@ def _compute_tag_diffs(
         )
         if old_clean != new_clean:
             diff_entries.append((metadata_field.name, old_clean, new_clean))
+    if original_metadata._advisory_needs_normalization and not any(
+        field == "advisory" for field, _, _ in diff_entries
+    ):
+        diff_entries.append(
+            ("advisory", "noncanonical tag encoding", track_info.advisory)
+        )
     return diff_entries
 
 
@@ -252,7 +279,7 @@ def _process_audio_and_save_tags(
         force=force,
         dry_run=dry_run,
     )
-    normalize_track_metadata(track_info, allow_network=False)
+    normalize_track_metadata(track_info)
 
     has_art_upgrade = False
     if cover_image and cover_image.exists():
@@ -327,7 +354,7 @@ def normalize_single_track(
     _enrich_bpm(current_info, file_path, fetch_bpm, force=force)
     _enrich_key(current_info, file_path, fetch_key, force=force)
 
-    normalize_track_metadata(current_info, allow_network=False)
+    normalize_track_metadata(current_info)
 
     diff_entries = _compute_tag_diffs(original_metadata, current_info)
     diff_descriptions = _describe_tag_diffs(diff_entries)

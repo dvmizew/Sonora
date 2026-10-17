@@ -16,6 +16,7 @@ from sonora.core.coordination import coalesce_lookup
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
+from sonora.core.retry import retry_network_call
 from sonora.core.text import (
     is_valid_uuid,
     normalize_country_name,
@@ -26,7 +27,6 @@ from sonora.core.text import (
     safe_int,
 )
 from sonora.core.titles import clean_title, score_artist_title_match
-from sonora.core.utils import retry_network_call
 
 _MB_LIMITER = RateLimiter(
     interval_seconds=RATE_LIMIT_MUSICBRAINZ, provider="musicbrainz.org"
@@ -115,6 +115,7 @@ def _score_musicbrainz_candidate(
     artist: str,
     album: str,
     expected_track_count: int | None = None,
+    expected_advisory: str | None = None,
 ) -> float:
     release_title = str(release.get("title", ""))
     release_artist = ""
@@ -136,6 +137,13 @@ def _score_musicbrainz_candidate(
     score = base_score
     album_norm = normalize_str(album)
     disambig = str(release.get("disambiguation") or "").strip().lower()
+    edition_tokens = set(normalize_str(disambig).split())
+    if (
+        expected_advisory == "Explicit"
+        and {"clean", "cleaned"}.intersection(edition_tokens)
+        and "explicit" not in edition_tokens
+    ):
+        return 0.0
 
     for kw in (
         "chopped",
@@ -177,16 +185,18 @@ def _score_musicbrainz_candidate(
 
 @coalesce_lookup
 def search_musicbrainz_release(
-    artist: str, album: str, expected_track_count: int | None = None
+    artist: str,
+    album: str,
+    expected_track_count: int | None = None,
+    *,
+    expected_advisory: str | None = None,
 ) -> dict[str, object] | None:
     """Search MusicBrainz for an album release matching artist and album name."""
     if not album or normalize_str(album) in ["unknown album", "unknown"]:
         return None
 
     count_suffix = f":{expected_track_count}" if expected_track_count else ""
-    cache_key = (
-        f"mb_release:v2:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}"
-    )
+    cache_key = f"mb_release:v3:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}:{expected_advisory or ''}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -207,7 +217,7 @@ def search_musicbrainz_release(
             album_lower in release_title and len(album_lower) >= 4
         ):
             candidate_score = _score_musicbrainz_candidate(
-                release, artist, album, expected_track_count
+                release, artist, album, expected_track_count, expected_advisory
             )
             if candidate_score >= get_config().catalog_candidate_rank_threshold:
                 candidate_scores[str(release.get("id") or "")] = candidate_score
@@ -230,7 +240,7 @@ def search_musicbrainz_release(
         )
         for release in releases:
             candidate_score = _score_musicbrainz_candidate(
-                release, artist, album, expected_track_count
+                release, artist, album, expected_track_count, expected_advisory
             )
             if candidate_score >= get_config().catalog_candidate_rank_threshold:
                 candidate_scores[str(release.get("id") or "")] = candidate_score
@@ -262,7 +272,7 @@ def search_musicbrainz_release(
             )
             for release in alt_releases:
                 candidate_score = _score_musicbrainz_candidate(
-                    release, artist, album, expected_track_count
+                    release, artist, album, expected_track_count, expected_advisory
                 )
                 if candidate_score >= get_config().catalog_candidate_rank_threshold:
                     candidate_scores[str(release.get("id") or "")] = candidate_score
@@ -722,7 +732,7 @@ def fetch_musicbrainz_release_details(
     if not release_mbid or not is_valid_uuid(release_mbid):
         return None
 
-    cache_key = f"mb_rel_details:v2:{release_mbid}"
+    cache_key = f"mb_rel_details:v3:{release_mbid}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict) and "tracks_by_disc_and_position" in cached:
         return cached
@@ -815,6 +825,7 @@ def fetch_musicbrainz_release_details(
 
         details: dict[str, object] = {
             "title": release_title,
+            "disambiguation": release_dict.get("disambiguation"),
             "album_artist": release_artist,
             "artist": release_artist,
             "barcode": barcode,

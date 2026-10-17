@@ -10,9 +10,9 @@ from rich.markup import escape
 
 from sonora.audio.decode import load_audio
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.core.cancellation import is_interruption
 from sonora.core.constants import SUPPORTED_EXTS
 from sonora.core.logger import LOG, resume_workers
-from sonora.core.utils import is_interruption
 
 
 @dataclass(frozen=True)

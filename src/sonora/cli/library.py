@@ -21,10 +21,10 @@ from sonora.cli.options import (
 )
 from sonora.cli.reports import _emit_tag_summary_and_report, _write_json_report
 from sonora.core.cache import set_ignore_cache
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import clear_config_cache, get_config, load_app_environment
 from sonora.core.logger import LOG
 from sonora.core.models import CheckReport, NormalizeReport, RenameReport, TrackInfo
-from sonora.core.utils import InterruptedOperationError, is_interruption
 from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.checker import check_library, write_check_report_json
 from sonora.modules.organizer import organize_library_singles
@@ -176,8 +176,18 @@ def tag(
         )
 
     if not interrupted:
-        action = "Previewed" if dry_run else "Successfully tagged"
-        LOG.success(f"{action} {len(tagged_tracks)} tracks.")
+        action = "Previewed" if dry_run else "Processed"
+        if failures:
+            LOG.warning(
+                f"{action} {len(tagged_tracks)} tracks with {len(failures)} failures."
+            )
+        else:
+            LOG.success(f"{action} {len(tagged_tracks)} tracks.")
+        conflict_count = sum(bool(track.metadata_conflicts) for track in tagged_tracks)
+        if conflict_count:
+            LOG.warning(
+                f"{conflict_count} tracks have unresolved provider conflicts; review the tagging report."
+            )
     else:
         LOG.warning(
             f"Partially processed {len(tagged_tracks)} tracks before interruption."

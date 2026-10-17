@@ -7,10 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sonora.audio.metadata import clear_metadata_cache
-from sonora.core.cache import close_cache, set_ignore_cache
+from sonora.core.cache import clear_normalization_cache, close_cache, set_ignore_cache
 from sonora.core.config import clear_config_cache
 from sonora.core.state import reset_library_state
-from sonora.core.utils import clear_utils_cache
 
 
 def reject_network(*arguments: object, **keywords: object) -> None:
@@ -58,7 +57,7 @@ class IsolatedTestCase(unittest.TestCase):
             reset_library_state()
             close_cache()
             clear_config_cache()
-            clear_utils_cache()
+            clear_normalization_cache()
             clear_metadata_cache()
             set_ignore_cache(False)
             try:
@@ -67,6 +66,6 @@ class IsolatedTestCase(unittest.TestCase):
                 reset_library_state()
                 close_cache()
                 clear_config_cache()
-                clear_utils_cache()
+                clear_normalization_cache()
                 clear_metadata_cache()
                 set_ignore_cache(False)

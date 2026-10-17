@@ -59,7 +59,7 @@ class TestNetwork(IsolatedTestCase):
         lrclib_patch.start()
         self.addCleanup(lrclib_patch.stop)
         artist_normalization = patch(
-            "sonora.modules.normalization.resolve_artist_name",
+            "sonora.services.artist_resolution.resolve_artist_name",
             side_effect=lambda name: name,
         )
         artist_normalization.start()
@@ -313,7 +313,7 @@ class TestNetwork(IsolatedTestCase):
                     return_value=None,
                 ),
                 patch(
-                    "sonora.core.artists.resolve_artist_name",
+                    "sonora.services.artist_resolution.resolve_artist_name",
                     side_effect=lambda x: x,
                 ),
                 patch("sonora.audio.metadata.write_track_metadata"),

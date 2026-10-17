@@ -20,7 +20,8 @@ class ModuleTestCase(IsolatedTestCase):
         artist_lookup.start()
         self.addCleanup(artist_lookup.stop)
         deezer_artist = patch(
-            "sonora.core.artists.SESSION.get", return_value=MagicMock(status_code=404)
+            "sonora.services.artist_resolution.SESSION.get",
+            return_value=MagicMock(status_code=404),
         )
         deezer_artist.start()
         self.addCleanup(deezer_artist.stop)

@@ -82,7 +82,7 @@ class TestLyricsResponses(ServiceResponseTestCase):
         self.assertIsNone(result)
         # Verify negative cache sentinel was persisted
         mock_set_cache.assert_called_with(
-            "lyrics:v4:True:artist without lyrics:instrumental track::[false, false, false, [], null, null, null]",
+            "lyrics:v5:True:artist without lyrics:instrumental track::[false, false, false, [], null, null, null]",
             "",
         )
 
@@ -109,6 +109,7 @@ class TestLyricsResponses(ServiceResponseTestCase):
         mock_song_response.json.return_value = {
             "response": {
                 "song": {
+                    "id": 1,
                     "title": "Title",
                     "primary_artist": {"name": "Artist"},
                     "description": {"plain": "Lyrics for this song are unavailable"},

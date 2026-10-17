@@ -1,14 +1,25 @@
+import dataclasses
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 
 from sonora.audio import metadata
+from sonora.core import artists
 from sonora.core.config import SonoraConfig
 from sonora.core.http import SESSION
 from sonora.core.models import CheckReport, TrackInfo
 from sonora.modules import catalog_enrichment, checker, matching, tagger
-from sonora.services import acoustid, itunes, lyrics, theaudiodb
+from sonora.modules.metadata_consensus import merge_provider_proposals
+from sonora.modules.normalization import normalize_track_metadata
+from sonora.services import (
+    acoustid,
+    artist_resolution,
+    itunes,
+    lyrics,
+    musicbrainz,
+    theaudiodb,
+)
 from tests.support import IsolatedTestCase
 
 MBID = "11111111-2222-3333-4444-555555555555"
@@ -343,3 +354,165 @@ class TestRecordingSafety(IsolatedTestCase):
                     expected,
                 )
             request.assert_not_called()
+
+
+class TestProviderConflictHandling(IsolatedTestCase):
+    def test_provider_conflict_preserves_disputed_field_and_allows_other_evidence(
+        self,
+    ) -> None:
+        track = TrackInfo(
+            Path("recording.flac"), artist="Artist", title="Song", total_tracks=14
+        )
+        disputed = dataclasses.replace(
+            track,
+            total_tracks=12,
+            metadata_conflicts={"total_tracks": "Release count excludes this track"},
+        )
+        agreed = dataclasses.replace(
+            track, genre="Pop", metadata_sources={"genre": "iTunes"}
+        )
+        merge_provider_proposals(track, [disputed, agreed])
+        self.assertEqual(track.total_tracks, 14)
+        self.assertEqual(
+            track.metadata_conflicts,
+            {"total_tracks": "Release count excludes this track"},
+        )
+        self.assertEqual(track.genre, "Pop")
+        self.assertEqual(track.metadata_sources.get("genre"), "iTunes")
+
+    def test_rejected_recording_cannot_inject_field_conflicts(self) -> None:
+        track = TrackInfo(Path("recording.flac"), artist="Artist", title="Song")
+        unrelated = dataclasses.replace(
+            track,
+            title="Entirely Different Recording",
+            metadata_conflicts={"genre": "Unrelated conflict"},
+        )
+        merge_provider_proposals(track, [unrelated])
+        self.assertIn("identity", track.metadata_conflicts)
+        self.assertNotIn("genre", track.metadata_conflicts)
+
+    def test_existing_conflict_cannot_be_overwritten_by_a_later_provider(self) -> None:
+        track = TrackInfo(
+            Path("recording.flac"),
+            artist="Artist",
+            title="Song",
+            genre="Jazz",
+            metadata_conflicts={"genre": "Album providers disagree"},
+        )
+        proposal = dataclasses.replace(
+            track, genre="Pop", metadata_sources={"genre": "iTunes"}
+        )
+        merge_provider_proposals(track, [proposal])
+        self.assertEqual(track.genre, "Jazz")
+        self.assertNotIn("genre", track.metadata_sources)
+
+
+class TestOfflineArtistNormalization(IsolatedTestCase):
+    def test_normalization_preserves_classified_groups_in_artist_and_title(
+        self,
+    ) -> None:
+        classifier = Mock(side_effect=lambda name: name == "Example & Partners")
+        for artist, title in (
+            ("Primary feat. Example & Partners", "Recording"),
+            ("Primary", "Recording (feat. Example & Partners)"),
+            ("Primary", "Recording feat. Example & Partners"),
+        ):
+            with self.subTest(artist=artist, title=title):
+                recording = TrackInfo(Path("song.flac"), artist=artist, title=title)
+                normalize_track_metadata(recording, group_classifier=classifier)
+                self.assertEqual(recording.artist, "Primary")
+                self.assertEqual(recording.title, "Recording")
+                self.assertEqual(recording.featured_artists, "Example & Partners")
+
+    def test_online_artist_resolution_uses_local_alias_before_providers(self) -> None:
+        with (
+            patch.object(
+                artists, "_load_user_overrides", return_value={"legal name": "Stage"}
+            ),
+            patch.object(
+                artist_resolution,
+                "_load_user_overrides",
+                return_value={"legal name": "Stage"},
+            ),
+            patch.object(artist_resolution, "get_cached_api") as cache_lookup,
+            patch.object(SESSION, "get") as http_request,
+            patch.object(musicbrainz, "search_musicbrainz_artists") as artist_search,
+        ):
+            self.assertEqual(
+                artist_resolution.resolve_artist_name("Legal Name"), "Stage"
+            )
+            cache_lookup.assert_not_called()
+            http_request.assert_not_called()
+            artist_search.assert_not_called()
+
+    def test_offline_artist_functions_ignore_external_identity_cache(self) -> None:
+        for cached_identity in ("Unrelated Artist", True, False):
+            with (
+                self.subTest(cached_identity=cached_identity),
+                patch.object(
+                    artist_resolution, "get_cached_api", return_value=cached_identity
+                ) as cache_lookup,
+            ):
+                self.assertEqual(artists.resolve_artist_name("Example"), "Example")
+                self.assertEqual(
+                    artists.get_primary_artist("Example & Partners"), "Example"
+                )
+                self.assertFalse(artists.is_single_group_artist("Example & Partners"))
+                cache_lookup.assert_not_called()
+
+    def test_explicit_group_classifier_preserves_registered_group(self) -> None:
+        classifier = Mock(return_value=True)
+        self.assertEqual(
+            artists.get_primary_artist(
+                "Example & Partners", group_classifier=classifier
+            ),
+            "Example & Partners",
+        )
+        classifier.assert_called_once()
+        classifier.return_value = False
+        self.assertEqual(
+            artists.get_primary_artist(
+                "Example & Partners", group_classifier=classifier
+            ),
+            "Example",
+        )
+        classifier.reset_mock()
+        self.assertEqual(
+            artists.get_primary_artist(None, group_classifier=classifier), "Unknown"
+        )
+        classifier.assert_not_called()
+
+    def test_local_aliases_work_without_online_artist_resolution(self) -> None:
+        with (
+            patch.object(
+                artists, "_load_user_overrides", return_value={"legal name": "Stage"}
+            ),
+            patch.object(
+                artist_resolution, "get_cached_api", return_value="Wrong Artist"
+            ) as cache_lookup,
+        ):
+            self.assertEqual(artists.resolve_artist_name("Legal Name"), "Stage")
+            self.assertEqual(artists.get_primary_artist("Legal Name"), "Stage")
+            self.assertEqual(artists.resolve_artist_name("Other Name"), "Other Name")
+            cache_lookup.assert_not_called()
+
+    def test_normalization_uses_artist_resolver_only_when_injected(self) -> None:
+        resolver = Mock(return_value="Stage")
+        offline_track = TrackInfo(
+            Path("song.flac"), artist="Legal Name", album_artist="Legal Name"
+        )
+        normalize_track_metadata(offline_track)
+        self.assertEqual(offline_track.artist, "Legal Name")
+        self.assertEqual(offline_track.album_artist, "Legal Name")
+        resolver.assert_not_called()
+        online_track = TrackInfo(
+            Path("song.flac"), artist="Legal Name", album_artist="Legal Name"
+        )
+        normalize_track_metadata(online_track, artist_resolver=resolver)
+        self.assertEqual(online_track.artist, "Stage")
+        self.assertEqual(online_track.album_artist, "Stage")
+        self.assertEqual(resolver.call_count, 2)
+        resolver.reset_mock()
+        empty_track = TrackInfo(Path("song.flac"), artist="", album_artist=None)
+        normalize_track_metadata(empty_track, artist_resolver=resolver)
+        resolver.assert_not_called()

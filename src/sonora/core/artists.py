@@ -1,24 +1,20 @@
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 import ftfy
-import httpx
 from rapidfuzz import fuzz
 from rich.markup import escape
 
-from sonora.core.api_payloads import require_api_object, require_api_records
-from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import (
     get_artist_split_pattern,
     get_balanced_feat_pattern,
+    get_config,
     get_feat_tokens_pattern,
 )
 from sonora.core.constants import DIRS, FEAT_KEYWORDS
-from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import (
     _COLLAPSE_SPACES_PATTERN,
@@ -26,7 +22,6 @@ from sonora.core.text import (
     clean_unicode_punct,
     normalize_str,
     preserve_unicode_repertoire,
-    safe_int,
     sanitize_name,
 )
 
@@ -58,7 +53,7 @@ def _load_user_overrides() -> dict[str, str]:
 
 
 @lru_cache(maxsize=4096)
-def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str:
+def resolve_artist_name(raw_name: str | None) -> str:
     """
     Resolve legal names, aliases, or variations to canonical stage names.
     Returns the resolved canonical name or the cleaned input if not an alias.
@@ -75,237 +70,41 @@ def resolve_artist_name(raw_name: str | None, allow_network: bool = True) -> str
     if normalized in user_overrides:
         return clean_unicode_punct(user_overrides[normalized])
 
-    if not allow_network:
-        return clean_unicode_punct(clean_name)
+    return clean_unicode_punct(clean_name)
 
-    cache_key = f"canonical_artist:{normalized}"
-    cached = get_cached_api(cache_key)
-    if isinstance(cached, str) and cached:
-        cached_words = cached.split()
-        norm_words = normalized.split()
-        is_corrupt_expansion = (
-            len(norm_words) == 1
-            and len(cached_words) > 1
-            and normalized in [w.lower() for w in cached_words]
-        )
-        is_cached_acronym = (
-            len(cached.replace(".", "")) <= 3
-            or "." in cached
-            or bool(re.search(r"\d", cached))
-        )
-        if is_corrupt_expansion or (
-            clean_name.istitle() and cached.isupper() and not is_cached_acronym
-        ):
-            set_cached_api(cache_key, None)
-        elif not (cached.isupper() and not is_cached_acronym):
-            return clean_unicode_punct(cached)
 
-    artists: list[dict[str, Any]] = []
-    try:
-        from sonora.services.musicbrainz import search_musicbrainz_artists
-
-        artists = search_musicbrainz_artists(
-            query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
-        )
-        for artist in artists:
-            art_name = str(artist.get("name", "")).strip()
-            if art_name == clean_name:
-                clean_res = clean_unicode_punct(art_name)
-                set_cached_api(cache_key, clean_res)
-                return clean_res
-
-        clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
-        for artist in artists:
-            art_name = str(artist.get("name", "")).strip()
-            if not art_name:
-                continue
-            is_exact = art_name.lower() == clean_name.lower()
-            is_norm = normalize_str(art_name) == normalized
-            if is_exact or is_norm:
-                cand_has_punct = bool(re.search(r"[^\w\s]", art_name))
-                if not is_exact and not clean_has_punct and cand_has_punct:
-                    continue
-                is_short_acronym = (
-                    len(clean_name.replace(".", "")) <= 3
-                    or "." in clean_name
-                    or bool(re.search(r"\d", clean_name))
-                )
-                if (
-                    clean_name.istitle()
-                    and art_name.isupper()
-                    and len(clean_name.replace(".", "")) > 3
-                ) or (
-                    clean_name.isupper() and is_short_acronym and not art_name.isupper()
-                ):
-                    res_name = clean_name
-                else:
-                    res_name = art_name
-                clean_res = clean_unicode_punct(res_name)
-                set_cached_api(cache_key, clean_res)
-                return clean_res
-    except (httpx.HTTPError, OSError) as e:
-        LOG.debug(f"MusicBrainz API error during artist resolution: {e}")
-
-    try:
-        response = SESSION.get(
-            "https://api.deezer.com/search/artist",
-            params={"q": clean_name},
-            timeout=5,
-        )
-        if response.status_code == 200:
-            deezer_payload = require_api_object(
-                response.json(), "Deezer artist response"
-            )
-            deezer_results = (
-                []
-                if deezer_payload.get("error")
-                else require_api_records(
-                    deezer_payload.get("data"), "Deezer artist results"
-                )
-            )
-            for deezer_entry in deezer_results[:10]:
-                d_name = str(deezer_entry.get("name", "")).strip()
-                if d_name == clean_name:
-                    clean_deezer = clean_unicode_punct(d_name)
-                    set_cached_api(cache_key, clean_deezer)
-                    return clean_deezer
-
-            clean_has_punct = bool(re.search(r"[^\w\s]", clean_name))
-            for deezer_entry in deezer_results[:10]:
-                d_name = str(deezer_entry.get("name", "")).strip()
-                if not d_name:
-                    continue
-                is_exact = d_name.lower() == clean_name.lower()
-                is_norm = normalize_str(d_name) == normalized
-                if is_exact or is_norm:
-                    if (
-                        not is_exact
-                        and not clean_has_punct
-                        and bool(re.search(r"[^\w\s]", d_name))
-                    ):
-                        continue
-                    if (clean_name.istitle() and d_name.isupper()) or (
-                        clean_name.isupper() and len(clean_name.replace(".", "")) <= 5
-                    ):
-                        res_name = clean_name
-                    else:
-                        res_name = d_name
-                    clean_deezer = clean_unicode_punct(res_name)
-                    set_cached_api(cache_key, clean_deezer)
-                    return clean_deezer
-    except (httpx.HTTPError, OSError) as e:
-        LOG.debug(f"Deezer API error during artist resolution: {e}")
-
-    clean_words = clean_name.split()
-    for artist in artists:
-        art_name = str(artist.get("name", "")).strip()
-        if not art_name:
-            continue
-        art_words = art_name.split()
-
-        # Guardrail: Single-word stage names must never expand into multi-word entities via aliases
-        if len(clean_words) == 1 and len(art_words) > 1:
-            continue
-        for alias_item in artist.get("alias-list", []):
-            if isinstance(alias_item, dict):
-                alias_name = str(alias_item.get("alias") or "")
-                alias_type = str(alias_item.get("type") or "").strip().lower()
-            else:
-                alias_name = str(alias_item)
-                alias_type = ""
-
-            if alias_type == "search hint" or (
-                alias_type == "legal name" and len(clean_words) < 2
-            ):
-                continue
-
-            if alias_name and (
-                alias_name.lower() == clean_name.lower()
-                or normalize_str(alias_name) == normalized
-            ):
-                clean_art = clean_unicode_punct(art_name)
-                set_cached_api(cache_key, clean_art)
-                return clean_art
-
-    clean_final = clean_unicode_punct(clean_name)
-    set_cached_api(cache_key, clean_final)
-    return clean_final
+def is_artist_group_candidate(raw_name: str | None) -> bool:
+    """Identify names whose configured separators can denote a band or collaboration."""
+    if not raw_name or not normalize_str(raw_name):
+        return False
+    clean_name = raw_name.strip()
+    if any(delimiter in clean_name for delimiter in ("&", "+", ",", "/")):
+        return True
+    name_lower = f" {clean_name.lower()} "
+    return any(
+        f" {conjunction} " in name_lower
+        for conjunction in get_config().featuring_conjunctions
+    )
 
 
 @lru_cache(maxsize=4096)
-def is_single_group_artist(raw_name: str | None, allow_network: bool = True) -> bool:
-    """
-    Determine if an artist name containing delimiters ('&', '+', ',') is a registered
-    single band/group entity (e.g. 'Simon & Garfunkel', 'Earth, Wind & Fire', 'Play & Win')
-    or a temporary collaboration (e.g. 'Drake & 21 Savage').
-    """
-    if not raw_name or not str(raw_name).strip():
+def is_single_group_artist(raw_name: str | None) -> bool:
+    """Recognize configured group entities without consulting provider data or caches."""
+    if not is_artist_group_candidate(raw_name):
         return False
-
-    clean_name = str(raw_name).strip()
-    normalized = normalize_str(clean_name)
-    if not normalized:
-        return False
-
-    delimiters = ("&", "+", ",", "/")
-    has_delimiter = any(delim in clean_name for delim in delimiters)
-    has_conjunction = False
-    if not has_delimiter:
-        from sonora.core.config import get_config
-
-        name_lower = f" {clean_name.lower()} "
-        has_conjunction = any(
-            f" {conj} " in name_lower for conj in get_config().featuring_conjunctions
-        )
-    if not (has_delimiter or has_conjunction):
-        return False
-
-    user_overrides = _load_user_overrides()
-    if normalized in user_overrides:
-        return True
-
-    from sonora.core.config import get_config
-
-    if any(normalize_str(g) == normalized for g in get_config().known_group_artists):
-        return True
-
-    if not allow_network:
-        return False
-
-    cache_key = f"is_group_entity:{normalized}"
-    cached = get_cached_api(cache_key)
-    if isinstance(cached, bool):
-        return cached
-
-    query_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", clean_name).strip()
-
-    try:
-        from sonora.services.musicbrainz import search_musicbrainz_artists
-
-        artist_list = search_musicbrainz_artists(
-            query=f'artist:"{query_name}"', limit=5
-        )
-        for artist in artist_list:
-            name_match = normalize_str(artist.get("name")) == normalized
-            score = safe_int(artist.get("ext:score")) or 0
-            artist_type = artist.get("type")
-            if name_match and (score >= 90 or artist_type == "Group"):
-                canonical_name = clean_unicode_punct(
-                    str(artist.get("name", "")).strip()
-                )
-                set_cached_api(f"canonical_artist:{normalized}", canonical_name)
-                set_cached_api(cache_key, True)
-                return True
-        set_cached_api(cache_key, False)
-        return False
-    except (
-        httpx.HTTPError,
-        OSError,
-    ):
-        return False
+    normalized = normalize_str(raw_name)
+    return normalized in _load_user_overrides() or any(
+        normalize_str(group_name) == normalized
+        for group_name in get_config().known_group_artists
+    )
 
 
-def get_primary_artist(artist_name: str | None, allow_network: bool = False) -> str:
+def get_primary_artist(
+    artist_name: str | None,
+    *,
+    artist_resolver: Callable[[str | None], str] | None = None,
+    group_classifier: Callable[[str | None], bool] | None = None,
+) -> str:
     """
     Extract primary artist from raw artist string by resolving aliases and stripping
     transient featured artists/delimiters, while preserving single group/band entities
@@ -316,14 +115,14 @@ def get_primary_artist(artist_name: str | None, allow_network: bool = False) -> 
 
     raw_artist_name = str(artist_name).strip()
     formatted_artist_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", raw_artist_name).strip()
-    if is_single_group_artist(raw_artist_name, allow_network=allow_network):
+    if (group_classifier or is_single_group_artist)(raw_artist_name):
         return sanitize_name(
-            resolve_artist_name(formatted_artist_name, allow_network=allow_network)
+            (artist_resolver or resolve_artist_name)(formatted_artist_name)
         )
 
     parts = get_artist_split_pattern().split(raw_artist_name, maxsplit=1)
     primary = parts[0].strip()
-    return sanitize_name(resolve_artist_name(primary, allow_network=allow_network))
+    return sanitize_name((artist_resolver or resolve_artist_name)(primary))
 
 
 def extract_balanced_features(
@@ -377,7 +176,8 @@ def extract_balanced_features(
 def extract_featured_artist_tokens(
     featured_artists_input: str | Sequence[str | None] | None,
     primary_artist: str | None = None,
-    allow_network: bool = False,
+    *,
+    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> list[str]:
     """
     Extract, normalize and deduplicate featured artists into a canonical list of individual artist names.
@@ -404,7 +204,7 @@ def extract_featured_artist_tokens(
         cleaned_chunk = clean_unicode_punct(raw_chunk).strip()
         if not cleaned_chunk:
             continue
-        if is_single_group_artist(cleaned_chunk, allow_network=allow_network):
+        if (group_classifier or is_single_group_artist)(cleaned_chunk):
             tokens.append(cleaned_chunk)
             continue
 
@@ -413,7 +213,7 @@ def extract_featured_artist_tokens(
             part_strip = part.strip()
             if not part_strip:
                 continue
-            if is_single_group_artist(part_strip, allow_network=allow_network):
+            if (group_classifier or is_single_group_artist)(part_strip):
                 tokens.append(part_strip)
             else:
                 for subpart in feat_pattern.split(part_strip):
@@ -495,7 +295,7 @@ def extract_featured_artist_tokens(
     registered_groups = [
         artist_token
         for artist_token in unique_artists
-        if is_single_group_artist(artist_token, allow_network=allow_network)
+        if (group_classifier or is_single_group_artist)(artist_token)
     ]
     if registered_groups:
         feat_token_pattern = get_feat_tokens_pattern()
@@ -528,7 +328,8 @@ def extract_featured_artist_tokens(
 def normalize_featured_artists(
     featured_artists_input: str | Sequence[str | None] | None,
     primary_artist: str | None = None,
-    allow_network: bool = False,
+    *,
+    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> str | None:
     """
     Format normalized featured artists as a canonical comma-separated string,
@@ -537,7 +338,7 @@ def normalize_featured_artists(
     tokens = extract_featured_artist_tokens(
         featured_artists_input,
         primary_artist=primary_artist,
-        allow_network=allow_network,
+        group_classifier=group_classifier,
     )
     return ", ".join(tokens) if tokens else None
 
@@ -546,7 +347,9 @@ _FEAT_ARTIST_PATTERN = re.compile(rf"\s+(?:{FEAT_KEYWORDS})\.?\s*(.+)$", re.IGNO
 
 
 def extract_artist_features(
-    artist_name: str | None, allow_network: bool = False
+    artist_name: str | None,
+    *,
+    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> tuple[str, list[str]]:
     """
     Extract featuring artists embedded within an artist tag, returning (base_artist, featured_artists_list).
@@ -556,7 +359,7 @@ def extract_artist_features(
     if not artist_name:
         return ("", [])
     raw_artist = ftfy.fix_text(str(artist_name)).strip()
-    if is_single_group_artist(raw_artist, allow_network=allow_network):
+    if (group_classifier or is_single_group_artist)(raw_artist):
         return (raw_artist, [])
 
     feat_match = _FEAT_ARTIST_PATTERN.search(raw_artist)
@@ -566,7 +369,7 @@ def extract_artist_features(
     base_artist = raw_artist[: feat_match.start()].strip()
     raw_featured = feat_match.group(1).strip()
     featured_tokens = extract_featured_artist_tokens(
-        raw_featured, primary_artist=base_artist, allow_network=allow_network
+        raw_featured, primary_artist=base_artist, group_classifier=group_classifier
     )
     return (base_artist, featured_tokens)
 

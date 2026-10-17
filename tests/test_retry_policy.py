@@ -6,7 +6,7 @@ from tests.support import IsolatedTestCase
 
 class TestNetworkRetries(IsolatedTestCase):
     def test_retry_network_call_success_on_first_try(self) -> None:
-        from sonora.core.utils import retry_network_call
+        from sonora.core.retry import retry_network_call
 
         mock_func = MagicMock(return_value="ok")
         result = retry_network_call(mock_func)
@@ -14,7 +14,7 @@ class TestNetworkRetries(IsolatedTestCase):
         self.assertEqual(mock_func.call_count, 1)
 
     def test_retry_network_call_retries_and_succeeds(self) -> None:
-        from sonora.core.utils import retry_network_call
+        from sonora.core.retry import retry_network_call
 
         limiter = RateLimiter(interval_seconds=0)
         mock_func = MagicMock(
@@ -32,7 +32,7 @@ class TestNetworkRetries(IsolatedTestCase):
         self.assertEqual(mock_sleep.call_count, 2)
 
     def test_retry_network_call_exhausts_retries(self) -> None:
-        from sonora.core.utils import retry_network_call
+        from sonora.core.retry import retry_network_call
 
         mock_func = MagicMock(side_effect=OSError("Permanent failure"))
         with patch("time.sleep"), self.assertRaises(OSError):
@@ -40,7 +40,7 @@ class TestNetworkRetries(IsolatedTestCase):
         self.assertEqual(mock_func.call_count, 3)
 
     def test_retry_network_call_skips_non_retryable(self) -> None:
-        from sonora.core.utils import retry_network_call
+        from sonora.core.retry import retry_network_call
 
         mock_func = MagicMock(side_effect=ValueError("Invalid parameter"))
         with patch("time.sleep"), self.assertRaises(ValueError):
@@ -52,7 +52,7 @@ class TestNetworkRetries(IsolatedTestCase):
         self.assertEqual(mock_func.call_count, 1)
 
     def test_retry_network_call_respects_retry_condition(self) -> None:
-        from sonora.core.utils import retry_network_call
+        from sonora.core.retry import retry_network_call
 
         mock_func = MagicMock(side_effect=OSError("Forbidden"))
         with patch("time.sleep"), self.assertRaises(OSError):

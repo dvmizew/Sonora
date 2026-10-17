@@ -16,9 +16,9 @@ from sonora.core.constants import RATE_LIMIT_ACOUSTID
 from sonora.core.coordination import coalesce_lookup
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
+from sonora.core.retry import retry_network_call
 from sonora.core.text import is_valid_uuid, safe_float
 from sonora.core.titles import recording_identity_matches
-from sonora.core.utils import retry_network_call
 
 _ACOUSTID_CACHE: dict[tuple[str, int, int, int], tuple[float, str]] = {}
 _ACOUSTID_LOCK = threading.RLock()
@@ -153,18 +153,19 @@ def lookup_acoustid(
                 ),
             )
         payload = require_api_object(acoustid_lookup_payload, "AcoustID response")
-        recording_durations: dict[str, float] = {}
+        recording_durations: dict[tuple[str, float], set[float]] = {}
         for result in require_api_records(
             payload.get("results", []), "AcoustID results"
         ):
+            result_score = safe_float(result.get("score"))
             for recording in require_api_records(
                 result.get("recordings", []), "AcoustID recordings"
             ):
                 recording_duration = safe_float(recording.get("duration"))
-                if recording_duration is not None:
-                    recording_durations[str(recording.get("id") or "")] = (
-                        recording_duration
-                    )
+                if recording_duration is not None and result_score is not None:
+                    recording_durations.setdefault(
+                        (str(recording.get("id") or ""), result_score), set()
+                    ).add(recording_duration)
 
         recording_scores: dict[str, float] = {}
         for (
@@ -182,11 +183,15 @@ def lookup_acoustid(
                 or not is_valid_uuid(str(recording_id))
             ):
                 continue
-            candidate_duration = recording_durations.get(str(recording_id))
-            if (
-                candidate_duration is not None
-                and abs(candidate_duration - duration)
+            # The same MBID can occur in several fingerprint results with different scores.
+            candidate_durations = recording_durations.get(
+                (str(recording_id), acoustic_score), set()
+            )
+            if any(
+                candidate_duration <= 0
+                or abs(candidate_duration - duration)
                 > get_config().single_duration_tolerance_seconds
+                for candidate_duration in candidate_durations
             ):
                 continue
             if (expected_artist or expected_title) and not recording_identity_matches(

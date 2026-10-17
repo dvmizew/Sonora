@@ -14,9 +14,9 @@ from sonora import __version__
 from sonora.cli.audio import bpm, key, lyrics, replaygain
 from sonora.cli.cache import cache_app, cache_clear_cmd
 from sonora.cli.library import backup, check, normalize, organize, rename, restore, tag
+from sonora.core.cancellation import is_interruption
 from sonora.core.config import load_app_environment
 from sonora.core.logger import LOG
-from sonora.core.utils import is_interruption
 
 load_app_environment()
 

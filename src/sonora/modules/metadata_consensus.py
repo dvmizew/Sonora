@@ -45,6 +45,7 @@ def merge_provider_proposals(
             recording.metadata_conflicts["identity"] = description
             LOG.warning(f"{escape(recording.file_path.name)}: {escape(description)}")
             continue
+        recording.metadata_conflicts.update(proposal.metadata_conflicts)
         accepted.append(proposal)
 
     recording_isrcs = {
@@ -64,14 +65,19 @@ def merge_provider_proposals(
 
     for attribute in dataclasses.fields(recording):
         field_name = attribute.name
-        if field_name.startswith("_") or field_name in {
-            "file_path",
-            "artist",
-            "title",
-            "duration",
-            "metadata_sources",
-            "metadata_conflicts",
-        }:
+        if (
+            field_name.startswith("_")
+            or field_name
+            in {
+                "file_path",
+                "artist",
+                "title",
+                "duration",
+                "metadata_sources",
+                "metadata_conflicts",
+            }
+            or field_name in recording.metadata_conflicts
+        ):
             continue
         original = getattr(recording, field_name)
         # Provenance distinguishes an independently accepted answer from inherited tags.

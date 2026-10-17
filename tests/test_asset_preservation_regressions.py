@@ -15,8 +15,8 @@ from sonora.audio.metadata import (
 )
 from sonora.audio.replaygain import LoudnessMeasurement, _album_loudness
 from sonora.core.models import TrackInfo
+from sonora.core.sidecars import find_companion_lyrics, relocate_companion_lyrics
 from sonora.core.text import normalize_date
-from sonora.core.utils import find_companion_lyrics, relocate_companion_lyrics
 from sonora.modules import tagger
 from sonora.modules import track_processing as track_processing_module
 from sonora.services import lyrics

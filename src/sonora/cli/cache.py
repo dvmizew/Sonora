@@ -7,13 +7,22 @@ from rich.markup import escape
 from sonora.core.cache import CacheStats, get_cache_stats
 from sonora.core.cache import clear_cache as perform_clear_cache
 from sonora.core.logger import LOG
-from sonora.core.utils import format_filesize
 
 cache_app = App(
     "cache",
     help="Inspect and manage Sonora cache and persistent state",
     result_action="return_value",
 )
+
+
+def _format_file_size(size_bytes: float) -> str:
+    """Format a byte count into a human-readable string (e.g. 4.25 MB, 1.20 GB)."""
+    size = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(size) < 1024.0:
+            return f"{int(size)} B" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} TB"
 
 
 def _display_cache_stats(stats: CacheStats) -> None:
@@ -26,7 +35,7 @@ def _display_cache_stats(stats: CacheStats) -> None:
         ),
         (
             "API Cache Size on Disk",
-            format_filesize(stats.api_size_bytes),
+            _format_file_size(stats.api_size_bytes),
             "green" if stats.api_size_bytes else "white",
         ),
         (
@@ -36,7 +45,7 @@ def _display_cache_stats(stats: CacheStats) -> None:
         ),
         (
             "Library State Size on Disk",
-            format_filesize(stats.state_size_bytes),
+            _format_file_size(stats.state_size_bytes),
             "green" if stats.state_size_bytes else "white",
         ),
         (
@@ -46,7 +55,7 @@ def _display_cache_stats(stats: CacheStats) -> None:
         ),
         (
             "Total Cache Disk Usage",
-            format_filesize(stats.total_size_bytes),
+            _format_file_size(stats.total_size_bytes),
             "bold magenta",
         ),
     ]
@@ -172,7 +181,7 @@ def cache_clear_cmd(
             (
                 "API Cache Target",
                 (
-                    f"{result.api_entries_cleared:,} entries ({format_filesize(result.api_bytes_freed)})"
+                    f"{result.api_entries_cleared:,} entries ({_format_file_size(result.api_bytes_freed)})"
                     if result.api_cleared
                     else "Skipped"
                 ),
@@ -181,7 +190,7 @@ def cache_clear_cmd(
             (
                 "Library State Target",
                 (
-                    f"{result.state_entries_cleared:,} tracks ({format_filesize(result.state_bytes_freed)})"
+                    f"{result.state_entries_cleared:,} tracks ({_format_file_size(result.state_bytes_freed)})"
                     if result.state_cleared
                     else "Preserved (use --state or --all to clear)"
                 ),
@@ -203,7 +212,7 @@ def cache_clear_cmd(
             ),
             (
                 "Total Space Reclaimable",
-                format_filesize(result.total_bytes_freed),
+                _format_file_size(result.total_bytes_freed),
                 "bold yellow",
             ),
         ]
@@ -216,7 +225,7 @@ def cache_clear_cmd(
         (
             "API Metadata Cache",
             (
-                f"{result.api_entries_cleared:,} entries cleared ({format_filesize(result.api_bytes_freed)} freed)"
+                f"{result.api_entries_cleared:,} entries cleared ({_format_file_size(result.api_bytes_freed)} freed)"
                 if result.api_cleared
                 else "Skipped"
             ),
@@ -225,7 +234,7 @@ def cache_clear_cmd(
         (
             "Library State Cache",
             (
-                f"{result.state_entries_cleared:,} tracks cleared ({format_filesize(result.state_bytes_freed)} freed)"
+                f"{result.state_entries_cleared:,} tracks cleared ({_format_file_size(result.state_bytes_freed)} freed)"
                 if result.state_cleared
                 else "Preserved (use --state or --all to clear)"
             ),
@@ -243,7 +252,7 @@ def cache_clear_cmd(
         ("Action Type", mode_label, "magenta"),
         (
             "Total Space Freed",
-            format_filesize(result.total_bytes_freed),
+            _format_file_size(result.total_bytes_freed),
             "bold green",
         ),
     ]

@@ -163,7 +163,12 @@ class TestAlbumIdentityReview(IsolatedTestCase):
         for candidate, expected in (
             (None, None),
             (
-                {"title": "Original Song", "artist": "Alpha", "duration": 180},
+                {
+                    "title": "Original Song",
+                    "artist": "Alpha",
+                    "duration": 180,
+                    "recording_mbid": recording_id,
+                },
                 recording_id,
             ),
             ({"title": "Original Song", "artist": "Alpha", "duration": 240}, None),

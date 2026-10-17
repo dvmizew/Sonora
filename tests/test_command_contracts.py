@@ -7,9 +7,9 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import Mock, patch
 
-from sonora.cli import audio, library
+from sonora.cli import audio, cache, library
+from sonora.core.cancellation import InterruptedOperationError
 from sonora.core.models import CheckReport, NormalizeReport, RenameReport, TrackInfo
-from sonora.core.utils import InterruptedOperationError
 from tests.support import IsolatedTestCase
 
 entrypoint = importlib.import_module("sonora.cli.main")
@@ -342,3 +342,19 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
             audio._run_parallel_audio_task(
                 self.test_directory, "Test analysis", worker, 1
             )
+
+
+class TestCacheSizeFormatting(IsolatedTestCase):
+    def test_file_size_conversion_includes_largest_supported_unit(self) -> None:
+        for size, expected in (
+            (0, "0 B"),
+            (512, "512 B"),
+            (1023, "1023 B"),
+            (1024, "1.00 KB"),
+            (1024**2, "1.00 MB"),
+            (1024**3, "1.00 GB"),
+            (1024**4, "1.00 TB"),
+            (1024**5, "1024.00 TB"),
+        ):
+            with self.subTest(size=size):
+                self.assertEqual(cache._format_file_size(size), expected)

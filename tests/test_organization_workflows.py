@@ -2,8 +2,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from sonora.core.library_paths import get_single_release_title
 from sonora.core.models import TrackInfo
-from sonora.core.utils import get_single_release_title
 from sonora.modules.checker import (
     check_library,
 )

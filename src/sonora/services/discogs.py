@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import Any
 
 import httpx
@@ -35,6 +36,28 @@ def _count_discogs_audio_tracks(tracklist: list[dict[str, Any]]) -> int:
     return audio_track_count
 
 
+def _discogs_credit_positions(scope: str, positions: list[str]) -> set[str]:
+    """Resolve documented credit scopes against actual, unambiguous tracklist positions."""
+    position_counts = Counter(positions)
+    selected_positions: set[str] = set()
+    for selection in scope.split(","):
+        start, separator, end = selection.strip().partition(" to ")
+        if position_counts[start] != 1 or (separator and position_counts[end] != 1):
+            return set()
+        if not separator:
+            selected_positions.add(start)
+            continue
+        start_index = positions.index(start)
+        end_index = positions.index(end)
+        if end_index < start_index:
+            return set()
+        position_range = positions[start_index : end_index + 1]
+        if any(position_counts[position] != 1 for position in position_range):
+            return set()
+        selected_positions.update(position_range)
+    return selected_positions
+
+
 @coalesce_lookup
 def fetch_discogs_release_details(
     release_id: int | str, user_token: str | None = None
@@ -42,7 +65,7 @@ def fetch_discogs_release_details(
     if not release_id:
         return None
 
-    cache_key = f"discogs_rel:v2:{release_id}"
+    cache_key = f"discogs_rel:v3:{release_id}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -118,6 +141,15 @@ def fetch_discogs_release_details(
         producers: list[str] = []
         remixers: list[str] = []
         composers: list[str] = []
+        tracklist = require_api_records(
+            discogs_payload.get("tracklist", []), "Discogs tracklist"
+        )
+        track_positions = [
+            str(track.get("position") or "").strip()
+            for track in tracklist
+            if str(track.get("position") or "").strip()
+        ]
+        scoped_credits: dict[str, list[dict[str, Any]]] = {}
         extra_artists = require_api_records(
             discogs_payload.get("extraartists", []), "Discogs extraartists"
         )
@@ -127,6 +159,13 @@ def fetch_discogs_release_details(
                 and extra_artist.get("name")
                 and extra_artist.get("role")
             ):
+                track_scope = str(extra_artist.get("tracks") or "").strip()
+                if track_scope:
+                    for position in _discogs_credit_positions(
+                        track_scope, track_positions
+                    ):
+                        scoped_credits.setdefault(position, []).append(extra_artist)
+                    continue
                 name = clean_disambiguation(str(extra_artist["name"]))
                 role = str(extra_artist["role"]).lower()
                 if (
@@ -151,9 +190,6 @@ def fetch_discogs_release_details(
 
         track_credits: dict[str, dict[str, str]] = {}
         repeated_titles: set[str] = set()
-        tracklist = require_api_records(
-            discogs_payload.get("tracklist", []), "Discogs tracklist"
-        )
         for track in tracklist:
             position = str(track.get("position", "")).strip()
             track_title = str(track.get("title", "")).strip()
@@ -163,6 +199,10 @@ def fetch_discogs_release_details(
             track_extra_artists = require_api_records(
                 track.get("extraartists", []), "Discogs track credits"
             )
+            track_extra_artists = [
+                *track_extra_artists,
+                *scoped_credits.get(position, []),
+            ]
             for track_extra_artist in track_extra_artists:
                 if (
                     isinstance(track_extra_artist, dict)
@@ -196,7 +236,7 @@ def fetch_discogs_release_details(
                         and track_artist_name not in track_composers
                     ):
                         track_composers.append(track_artist_name)
-            credits_dict: dict[str, str] = {}
+            credits_dict: dict[str, str] = {"title": track_title}
             if track_producers:
                 credits_dict["producers"] = ", ".join(track_producers)
             if track_remixers:
@@ -307,7 +347,7 @@ def search_discogs_release(
 
     count_suffix = f":{expected_track_count}" if expected_track_count else ""
     artist_key = normalize_str(artist)
-    cache_key = f"discogs_search:v3:{artist_key}:{normalize_str(album)}{count_suffix}"
+    cache_key = f"discogs_search:v4:{artist_key}:{normalize_str(album)}{count_suffix}"
 
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
