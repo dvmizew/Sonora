@@ -78,18 +78,35 @@ pip install -e .
 
 ### Option 3: Compile Standalone Executable (PyInstaller)
 
-To compile your own single-file portable binary for Linux x86_64:
+Build in an isolated environment using the checked-in `uv.lock`. Install
+[uv](https://docs.astral.sh/uv/getting-started/installation/) version `0.13.0`,
+then run these commands from a clean checkout:
 
 ```bash
-# Install PyInstaller
-pip install pyinstaller
-
-# Build standalone binary with all collected audio/service hooks
-pyinstaller sonora-linux-x86_64.spec --clean -y
+uv sync --locked --group build --python 3.12.15 --no-editable
+uv run --no-sync python -W error -m unittest discover -s tests
+uv run --no-sync pyinstaller sonora-linux-x86_64.spec --clean -y
 
 # Output executable is located at:
 ./dist/sonora-linux-x86_64
 ```
+
+Release CI uses this same dependency lock on Linux and Windows. The spec keeps
+all Sonora features and excludes only pyacoustid's unused `audioread` decoder;
+Sonora fingerprints through `fpcalc`. UPX is disabled so builds do not depend on
+whether a compression tool happens to be installed. Platform libraries and the
+Python toolchain still affect executable bytes; the lock guarantees dependency
+selection, not bit-for-bit identical binaries.
+
+When rebuilding an existing working tree, remove the generated `build/lib/`
+directory and run `uv cache clean sonora` before syncing. Setuptools can otherwise
+carry deleted modules from an earlier build into the new wheel.
+
+For development, use `uv sync --locked --extra dev`. Ruff includes the Pyflakes
+checks; mypy is the primary CI type checker, with Pyright retained for editor or
+manual complementary checks. To update dependencies intentionally, run
+`uv lock --upgrade`, review the lock diff, and rerun the supported Python CI matrix and
+packaged-feature checks before releasing.
 
 ---
 
@@ -137,7 +154,9 @@ Identification can abstain when recordings or releases are ambiguous. Stored rec
 
 Lyrics sources that return only text cannot establish recording identity. They are disabled by default; `allow_unverified_lyrics = true` explicitly enables those fallbacks with a warning. LRCLIB responses still require matching artist/title and duration. These safeguards reduce coverage when evidence is insufficient; they do not guarantee universal identification accuracy.
 
-Matching penalties and ranking weights can also be configured with `version_equivalence_penalty`, `version_mismatch_penalty`, `remix_modifier_mismatch_penalty`, and `title_score_weight`. Single-edition comparisons use `single_duration_tolerance_seconds` and `single_identifier_title_threshold`. JSON/TOML boolean settings require actual booleans, and structural lists require strings; invalid settings produce an error.
+ShazamIO and syncedlyrics are community integrations, not official Shazam or Musixmatch service APIs. Their versions are locked and provider-specific failures are isolated. Supplied Musixmatch credentials belong to each SDK client; Sonora does not write the SDK token cache or fabricate credential expiry. Logs retain dependency warnings and errors rather than globally silencing them.
+
+Matching penalties and ranking weights can also be configured with `version_equivalence_penalty`, `version_mismatch_penalty`, `remix_modifier_mismatch_penalty`, and `title_score_weight`. Single-edition comparisons use `single_duration_tolerance_seconds` (2 seconds by default) and `single_identifier_title_threshold`. The duration limit favors withholding uncertain matches when recordings differ in length; it does not verify clean versus explicit editions. JSON/TOML boolean settings require actual booleans, and structural lists require strings; invalid settings produce an error.
 
 | Key | Where to get it | What it unlocks |
 | :--- | :--- | :--- |
@@ -351,6 +370,20 @@ sonora normalize /path/to/music --dry-run
 - `--dry-run`: Preview normalization without modifying files.
 
 ---
+
+### Console output
+
+Commands show progress, failures and a final summary by default. Use `--verbose`
+for per-file changes, provider decisions and diagnostic messages:
+
+```sh
+sonora tag /path/to/music --dry-run --verbose
+sonora --verbose check /path/to/music --json report.json
+```
+
+The option works before or after a command. `-v` still prints the version.
+JSON reports always include full results, regardless of verbosity. Metadata
+conflicts remain visible in the final summary; uncertain fields are preserved.
 
 ### `sonora lyrics`
 
