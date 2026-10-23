@@ -1,26 +1,55 @@
 import functools
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pyloudnorm
 from rich.markup import escape
 
-from sonora.audio.bpm import load_audio
+from sonora.audio.decode import load_audio
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
+from sonora.core.cancellation import is_interruption
 from sonora.core.constants import SUPPORTED_EXTS
-from sonora.core.logger import LOG
-from sonora.core.utils import is_interruption
+from sonora.core.logger import LOG, resume_workers
+
+
+@dataclass(frozen=True)
+class LoudnessMeasurement:
+    file_path: Path
+    track_gain: float
+    track_peak: float
+    loudness: float
+    duration: float
+    block_loudness: tuple[float, ...]
+
+
+def _album_loudness(measurements: Sequence[LoudnessMeasurement]) -> float | None:
+    # BS.1770 requires one relative gate for all album blocks, not per-track LUFS averages.
+    block_levels = np.array(
+        [
+            level
+            for measurement in measurements
+            for level in measurement.block_loudness
+            if np.isfinite(level) and level > -70.0
+        ],
+        dtype=np.float64,
+    )
+    if not len(block_levels):
+        return None
+    reference_level = float(np.max(block_levels))
+    relative_levels = block_levels - reference_level
+    block_energy = np.power(10.0, relative_levels / 10.0)
+    relative_gate = 10.0 * float(np.log10(np.mean(block_energy))) - 10.0
+    gated_energy = block_energy[relative_levels > relative_gate]
+    return reference_level + 10.0 * float(np.log10(np.mean(gated_energy)))
 
 
 def _measure_track_loudness(
     audio_path: Path, target_lufs: float = -18.0
-) -> tuple[Path, float, float, float, float] | None:
-    """
-    Measures loudness and peak amplitude of a single track.
-    Returns (audio_path, track_gain, track_peak, track_loudness, duration) or None.
-    """
+) -> LoudnessMeasurement | None:
+    """Measure track gain, peak, and gated loudness blocks for album aggregation."""
     try:
         loaded = load_audio(audio_path)
         if loaded is None or len(loaded[0]) == 0 or loaded[1] <= 0:
@@ -37,21 +66,32 @@ def _measure_track_loudness(
             if not (np.isnan(track_loudness) or np.isinf(track_loudness))
             else 0.0
         )
-        return (audio_path, track_gain, track_peak, track_loudness, duration)
+        return LoudnessMeasurement(
+            audio_path,
+            track_gain,
+            track_peak,
+            track_loudness,
+            duration,
+            tuple(float(level) for level in meter.blockwise_loudness),
+        )
     except (ValueError, OSError) as error:
         LOG.debug(f"Failed to measure loudness for {audio_path}: {error}")
         return None
 
 
 def _write_album_replaygain_track(
-    entry: tuple[Path, float, float, float, float],
+    entry: LoudnessMeasurement,
     album_gain: float,
     max_album_peak: float,
     dry_run: bool = False,
 ) -> bool:
-    file_path, track_gain, track_peak, _, _ = entry
+    file_path, track_gain, track_peak = (
+        entry.file_path,
+        entry.track_gain,
+        entry.track_peak,
+    )
     if dry_run:
-        LOG.info(
+        LOG.detail(
             f"[DRY-RUN] Would tag {escape(file_path.name)}: Track Gain={track_gain:+.2f} dB, "
             f"Album Gain={album_gain:+.2f} dB, Track Peak={track_peak:.6f}, Album Peak={max_album_peak:.6f}"
         )
@@ -97,6 +137,8 @@ def calculate_album_replaygain(
                 if (
                     track_info.replaygain_track_gain is None
                     or track_info.replaygain_album_gain is None
+                    or track_info.replaygain_track_peak is None
+                    or track_info.replaygain_album_peak is None
                 ):
                     already_tagged = False
                     break
@@ -107,9 +149,9 @@ def calculate_album_replaygain(
             LOG.debug("Files already contain ReplayGain tags. Skipping.")
             return False
 
-    LOG.info(f"🔊 Calculating ReplayGain for {len(valid_files)} track(s)...")
+    LOG.detail(f"🔊 Calculating ReplayGain for {len(valid_files)} track(s)...")
 
-    track_results: list[tuple[Path, float, float, float, float]] = []
+    track_results: list[LoudnessMeasurement] = []
     max_album_peak = 0.0
 
     with ThreadPoolExecutor(max_workers=min(max_threads, 4)) as executor:
@@ -123,40 +165,28 @@ def calculate_album_replaygain(
                     loudness_metrics = future.result()
                     if loudness_metrics is not None:
                         track_results.append(loudness_metrics)
-                        max_album_peak = max(max_album_peak, loudness_metrics[2])
+                        max_album_peak = max(
+                            max_album_peak, loudness_metrics.track_peak
+                        )
                 except OSError as error:
                     LOG.debug(f"Track loudness measurement failed: {error}")
         except (KeyboardInterrupt, RuntimeError) as exc:
             if not is_interruption(exc):
                 raise
+            resume_workers()
             executor.shutdown(wait=True, cancel_futures=True)
             raise
 
-    if not track_results:
-        LOG.warning("Could not calculate loudness for any audio files.")
+    if len(track_results) != len(valid_files):
+        LOG.warning(
+            "ReplayGain measurement failed for "
+            f"{len(valid_files) - len(track_results)}/{len(valid_files)} track(s); "
+            "album tags were not changed."
+        )
         return False
 
-    # 3. Compute album loudness via ITU-R BS.1770 duration-weighted linear energy integration
-    total_energy = sum(
-        (10.0 ** (loudness / 10.0)) * duration
-        for _, _, _, loudness, duration in track_results
-        if not (np.isnan(loudness) or np.isinf(loudness))
-    )
-    total_duration = sum(
-        duration
-        for _, _, _, loudness, duration in track_results
-        if not (np.isnan(loudness) or np.isinf(loudness))
-    )
-
-    if total_duration > 0 and total_energy > 0:
-        album_loudness = 10.0 * float(np.log10(total_energy / total_duration))
-        album_gain = (
-            target_lufs - album_loudness
-            if not (np.isnan(album_loudness) or np.isinf(album_loudness))
-            else float(np.mean([metrics[1] for metrics in track_results]))
-        )
-    else:
-        album_gain = float(np.mean([metrics[1] for metrics in track_results]))
+    album_loudness = _album_loudness(track_results)
+    album_gain = target_lufs - album_loudness if album_loudness is not None else 0.0
 
     writer = functools.partial(
         _write_album_replaygain_track,
@@ -170,9 +200,10 @@ def calculate_album_replaygain(
         except (KeyboardInterrupt, RuntimeError) as exc:
             if not is_interruption(exc):
                 raise
+            resume_workers()
             executor_write.shutdown(wait=True, cancel_futures=True)
             raise
 
     tagged_count = sum(1 for success in write_results if success)
-    LOG.info(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")
+    LOG.detail(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")
     return tagged_count > 0

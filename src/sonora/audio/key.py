@@ -1,11 +1,14 @@
 import functools
 import re
+from math import gcd
 from pathlib import Path
 
 import numpy as np
 import scipy.signal
+from numpy.typing import NDArray
 
-from sonora.audio.bpm import load_audio
+from sonora.audio.decode import load_audio
+from sonora.core.config import get_config
 from sonora.core.logger import LOG
 
 PITCH_CLASSES: tuple[str, ...] = (
@@ -23,11 +26,11 @@ PITCH_CLASSES: tuple[str, ...] = (
     "B",
 )
 
-# Empirically optimized Shaath profiles (KeyFinder / Essentia standard for modern music)
-SHAATH_MAJOR: np.ndarray = np.array(
+# Shaath-style profiles used by the correlation estimator; confidence is not an accuracy measure.
+SHAATH_MAJOR: NDArray[np.float32] = np.array(
     [6.6, 2.0, 3.5, 2.3, 4.6, 4.0, 2.5, 5.2, 2.4, 3.7, 2.3, 3.4], dtype=np.float32
 )
-SHAATH_MINOR: np.ndarray = np.array(
+SHAATH_MINOR: NDArray[np.float32] = np.array(
     [6.5, 2.7, 3.5, 5.4, 2.6, 3.5, 2.5, 5.2, 4.0, 2.7, 4.3, 3.2], dtype=np.float32
 )
 
@@ -73,7 +76,7 @@ def key_to_camelot(key_str: str | None) -> str | None:
     if _CAMELOT_REGEX.match(cleaned):
         return cleaned.upper()
 
-    match = _KEY_NOTE_REGEX.match(cleaned)
+    match = _KEY_NOTE_REGEX.fullmatch(cleaned)
     if match:
         base = match.group(1)
         base = base[0].upper() + (base[1].lower() if len(base) > 1 else "")
@@ -93,16 +96,16 @@ def key_to_camelot(key_str: str | None) -> str | None:
 
 
 def _hz_to_octs(
-    frequencies: np.ndarray,
+    frequencies: NDArray[np.float64],
     tuning: float = 0.0,
     bins_per_octave: int = 12,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """Convert frequencies (Hz) to fractional octave coordinates relative to A0 (27.5 Hz)."""
     a440 = 440.0
     a0 = a440 / 16.0  # 27.5 Hz
     freq_tuned = frequencies * (2.0 ** (-tuning / bins_per_octave))
     safe_freq = np.maximum(freq_tuned / a0, 1e-10)
-    octs: np.ndarray = np.log2(safe_freq)
+    octs: NDArray[np.float64] = np.log2(safe_freq)
     return octs
 
 
@@ -114,13 +117,13 @@ def get_chroma_filterbank(
     tuning: float = 0.0,
     ctroct: float = 4.0,
     octwidth: float = 1.5,
-) -> np.ndarray:
+) -> NDArray[np.float32]:
     """
     Construct a librosa-compatible Gaussian chroma filterbank matrix.
     Projects linear FFT magnitude bins onto 12 pitch classes (C, C#, ..., B).
     """
     wts = np.zeros((n_chroma, n_fft), dtype=np.float64)
-    frequencies = np.linspace(0, sr, n_fft, endpoint=False)[1:]
+    frequencies = np.linspace(0, sr, n_fft, endpoint=False, dtype=np.float64)[1:]
 
     frqbins = n_chroma * _hz_to_octs(
         frequencies, tuning=tuning, bins_per_octave=n_chroma
@@ -136,7 +139,6 @@ def get_chroma_filterbank(
 
     wts = np.exp(-0.5 * (2.0 * diff_matrix / np.tile(binwidthbins, (n_chroma, 1))) ** 2)
 
-    # Normalize each frequency column
     col_norms = np.sqrt(np.sum(wts**2, axis=0, keepdims=True))
     col_norms[col_norms == 0] = 1.0
     wts = wts / col_norms
@@ -153,7 +155,9 @@ def get_chroma_filterbank(
     return np.ascontiguousarray(wts[:, :cutoff], dtype=np.float32)
 
 
-def _pearson_r(x: np.ndarray, y: np.ndarray) -> float:
+def _pearson_r(
+    x: NDArray[np.float32 | np.float64], y: NDArray[np.float32 | np.float64]
+) -> float:
     """Compute Pearson correlation coefficient between two 1D vectors."""
     x_zm = x - np.mean(x)
     y_zm = y - np.mean(y)
@@ -163,20 +167,22 @@ def _pearson_r(x: np.ndarray, y: np.ndarray) -> float:
     return float(np.sum(x_zm * y_zm) / denom)
 
 
-def calculate_chroma(audio: np.ndarray, sample_rate: int) -> np.ndarray | None:
+def calculate_chroma(
+    audio: NDArray[np.float32 | np.float64], sample_rate: int
+) -> NDArray[np.float32] | None:
     """
     Calculate the 12-dimensional mean chroma vector from mono audio signal.
     """
     if len(audio) == 0 or np.all(audio == 0):
         return None
 
-    # Downsample to ~22,050 Hz for efficient spectral analysis
     target_sr = 22050
-    if sample_rate > 24000:
-        decimation = sample_rate // target_sr
-        if decimation > 1:
-            audio = audio[::decimation]
-            sample_rate = sample_rate // decimation
+    if sample_rate > target_sr:
+        common_rate = gcd(sample_rate, target_sr)
+        audio = scipy.signal.resample_poly(
+            audio, target_sr // common_rate, sample_rate // common_rate
+        )
+        sample_rate = target_sr
 
     nperseg = 4096
     noverlap = nperseg // 2
@@ -191,32 +197,28 @@ def calculate_chroma(audio: np.ndarray, sample_rate: int) -> np.ndarray | None:
         window="hann",
     )
 
-    if spectrogram.size == 0:
-        return None
-
     # Logarithmic magnitude compression to balance dynamic range against percussion
     spec_log = np.log1p(1000.0 * spectrogram)
 
-    # Project linear frequencies into 12 chroma pitch classes
     filterbank = get_chroma_filterbank(sr=sample_rate, n_fft=nperseg)
     chroma = filterbank @ spec_log
 
-    # L2-normalize each time frame
     frame_norms = np.linalg.norm(chroma, axis=0, keepdims=True)
     chroma_norm = chroma / np.maximum(frame_norms, 1e-6)
 
-    # Compute mean energy across all analyzed time frames
-    chroma_mean: np.ndarray = np.mean(chroma_norm, axis=1)
+    chroma_mean: NDArray[np.float32 | np.float64] = np.mean(chroma_norm, axis=1)
     vector_norm = np.linalg.norm(chroma_mean)
     if vector_norm <= 0:
         return None
 
-    normalized: np.ndarray = np.asarray(chroma_mean / vector_norm, dtype=np.float32)
+    normalized: NDArray[np.float32] = np.asarray(
+        chroma_mean / vector_norm, dtype=np.float32
+    )
     return normalized
 
 
 def detect_key_from_chroma(
-    chroma_vector: np.ndarray,
+    chroma_vector: NDArray[np.float32 | np.float64],
 ) -> tuple[str, str, float] | None:
     """
     Match a 12-element chroma vector against Shaath key profiles using Pearson correlation.
@@ -241,7 +243,7 @@ def detect_key_from_chroma(
             best_score = score_min
             best_key = f"{base_name}m"
 
-    if best_key is None or best_score < 0.20:
+    if best_key is None or best_score < get_config().key_confidence_threshold:
         return None
 
     camelot = CAMELOT_MAP.get(best_key, "")

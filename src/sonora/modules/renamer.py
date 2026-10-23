@@ -6,43 +6,41 @@ from pathlib import Path
 from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata
+from sonora.core.artists import get_primary_artist
+from sonora.core.audio_files import find_audio_files
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import get_config
+from sonora.core.files import atomic_write_bytes
+from sonora.core.library_paths import (
+    get_single_release_title,
+    group_files_by_album_root,
+    is_in_singles_hierarchy,
+    resolve_unique_path,
+    safe_case_rename,
+)
 from sonora.core.logger import (
     LOG,
     create_progress,
     interactive_pause_listener,
+    resume_workers,
     wait_if_paused,
 )
 from sonora.core.models import RenameReport, TrackInfo
-from sonora.core.utils import (
-    InterruptedOperationError,
-    deduplicate_title_features,
-    find_audio_files,
-    find_companion_lyrics,
-    get_primary_artist,
-    get_single_release_title,
-    group_files_by_album_root,
-    is_in_singles_hierarchy,
-    is_interruption,
-    normalize_str,
-    relocate_companion_lyrics,
-    safe_case_rename,
-    safe_int,
-    sanitize_name,
-)
-from sonora.modules.checker import strip_corrupt_brackets
+from sonora.core.sidecars import find_companion_lyrics, relocate_companion_lyrics
+from sonora.core.text import normalize_str, safe_int, sanitize_name
+from sonora.core.titles import clean_title, strip_corrupt_brackets
 
 
 def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
     """
     Update or insert [ar: Artist] and [ti: Title] metadata headers into an .lrc file.
-    Preserves all synchronized timestamps [mm:ss.xx] intact.
+    Preserve synchronized lyrics and return True only when header changes are saved.
     """
     if not lrc_path.exists() or not lrc_path.is_file():
         return False
 
     try:
-        with lrc_path.open(encoding="utf-8", errors="ignore") as file_handle:
+        with lrc_path.open(encoding="utf-8", newline="") as file_handle:
             lines = file_handle.readlines()
 
         new_lines: list[str] = []
@@ -52,10 +50,20 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
         for line in lines:
             line_stripped = line.strip()
             if line_stripped.lower().startswith("[ar:"):
-                new_lines.append(f"[ar:{artist}]\n")
+                line_ending = line[len(line.rstrip("\r\n")) :]
+                new_lines.append(
+                    line
+                    if line_stripped == f"[ar:{artist}]"
+                    else f"[ar:{artist}]{line_ending}"
+                )
                 artist_header_found = True
             elif line_stripped.lower().startswith("[ti:"):
-                new_lines.append(f"[ti:{title}]\n")
+                line_ending = line[len(line.rstrip("\r\n")) :]
+                new_lines.append(
+                    line
+                    if line_stripped == f"[ti:{title}]"
+                    else f"[ti:{title}]{line_ending}"
+                )
                 title_header_found = True
             else:
                 new_lines.append(line)
@@ -68,12 +76,16 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
         if headers:
             new_lines = headers + new_lines
 
-        with lrc_path.open("w", encoding="utf-8") as file_handle:
-            file_handle.writelines(new_lines)
+        updated_lyrics = "".join(new_lines)
+        if updated_lyrics == "".join(lines):
+            return False
+        atomic_write_bytes(lrc_path, updated_lyrics.encode("utf-8"))
         return True
 
-    except (OSError, ValueError) as error:
-        LOG.debug(f"Failed to sync LRC metadata for {lrc_path}: {error}")
+    except (OSError, UnicodeDecodeError) as error:
+        LOG.debug(
+            f"Failed to sync LRC metadata for {escape(str(lrc_path))}: {escape(str(error))}"
+        )
         return False
 
 
@@ -91,22 +103,19 @@ def build_new_filename(
     if not title:
         return None
 
-    clean_title = (
-        sanitize_name(strip_corrupt_brackets(deduplicate_title_features(title)))
-        or "Untitled"
-    )
-    track_num_int = safe_int(track_number)
+    sanitized_title = sanitize_name(strip_corrupt_brackets(clean_title(title)))
+    parsed_track_number = safe_int(track_number)
 
     disc_prefix = ""
-    disc_num_int = safe_int(disc_number)
-    if disc_num_int:
+    parsed_disc_number = safe_int(disc_number)
+    if parsed_disc_number:
         discs_count = safe_int(total_discs) or 1
-        if disc_num_int > 1 or discs_count > 1:
-            disc_prefix = f"{disc_num_int}-"
+        if parsed_disc_number > 1 or discs_count > 1:
+            disc_prefix = f"{parsed_disc_number}-"
 
-    if track_num_int is not None:
-        return f"{disc_prefix}{track_num_int:02d} - {clean_title}{extension}"
-    return f"{disc_prefix}{clean_title}{extension}"
+    if parsed_track_number is not None:
+        return f"{disc_prefix}{parsed_track_number:02d} - {sanitized_title}{extension}"
+    return f"{disc_prefix}{sanitized_title}{extension}"
 
 
 def rename_track_file(
@@ -115,15 +124,13 @@ def rename_track_file(
     track_info: TrackInfo | None = None,
     dry_run: bool = False,
     relocated_lrc_collector: list[Path] | None = None,
+    synced_lrc_collector: list[Path] | None = None,
 ) -> Path:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    try:
-        if track_info is None:
-            track_info = read_track_metadata(file_path)
-    except OSError as error:
-        raise RuntimeError(f"Cannot rename file without metadata: {error}") from error
+    if track_info is None:
+        track_info = read_track_metadata(file_path)
 
     folder = file_path.parent
     in_singles = is_in_singles_hierarchy(file_path)
@@ -132,33 +139,31 @@ def rename_track_file(
         if in_singles:
             folder_audios = find_audio_files(folder, recursive=False)
             if len(folder_audios) <= 1:
-                track_num: int | str | None = 1
+                filename_track_number: int | str | None = 1
             else:
-                track_num = track_info.track_number or 1
-            disc_num: int | str | None = 1
+                filename_track_number = track_info.track_number or 1
+            filename_disc_number: int | str | None = 1
             total_discs: int | str | None = 1
         else:
-            track_num = track_info.track_number
-            disc_num = track_info.disc_number
+            filename_track_number = track_info.track_number
+            filename_disc_number = track_info.disc_number
             total_discs = track_info.total_discs
 
         new_name = build_new_filename(
-            track_number=track_num,
+            track_number=filename_track_number,
             title=track_info.title,
             extension=file_path.suffix,
-            disc_number=disc_num,
+            disc_number=filename_disc_number,
             total_discs=total_discs,
         )
         if not new_name:
             return file_path
     else:
-        num = 1 if in_singles else (track_info.track_number or 1)
+        formatted_track_number = 1 if in_singles else (track_info.track_number or 1)
         artist_clean = sanitize_name(track_info.artist)
-        title_clean = (
-            sanitize_name(deduplicate_title_features(track_info.title)) or "Untitled"
-        )
+        title_clean = sanitize_name(clean_title(track_info.title))
         new_stem = format_pattern.format(
-            track_number=num,
+            track_number=formatted_track_number,
             artist=artist_clean,
             title=title_clean,
         )
@@ -167,65 +172,48 @@ def rename_track_file(
 
     new_path = folder / new_name
 
-    companion_lyrics = find_companion_lyrics(file_path)
-
-    # Fallback search by track number prefix if no exact stem match
-    if not companion_lyrics and track_info.track_number is not None:
-        parsed_track = safe_int(track_info.track_number)
-        if parsed_track is not None:
-            prefix = f"{parsed_track:02d}"
-            prefix_unpadded = str(parsed_track)
-            for candidate in folder.iterdir():
-                if candidate.suffix.lower() == ".lrc" and (
-                    candidate.name.startswith(prefix)
-                    or candidate.name.startswith(prefix_unpadded)
-                ):
-                    companion_lyrics.append(candidate)
-                    break
-
-    if not companion_lyrics and in_singles:
-        lrc_candidates = [
-            candidate
-            for candidate in folder.iterdir()
-            if candidate.suffix.lower() == ".lrc" and candidate.is_file()
-        ]
-        if len(lrc_candidates) == 1:
-            companion_lyrics.append(lrc_candidates[0])
+    companion_lyrics = find_companion_lyrics(
+        file_path, track_number=track_info.track_number, in_singles=in_singles
+    )
 
     for companion in companion_lyrics:
-        if companion.suffix.lower() == ".lrc" and not dry_run:
-            sync_lrc_metadata(companion, track_info.artist, track_info.title)
+        if (
+            companion.suffix.lower() == ".lrc"
+            and not dry_run
+            and sync_lrc_metadata(companion, track_info.artist, track_info.title)
+            and synced_lrc_collector is not None
+        ):
+            synced_lrc_collector.append(companion)
 
     if file_path.name != new_name or file_path.parent != new_path.parent:
-        base_stem = Path(new_name).stem
-        if new_path.exists() and (
-            file_path.parent != new_path.parent
-            or file_path.name.lower() != new_path.name.lower()
-        ):
-            counter = 2
-            while new_path.exists() and (
-                file_path.parent != new_path.parent
-                or file_path.name.lower() != new_path.name.lower()
-            ):
-                new_name = f"{base_stem} ({counter}){file_path.suffix}"
-                new_path = folder / new_name
-                counter += 1
+        if new_path.exists() and not file_path.samefile(new_path):
+            new_path = resolve_unique_path(new_path, current_path=file_path)
+            new_name = new_path.name
 
         if not dry_run:
             try:
-                safe_case_rename(file_path, new_path)
-                LOG.info(
+                while True:
+                    try:
+                        safe_case_rename(file_path, new_path)
+                        break
+                    except FileExistsError:
+                        new_path = resolve_unique_path(new_path, current_path=file_path)
+                new_name = new_path.name
+                LOG.detail(
                     f"   ∟ 🎵 [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
                 )
                 relocated = relocate_companion_lyrics(
-                    file_path, new_path, dry_run=False
+                    file_path, new_path, dry_run=False, sidecars=companion_lyrics
                 )
                 if relocated_lrc_collector is not None:
                     relocated_lrc_collector.extend(relocated)
             except OSError as error:
-                LOG.warning(f"Failed to rename file {escape(file_path.name)}: {error}")
+                LOG.warning(
+                    f"Failed to rename file {escape(file_path.name)}: {escape(str(error))}"
+                )
+                raise
         else:
-            LOG.info(
+            LOG.detail(
                 f"[DRY-RUN] Would rename {escape(file_path.name)} -> {escape(new_name)}"
             )
 
@@ -235,57 +223,62 @@ def rename_track_file(
 def rename_single_folder(
     folder_path: Path, track_info: TrackInfo, dry_run: bool = False
 ) -> Path:
-    """
-    Rename a single release folder to consensus 'Primary Artist - SingleReleaseTitle'.
-    Guarantees singles folders are shielded from multi-track album consensus and dirty album tags.
-    """
-    folder_now = folder_path.name
+    """Rename a single release folder while preserving library containers."""
+    current_folder_name = folder_path.name
     if (
-        get_config().is_generic_container(folder_now)
-        or get_config().is_disc_folder(folder_now)
-        or folder_now.lower() in ("singles", "single")
+        get_config().is_generic_container(current_folder_name)
+        or get_config().is_disc_folder(current_folder_name)
+        or current_folder_name.lower() in ("singles", "single")
     ):
         return folder_path
 
     try:
-        if any(p.is_dir() for p in folder_path.iterdir()):
+        if any(entry_path.is_dir() for entry_path in folder_path.iterdir()):
             return folder_path
     except OSError:
         return folder_path
 
     primary_artist = get_primary_artist(track_info.artist)
     single_title = get_single_release_title(track_info)
-    if not primary_artist or not single_title:
+    canonical_with_feat = (
+        sanitize_name(
+            f"{primary_artist} - {single_title} (feat. {track_info.featured_artists})"
+        )
+        if track_info.featured_artists
+        and not re.search(r"\b(?:feat|ft|featuring)\b", single_title, re.IGNORECASE)
+        else None
+    )
+    canonical_without_feat = sanitize_name(f"{primary_artist} - {single_title}")
+
+    if current_folder_name in (canonical_with_feat, canonical_without_feat):
         return folder_path
 
-    expected_name = sanitize_name(f"{primary_artist} - {single_title}")
-    if folder_now != expected_name:
-        new_folder = folder_path.with_name(expected_name)
-        if (
-            new_folder.exists()
-            and folder_path.resolve() != new_folder.resolve()
-            and folder_path.name.lower() != new_folder.name.lower()
-        ):
-            return folder_path
+    expected_name = canonical_with_feat or canonical_without_feat
+    new_folder = folder_path.with_name(expected_name)
+    if (
+        new_folder.exists()
+        and folder_path.resolve() != new_folder.resolve()
+        and folder_path.name.lower() != new_folder.name.lower()
+    ):
+        return folder_path
 
-        if not dry_run:
-            try:
-                safe_case_rename(folder_path, new_folder)
-                LOG.info(
-                    f"   ∟ 📂 Single folder renamed: [dim]{escape(folder_now)}[/] -> [cyan]{escape(expected_name)}[/]"
-                )
-                return new_folder
-            except OSError as error:
-                LOG.warning(
-                    f"Failed to rename single folder {escape(folder_now)}: {error}"
-                )
-                return folder_path
-        else:
-            LOG.info(
-                f"[DRY-RUN] Would rename single folder {escape(folder_now)} -> {escape(expected_name)}"
+    if not dry_run:
+        try:
+            safe_case_rename(folder_path, new_folder)
+            LOG.detail(
+                f"   ∟ 📂 Single folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
             )
             return new_folder
-    return folder_path
+        except OSError as error:
+            LOG.warning(
+                f"Failed to rename single folder {escape(current_folder_name)}: {escape(str(error))}"
+            )
+            return folder_path
+    else:
+        LOG.detail(
+            f"[DRY-RUN] Would rename single folder {escape(current_folder_name)} -> {escape(expected_name)}"
+        )
+        return new_folder
 
 
 def rename_album_folder(
@@ -299,10 +292,10 @@ def rename_album_folder(
     ):
         return folder_path
 
-    folder_now = folder_path.name
+    current_folder_name = folder_path.name
 
     # Shield artist container folders from being renamed to album names
-    if normalize_str(folder_now) == normalize_str(artist) and normalize_str(
+    if normalize_str(current_folder_name) == normalize_str(artist) and normalize_str(
         album
     ) != normalize_str(artist):
         return folder_path
@@ -310,8 +303,8 @@ def rename_album_folder(
     # Do not rename if this directory contains child directories other than CD/Disc folders
     try:
         if any(
-            p.is_dir() and not get_config().is_disc_folder(p.name)
-            for p in folder_path.iterdir()
+            entry_path.is_dir() and not get_config().is_disc_folder(entry_path.name)
+            for entry_path in folder_path.iterdir()
         ):
             return folder_path
     except OSError:
@@ -319,7 +312,7 @@ def rename_album_folder(
 
     expected_name = sanitize_name(f"{artist} - {album}")
 
-    if folder_now != expected_name:
+    if current_folder_name != expected_name:
         new_folder = folder_path.with_name(expected_name)
         if (
             new_folder.exists()
@@ -331,16 +324,18 @@ def rename_album_folder(
         if not dry_run:
             try:
                 safe_case_rename(folder_path, new_folder)
-                LOG.info(
-                    f"   ∟ 📂 Album folder renamed: [dim]{escape(folder_now)}[/] -> [cyan]{escape(expected_name)}[/]"
+                LOG.detail(
+                    f"   ∟ 📂 Album folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
                 )
                 return new_folder
             except OSError as error:
-                LOG.warning(f"Failed to rename folder {escape(folder_now)}: {error}")
+                LOG.warning(
+                    f"Failed to rename folder {escape(current_folder_name)}: {escape(str(error))}"
+                )
                 return folder_path
         else:
-            LOG.info(
-                f"[DRY-RUN] Would rename album folder {escape(folder_now)} -> {escape(expected_name)}"
+            LOG.detail(
+                f"[DRY-RUN] Would rename album folder {escape(current_folder_name)} -> {escape(expected_name)}"
             )
             return new_folder
     return folder_path
@@ -349,19 +344,19 @@ def rename_album_folder(
 def _rename_single_worker(
     path: Path, dry_run: bool
 ) -> tuple[Path, TrackInfo | None, Path | None, int]:
+    synced_lyrics_paths: list[Path] = []
     try:
         extracted_track_info = read_track_metadata(path)
-        relocated_lrcs: list[Path] = []
         new_path = rename_track_file(
             path,
             track_info=extracted_track_info,
             dry_run=dry_run,
-            relocated_lrc_collector=relocated_lrcs,
+            synced_lrc_collector=synced_lyrics_paths,
         )
-        return path, extracted_track_info, new_path, len(relocated_lrcs)
+        return path, extracted_track_info, new_path, len(synced_lyrics_paths)
     except OSError as error:
-        LOG.warning(f"Failed to rename file {escape(str(path))}: {error}")
-        return path, None, None, 0
+        LOG.warning(f"Failed to rename file {escape(str(path))}: {escape(str(error))}")
+        return path, None, None, len(synced_lyrics_paths)
 
 
 def rename_directory_files(
@@ -392,7 +387,7 @@ def rename_directory_files(
             "[cyan]Renaming audio files...", total=total_files_count
         )
         with (
-            interactive_pause_listener(progress, task),
+            interactive_pause_listener(progress, task) as pause_stop_event,
             ThreadPoolExecutor(max_workers=max_threads) as executor,
         ):
             try:
@@ -403,16 +398,21 @@ def rename_directory_files(
 
                     file_results = (
                         (
-                            fut.result()
-                            for fut in as_completed(
+                            rename_future.result()
+                            for rename_future in as_completed(
                                 [
-                                    executor.submit(_rename_single_worker, p, dry_run)
-                                    for p in files
+                                    executor.submit(
+                                        _rename_single_worker, audio_path, dry_run
+                                    )
+                                    for audio_path in files
                                 ]
                             )
                         )
                         if max_threads > 1 and len(files) > 1
-                        else (_rename_single_worker(p, dry_run) for p in files)
+                        else (
+                            _rename_single_worker(audio_path, dry_run)
+                            for audio_path in files
+                        )
                     )
                     for path, track_info, new_path, lrc_count in file_results:
                         wait_if_paused()
@@ -433,6 +433,8 @@ def rename_directory_files(
                                 report.files_renamed += 1
                             else:
                                 report.unchanged_files += 1
+                        else:
+                            report.failed_files += 1
                         progress.advance(task)
 
                     final_folder = folder
@@ -444,31 +446,43 @@ def rename_directory_files(
                             if final_folder != folder:
                                 report.folders_renamed += 1
                     elif album_consensus:
-                        top = album_consensus.most_common(1)
-                        if top and top[0][1] >= len(files) / 2:
-                            art_name, alb_name = top[0][0]
-                        elif len({alb for _, alb in album_consensus}) == 1:
-                            art_name, alb_name = (
+                        ranked_album_credits = album_consensus.most_common(1)
+                        if (
+                            ranked_album_credits
+                            and ranked_album_credits[0][1] > len(files) / 2
+                        ):
+                            album_artist, album_title = ranked_album_credits[0][0]
+                        elif (
+                            len({album_title for _, album_title in album_consensus})
+                            == 1
+                            and sum(album_consensus.values()) > len(files) / 2
+                        ):
+                            album_artist, album_title = (
                                 "Various Artists",
                                 next(iter(album_consensus))[1],
                             )
                         else:
-                            art_name, alb_name = None, None
+                            album_artist, album_title = None, None
 
-                        if art_name and alb_name:
+                        if album_artist and album_title:
                             final_folder = rename_album_folder(
-                                folder, art_name, alb_name, dry_run=dry_run
+                                folder, album_artist, album_title, dry_run=dry_run
                             )
                             if final_folder != folder:
                                 report.folders_renamed += 1
 
                     renamed.extend(
-                        (final_folder / p.name if final_folder != folder else p)
-                        for p in folder_renamed_paths
+                        (
+                            final_folder / audio_path.relative_to(folder)
+                            if final_folder != folder
+                            else audio_path
+                        )
+                        for audio_path in folder_renamed_paths
                     )
             except (KeyboardInterrupt, RuntimeError) as exc:
                 if not is_interruption(exc):
                     raise
+                resume_workers(pause_stop_event)
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(report) from None
 

@@ -1,173 +1,178 @@
 import contextlib
 import os
-import shutil
+import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from rapidfuzz import fuzz
 from rich.markup import escape
 
 from sonora.audio.metadata import read_track_metadata
+from sonora.core.artists import extract_featured_artist_tokens, get_primary_artist
+from sonora.core.audio_files import find_audio_files, group_files_by_parent
+from sonora.core.cache import api_cache_session
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import get_config
+from sonora.core.library_paths import (
+    get_single_release_title,
+    is_in_singles_hierarchy,
+    resolve_unique_path,
+    safe_case_rename,
+)
 from sonora.core.logger import (
     LOG,
     create_progress,
     interactive_pause_listener,
+    resume_workers,
     wait_if_paused,
 )
 from sonora.core.models import TrackInfo
-from sonora.core.utils import (
-    InterruptedOperationError,
-    clean_title,
-    deduplicate_title_features,
-    find_audio_files,
+from sonora.core.sidecars import (
     find_companion_lyrics,
-    get_primary_artist,
-    get_single_release_title,
-    group_files_by_parent,
-    is_in_singles_hierarchy,
-    is_interruption,
-    normalize_str,
+    relocate_companion_artwork,
     relocate_companion_lyrics,
-    sanitize_name,
 )
+from sonora.core.text import normalize_str, sanitize_name
+from sonora.core.titles import clean_title
+from sonora.modules.normalization import normalize_track_metadata
 
 
 def _quarantine_file(file_path: Path, quarantine_dir: Path) -> Path:
     quarantine_dir.mkdir(parents=True, exist_ok=True)
-    target = quarantine_dir / file_path.name
-    counter = 1
-    while target.exists() and target.resolve() != file_path.resolve():
-        target = quarantine_dir / f"{file_path.stem} ({counter}){file_path.suffix}"
-        counter += 1
+    target = resolve_unique_path(
+        quarantine_dir / file_path.name, current_path=file_path
+    )
     if target.resolve() != file_path.resolve():
-        shutil.move(str(file_path), str(target))
+        safe_case_rename(file_path, target)
     for companion in find_companion_lyrics(file_path):
-        comp_target = quarantine_dir / companion.name
-        c_counter = 1
-        while comp_target.exists() and comp_target.resolve() != companion.resolve():
-            comp_target = (
-                quarantine_dir / f"{companion.stem} ({c_counter}){companion.suffix}"
-            )
-            c_counter += 1
+        comp_target = resolve_unique_path(
+            quarantine_dir / companion.name, current_path=companion
+        )
         if comp_target.resolve() != companion.resolve():
-            shutil.move(str(companion), str(comp_target))
+            safe_case_rename(companion, comp_target)
     return target
 
 
+@api_cache_session()
 def _read_file_info(file_path: Path) -> tuple[Path, TrackInfo | None]:
     try:
         return file_path, read_track_metadata(file_path)
     except OSError as err:
-        LOG.warning(f"Failed to read metadata for {escape(str(file_path))}: {err}")
+        LOG.warning(
+            f"Failed to read metadata for {escape(str(file_path))}: {escape(str(err))}"
+        )
         return file_path, None
 
 
+def _audio_quality_rank(track_info: TrackInfo) -> tuple[int, int, int, int]:
+    return (
+        int(track_info.is_lossless),
+        (track_info.bits_per_sample or 16) if track_info.is_lossless else 0,
+        (track_info.sample_rate or 44100) if track_info.is_lossless else 0,
+        0 if track_info.is_lossless else (track_info.bitrate or 0),
+    )
+
+
+@dataclass(frozen=True)
+class _RegisteredSingle:
+    primary_artist_key: str
+    artist_key: frozenset[str]
+    title_key: str
+    featured_key: frozenset[str]
+    isrc: str | None
+    recording_mbid: str | None
+    duration: float | None
+    quality: tuple[int, int, int, int]
+    file_path: Path
+
+
+def _single_recording(
+    track_info: TrackInfo, target_path: Path | None = None
+) -> _RegisteredSingle:
+    normalized_track = normalize_track_metadata(replace(track_info))
+    return _RegisteredSingle(
+        primary_artist_key=normalize_str(get_primary_artist(normalized_track.artist)),
+        artist_key=frozenset(
+            normalize_str(artist)
+            for artist in extract_featured_artist_tokens(normalized_track.artist)
+        ),
+        title_key=normalize_str(clean_title(normalized_track.title)),
+        featured_key=frozenset(
+            normalize_str(artist)
+            for artist in extract_featured_artist_tokens(
+                normalized_track.featured_artists
+            )
+        ),
+        isrc=normalized_track.isrc.strip().upper() if normalized_track.isrc else None,
+        recording_mbid=normalized_track.musicbrainz_trackid.strip().lower()
+        if normalized_track.musicbrainz_trackid
+        else None,
+        duration=normalized_track.duration,
+        quality=_audio_quality_rank(track_info),
+        file_path=target_path or track_info.file_path,
+    )
+
+
 class SingleDeduplicator:
-    """
-    Registry for detecting duplicate singles without cross-song collisions
-    or false-positive elimination of distinct mixes, versions, or audio qualities.
-    """
+    """Keep distinct recording editions while ranking duplicate audio quality."""
 
     def __init__(self) -> None:
-        self._tracks: dict[
-            str,
-            list[
-                tuple[
-                    str,
-                    str | None,
-                    str | None,
-                    float | None,
-                    int | None,
-                    int | None,
-                    Path,
-                ]
-            ],
-        ] = {}
+        self._tracks: dict[str, list[_RegisteredSingle]] = {}
 
     def register(self, track_info: TrackInfo, target_path: Path | None = None) -> None:
-        primary_artist_key = normalize_str(get_primary_artist(track_info.artist))
-        clean_title_key = normalize_str(deduplicate_title_features(track_info.title))
-        isrc_key = track_info.isrc.strip().upper() if track_info.isrc else None
-        mbid_key = (
-            track_info.musicbrainz_trackid.strip().lower()
-            if track_info.musicbrainz_trackid
-            else None
-        )
-        resolved_path = target_path or track_info.file_path
-        entry = (
-            clean_title_key,
-            isrc_key,
-            mbid_key,
-            track_info.duration,
-            track_info.bits_per_sample,
-            track_info.sample_rate,
-            resolved_path,
-        )
-        self._tracks.setdefault(primary_artist_key, []).append(entry)
+        recording = _single_recording(track_info, target_path)
+        self.forget(recording.file_path)
+        self._tracks.setdefault(recording.primary_artist_key, []).append(recording)
 
-    def find_duplicate(
-        self, track_info: TrackInfo
-    ) -> tuple[bool, Path | None, int | None, int | None]:
-        """
-        Check if track_info is a duplicate of a previously registered single.
-        Returns: (is_duplicate, existing_target_path, existing_bits, existing_sample_rate)
-        """
-        primary_artist_key = normalize_str(get_primary_artist(track_info.artist))
-        existing_list = self._tracks.get(primary_artist_key)
-        if not existing_list:
-            return False, None, None, None
-
-        clean_title_key = normalize_str(deduplicate_title_features(track_info.title))
-        isrc_key = track_info.isrc.strip().upper() if track_info.isrc else None
-        mbid_key = (
-            track_info.musicbrainz_trackid.strip().lower()
-            if track_info.musicbrainz_trackid
-            else None
-        )
-        curr_duration = track_info.duration
-
-        for (
-            ex_title,
-            ex_isrc,
-            ex_mbid,
-            ex_duration,
-            ex_bits,
-            ex_sr,
-            ex_path,
-        ) in existing_list:
+    def find_duplicate(self, track_info: TrackInfo) -> _RegisteredSingle | None:
+        candidate = _single_recording(track_info)
+        for recording in self._tracks.get(candidate.primary_artist_key, []):
             if (
-                curr_duration is not None
-                and ex_duration is not None
-                and abs(curr_duration - ex_duration) > 15.0
+                track_info.duration is not None
+                and recording.duration is not None
+                and abs(track_info.duration - recording.duration)
+                > get_config().single_duration_tolerance_seconds
             ):
                 continue
-
-            if clean_title_key == ex_title:
-                return True, ex_path, ex_bits, ex_sr
-
+            if candidate.isrc and recording.isrc and candidate.isrc != recording.isrc:
+                continue
             if (
-                isrc_key
-                and ex_isrc
-                and isrc_key == ex_isrc
-                and fuzz.ratio(clean_title_key, ex_title) >= 70.0
+                candidate.recording_mbid
+                and recording.recording_mbid
+                and candidate.recording_mbid != recording.recording_mbid
             ):
-                return True, ex_path, ex_bits, ex_sr
-
+                continue
             if (
-                mbid_key
-                and ex_mbid
-                and mbid_key == ex_mbid
-                and fuzz.ratio(clean_title_key, ex_title) >= 70.0
+                candidate.artist_key != recording.artist_key
+                or candidate.featured_key != recording.featured_key
             ):
-                return True, ex_path, ex_bits, ex_sr
-
-        return False, None, None, None
+                continue
+            if candidate.title_key == recording.title_key:
+                return recording
+            if (
+                (candidate.isrc and candidate.isrc == recording.isrc)
+                or (
+                    candidate.recording_mbid
+                    and candidate.recording_mbid == recording.recording_mbid
+                )
+            ) and fuzz.ratio(
+                candidate.title_key, recording.title_key
+            ) >= get_config().single_identifier_title_threshold:
+                return recording
+        return None
 
     def is_duplicate(self, track_info: TrackInfo) -> bool:
-        dup, _, _, _ = self.find_duplicate(track_info)
-        return dup
+        return self.find_duplicate(track_info) is not None
+
+    def forget(self, audio_path: Path) -> None:
+        for primary_artist, recordings in self._tracks.items():
+            self._tracks[primary_artist] = [
+                recording
+                for recording in recordings
+                if recording.file_path != audio_path
+            ]
 
 
 def _quarantine_duplicate_single(
@@ -180,13 +185,16 @@ def _quarantine_duplicate_single(
     if not dry_run:
         try:
             _quarantine_file(path, quarantine_dir)
-            LOG.info(
+            LOG.detail(
                 f"   ∟ 📦 Quarantined duplicate single{reason}: {escape(key)} -> .duplicates/"
             )
         except OSError as error:
             LOG.debug(f"Failed to quarantine duplicate single {path}: {error}")
+            raise
     else:
-        LOG.info(f"[DRY-RUN] Would quarantine duplicate single{reason}: {escape(key)}")
+        LOG.detail(
+            f"[DRY-RUN] Would quarantine duplicate single{reason}: {escape(key)}"
+        )
 
 
 def _is_single_folder(
@@ -199,16 +207,12 @@ def _is_single_folder(
     if get_config().is_disc_folder(folder.name):
         return False
 
-    # Loose files placed directly in library root are loose singles
     if folder.resolve() == source_dir.resolve():
         return True
 
-    # Folders already located within a Singles hierarchy
-    if is_in_singles_hierarchy(folder, source_dir):
-        return True
-
-    # Immediate generic dump bucket relative to source_dir (e.g. source_dir / 'Downloads')
-    if get_config().is_generic_container(folder.name):
+    if is_in_singles_hierarchy(folder, source_dir) or get_config().is_generic_container(
+        folder.name
+    ):
         return True
 
     if not folder_track_infos:
@@ -235,15 +239,12 @@ def _is_single_folder(
 
     file_count = len(files)
 
-    # Multi-track album evaluation (>= 3 tracks)
     if file_count >= 3:
-        # Album consensus: majority of tracks share the same raw or cleaned album title
         if cleaned_albums and cleaned_albums.most_common(1)[0][1] >= (file_count * 0.5):
             return False
         if raw_albums and raw_albums.most_common(1)[0][1] >= (file_count * 0.5):
             return False
 
-        # Sequence continuity: >= 3 unique positive track numbers forming an album sequence
         if (
             len(track_numbers) >= 3
             and max(track_numbers) >= 3
@@ -251,32 +252,31 @@ def _is_single_folder(
         ):
             return False
 
-        # Declared album release: majority of tracks declare total_tracks >= 3
         multi_track_declared = sum(
-            cnt for tot, cnt in total_tracks_counts.items() if tot >= 3
+            count
+            for total_tracks, count in total_tracks_counts.items()
+            if total_tracks >= 3
         )
         if multi_track_declared >= (file_count * 0.5):
             return False
 
-        # Structural coherence: folder name reflects an album title present in track metadata
         norm_folder = normalize_str(folder.name)
-        for alb in cleaned_albums:
-            if alb in norm_folder or norm_folder in alb:
+        for album in cleaned_albums:
+            if album in norm_folder or norm_folder in album:
                 return False
 
         return True
 
-    # 1-2 tracks: verify whether track metadata declares a multi-track album
     for _, track_meta in folder_track_infos:
         if (track_meta.total_tracks and track_meta.total_tracks > 2) or (
             track_meta.track_number and track_meta.track_number > 2
         ):
             return False
         if track_meta.album and not get_config().is_generic_container(track_meta.album):
-            norm_alb = normalize_str(track_meta.album)
+            normalized_album = normalize_str(track_meta.album)
             norm_folder = normalize_str(folder.name)
             if (
-                (norm_alb in norm_folder or norm_folder in norm_alb)
+                (normalized_album in norm_folder or norm_folder in normalized_album)
                 and track_meta.total_tracks
                 and track_meta.total_tracks > 1
             ):
@@ -285,17 +285,111 @@ def _is_single_folder(
     return True
 
 
+def _resolve_single_target_file(
+    path: Path,
+    track_info: TrackInfo,
+    target_singles_dir: Path,
+) -> Path:
+    """Calculates canonical target path for a single audio track."""
+    normalized_track = normalize_track_metadata(replace(track_info))
+    artist_credit = normalized_track.artist or get_primary_artist(track_info.artist)
+    single_release_title = get_single_release_title(normalized_track)
+    has_feat_in_title = bool(
+        re.search(r"\b(?:feat|ft|featuring)\b", single_release_title, re.IGNORECASE)
+    )
+    canonical_with_feat = (
+        sanitize_name(
+            f"{artist_credit} - {single_release_title} (feat. {normalized_track.featured_artists})"
+        )
+        if normalized_track.featured_artists and not has_feat_in_title
+        else None
+    )
+    canonical_without_feat = sanitize_name(f"{artist_credit} - {single_release_title}")
+
+    if path.parent.name in (canonical_with_feat, canonical_without_feat):
+        single_folder_name = path.parent.name
+    else:
+        single_folder_name = canonical_with_feat or canonical_without_feat
+
+    single_folder = target_singles_dir / single_folder_name
+    return single_folder / f"01 - {sanitize_name(normalized_track.title)}{path.suffix}"
+
+
+def _handle_single_deduplication(
+    path: Path,
+    track_info: TrackInfo,
+    target_file: Path,
+    track_identity_key: str,
+    deduplicator: SingleDeduplicator,
+    quarantine_dir: Path,
+    dry_run: bool,
+) -> tuple[bool, int]:
+    """
+    Checks for duplicates in memory and on disk with quality downgrade protection.
+    Returns (should_skip, removed_count).
+    """
+    removed_count = 0
+    registered = deduplicator.find_duplicate(track_info)
+    if registered and not dry_run and not registered.file_path.exists():
+        deduplicator.forget(registered.file_path)
+        registered = None
+    if registered:
+        if _audio_quality_rank(track_info) > registered.quality:
+            _quarantine_duplicate_single(
+                registered.file_path,
+                track_identity_key,
+                quarantine_dir,
+                dry_run,
+                reason=" (lower quality replaced)",
+            )
+            deduplicator.forget(registered.file_path)
+            removed_count += 1
+        else:
+            _quarantine_duplicate_single(
+                path, track_identity_key, quarantine_dir, dry_run
+            )
+            return True, 1
+
+    if target_file.exists() and not (
+        dry_run and registered and registered.file_path == target_file and removed_count
+    ):
+        target_meta = _read_file_info(target_file)[1]
+        destination_registry = SingleDeduplicator()
+        if target_meta is None:
+            return False, removed_count
+        destination_registry.register(target_meta)
+        if not destination_registry.is_duplicate(track_info):
+            return False, removed_count
+        if _audio_quality_rank(track_info) > _audio_quality_rank(target_meta):
+            _quarantine_duplicate_single(
+                target_file,
+                track_identity_key,
+                quarantine_dir,
+                dry_run,
+                reason=" (lower quality replaced)",
+            )
+            removed_count += 1
+        else:
+            _quarantine_duplicate_single(
+                path,
+                track_identity_key,
+                quarantine_dir,
+                dry_run,
+                reason=" (target exists)",
+            )
+            return True, removed_count + 1
+
+    return False, removed_count
+
+
 def organize_library_singles(
     source_dir: Path,
     target_singles_dir: Path,
     dry_run: bool = False,
     max_threads: int = 4,
+    failures: list[str] | None = None,
 ) -> int:
-    """
-    Scan source_dir, detect single tracks, and move them to target_singles_dir
-    organized as target_singles_dir / Primary Artist / Artist - Title.ext.
-    Returns the count of moved tracks.
-    """
+    """Move standalone tracks into release folders at the selected destination."""
     if not source_dir.exists():
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
 
@@ -317,7 +411,7 @@ def organize_library_singles(
             "[cyan]Scanning library & analyzing albums...", total=len(all_audio_files)
         )
         with (
-            interactive_pause_listener(progress, task_scan),
+            interactive_pause_listener(progress, task_scan) as pause_stop_event,
             ThreadPoolExecutor(max_workers=max_threads) as executor,
         ):
             try:
@@ -339,6 +433,8 @@ def organize_library_singles(
                         wait_if_paused()
                         if track_info is not None:
                             folder_track_infos.append((file_path, track_info))
+                        elif failures is not None:
+                            failures.append(str(file_path))
                         progress.advance(task_scan)
 
                     is_single = _is_single_folder(
@@ -354,6 +450,7 @@ def organize_library_singles(
             except (KeyboardInterrupt, RuntimeError) as exc:
                 if not is_interruption(exc):
                     raise
+                resume_workers(pause_stop_event)
                 executor.shutdown(wait=True, cancel_futures=True)
                 raise InterruptedOperationError(moved_count) from None
 
@@ -363,185 +460,206 @@ def organize_library_singles(
             "[cyan]Organizing single tracks...", total=len(singles_to_process)
         )
 
-        quarantine_dir = (
-            target_singles_dir or (source_dir / "Singles")
-        ) / ".duplicates"
+        quarantine_dir = target_singles_dir / ".duplicates"
 
-        # Process and move collected singles (with safe deduplication and quality downgrade protection)
         try:
             for path, track_info in singles_to_process:
-                wait_if_paused()
-                primary_artist = get_primary_artist(track_info.artist)
-                clean_title_str = deduplicate_title_features(track_info.title)
-                primary_artist_key = normalize_str(primary_artist)
-                track_identity_key = (
-                    f"{primary_artist_key} - {normalize_str(clean_title_str)}"
-                )
+                try:
+                    wait_if_paused()
+                    target_file = _resolve_single_target_file(
+                        path, track_info, target_singles_dir
+                    )
+                    if path.resolve() == target_file.resolve():
+                        deduplicator.register(track_info, target_file)
+                        progress.advance(task_organize)
+                        continue
 
-                single_release_title = get_single_release_title(track_info)
-                single_folder_name = sanitize_name(
-                    f"{primary_artist} - {single_release_title}"
-                )
-                primary_artist_clean = sanitize_name(primary_artist)
+                    primary_artist = get_primary_artist(track_info.artist)
+                    track_identity_key = f"{normalize_str(primary_artist)} - {normalize_str(clean_title(track_info.title))}"
+                    should_skip, dup_count = _handle_single_deduplication(
+                        path,
+                        track_info,
+                        target_file,
+                        track_identity_key,
+                        deduplicator,
+                        quarantine_dir,
+                        dry_run,
+                    )
+                    removed_dupes += dup_count
+                    if should_skip:
+                        progress.advance(task_organize)
+                        continue
 
-                if target_singles_dir and target_singles_dir != source_dir / "Singles":
-                    base_parent = target_singles_dir
-                elif source_dir.name.lower() == primary_artist_clean.lower():
-                    base_parent = source_dir / "Singles"
-                else:
-                    try:
-                        subdirs = [
-                            p
-                            for p in source_dir.iterdir()
-                            if p.is_dir() and not p.name.startswith(".")
-                        ]
-                        if len(subdirs) > 5 and any(
-                            " - " not in p.name for p in subdirs
+                    if target_file.exists() and target_file.resolve() != path.resolve():
+                        edition_id = track_info.isrc or track_info.musicbrainz_trackid
+                        edition_label = (
+                            edition_id or track_info.album or path.parent.name
+                        )
+                        target_file = (
+                            target_file.parent.with_name(
+                                f"{target_file.parent.name} [{sanitize_name(edition_label)}]"
+                            )
+                            / target_file.name
+                        )
+                        target_file = resolve_unique_path(
+                            target_file, current_path=path
+                        )
+
+                    if not dry_run:
+                        if not os.access(path, os.R_OK) or not os.access(
+                            path.parent, os.W_OK
                         ):
-                            base_parent = source_dir / primary_artist_clean / "Singles"
-                        else:
-                            base_parent = source_dir / "Singles"
-                    except OSError:
-                        base_parent = source_dir / "Singles"
+                            LOG.warning(
+                                f"Permission denied modifying: {escape(str(path))}"
+                            )
+                            if failures is not None:
+                                failures.append(str(path))
+                            progress.advance(task_organize)
+                            continue
+                        target_file.parent.mkdir(parents=True, exist_ok=True)
+                        if path.parent != target_file.parent:
+                            relocate_companion_artwork(
+                                path.parent, target_file.parent, dry_run=False
+                            )
+                        safe_case_rename(path, target_file)
+                        LOG.detail(
+                            f"   ∟ 📁 Moved single: {escape(path.name)} -> {escape(target_file.parent.name)}/"
+                        )
+                    else:
+                        LOG.detail(
+                            f"[DRY-RUN] Would move {escape(path.name)} -> {escape(str(target_file))}"
+                        )
 
-                single_folder = base_parent / single_folder_name
-                target_file = (
-                    single_folder
-                    / f"01 - {sanitize_name(track_info.title)}{path.suffix}"
-                )
-
-                # 1. Canonical location check: if already in its canonical target location, register and skip cleanly
-                if path.resolve() == target_file.resolve():
+                    relocate_companion_lyrics(path, target_file, dry_run=dry_run)
                     deduplicator.register(track_info, target_file)
+                    moved_count += 1
                     progress.advance(task_organize)
-                    continue
-
-                # 2. Check for duplicate against previously organized singles
-                is_dup, ex_path, ex_bits, ex_sr = deduplicator.find_duplicate(
-                    track_info
-                )
-                if is_dup:
-                    curr_bits = track_info.bits_per_sample or 16
-                    prior_bits = ex_bits or 16
-                    curr_sr = track_info.sample_rate or 44100
-                    prior_sr = ex_sr or 44100
-
-                    if (
-                        (
-                            curr_bits > prior_bits
-                            or (curr_bits == prior_bits and curr_sr > prior_sr)
-                        )
-                        and ex_path
-                        and ex_path.exists()
-                    ):
-                        # Existing is lower quality -> quarantine existing, allow incoming higher-quality file to take its place
-                        _quarantine_duplicate_single(
-                            ex_path,
-                            track_identity_key,
-                            quarantine_dir,
-                            dry_run,
-                            reason=" (lower quality replaced)",
-                        )
-                        removed_dupes += 1
-                    else:
-                        # Current track is lower or equal quality duplicate -> quarantine incoming file
-                        _quarantine_duplicate_single(
-                            path, track_identity_key, quarantine_dir, dry_run
-                        )
-                        removed_dupes += 1
-                        progress.advance(task_organize)
-                        continue
-
-                if not dry_run:
-                    if not os.access(path, os.R_OK):
-                        LOG.warning(
-                            f"Permission denied reading file: {escape(str(path))}"
-                        )
-                        progress.advance(task_organize)
-                        continue
-                    if not os.access(path.parent, os.W_OK):
-                        LOG.warning(
-                            f"Permission denied modifying directory: {escape(str(path.parent))}"
-                        )
-                        progress.advance(task_organize)
-                        continue
-                    single_folder.mkdir(parents=True, exist_ok=True)
-
-                # 3. Handle destination collisions (target already exists on disk from an unmanaged or prior file)
-                if target_file.exists():
-                    target_meta = _read_file_info(target_file)[1]
-                    target_bits = (
-                        target_meta.bits_per_sample if target_meta else None
-                    ) or 16
-                    target_sr = (
-                        target_meta.sample_rate if target_meta else None
-                    ) or 44100
-                    curr_bits = track_info.bits_per_sample or 16
-                    curr_sr = track_info.sample_rate or 44100
-
-                    if curr_bits > target_bits or (
-                        curr_bits == target_bits and curr_sr > target_sr
-                    ):
-                        _quarantine_duplicate_single(
-                            target_file,
-                            track_identity_key,
-                            quarantine_dir,
-                            dry_run,
-                            reason=" (lower quality replaced)",
-                        )
-                        removed_dupes += 1
-                    else:
-                        _quarantine_duplicate_single(
-                            path,
-                            track_identity_key,
-                            quarantine_dir,
-                            dry_run,
-                            reason=" (target exists)",
-                        )
-                        removed_dupes += 1
-                        progress.advance(task_organize)
-                        continue
-
-                if not dry_run:
-                    # Also move companion artwork from old single folder if changing folders
-                    if path.parent != single_folder:
-                        for art_name in [
-                            "cover.jpg",
-                            "cover.png",
-                            "folder.jpg",
-                            "front.jpg",
-                        ]:
-                            old_art = path.parent / art_name
-                            new_art = single_folder / art_name
-                            if old_art.exists() and not new_art.exists():
-                                with contextlib.suppress(OSError):
-                                    shutil.move(str(old_art), str(new_art))
-                    shutil.move(str(path), str(target_file))
-                    LOG.info(
-                        f"   ∟ 📁 Moved single: {escape(path.name)} -> {escape(single_folder.name)}/"
+                except OSError as error:
+                    if failures is not None:
+                        failures.append(str(path))
+                    LOG.warning(
+                        f"Failed to organize {escape(str(path))}: {escape(str(error))}"
                     )
-                else:
-                    LOG.info(
-                        f"[DRY-RUN] Would move {escape(path.name)} -> {escape(str(target_file))}"
-                    )
-
-                relocate_companion_lyrics(path, target_file, dry_run=dry_run)
-                deduplicator.register(track_info, target_file)
-
-                moved_count += 1
-                progress.advance(task_organize)
+                    progress.advance(task_organize)
         except (KeyboardInterrupt, RuntimeError) as exc:
             if not is_interruption(exc):
                 raise
             raise InterruptedOperationError(moved_count) from None
 
     if removed_dupes > 0:
-        LOG.info(f"🗑️ Removed {removed_dupes} duplicate single(s).")
+        LOG.detail(f"🗑️ Removed {removed_dupes} duplicate single(s).")
 
     if not dry_run:
+        consolidate_duplicate_artist_dirs(source_dir, dry_run=False)
         cleanup_empty_dirs(source_dir)
+    else:
+        consolidate_duplicate_artist_dirs(source_dir, dry_run=True)
 
     return moved_count
+
+
+def _consolidate_directory_entries(parent_dir: Path, dry_run: bool = False) -> int:
+    """Consolidates case-variant and duplicate subdirectories within parent_dir."""
+    if not parent_dir.is_dir():
+        return 0
+
+    consolidated_count = 0
+    dir_groups: dict[str, list[Path]] = {}
+    for entry in parent_dir.iterdir():
+        if entry.is_dir() and not entry.name.startswith("."):
+            norm_key = normalize_str(entry.name)
+            if norm_key:
+                dir_groups.setdefault(norm_key, []).append(entry)
+
+    for candidate_dirs in dir_groups.values():
+        if len(candidate_dirs) <= 1:
+            continue
+
+        candidate_stats: list[tuple[Path, int, list[str]]] = []
+        for cand_dir in candidate_dirs:
+            audio_files = find_audio_files(cand_dir)
+            tag_artists: list[str] = []
+            for af in audio_files[:10]:
+                _, meta = _read_file_info(af)
+                if meta and meta.artist:
+                    tag_artists.append(meta.artist)
+            candidate_stats.append((cand_dir, len(audio_files), tag_artists))
+
+        canonical_dir: Path | None = None
+        all_tags = [art for _, _, tags in candidate_stats for art in tags]
+        if all_tags:
+            most_common_tag = Counter(all_tags).most_common(1)[0][0]
+            clean_tag = sanitize_name(most_common_tag)
+            for cand_dir, _, _ in candidate_stats:
+                if cand_dir.name == clean_tag:
+                    canonical_dir = cand_dir
+                    break
+
+        if not canonical_dir:
+            non_screaming = [
+                d
+                for d, _, _ in candidate_stats
+                if not (d.name.isupper() and len(d.name) > 3)
+            ]
+            if non_screaming:
+                canonical_dir = max(
+                    [s for s in candidate_stats if s[0] in non_screaming],
+                    key=lambda s: s[1],
+                )[0]
+            else:
+                canonical_dir = max(candidate_stats, key=lambda s: s[1])[0]
+
+        for cand_dir, _, _ in candidate_stats:
+            if cand_dir == canonical_dir:
+                continue
+
+            LOG.detail(
+                f"Consolidating duplicate directory: {cand_dir.name} -> {canonical_dir.name}"
+            )
+            if not dry_run:
+                try:
+                    for source_file in sorted(cand_dir.rglob("*")):
+                        if not source_file.is_file():
+                            continue
+                        destination_file = canonical_dir / source_file.relative_to(
+                            cand_dir
+                        )
+                        destination_file.parent.mkdir(parents=True, exist_ok=True)
+                        destination_file = resolve_unique_path(destination_file)
+                        safe_case_rename(source_file, destination_file)
+                    cleanup_empty_dirs(cand_dir)
+                    cand_dir.rmdir()
+                except OSError as error:
+                    LOG.debug(
+                        f"Failed to consolidate {cand_dir} into {canonical_dir}: {error}"
+                    )
+                    continue
+            consolidated_count += 1
+
+    return consolidated_count
+
+
+def consolidate_duplicate_artist_dirs(source_dir: Path, dry_run: bool = False) -> int:
+    """
+    Detects case-variant and normalized duplicate artist directories and subdirectories
+    in source_dir (e.g. 'Ian' vs 'IAN', 'Nosfe' vs 'NOSFE', 'Crush' vs 'CRUSH').
+    Consolidates subdirectories, audio files, and companion assets into the canonical directory.
+    """
+    if not source_dir.is_dir():
+        return 0
+
+    consolidated_count = _consolidate_directory_entries(source_dir, dry_run=dry_run)
+
+    for entry in list(source_dir.iterdir()):
+        if entry.is_dir() and not entry.name.startswith("."):
+            singles_dir = entry / "Singles"
+            if singles_dir.is_dir():
+                consolidated_count += _consolidate_directory_entries(
+                    singles_dir, dry_run=dry_run
+                )
+            consolidated_count += _consolidate_directory_entries(entry, dry_run=dry_run)
+
+    return consolidated_count
 
 
 def cleanup_empty_dirs(path: Path, target_singles_dir: Path | None = None) -> int:

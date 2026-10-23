@@ -1,10 +1,12 @@
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import scipy.signal
 import soundfile
+from numpy.typing import NDArray
 
-from sonora.audio.bpm import load_audio
+from sonora.audio.decode import load_audio
 from sonora.core.logger import LOG
 
 
@@ -17,7 +19,7 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
 
     try:
         sample_rate: int = 44100
-        audio_mono: np.ndarray | None = None
+        audio_mono: NDArray[np.float32] | None = None
 
         # Partial read: seek to active middle section (30% in) to avoid silent/spoken intros
         try:
@@ -35,8 +37,11 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
 
                 audio_file.seek(int(sample_rate * offset_seconds))
                 read_frames = int(sample_rate * 20.0)
-                raw_samples = audio_file.read(
-                    frames=read_frames, dtype="float32", always_2d=True
+                raw_samples = cast(
+                    NDArray[np.float32],
+                    audio_file.read(
+                        frames=read_frames, dtype="float32", always_2d=True
+                    ),
                 )
                 if raw_samples.shape[1] > 1:
                     audio_mono = np.mean(raw_samples, axis=1)
@@ -56,7 +61,6 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
         if sample_rate < 32000 or len(audio_mono) < sample_rate * 5:
             return False, 0.0, None
 
-        # Compute Fast Fourier Transform spectrogram
         frequency_axis, _, spectrogram_matrix = scipy.signal.spectrogram(
             audio_mono, fs=sample_rate, nperseg=2048, noverlap=1024
         )
