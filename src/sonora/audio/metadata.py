@@ -1,4 +1,3 @@
-import dataclasses
 import io
 import os
 import threading
@@ -116,7 +115,7 @@ _TAG_SCHEMA: dict[str, tuple[str, ...]] = {
 def _get_tag(tags: dict[str, list[str]], *keys: str) -> str | None:
     for key in keys:
         values = tags.get(key) or tags.get(key.upper()) or tags.get(key.lower())
-        if values and len(values) > 0 and values[0] is not None:
+        if values:
             return str(values[0]).strip()
     return None
 
@@ -207,12 +206,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
     with _METADATA_CACHE_LOCK:
         cached = _METADATA_CACHE.get(cache_key)
         if cached is not None:
-            return dataclasses.replace(
-                cached,
-                metadata_sources=dict(cached.metadata_sources),
-                metadata_conflicts=dict(cached.metadata_conflicts),
-                _diff_descriptions=list(cached._diff_descriptions),
-            )
+            return cached.copy()
 
     try:
         with taglib.File(str(file_path)) as song:
@@ -362,12 +356,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             with _METADATA_CACHE_LOCK:
                 if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
                     _METADATA_CACHE.clear()
-                _METADATA_CACHE[cache_key] = dataclasses.replace(
-                    track_info,
-                    metadata_sources=dict(track_info.metadata_sources),
-                    metadata_conflicts=dict(track_info.metadata_conflicts),
-                    _diff_descriptions=list(track_info._diff_descriptions),
-                )
+                _METADATA_CACHE[cache_key] = track_info.copy()
             return track_info
     except FileNotFoundError:
         raise
@@ -510,25 +499,17 @@ def _write_audio_properties_tags(
     else:
         tags.pop("COMPILATION", None)
 
-    if track_info.replaygain_track_gain is not None:
-        tags["REPLAYGAIN_TRACK_GAIN"] = [f"{track_info.replaygain_track_gain:+.2f} dB"]
-    else:
-        tags.pop("REPLAYGAIN_TRACK_GAIN", None)
-
-    if track_info.replaygain_track_peak is not None:
-        tags["REPLAYGAIN_TRACK_PEAK"] = [f"{track_info.replaygain_track_peak:.6f}"]
-    else:
-        tags.pop("REPLAYGAIN_TRACK_PEAK", None)
-
-    if track_info.replaygain_album_gain is not None:
-        tags["REPLAYGAIN_ALBUM_GAIN"] = [f"{track_info.replaygain_album_gain:+.2f} dB"]
-    else:
-        tags.pop("REPLAYGAIN_ALBUM_GAIN", None)
-
-    if track_info.replaygain_album_peak is not None:
-        tags["REPLAYGAIN_ALBUM_PEAK"] = [f"{track_info.replaygain_album_peak:.6f}"]
-    else:
-        tags.pop("REPLAYGAIN_ALBUM_PEAK", None)
+    for tag_key, measurement, value_format in (
+        ("REPLAYGAIN_TRACK_GAIN", track_info.replaygain_track_gain, "+.2f"),
+        ("REPLAYGAIN_TRACK_PEAK", track_info.replaygain_track_peak, ".6f"),
+        ("REPLAYGAIN_ALBUM_GAIN", track_info.replaygain_album_gain, "+.2f"),
+        ("REPLAYGAIN_ALBUM_PEAK", track_info.replaygain_album_peak, ".6f"),
+    ):
+        if measurement is None:
+            tags.pop(tag_key, None)
+        else:
+            unit = " dB" if tag_key.endswith("_GAIN") else ""
+            tags[tag_key] = [f"{measurement:{value_format}}{unit}"]
 
 
 def _write_schema_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> None:
@@ -663,7 +644,7 @@ def write_track_metadata(
                         except OSError:
                             continue
                     if not any(
-                        width * height > cover_dimensions[0] * cover_dimensions[1]
+                        width > cover_dimensions[0] or height > cover_dimensions[1]
                         for width, height in existing_dimensions
                     ):
                         song.pictures = [

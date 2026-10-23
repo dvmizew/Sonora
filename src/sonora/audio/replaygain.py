@@ -49,10 +49,7 @@ def _album_loudness(measurements: Sequence[LoudnessMeasurement]) -> float | None
 def _measure_track_loudness(
     audio_path: Path, target_lufs: float = -18.0
 ) -> LoudnessMeasurement | None:
-    """
-    Measures loudness and peak amplitude of a single track.
-    Returns (audio_path, track_gain, track_peak, track_loudness, duration) or None.
-    """
+    """Measure track gain, peak, and gated loudness blocks for album aggregation."""
     try:
         loaded = load_audio(audio_path)
         if loaded is None or len(loaded[0]) == 0 or loaded[1] <= 0:
@@ -94,7 +91,7 @@ def _write_album_replaygain_track(
         entry.track_peak,
     )
     if dry_run:
-        LOG.info(
+        LOG.detail(
             f"[DRY-RUN] Would tag {escape(file_path.name)}: Track Gain={track_gain:+.2f} dB, "
             f"Album Gain={album_gain:+.2f} dB, Track Peak={track_peak:.6f}, Album Peak={max_album_peak:.6f}"
         )
@@ -140,6 +137,8 @@ def calculate_album_replaygain(
                 if (
                     track_info.replaygain_track_gain is None
                     or track_info.replaygain_album_gain is None
+                    or track_info.replaygain_track_peak is None
+                    or track_info.replaygain_album_peak is None
                 ):
                     already_tagged = False
                     break
@@ -150,7 +149,7 @@ def calculate_album_replaygain(
             LOG.debug("Files already contain ReplayGain tags. Skipping.")
             return False
 
-    LOG.info(f"🔊 Calculating ReplayGain for {len(valid_files)} track(s)...")
+    LOG.detail(f"🔊 Calculating ReplayGain for {len(valid_files)} track(s)...")
 
     track_results: list[LoudnessMeasurement] = []
     max_album_peak = 0.0
@@ -178,8 +177,12 @@ def calculate_album_replaygain(
             executor.shutdown(wait=True, cancel_futures=True)
             raise
 
-    if not track_results:
-        LOG.warning("Could not calculate loudness for any audio files.")
+    if len(track_results) != len(valid_files):
+        LOG.warning(
+            "ReplayGain measurement failed for "
+            f"{len(valid_files) - len(track_results)}/{len(valid_files)} track(s); "
+            "album tags were not changed."
+        )
         return False
 
     album_loudness = _album_loudness(track_results)
@@ -202,5 +205,5 @@ def calculate_album_replaygain(
             raise
 
     tagged_count = sum(1 for success in write_results if success)
-    LOG.info(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")
+    LOG.detail(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")
     return tagged_count > 0

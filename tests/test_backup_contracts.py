@@ -118,6 +118,10 @@ class TestBackupManifestContracts(IsolatedTestCase):
             {"tags": {}, "complex_tags": {"PICTURE": [{"data": {"base64": "!!!"}}]}},
             {"tags": {}, "complex_tags": {"PICTURE": [{"data": {"other": "value"}}]}},
             {"tags": {}, "complex_tags": {"PICTURE": [{"data": None}]}},
+            {"tags": {}, "complex_tags": {}, "mp4_rating": "Explicit"},
+            {"tags": {}, "complex_tags": {}, "mp4_rating": [True]},
+            {"tags": {}, "complex_tags": {}, "mp4_rating": [256]},
+            {"tags": {}, "complex_tags": {}, "mp4_rating": []},
         )
         for properties in track_properties:
             manifest = {
@@ -286,3 +290,27 @@ class TestBinaryPropertyContracts(IsolatedTestCase):
                 (False, False),
             )
         open_audio.assert_not_called()
+
+    def test_native_rating_write_failure_preserves_original_audio(self) -> None:
+        path = self.test_directory / "recording.m4a"
+        path.write_bytes(b"original audio")
+        audio_tags = MagicMock(spec=taglib.File)
+        audio_tags.tags = {}
+        audio_tags.complex_property_keys = []
+        audio_tags.save.return_value = []
+        with (
+            patch("taglib.File") as open_audio,
+            patch.object(backup, "MP4") as open_mp4,
+        ):
+            open_audio.return_value.__enter__.return_value = audio_tags
+            open_mp4.return_value.save.side_effect = OSError("disk full")
+            self.assertEqual(
+                backup._restore_single_track(
+                    path.name,
+                    {"tags": {}, "complex_tags": {}, "mp4_rating": [4]},
+                    self.test_directory,
+                ),
+                (False, False),
+            )
+        self.assertEqual(path.read_bytes(), b"original audio")
+        self.assertEqual(list(self.test_directory.glob(".*recording*")), [])

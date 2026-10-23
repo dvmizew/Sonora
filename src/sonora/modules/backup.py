@@ -15,6 +15,8 @@ from typing import Any, BinaryIO
 import ijson
 import orjson
 import taglib
+from mutagen import MutagenError
+from mutagen.mp4 import MP4
 from rich.markup import escape
 
 from sonora.audio.metadata import clear_metadata_cache
@@ -48,11 +50,15 @@ def _read_track_for_backup(audio_path: Path) -> tuple[str, dict[str, Any] | None
                 ]
                 for key in audio_tags.complex_property_keys
             }
-            return str(audio_path), {
+            track_backup: dict[str, Any] = {
                 "tags": audio_tags.tags,
                 "complex_tags": complex_tags,
             }
-    except OSError as error:
+        if audio_path.suffix.lower() in {".m4a", ".mp4"}:
+            # TagLib's property map omits the native content-rating atom.
+            track_backup["mp4_rating"] = MP4(audio_path).get("rtng")
+        return str(audio_path), track_backup
+    except (OSError, MutagenError) as error:
         LOG.debug(
             f"Error reading {escape(str(audio_path))} for backup: {escape(str(error))}"
         )
@@ -71,33 +77,43 @@ def _restore_single_track(
     try:
         if not os.access(target_path, os.W_OK):
             raise PermissionError(f"Read-only audio file: {target_path}")
-        with (
-            atomic_audio_edit(target_path) as staging_path,
-            taglib.File(str(staging_path)) as audio_tags,
-        ):
-            audio_tags.tags.clear()
-            audio_tags.tags.update(backup_tags["tags"])
-            for key in set(audio_tags.complex_property_keys) | set(
-                backup_tags["complex_tags"]
-            ):
-                properties = [
-                    {
-                        field: base64.b64decode(value["base64"], validate=True)
-                        if isinstance(value, dict)
-                        else value
-                        for field, value in property_fields.items()
-                    }
-                    for property_fields in backup_tags["complex_tags"].get(key, [])
-                ]
-                if not audio_tags.set_complex_properties(key, properties):
+        with atomic_audio_edit(target_path) as staging_path:
+            with taglib.File(str(staging_path)) as audio_tags:
+                audio_tags.tags.clear()
+                audio_tags.tags.update(backup_tags["tags"])
+                for key in set(audio_tags.complex_property_keys) | set(
+                    backup_tags["complex_tags"]
+                ):
+                    properties = [
+                        {
+                            field: base64.b64decode(value["base64"], validate=True)
+                            if isinstance(value, dict)
+                            else value
+                            for field, value in property_fields.items()
+                        }
+                        for property_fields in backup_tags["complex_tags"].get(key, [])
+                    ]
+                    if not audio_tags.set_complex_properties(key, properties):
+                        raise OSError(
+                            f"Cannot restore binary property {key} on {target_path}"
+                        )
+                if audio_tags.save():
                     raise OSError(
-                        f"Cannot restore binary property {key} on {target_path}"
+                        f"Some backup tags could not be saved to {target_path}"
                     )
-            if audio_tags.save():
-                raise OSError(f"Some backup tags could not be saved to {target_path}")
+            if (
+                target_path.suffix.lower() in {".m4a", ".mp4"}
+                and "mp4_rating" in backup_tags
+            ):
+                mp4_audio = MP4(staging_path)
+                if backup_tags["mp4_rating"] is None:
+                    mp4_audio.pop("rtng", None)
+                else:
+                    mp4_audio["rtng"] = backup_tags["mp4_rating"]
+                mp4_audio.save()
         clear_metadata_cache()
         return True, False
-    except OSError as error:
+    except (OSError, MutagenError) as error:
         LOG.warning(
             f"Failed to restore {escape(str(target_path))}: {escape(str(error))}"
         )
@@ -282,6 +298,15 @@ def _validate_backup_tags(relative_path: str, raw_tags: Any) -> dict[str, Any]:
                     raise TypeError(
                         f"Invalid complex property value for {relative_path}"
                     )
+    if "mp4_rating" in raw_tags:
+        rating = raw_tags["mp4_rating"]
+        if rating is not None and (
+            not isinstance(rating, list)
+            or len(rating) != 1
+            or type(rating[0]) is not int
+            or not 0 <= rating[0] <= 255
+        ):
+            raise ValueError(f"Invalid MP4 content rating for {relative_path}")
     return raw_tags
 
 

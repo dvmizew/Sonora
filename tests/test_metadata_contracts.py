@@ -9,7 +9,8 @@ import taglib
 from mutagen.mp4 import MP4
 
 from sonora.audio import metadata
-from sonora.core.models import TrackInfo
+from sonora.core.models import NormalizeReport, TrackInfo
+from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.track_processing import normalize_single_track
 from tests.fixtures import image_bytes
 from tests.regression_support import AudioRegressionTestCase
@@ -17,6 +18,35 @@ from tests.support import IsolatedTestCase
 
 
 class TestMetadataContracts(IsolatedTestCase):
+    def test_track_copy_owns_provenance_and_change_collections(self) -> None:
+        original = TrackInfo(
+            Path("recording.flac"),
+            metadata_sources={"title": "MusicBrainz"},
+            metadata_conflicts={"isrc": "Catalog disagreement"},
+            _diff_descriptions=["Title normalized"],
+        )
+        copied = original.copy()
+        self.assertEqual(copied, original)
+        copied.metadata_sources.clear()
+        copied.metadata_conflicts.clear()
+        copied._diff_descriptions.clear()
+        self.assertEqual(original.metadata_sources, {"title": "MusicBrainz"})
+        self.assertEqual(original.metadata_conflicts, {"isrc": "Catalog disagreement"})
+        self.assertEqual(original._diff_descriptions, ["Title normalized"])
+        empty = TrackInfo(Path("empty.flac"))
+        empty.copy().metadata_conflicts["title"] = "Review required"
+        self.assertEqual(empty.metadata_conflicts, {})
+
+    def test_normalization_report_counts_use_its_only_track_collection(self) -> None:
+        report = NormalizeReport()
+        self.assertEqual((report.total_scanned, report.total_unchanged), (0, 0))
+        report.tracks.append(TrackInfo(Path("recording.flac")))
+        self.assertEqual((report.total_scanned, report.total_unchanged), (1, 1))
+        report.modified_files["recording.flac"] = ["Title normalized"]
+        self.assertEqual((report.total_modified, report.total_unchanged), (1, 0))
+        report.tracks.clear()
+        self.assertEqual(report.total_scanned, 0)
+
     def test_embedded_dimensions_and_explicit_feature_tags_need_no_fallback(
         self,
     ) -> None:
@@ -180,6 +210,28 @@ class TestMetadataContracts(IsolatedTestCase):
             metadata.write_track_metadata(TrackInfo(path), cover)
             self.assertEqual(len(song.pictures), 1)
             self.assertEqual(song.pictures[0].data, cover.read_bytes())
+
+    def test_cover_replacement_cannot_reduce_either_image_dimension(self) -> None:
+        path = self.test_directory / "recording.wav"
+        path.write_bytes(b"audio fixture")
+        replacement = self.test_directory / "cover.png"
+        replacement.write_bytes(image_bytes((1000, 1000)))
+        for dimensions in ((1400, 600), (600, 1400)):
+            embedded = taglib.Picture(
+                data=image_bytes(dimensions),
+                mime_type="image/png",
+                picture_type="Front Cover",
+            )
+            with (
+                self.subTest(dimensions=dimensions),
+                patch("taglib.File") as open_audio,
+            ):
+                song = open_audio.return_value.__enter__.return_value
+                song.tags = {}
+                song.pictures = [embedded]
+                song.save.return_value = []
+                metadata.write_track_metadata(TrackInfo(path), replacement)
+                self.assertEqual(song.pictures[0].data, embedded.data)
 
     def test_unchanged_album_artist_preserves_original_multivalue_credits(self) -> None:
         original = {"ALBUMARTIST": ["Primary"], "ALBUMARTISTS": ["Primary", "Guest"]}
@@ -408,3 +460,27 @@ class TestAdvisoryPersistence(AudioRegressionTestCase):
                 self.assertTrue(recording._advisory_needs_normalization)
                 metadata.write_track_metadata(recording)
                 self.assertEqual(MP4(path).get("rtng"), [4] if expected else None)
+
+    def test_backup_restores_native_mp4_rating_and_its_absence(self) -> None:
+        source = self.audio("source.wav")
+        path = self.root / "recording.m4a"
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(source), "-c:a", "alac", str(path)],
+            check=True,
+            capture_output=True,
+        )
+        archive = self.root / "backup.json.gz"
+        for rating in ([4], None):
+            with self.subTest(rating=rating):
+                native = MP4(path)
+                if rating is None:
+                    native.pop("rtng", None)
+                else:
+                    native["rtng"] = rating
+                native.save()
+                backup_library_tags(self.root, archive, max_threads=1)
+                native = MP4(path)
+                native["rtng"] = [2]
+                native.save()
+                self.assertEqual(restore_library_tags(archive, max_threads=1), 2)
+                self.assertEqual(MP4(path).get("rtng"), rating)

@@ -186,8 +186,8 @@ class TestMusicalKey(IsolatedTestCase):
         create_chord_wav(album_dir / "01 - Song.wav", [261.63, 329.63, 392.00])
 
         results = normalize_library(album_dir, fetch_key=True)
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].initial_key, "C")
+        self.assertEqual(len(results.tracks), 1)
+        self.assertEqual(results.tracks[0].initial_key, "C")
 
 
 if __name__ == "__main__":

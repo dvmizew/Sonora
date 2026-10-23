@@ -266,13 +266,33 @@ class TestReplayGainFailureContracts(IsolatedTestCase):
             )
 
     def test_all_tagged_files_skip_measurement(self) -> None:
-        tagged = TrackInfo(self.path, replaygain_track_gain=1, replaygain_album_gain=1)
+        tagged = TrackInfo(
+            self.path,
+            replaygain_track_gain=1,
+            replaygain_album_gain=1,
+            replaygain_track_peak=0.5,
+            replaygain_album_peak=0.5,
+        )
         with (
             patch.object(replaygain, "read_track_metadata", return_value=tagged),
             patch.object(replaygain, "_measure_track_loudness") as measure,
         ):
             self.assertFalse(replaygain.calculate_album_replaygain([self.path]))
         measure.assert_not_called()
+
+    def test_missing_peak_is_repaired_without_force(self) -> None:
+        tagged = TrackInfo(self.path, replaygain_track_gain=1, replaygain_album_gain=1)
+        with (
+            patch.object(replaygain, "read_track_metadata", return_value=tagged),
+            patch.object(
+                replaygain, "_measure_track_loudness", return_value=self.measurement
+            ),
+            patch.object(replaygain, "write_track_metadata") as write,
+        ):
+            self.assertTrue(replaygain.calculate_album_replaygain([self.path]))
+        write.assert_called_once()
+        self.assertEqual(tagged.replaygain_track_peak, self.measurement.track_peak)
+        self.assertEqual(tagged.replaygain_album_peak, self.measurement.track_peak)
 
     def test_unreadable_tags_and_failed_measurements_produce_no_writes(self) -> None:
         for failure in (None, OSError("decoder failed")):
@@ -322,6 +342,26 @@ class TestReplayGainFailureContracts(IsolatedTestCase):
                 )
             else:
                 executor.shutdown.assert_not_called()
+
+    def test_partial_album_measurement_preserves_existing_replaygain(self) -> None:
+        other_path = self.test_directory / "unreadable.flac"
+        other_path.touch()
+        for failed_measurement in (None, OSError("decoder failed")):
+            with (
+                self.subTest(failure=failed_measurement),
+                patch.object(
+                    replaygain,
+                    "_measure_track_loudness",
+                    side_effect=[self.measurement, failed_measurement],
+                ),
+                patch.object(replaygain, "_write_album_replaygain_track") as write,
+            ):
+                self.assertFalse(
+                    replaygain.calculate_album_replaygain(
+                        [self.path, other_path], force=True, max_threads=1
+                    )
+                )
+            write.assert_not_called()
 
 
 class TestChecksumFailureContracts(IsolatedTestCase):
