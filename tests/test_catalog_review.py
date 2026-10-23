@@ -43,11 +43,11 @@ class TestCatalogReview(ServiceResponseTestCase):
                 ):
                     album = itunes.fetch_itunes_album_details("Primary", "Album")
                 assert album is not None
-                position_index = album["tracks_by_number"]
+                position_index = album["tracks_by_disc_and_position"]
                 title_index = album["tracks_by_title"]
                 assert isinstance(position_index, dict)
                 assert isinstance(title_index, dict)
-                self.assertEqual(len(position_index), len(titles) * 3)
+                self.assertEqual(len(position_index), len(titles))
                 self.assertEqual(
                     "recording" in title_index,
                     titles.count("Recording") == 1,

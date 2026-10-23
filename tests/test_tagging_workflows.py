@@ -8,11 +8,12 @@ from sonora.core.models import TrackInfo
 from sonora.modules.catalog_enrichment import (
     _enrich_deezer,
     _enrich_shazam,
-    apply_metadata_mapping,
 )
 from sonora.modules.matching import _resolve_album_track_position
+from sonora.modules.metadata_consensus import apply_metadata_mapping
 from sonora.modules.musicbrainz_enrichment import _enrich_musicbrainz
 from sonora.modules.tagger import (
+    _AlbumMetadataContext,
     _resolve_album_folder_identity,
     process_single_track,
     tag_album_folder,
@@ -163,13 +164,17 @@ class TestTaggingWorkflows(ModuleTestCase):
         mb_release: dict[str, object] = {
             "title": "That's My Name",
             "album_artist": "Akcent",
-            "tracks_by_position": {
-                1: {"title": "Kylie", "artist": "Akcent", "isrc": "RO001"},
-                2: {"title": "That's My Name", "artist": "Akcent", "isrc": "RO002"},
-                3: {"title": "My Passion", "artist": "Akcent", "isrc": "RO003"},
-                4: {"title": "Kamelia", "artist": "Akcent", "isrc": "RO004"},
-                5: {"title": "Te Quiero", "artist": "Akcent", "isrc": "RO005"},
-                6: {"title": "Amor Gitana", "artist": "Akcent", "isrc": "RO006"},
+            "tracks_by_disc_and_position": {
+                (1, 1): {"title": "Kylie", "artist": "Akcent", "isrc": "RO001"},
+                (1, 2): {
+                    "title": "That's My Name",
+                    "artist": "Akcent",
+                    "isrc": "RO002",
+                },
+                (1, 3): {"title": "My Passion", "artist": "Akcent", "isrc": "RO003"},
+                (1, 4): {"title": "Kamelia", "artist": "Akcent", "isrc": "RO004"},
+                (1, 5): {"title": "Te Quiero", "artist": "Akcent", "isrc": "RO005"},
+                (1, 6): {"title": "Amor Gitana", "artist": "Akcent", "isrc": "RO006"},
             },
         }
 
@@ -236,8 +241,8 @@ class TestTaggingWorkflows(ModuleTestCase):
         mb_release: dict[str, object] = {
             "title": "Revenge",
             "album_artist": "XXXTENTACION",
-            "tracks_by_position": {
-                4: {
+            "tracks_by_disc_and_position": {
+                (1, 4): {
                     "title": "KING",
                     "artist": "XXXTENTACION",
                     "isrc": "USUYG1142049",
@@ -249,7 +254,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         _enrich_musicbrainz(
             track_info=track,
             album_mbid="9d90908d-0a74-4df0-8e76-13c6473b33e5",
-            album_track_mbids={4: "548be1ad-0000-0000-0000-000000000000"},
+            album_track_mbids={(1, 4): "548be1ad-0000-0000-0000-000000000000"},
             album_mb_release_details=mb_release,
             force=True,
         )
@@ -273,8 +278,8 @@ class TestTaggingWorkflows(ModuleTestCase):
         mb_release: dict[str, object] = {
             "title": "Back From the Edge",
             "album_artist": "James Arthur",
-            "tracks_by_position": {
-                4: {
+            "tracks_by_disc_and_position": {
+                (1, 4): {
                     "title": "Can I Be Him",
                     "artist": "James Arthur",
                     "isrc": "DEE861600588",
@@ -285,7 +290,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         _enrich_musicbrainz(
             track_info=track,
             album_mbid="c6b7d374-1425-4414-ba65-2ddcb4d98196",
-            album_track_mbids={4: "c8b03190-306c-4125-9b32-3f9d86d60a12"},
+            album_track_mbids={(1, 4): "c8b03190-306c-4125-9b32-3f9d86d60a12"},
             album_mb_release_details=mb_release,
             force=False,
         )
@@ -308,14 +313,14 @@ class TestTaggingWorkflows(ModuleTestCase):
             album="Born to Die",
             track_number=3,
         )
-        mbids = {1: "uuid-1", 2: "uuid-2", 3: "uuid-3"}
+        mbids = {(1, 1): "uuid-1", (1, 2): "uuid-2", (1, 3): "uuid-3"}
         mb_release: dict[str, object] = {
             "title": "Issa Album",
             "album_artist": "21 Savage",
-            "tracks_by_position": {
-                1: {"title": "Famous", "artist": "21 Savage"},
-                2: {"title": "Bank Account", "artist": "21 Savage"},
-                3: {"title": "Close My Eyes", "artist": "21 Savage"},
+            "tracks_by_disc_and_position": {
+                (1, 1): {"title": "Famous", "artist": "21 Savage"},
+                (1, 2): {"title": "Bank Account", "artist": "21 Savage"},
+                (1, 3): {"title": "Close My Eyes", "artist": "21 Savage"},
             },
         }
         with (
@@ -328,10 +333,12 @@ class TestTaggingWorkflows(ModuleTestCase):
         ):
             track_metadata = process_single_track(
                 track_file,
-                album_track_mbids=mbids,
-                album_mb_release_details=mb_release,
-                target_album_artist="21 Savage",
-                target_album_title="Issa Album",
+                album_context=_AlbumMetadataContext(
+                    track_mbids=mbids,
+                    mb_release_details=mb_release,
+                    sample_artist="21 Savage",
+                    sample_album="Issa Album",
+                ),
                 force=True,
                 fetch_bpm=False,
                 fetch_lyrics=False,
@@ -515,8 +522,8 @@ class TestTaggingWorkflows(ModuleTestCase):
 
         mock_deezer_details = {
             "title": "The Arrival",
-            "tracks_by_position": {
-                5: {
+            "tracks_by_disc_and_position": {
+                (1, 5): {
                     "title": "Renegade",
                     "artist": "Aaryan Shah",
                     "isrc": "TCADM1875890",
@@ -530,9 +537,11 @@ class TestTaggingWorkflows(ModuleTestCase):
             fetch_key=False,
             fetch_lyrics=False,
             fetch_itunes_art=False,
-            album_deezer_details=mock_deezer_details,
-            target_album_artist="Aaryan Shah",
-            target_album_title="The Arrival",
+            album_context=_AlbumMetadataContext(
+                deezer_details=mock_deezer_details,
+                sample_artist="Aaryan Shah",
+                sample_album="The Arrival",
+            ),
         )
         # Corrupted artist 'Kavinsky' must be healed to 'Aaryan Shah'
         self.assertEqual(result.artist, "Aaryan Shah")
@@ -551,7 +560,9 @@ class TestTaggingWorkflows(ModuleTestCase):
         # Album has only track 1 (e.g. standard edition or incomplete match)
         incomplete_album = {
             "title": "Legendary",
-            "tracks_by_position": {1: {"title": "Too Many", "track_position": 1}},
+            "tracks_by_disc_and_position": {
+                (1, 1): {"title": "Too Many", "track_position": 1}
+            },
             "tracks_by_title": {"too many": {"title": "Too Many", "track_position": 1}},
         }
         with patch("sonora.services.deezer.fetch_deezer_track_details") as mock_fetch:
@@ -592,8 +603,8 @@ class TestTaggingWorkflows(ModuleTestCase):
         mock_mb_release: dict[str, object] = {
             "title": "SR3MM",
             "album_artist": "Rae Sremmurd",
-            "tracks_by_position": {
-                2: {
+            "tracks_by_disc_and_position": {
+                (1, 2): {
                     "title": "What's in Your Heart?",
                     "artist": "Swae Lee",
                 }
@@ -614,9 +625,11 @@ class TestTaggingWorkflows(ModuleTestCase):
                 fetch_key=False,
                 fetch_lyrics=False,
                 fetch_itunes_art=False,
-                album_mb_release_details=mock_mb_release,
-                target_album_artist="Rae Sremmurd",
-                target_album_title="SR3MM",
+                album_context=_AlbumMetadataContext(
+                    mb_release_details=mock_mb_release,
+                    sample_artist="Rae Sremmurd",
+                    sample_album="SR3MM",
+                ),
                 force=True,
             )
         # Swae Lee must be preserved as track artist, Rae Sremmurd set as album artist

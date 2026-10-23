@@ -1,4 +1,5 @@
 import hashlib
+import json
 import math
 import os
 import subprocess
@@ -30,6 +31,7 @@ def _fingerprint_file_with_timeout(
     """Execute fpcalc with an explicit timeout to prevent thread hangs on corrupt files."""
     command = [
         os.environ.get("FPCALC", "fpcalc"),
+        "-json",
         "-length",
         "120",
         str(file_path.resolve()),
@@ -38,21 +40,25 @@ def _fingerprint_file_with_timeout(
         process_result = subprocess.run(
             command, capture_output=True, check=True, timeout=timeout
         )
-        duration: float | None = None
-        fingerprint: str | None = None
-        for line in process_result.stdout.splitlines():
-            if line.startswith(b"DURATION="):
-                duration = safe_float(
-                    line.split(b"=", 1)[1].decode("ascii", errors="replace")
-                )
-            elif line.startswith(b"FINGERPRINT="):
-                fingerprint = line.split(b"=", 1)[1].decode("ascii")
-        if duration is not None and duration > 0 and fingerprint:
-            return duration, str(fingerprint)
     except (subprocess.SubprocessError, OSError) as error:
         LOG.debug(f"Direct fpcalc execution with timeout failed: {error}")
 
         raise OSError(f"Fingerprint decoding failed for {file_path}") from error
+    try:
+        fingerprint_payload = require_api_object(
+            json.loads(process_result.stdout), "fpcalc output"
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise OSError(f"fpcalc returned invalid JSON for {file_path}") from error
+    duration = safe_float(fingerprint_payload.get("duration"))
+    fingerprint = fingerprint_payload.get("fingerprint")
+    if (
+        duration is not None
+        and duration > 0
+        and isinstance(fingerprint, str)
+        and fingerprint.strip()
+    ):
+        return duration, fingerprint
     raise OSError(f"fpcalc returned incomplete fingerprint for {file_path}")
 
 
@@ -78,7 +84,7 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
             return _ACOUSTID_CACHE[cache_key]
 
     fingerprint_key = (
-        "fingerprint:v1:"
+        "fingerprint:v2:"
         + hashlib.sha256(
             repr((cache_key, os.environ.get("FPCALC", "fpcalc"), 120)).encode("utf-8")
         ).hexdigest()

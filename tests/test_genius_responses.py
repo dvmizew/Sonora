@@ -252,7 +252,7 @@ class TestGeniusSongIdentity(IsolatedTestCase):
                         "Alpha", "Original Song", "token"
                     )
                 self.assertEqual(result is not None, expected)
-                self.assertIn("genius_song:v6:", cache_lookup.call_args.args[0])
+                self.assertIn("genius_song:v7:", cache_lookup.call_args.args[0])
                 self.assertEqual(cached["description"], "?")
                 if result is not None:
                     self.assertIsNone(result["description"])
@@ -413,5 +413,5 @@ class TestGeniusDirectLookup(IsolatedTestCase):
                 )
             self.assertEqual(request.call_count, 1)
             store.assert_called_once_with(
-                "genius_song:v6:primary:original recording", None
+                "genius_song:v7:primary:original recording", None
             )

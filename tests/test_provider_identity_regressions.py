@@ -7,16 +7,22 @@ from unittest.mock import patch
 import httpx
 
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
-from sonora.core.http import RetryTransport, _retry_delay
-from sonora.core.models import TrackInfo
+from sonora.core.http import SESSION, RetryTransport, _retry_delay
+from sonora.core.models import MetadataSource, TrackInfo
 from sonora.core.titles import recording_identity_matches, score_artist_title_match
 from sonora.modules import catalog_enrichment, tagger
 from sonora.modules.metadata_consensus import (
+    build_provider_proposal,
     collect_provider_proposal,
     merge_provider_proposals,
 )
-from sonora.services import acoustid, deezer, genius, itunes
+from sonora.services import acoustid, deezer, genius, itunes, theaudiodb
+from sonora.services.itunes import _parse_itunes_track
 from tests.regression_support import AudioRegressionTestCase
+from tests.support import IsolatedTestCase
+
+RECORDING_MBID = "11111111-2222-3333-4444-555555555555"
+CONFLICTING_RECORDING_MBID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 def _validate_genius_identifier(track_info: TrackInfo, **keywords: object) -> None:
@@ -134,17 +140,26 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
             metadata_sources={"advisory": "Deezer"},
             metadata_conflicts={},
         )
-        merge_provider_proposals(track, [explicit, nonexplicit])
+        merge_provider_proposals(
+            track,
+            [
+                build_provider_proposal(track, candidate)
+                for candidate in [explicit, nonexplicit]
+            ],
+        )
         self.assertEqual(track.advisory, "Explicit")
         self.assertIn("advisory", track.metadata_conflicts)
         agreed = dataclasses.replace(track, metadata_conflicts={})
         merge_provider_proposals(
             agreed,
             [
-                nonexplicit,
-                dataclasses.replace(
-                    nonexplicit, metadata_sources={"advisory": "iTunes"}
-                ),
+                build_provider_proposal(agreed, candidate)
+                for candidate in [
+                    nonexplicit,
+                    dataclasses.replace(
+                        nonexplicit, metadata_sources={"advisory": "iTunes"}
+                    ),
+                ]
             ],
         )
         self.assertIsNone(agreed.advisory)
@@ -407,8 +422,8 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     composer="Verified Writer",
                 )
                 album = {
-                    "tracks_by_position": {
-                        1: {
+                    "tracks_by_disc_and_position": {
+                        (1, 1): {
                             **candidate,
                             "composer": "Wrong Writer",
                             "explicit_lyrics": True,
@@ -443,15 +458,15 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
         album = {
             "tracks_by_disc_and_position": {
                 (1, 1): {
-                    "trackName": "Original Song",
-                    "trackId": 456,
+                    "title": "Original Song",
+                    "itunes_trackid": 456,
                     "advisory": "Explicit",
                 }
             },
             "tracks_by_title": {
                 "original song": {
-                    "trackName": "Original Song",
-                    "trackId": 123,
+                    "title": "Original Song",
+                    "itunes_trackid": 123,
                     "genre": "Jazz",
                 }
             },
@@ -481,14 +496,16 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     patch.object(
                         itunes,
                         "lookup_itunes_track",
-                        return_value={
-                            "trackId": 11,
-                            "artistName": "Alpha",
-                            "trackName": "Original Song",
-                            "trackTimeMillis": 180000,
-                            "collectionId": 22,
-                            "artistId": 33,
-                        },
+                        return_value=_parse_itunes_track(
+                            {
+                                "trackId": 11,
+                                "artistName": "Alpha",
+                                "trackName": "Original Song",
+                                "trackTimeMillis": 180000,
+                                "collectionId": 22,
+                                "artistId": 33,
+                            }
+                        ),
                     ),
                     patch.object(itunes, "fetch_itunes_track_metadata") as search,
                 ):
@@ -517,11 +534,13 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
             patch.object(
                 itunes,
                 "lookup_itunes_track",
-                return_value={
-                    "artistName": "Unrelated",
-                    "trackName": "Different Song",
-                    "trackId": 11,
-                },
+                return_value=_parse_itunes_track(
+                    {
+                        "artistName": "Unrelated",
+                        "trackName": "Different Song",
+                        "trackId": 11,
+                    }
+                ),
             ),
             patch.object(itunes, "fetch_itunes_track_metadata", return_value=None),
         ):
@@ -584,7 +603,10 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     self.assertNotIn("genius_song_id", recording.metadata_sources)
                 elif stored and stored.get("writers"):
                     self.assertEqual(recording.composer, "Correct Writer")
-                merge_provider_proposals(original, [recording])
+                merge_provider_proposals(
+                    original,
+                    [build_provider_proposal(original, recording)],
+                )
                 self.assertEqual(original.genius_song_id, expected)
 
     def test_discogs_position_cannot_supply_another_song_or_unidentified_credits(
@@ -712,12 +734,14 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     patch.object(
                         itunes,
                         "lookup_itunes_track",
-                        return_value={
-                            "trackId": 1133782487,
-                            "artistName": candidate_artist,
-                            "trackName": "Real Ni**a",
-                            "trackTimeMillis": duration,
-                        },
+                        return_value=_parse_itunes_track(
+                            {
+                                "trackId": 1133782487,
+                                "artistName": candidate_artist,
+                                "trackName": "Real Ni**a",
+                                "trackTimeMillis": duration,
+                            }
+                        ),
                     ),
                     patch.object(
                         itunes, "fetch_itunes_track_metadata", return_value=None
@@ -795,6 +819,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         "trackName": "Original Song",
                         "trackTimeMillis": 180000,
                         "trackExplicitness": explicitness,
+                        "primaryGenreName": "Rock",
                         "collectionId": 22,
                         "artistId": 33,
                     }
@@ -814,7 +839,11 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         else None
                     )
                     with (
-                        patch.object(itunes, "lookup_itunes_track", return_value=raw),
+                        patch.object(
+                            itunes,
+                            "lookup_itunes_track",
+                            return_value=_parse_itunes_track(raw),
+                        ),
                         patch.object(
                             itunes,
                             "fetch_itunes_track_metadata",
@@ -823,7 +852,12 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     ):
                         catalog_enrichment._enrich_itunes(recording, album, force=True)
                     self.assertEqual(recording.itunes_trackid, "11")
-                    self.assertEqual(recording.advisory, "Explicit")
+                    self.assertEqual(
+                        recording.advisory,
+                        None
+                        if not album_context and explicitness == "notExplicit"
+                        else "Explicit",
+                    )
                     if explicitness == "cleaned":
                         self.assertIsNone(recording.genre)
                         self.assertIn("itunes_trackid", recording.metadata_conflicts)
@@ -903,11 +937,13 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         fetch_key=False,
                         fetch_lyrics=False,
                         fetch_itunes_art=False,
-                        album_mb_release_details={
-                            "artist": "Alpha",
-                            "title": "Album",
-                            "disambiguation": description,
-                        },
+                        album_context=tagger._AlbumMetadataContext(
+                            mb_release_details={
+                                "artist": "Alpha",
+                                "title": "Album",
+                                "disambiguation": description,
+                            }
+                        ),
                     )
                 persist.assert_not_called()
                 catalog.assert_not_called()
@@ -1099,3 +1135,210 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     "11" if requested.startswith("Când") else None,
                 )
                 self.assertIn("genius_song_id_validation", recording.metadata_conflicts)
+
+    def test_genius_matching_normalizes_branding_and_punctuation(self) -> None:
+        for artist, title, candidate_artist, candidate_title, accepted in (
+            ("$inger", "Don't Go", "Singer", "Don’t Go", True),
+            ("Álpha", "Original Song", "Alpha", "Original Song", True),
+            ("Alpha", "Original Song", "Unrelated", "Original Song", False),
+            ("Alpha", "Original Song", "Alpha", "Original Song (Live)", False),
+        ):
+            with self.subTest(artist=artist, candidate_title=candidate_title):
+                self.assertEqual(
+                    genius.score_genius_song_match(
+                        artist,
+                        title,
+                        {"artist": candidate_artist, "title": candidate_title},
+                    )
+                    > 0,
+                    accepted,
+                )
+
+    def test_explicit_rating_requires_independent_agreement_to_remove(self) -> None:
+        scenarios: tuple[tuple[tuple[MetadataSource, ...], bool, str | None], ...] = (
+            (("Deezer",), False, "Explicit"),
+            (("iTunes",), False, "Explicit"),
+            (("Deezer", "iTunes"), False, None),
+            (("Deezer", "iTunes"), True, "Explicit"),
+            ((), False, "Explicit"),
+        )
+        for sources, edition_conflict, expected in scenarios:
+            with self.subTest(sources=sources, edition_conflict=edition_conflict):
+                track = TrackInfo(self.root / "recording.flac", advisory="Explicit")
+                proposals = [
+                    dataclasses.replace(
+                        track,
+                        advisory=None,
+                        metadata_sources={"advisory": source},
+                        metadata_conflicts={"itunes_trackid": "Clean edition"}
+                        if edition_conflict
+                        else {},
+                    )
+                    for source in sources
+                ]
+                merge_provider_proposals(
+                    track,
+                    [
+                        build_provider_proposal(track, candidate)
+                        for candidate in proposals
+                    ],
+                )
+                self.assertEqual(track.advisory, expected)
+
+    def test_recording_lookup_cannot_replace_release_sequence(self) -> None:
+        from sonora.modules.musicbrainz_enrichment import _apply_mb_recording_metadata
+
+        for album_recording in (False, True):
+            with (
+                self.subTest(album_recording=album_recording),
+                patch(
+                    "sonora.modules.musicbrainz_enrichment.artist_resolution.resolve_artist_name",
+                    return_value="Alpha",
+                ),
+            ):
+                track = TrackInfo(
+                    self.root / "recording.flac",
+                    artist="Alpha",
+                    title="Original Song",
+                    disc_number=2,
+                    total_discs=2,
+                    total_tracks=6,
+                )
+                _apply_mb_recording_metadata(
+                    track,
+                    {
+                        "artist": "Alpha",
+                        "title": "Original Song",
+                        "disc_number": 1,
+                        "total_discs": 1,
+                        "disc_total_tracks": 14,
+                    },
+                    album_recording,
+                    None,
+                    False,
+                    force=True,
+                )
+                self.assertEqual(
+                    (track.disc_number, track.total_discs, track.total_tracks),
+                    (1, 1, 14) if album_recording else (2, 2, 6),
+                )
+
+    def test_stored_apple_id_retains_advisory_evidence_without_forced_search(
+        self,
+    ) -> None:
+        for rating, expected in (
+            ("explicit", "Explicit"),
+            ("", "Explicit"),
+            ("cleaned", "Explicit"),
+        ):
+            with self.subTest(rating=rating):
+                track = TrackInfo(
+                    self.root / "recording.flac",
+                    artist="Alpha",
+                    title="Original Song",
+                    duration=180,
+                    advisory="Explicit",
+                    genre="Rock",
+                    itunes_trackid="11",
+                )
+                with (
+                    patch.object(
+                        itunes,
+                        "lookup_itunes_track",
+                        return_value=_parse_itunes_track(
+                            {
+                                "artistName": "Alpha",
+                                "trackName": "Original Song",
+                                "trackTimeMillis": 180000,
+                                "trackExplicitness": rating,
+                                "trackId": 11,
+                            }
+                        ),
+                    ),
+                    patch.object(itunes, "fetch_itunes_track_metadata") as search,
+                ):
+                    catalog_enrichment._enrich_itunes(track)
+                search.assert_not_called()
+                self.assertEqual(track.advisory, expected)
+                self.assertEqual(
+                    track.metadata_sources.get("advisory"),
+                    "iTunes" if rating == "explicit" else None,
+                )
+
+
+class TestITunesIdentityBoundaries(IsolatedTestCase):
+    def test_metadata_does_not_trust_candidates_without_an_artist(self) -> None:
+        from sonora.services.itunes import fetch_itunes_track_metadata
+
+        with patch(
+            "sonora.services.itunes.search_itunes",
+            return_value=[{"trackName": "Intro", "trackId": 123}],
+        ):
+            self.assertIsNone(fetch_itunes_track_metadata("Artist Alpha", "Intro"))
+
+    def test_short_titles_cannot_bypass_identity_scoring(self) -> None:
+        from sonora.services.itunes import fetch_itunes_track_metadata
+
+        with patch(
+            "sonora.services.itunes.search_itunes",
+            return_value=[
+                {"trackName": "Outro", "artistName": "Artist Alpha", "trackId": 123}
+            ],
+        ):
+            self.assertIsNone(fetch_itunes_track_metadata("Artist Alpha", "Intro"))
+
+    def test_cover_art_does_not_trust_candidates_without_an_artist(self) -> None:
+        from sonora.services.itunes import fetch_itunes_cover_art_url
+
+        with patch(
+            "sonora.services.itunes.search_itunes",
+            return_value=[
+                {
+                    "collectionName": "Record",
+                    "artworkUrl100": "https://example.com/100x100bb.jpg",
+                }
+            ],
+        ):
+            self.assertIsNone(fetch_itunes_cover_art_url("Artist Alpha", "Record"))
+
+
+class TestAudioDBRecordingEvidence(IsolatedTestCase):
+    def test_audiodb_fallback_cannot_contradict_known_recording_id(self) -> None:
+        for candidate_id, accepted in (
+            (RECORDING_MBID, True),
+            (CONFLICTING_RECORDING_MBID, False),
+            (None, True),
+        ):
+            candidate = {
+                "strArtist": "Alpha",
+                "strTrack": "Original Song",
+                "strMood": "Calm",
+            }
+            if candidate_id:
+                candidate["strMusicBrainzID"] = candidate_id
+            responses = [
+                httpx.Response(
+                    200,
+                    json={"track": None},
+                    request=httpx.Request(
+                        "GET", "https://www.theaudiodb.com/track-mb.php"
+                    ),
+                ),
+                httpx.Response(
+                    200,
+                    json={"track": [candidate]},
+                    request=httpx.Request(
+                        "GET", "https://www.theaudiodb.com/searchtrack.php"
+                    ),
+                ),
+            ]
+            with (
+                self.subTest(candidate_id=candidate_id),
+                patch.object(theaudiodb, "get_cached_api", return_value=None),
+                patch.object(theaudiodb, "set_cached_api"),
+                patch.object(SESSION, "get", side_effect=responses),
+            ):
+                result = theaudiodb.fetch_theaudiodb_track_details(
+                    "Alpha", "Original Song", recording_mbid=RECORDING_MBID
+                )
+            self.assertEqual(result is not None, accepted)

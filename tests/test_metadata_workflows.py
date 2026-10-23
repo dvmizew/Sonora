@@ -72,10 +72,10 @@ class TestMetadataWorkflows(ModuleTestCase):
         mb_release: dict[str, object] = {
             "title": "Issa Album",
             "album_artist": "21 Savage",
-            "tracks_by_position": {
-                1: {"title": "Famous", "artist": "21 Savage"},
-                2: {"title": "Bank Account", "artist": "21 Savage"},
-                3: {"title": "Close My Eyes", "artist": "21 Savage"},
+            "tracks_by_disc_and_position": {
+                (1, 1): {"title": "Famous", "artist": "21 Savage"},
+                (1, 2): {"title": "Bank Account", "artist": "21 Savage"},
+                (1, 3): {"title": "Close My Eyes", "artist": "21 Savage"},
             },
         }
         # True positive: Lana Del Rey inside 21 Savage album
@@ -152,8 +152,8 @@ class TestMetadataWorkflows(ModuleTestCase):
         mb_release_ja: dict[str, object] = {
             "title": "Back From the Edge",
             "album_artist": "James Arthur",
-            "tracks_by_position": {
-                4: {
+            "tracks_by_disc_and_position": {
+                (1, 4): {
                     "title": "Can I Be Him",
                     "artist": "James Arthur",
                     "isrc": "DEE861600588",
@@ -200,34 +200,38 @@ class TestMetadataWorkflows(ModuleTestCase):
         mb_release_rev: dict[str, object] = {
             "title": "Revenge",
             "album_artist": "XXXTENTACION",
-            "tracks_by_position": {
-                1: {
+            "tracks_by_disc_and_position": {
+                (1, 1): {
                     "title": "Look at Me!",
                     "artist": "XXXTENTACION",
                     "isrc": "USUYG1131080",
                 },
-                2: {
+                (1, 2): {
                     "title": "I don't wanna do this anymore",
                     "artist": "XXXTENTACION",
                     "isrc": "USUYG1142046",
                 },
-                3: {
+                (1, 3): {
                     "title": "Looking for a Star",
                     "artist": "XXXTENTACION",
                     "isrc": "USUYG1142047",
                 },
-                4: {"title": "KING", "artist": "XXXTENTACION", "isrc": "USUYG1142049"},
-                5: {
+                (1, 4): {
+                    "title": "KING",
+                    "artist": "XXXTENTACION",
+                    "isrc": "USUYG1142049",
+                },
+                (1, 5): {
                     "title": "Slipknot",
                     "artist": "XXXTENTACION feat. Kin$oul & Killstation",
                     "isrc": "USUYG1142050",
                 },
-                6: {
+                (1, 6): {
                     "title": "YuNg BrAtZ",
                     "artist": "XXXTENTACION",
                     "isrc": "USUYG1142051",
                 },
-                7: {
+                (1, 7): {
                     "title": 'R.I.P ROACH "EAST SIDE SOULJA"',
                     "artist": "XXXTENTACION",
                     "isrc": "USUYG1142052",

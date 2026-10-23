@@ -1,7 +1,10 @@
 import dataclasses
 import os
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
+
+import httpx
 
 from sonora.audio import art, metadata, replaygain
 from sonora.core.config import get_config
@@ -95,7 +98,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
 
     def test_partial_release_indexes_do_not_establish_identity(self) -> None:
         for release in (
-            {"tracks_by_position": {1: {"recording_mbid": None}}},
+            {"tracks_by_disc_and_position": {(1, 1): {"recording_mbid": None}}},
             {"tracks_by_disc_and_position": {(1, 1): {"recording_mbid": None}}},
         ):
             recording = dataclasses.replace(self.recording, musicbrainz_albumid=MBID)
@@ -111,9 +114,6 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                     musicbrainz,
                     "fetch_musicbrainz_release_details",
                     return_value=release,
-                ),
-                patch.object(
-                    musicbrainz, "fetch_album_track_mbids", return_value={1: MBID}
                 ),
                 patch.object(deezer, "fetch_deezer_album_details", return_value=None),
                 patch.object(itunes, "fetch_itunes_album_details", return_value=None),
@@ -139,18 +139,19 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
             track_number=3,
         )
         itunes_release = {
-            "tracks_by_number": {3: {"title": "Recording", "artist": "Guest"}}
+            "tracks_by_disc_and_position": {
+                (1, 3): {"title": "Recording", "artist": "Guest"}
+            }
         }
         tagger._heal_and_align_album_track(
             recording,
             recording.file_path,
-            None,
-            None,
-            itunes_release,
-            None,
-            "Primary",
-            "Record",
             True,
+            album_context=tagger._AlbumMetadataContext(
+                itunes_details=itunes_release,
+                sample_artist="Primary",
+                sample_album="Record",
+            ),
         )
         self.assertEqual(recording.artist, "Guest")
         self.assertEqual(recording.album_artist, "Primary")
@@ -371,9 +372,6 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
             for number in range(1, 4)
         }
         release = {
-            "tracks_by_position": {
-                number: recordings[(1, number)] for number in range(1, 4)
-            },
             "tracks_by_disc_and_position": recordings,
         }
         with (
@@ -410,10 +408,6 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
             {
                 (1, number): f"00000000-0000-0000-0000-{number:012d}"
                 for number in range(1, 4)
-            }
-            | {
-                number: f"00000000-0000-0000-0000-{number:012d}"
-                for number in range(1, 4)
             },
         )
         self.assertEqual(context.discogs_release, {"label": "Publisher"})
@@ -437,9 +431,6 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
             patch.object(
                 musicbrainz, "fetch_musicbrainz_release_details", return_value=None
             ),
-            patch.object(
-                musicbrainz, "fetch_album_track_mbids", return_value={(1, 1): MBID}
-            ) as fetch,
             patch.object(deezer, "fetch_deezer_album_details", return_value=None),
             patch.object(itunes, "fetch_itunes_album_details", return_value=None),
         ):
@@ -451,7 +442,6 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                 False,
                 True,
             )
-        fetch.assert_not_called()
         self.assertIsNone(context.track_mbids)
 
     def test_prefetch_empty_identity_and_network_error_preserve_empty_context(
@@ -567,3 +557,98 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         self.assertEqual(get_config().fanart_client_key, "client")
         self.assertFalse(get_config().enable_shazam)
         self.assertEqual(os.environ["FANART_API_KEY"], "fixture")
+
+
+class TestBlockedAlbumAssets(IsolatedTestCase):
+    def test_album_finalization_does_not_download_assets_for_blocked_tracks(
+        self,
+    ) -> None:
+        for conflict in ("identity", "isrc", None):
+            with self.subTest(conflict=conflict):
+                recording = TrackInfo(
+                    Path("recording.flac"),
+                    artist="Alpha",
+                    title="Original Song",
+                    metadata_conflicts={conflict: "Review needed"} if conflict else {},
+                )
+                with (
+                    patch.object(art, "process_artist_artwork") as artist,
+                    patch.object(art, "process_label_artwork") as label,
+                ):
+                    tagger._finalize_album_assets_and_replaygain(
+                        self.test_directory,
+                        [recording],
+                        [],
+                        None,
+                        {"label_mbid": MBID},
+                        False,
+                        False,
+                        False,
+                        1,
+                    )
+                self.assertEqual(artist.call_count, 0 if conflict else 1)
+                self.assertEqual(label.call_count, 0 if conflict else 1)
+
+
+class TestAlbumProviderFailures(IsolatedTestCase):
+    def setUp(self) -> None:
+        self.path = self.test_directory / "01 - Recording.wav"
+        self.path.touch()
+        self.recording = TrackInfo(
+            self.path,
+            artist="Primary",
+            title="Recording",
+            album="Record",
+            album_artist="Primary",
+            track_number=1,
+        )
+
+    def test_album_prefetch_continues_after_independent_provider_failures(self) -> None:
+        providers = (
+            (musicbrainz, "search_musicbrainz_release", None, None),
+            (deezer, "fetch_deezer_album_details", "deezer_details", {"genre": "Rock"}),
+            (itunes, "fetch_itunes_album_details", "itunes_details", {"genre": "Rock"}),
+            (discogs, "search_discogs_release", "discogs_release", {"genre": "Rock"}),
+        )
+        for failed_provider in range(len(providers)):
+            with self.subTest(failed_provider=failed_provider):
+                with ExitStack() as patches:
+                    patches.enter_context(
+                        patch.object(
+                            tagger,
+                            "_resolve_album_folder_identity",
+                            return_value=("Primary", "Record"),
+                        )
+                    )
+                    patches.enter_context(
+                        patch.object(
+                            metadata,
+                            "read_track_metadata",
+                            return_value=self.recording,
+                        )
+                    )
+                    lookups = []
+                    for index, (module, function, _, response) in enumerate(providers):
+                        lookups.append(
+                            patches.enter_context(
+                                patch.object(
+                                    module,
+                                    function,
+                                    return_value=response,
+                                    side_effect=httpx.ConnectError("unavailable")
+                                    if index == failed_provider
+                                    else None,
+                                )
+                            )
+                        )
+                    context = tagger._resolve_album_metadata_context(
+                        self.test_directory, [self.path], "token", False, False, True
+                    )
+                for lookup in lookups:
+                    lookup.assert_called_once()
+                for index, (_, _, field, response) in enumerate(providers):
+                    if field:
+                        self.assertEqual(
+                            getattr(context, field),
+                            None if index == failed_provider else response,
+                        )

@@ -102,7 +102,7 @@ def fetch_deezer_album_details(
 
     clean_album = clean_title(album)
     cache_suffix = f":{expected_track_count}" if expected_track_count else ""
-    cache_key = f"deezer_meta:v4:{normalize_str(artist)}:{normalize_str(clean_album)}{cache_suffix}"
+    cache_key = f"deezer_meta:v7:{normalize_str(artist)}:{normalize_str(clean_album)}{cache_suffix}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -177,9 +177,7 @@ def fetch_deezer_album_details(
                 tied_candidates = True
 
         if tied_candidates:
-            LOG.warning(
-                f"Ambiguous Deezer album for {escape(artist)} - {escape(album)}"
-            )
+            LOG.detail(f"Ambiguous Deezer album for {escape(artist)} - {escape(album)}")
             return None
         if not best_candidate:
             set_cached_api(cache_key, None)
@@ -206,7 +204,6 @@ def fetch_deezer_album_details(
             if isinstance(genre_item, dict) and "name" in genre_item
         ]
 
-        tracks_by_position: dict[Any, dict[str, object]] = {}
         tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
         repeated_titles: set[str] = set()
@@ -244,32 +241,21 @@ def fetch_deezer_album_details(
             track_position = raw_pos if isinstance(raw_pos, int) else track_index
             disc_number = safe_int(track_candidate.get("disk_number")) or 1
             track_title = str(track_candidate.get("title", ""))
-            artist_name = (
-                track_candidate.get("artist", {}).get("name")
-                if isinstance(track_candidate.get("artist"), dict)
-                else None
+            track_dict: dict[str, object] = dict(
+                _parse_deezer_track_payload(track_candidate)
             )
-            explicit = _read_explicit_lyrics(track_candidate.get("explicit_lyrics"))
-
-            track_dict: dict[str, object] = {
-                "id": track_candidate.get("id"),
-                "title": track_title,
-                "artist": artist_name,
-                "track_position": track_position,
-                "disk_number": disc_number,
-                "isrc": track_candidate.get("isrc"),
-                "duration": track_candidate.get("duration"),
-                "bpm": track_candidate.get("bpm"),
-                "gain": track_candidate.get("gain"),
-                "explicit_lyrics": explicit,
-                "release_date": album_deezer_payload.get("release_date"),
-                "genre": genres[0] if genres else None,
-            }
+            track_dict.update(
+                {
+                    "id": track_candidate.get("id"),
+                    "track_position": track_position,
+                    "disk_number": disc_number,
+                    "bpm": track_candidate.get("bpm"),
+                    "gain": track_candidate.get("gain"),
+                    "release_date": album_deezer_payload.get("release_date"),
+                    "genre": genres[0] if genres else None,
+                }
+            )
             tracks_by_disc_and_position[(disc_number, track_position)] = track_dict
-            tracks_by_position[(disc_number, track_position)] = track_dict
-            tracks_by_position[f"{disc_number}-{track_position}"] = track_dict
-            if disc_number == 1 or track_position not in tracks_by_position:
-                tracks_by_position[track_position] = track_dict
             if track_title:
                 for title_key in {
                     normalize_str(clean_title(track_title)),
@@ -296,7 +282,6 @@ def fetch_deezer_album_details(
             "cover_url": album_deezer_payload.get("cover_xl")
             or album_deezer_payload.get("cover_big"),
             "genre": genres[0] if genres else None,
-            "tracks_by_position": tracks_by_position,
             "tracks_by_disc_and_position": tracks_by_disc_and_position,
             "tracks_by_title": tracks_by_title,
         }
@@ -421,7 +406,10 @@ def fetch_deezer_track_details(
         return None
 
     clean_track_title = clean_title(title)
-    cache_key = f"deezer_track:v4:{normalize_str(artist)}:{normalize_str(clean_track_title)}:{duration}"
+    cache_key = (
+        f"deezer_track:v5:{normalize_str(artist)}:{normalize_str(clean_track_title)}"
+        f":{duration}:{get_config().single_duration_tolerance_seconds}"
+    )
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -472,7 +460,7 @@ def fetch_deezer_track_details(
                 best_candidate = track_candidate
 
         if sum(score == best_score for score in candidate_scores.values()) > 1:
-            LOG.warning(
+            LOG.detail(
                 f"Ambiguous Deezer recording for {escape(artist)} - {escape(title)}"
             )
             return None

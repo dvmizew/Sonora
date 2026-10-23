@@ -39,7 +39,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         alias_path.write_text(
             json.dumps({"Legal Name": "Stage", "Alpha & Beta": "Ensemble"})
         )
-        self.assertEqual(artists.resolve_artist_name("Legal Name"), "Stage")
+        self.assertEqual(artists.normalize_artist_name("Legal Name"), "Stage")
         self.assertTrue(artists.is_single_group_artist("Alpha & Beta"))
         self.assertEqual(
             artists.extract_featured_artist_tokens("Legal Name"),
@@ -268,36 +268,26 @@ class TestArtistResolutionContracts(IsolatedTestCase):
 
 
 class TestAlbumIdentityContracts(IsolatedTestCase):
-    def test_album_position_indexes_support_all_canonical_key_types(self) -> None:
+    def test_album_position_indexes_use_disc_and_position(self) -> None:
         recording = {"title": "Recording", "artist": "Primary"}
-        for index_name, key in (
-            ("tracks_by_disc_and_position", (2, 3)),
-            ("tracks_by_position", (2, 3)),
-            ("tracks_by_position", "2-3"),
-            ("tracks_by_number", 3),
-        ):
+        for index_name, key in (("tracks_by_disc_and_position", (2, 3)),):
             with self.subTest(index_name=index_name, key=key):
                 details = {index_name: {key: recording}}
-                self.assertEqual(
-                    matching._get_album_track_details(
-                        3, disc_number=2, album_mb_release_details=details
-                    ),
-                    ("Primary", "Recording"),
-                )
                 self.assertTrue(
                     matching._pos_in_album(
                         3, disc_number=2, album_mb_release_details=details
                     )
                 )
-        self.assertEqual(
-            matching._get_album_track_details(
-                1, 1, {"tracks_by_disc_and_position": {(1, 1): {}}}
-            ),
-            (None, None),
+        self.assertFalse(
+            matching._pos_in_album(
+                1,
+                1,
+                album_mb_release_details={"tracks_by_disc_and_position": {(1, 1): {}}},
+            )
         )
-        self.assertTrue(matching._pos_in_album(1, album_track_mbids={1: MBID}))
+        self.assertTrue(matching._pos_in_album(1, album_track_mbids={(1, 1): MBID}))
         self.assertTrue(
-            matching._pos_in_album(1, disc_number=2, album_track_mbids={"2-1": MBID})
+            matching._pos_in_album(1, disc_number=2, album_track_mbids={(2, 1): MBID})
         )
 
     def test_recording_ids_require_release_identity_before_repairing_positions(
@@ -305,9 +295,7 @@ class TestAlbumIdentityContracts(IsolatedTestCase):
     ) -> None:
         for index in (
             {(2, 3): MBID},
-            {3: MBID},
-            {("bad", 3): MBID},
-            {(2, "bad"): MBID},
+            {(1, 3): MBID},
         ):
             recording = TrackInfo(Path("recording.flac"))
             with self.subTest(index=index):
@@ -348,8 +336,8 @@ class TestAlbumIdentityContracts(IsolatedTestCase):
             3,
         )
         single = {
-            "tracks_by_number": {
-                3: {"trackId": "123", "disk_number": 2, "title": "Original"}
+            "tracks_by_disc_and_position": {
+                (1, 3): {"itunes_trackid": "123", "disk_number": 2, "title": "Original"}
             }
         }
         self.assertEqual(
@@ -363,11 +351,14 @@ class TestAlbumIdentityContracts(IsolatedTestCase):
         self.assertEqual(
             matching._build_album_tracks_by_disc_map(
                 None,
-                {(2, 3): MBID, "bad": MBID, 1: MBID},
+                {(2, 3): MBID, (1, 1): MBID},
                 [
                     {
-                        "tracks_by_disc_and_position": {(2, 4): {}},
-                        "tracks_by_number": {(3, 1): {}, 2: {}},
+                        "tracks_by_disc_and_position": {
+                            (2, 4): {},
+                            (3, 1): {},
+                            (1, 2): {},
+                        },
                     }
                 ],
             ),
@@ -443,7 +434,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self.assertEqual(self.recording.musicbrainz_trackid, OTHER_MBID)
         self.assertEqual(self.recording.title, "Recording")
 
-    def test_invalid_track_totals_are_ignored_and_release_disc_totals_are_authoritative(
+    def test_invalid_track_totals_and_conflicting_release_layout_are_withheld(
         self,
     ) -> None:
         self.recording.total_tracks = 10
@@ -458,8 +449,9 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             {"title": "Record", "total_tracks": 5, "total_discs": 1},
         )
         self.assertEqual(
-            (self.recording.total_tracks, self.recording.total_discs), (10, 1)
+            (self.recording.total_tracks, self.recording.total_discs), (10, 2)
         )
+        self.assertIn("album_sequence", self.recording.metadata_conflicts)
 
     def test_recording_artist_updates_require_album_credit_or_strong_identity(
         self,
@@ -541,18 +533,14 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
 
     def test_release_recording_lookup_uses_position_fallbacks(self) -> None:
         self.recording.track_number = 3
-        for index, key in (
-            ("tracks_by_disc_and_position", (2, 3)),
-            ("tracks_by_position", "2-3"),
-            ("tracks_by_position", 3),
-        ):
-            with self.subTest(index=index, key=key):
-                self.assertEqual(
-                    enrichment._find_album_release_recording(
-                        self.recording, {index: {key: self.details}}, 2
-                    ),
-                    self.details,
-                )
+        self.assertEqual(
+            enrichment._find_album_release_recording(
+                self.recording,
+                {"tracks_by_disc_and_position": {(2, 3): self.details}},
+                2,
+            ),
+            self.details,
+        )
         self.assertIsNone(
             enrichment._find_album_release_recording(
                 self.recording, {"title": "Record"}, 2
@@ -565,20 +553,20 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self.recording.track_number = 3
         release = {"title": "Record"}
         enrichment._resolve_musicbrainz_track_id(
-            self.recording, {3: MBID}, release, self.details, False
+            self.recording, {(1, 3): MBID}, release, self.details, False
         )
         self.assertEqual(self.recording.musicbrainz_trackid, MBID)
         self.recording.musicbrainz_trackid = None
         enrichment._resolve_musicbrainz_track_id(
             self.recording,
-            {3: MBID},
+            {(1, 3): MBID},
             release,
             {"title": "Unrelated", "artist": "Wrong"},
             False,
         )
         self.assertIsNone(self.recording.musicbrainz_trackid)
         enrichment._resolve_musicbrainz_track_id(
-            self.recording, {3: MBID}, None, None, False
+            self.recording, {(1, 3): MBID}, None, None, False
         )
         self.assertIsNone(self.recording.musicbrainz_trackid)
 
@@ -670,7 +658,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
                 self.recording,
                 self.recording.file_path,
                 "fixture",
-                {1: MBID},
+                {(1, 1): MBID},
                 force=True,
             )
         lookup.assert_called_once()
@@ -795,9 +783,13 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             "original_date": "2019",
             "total_tracks": 10,
             "total_discs": 2,
+            "tracks_by_disc_and_position": {
+                (1, 3): {"title": "Recording", "disc_total_tracks": 10}
+            },
         }
         self.recording.musicbrainz_albumid = MBID
         self.recording.album = "Unknown Album"
+        self.recording.track_number = 3
         enrichment._apply_mb_release_metadata(self.recording, MBID, release, force=True)
         self.assertEqual(
             (
@@ -851,3 +843,23 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         ):
             enrichment._enrich_musicbrainz(self.recording, None, None, None)
         self.assertEqual(self.recording.title, "Recording")
+
+
+class TestArtistResponseContracts(IsolatedTestCase):
+    def test_artist_resolution_exposes_malformed_deezer_responses(self) -> None:
+        from sonora.services.artist_resolution import resolve_artist_name
+
+        payload: object
+        for payload in ([], {"data": "wrong"}, {"data": [None]}):
+            with (
+                self.subTest(payload=payload),
+                patch(
+                    "sonora.services.musicbrainz.search_musicbrainz_artists",
+                    return_value=[],
+                ),
+                patch("sonora.services.artist_resolution.SESSION.get") as request,
+            ):
+                request.return_value.status_code = 200
+                request.return_value.json.return_value = payload
+                with self.assertRaises(TypeError):
+                    resolve_artist_name("Artist Alpha")

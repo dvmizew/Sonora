@@ -7,41 +7,34 @@ from musicbrainzngs import MusicBrainzError
 from rapidfuzz import fuzz
 from rich.markup import escape
 
-from sonora.audio import key as key_module
-from sonora.core.api_payloads import require_api_object
 from sonora.core.artists import (
     extract_featured_artist_tokens,
-    normalize_featured_artists,
 )
 from sonora.core.config import get_config
 from sonora.core.logger import LOG
-from sonora.core.models import MetadataSource, TrackInfo
+from sonora.core.models import TrackInfo
 from sonora.core.text import (
     clean_unicode_punct,
     is_valid_uuid,
-    normalize_advisory,
-    normalize_country_name,
-    normalize_date,
     normalize_genre,
-    normalize_language_name,
-    normalize_script_name,
     normalize_str,
     preserve_unicode_repertoire,
     safe_float,
     safe_int,
 )
 from sonora.core.titles import (
-    clean_title,
-    extract_title_features,
     recording_identity_matches,
     score_artist_title_match,
 )
 from sonora.modules.matching import (
+    _catalog_recording_matches_track,
+    _compatible_release_layout,
+    _find_track_in_album_mapping,
     _is_generic,
     _is_generic_title,
     _is_strong_track_match,
-    _recording_isrc_matches,
 )
+from sonora.modules.metadata_consensus import apply_metadata_mapping
 from sonora.services import artist_resolution
 from sonora.services import deezer as deezer_service
 from sonora.services import discogs as discogs_service
@@ -59,251 +52,6 @@ _NETWORK_EXCEPTIONS = (
     OSError,
     TimeoutError,
 )
-
-
-def apply_metadata_mapping(
-    track_info: TrackInfo,
-    metadata_dict: dict[str, Any],
-    field_map: dict[str, str],
-    force: bool = False,
-    source: MetadataSource | None = None,
-) -> None:
-    for src_key, target_attr in field_map.items():
-        provider_value = metadata_dict.get(src_key)
-        if provider_value is None:
-            continue
-        normalized_value: str | None = str(provider_value).strip()
-        if not normalized_value or normalized_value.lower() in ("none", "null"):
-            continue
-
-        if target_attr == "isrc" and _recording_isrc_matches(
-            track_info.isrc, metadata_dict
-        ):
-            normalized_value = str(track_info.isrc).strip().upper()
-        if target_attr == "genre":
-            normalized_value = normalize_genre(normalized_value)
-        elif target_attr in ("date", "original_date"):
-            normalized_value = normalize_date(normalized_value)
-        elif target_attr == "release_country":
-            normalized_value = normalize_country_name(normalized_value)
-        elif target_attr == "language":
-            normalized_value = normalize_language_name(normalized_value)
-        elif target_attr == "script":
-            normalized_value = normalize_script_name(normalized_value)
-        if not normalized_value:
-            continue
-
-        if target_attr == "title":
-            normalized_value = clean_unicode_punct(normalized_value)
-            clean_t, extracted_feats = extract_title_features(
-                normalized_value, primary_artist=track_info.artist
-            )
-            if extracted_feats:
-                track_info.featured_artists = normalize_featured_artists(
-                    [track_info.featured_artists, *extracted_feats],
-                    primary_artist=track_info.artist,
-                )
-            existing_title = getattr(track_info, "title", None)
-            normalized_value = preserve_unicode_repertoire(
-                str(existing_title) if existing_title else None,
-                clean_t or normalized_value,
-            )
-        elif target_attr in ("artist", "album", "album_artist"):
-            normalized_value = clean_unicode_punct(normalized_value)
-            existing_val = getattr(track_info, target_attr, None)
-            normalized_value = preserve_unicode_repertoire(
-                str(existing_val) if existing_val else None, normalized_value
-            )
-        elif target_attr == "advisory":
-            normalized_value = normalize_advisory(normalized_value)
-            if normalized_value is None:
-                continue
-        elif (
-            target_attr == "initial_key"
-            and key_module.key_to_camelot(normalized_value) is None
-        ):
-            continue
-        elif target_attr == "featured_artists":
-            existing_featured = getattr(track_info, "featured_artists", None)
-            if existing_featured and not force:
-                normalized_result = normalize_featured_artists(
-                    [existing_featured, normalized_value],
-                    primary_artist=track_info.artist,
-                )
-            else:
-                normalized_result = normalize_featured_artists(
-                    normalized_value,
-                    primary_artist=track_info.artist,
-                )
-            if not normalized_result:
-                continue
-            normalized_value = normalized_result
-
-        if target_attr in (
-            "disc_number",
-            "total_discs",
-            "track_number",
-            "total_tracks",
-        ):
-            val_int = safe_int(normalized_value)
-            if val_int is None:
-                continue
-            if val_int < 0 or (target_attr != "track_number" and val_int == 0):
-                continue
-            if target_attr in ("total_tracks", "total_discs"):
-                position_attribute = (
-                    "track_number" if target_attr == "total_tracks" else "disc_number"
-                )
-                current_position = getattr(track_info, position_attribute)
-                if current_position is not None and val_int < current_position:
-                    track_info.metadata_conflicts[target_attr] = (
-                        f"Provider {target_attr}={val_int} is below existing "
-                        f"{position_attribute}={current_position}; existing value preserved."
-                    )
-                    continue
-            cur_int = safe_int(getattr(track_info, target_attr, None))
-            if target_attr in ("disc_number", "total_discs"):
-                if cur_int is None or cur_int != val_int:
-                    setattr(track_info, target_attr, val_int)
-            elif cur_int is None or force:
-                setattr(track_info, target_attr, val_int)
-            continue
-
-        if target_attr in ("label", "copyright", "composer", "lyricist", "producers"):
-            existing_credit = getattr(track_info, target_attr)
-            if existing_credit and set(normalize_str(normalized_value).split()) < set(
-                normalize_str(str(existing_credit)).split()
-            ):
-                continue
-
-        current_value = getattr(track_info, target_attr)
-        missing_identity = (
-            target_attr == "title" and _is_generic_title(current_value)
-        ) or (
-            target_attr in ("artist", "album", "album_artist")
-            and _is_generic(current_value, target_attr)
-        )
-        if (
-            not current_value
-            or missing_identity
-            or target_attr == "featured_artists"
-            or force
-        ):
-            setattr(track_info, target_attr, normalized_value)
-            if source is not None:
-                track_info.metadata_sources[target_attr] = source
-        elif (
-            getattr(track_info, target_attr) == normalized_value and source is not None
-        ):
-            track_info.metadata_sources.setdefault(target_attr, source)
-
-
-def _catalog_recording_matches_track(
-    recording: dict[str, Any],
-    title: str | None,
-    artist: str | None,
-    isrc: str | None,
-    itunes_trackid: str | None,
-    duration: float | None = None,
-) -> bool:
-    candidate_duration = safe_float(recording.get("duration"))
-    if (
-        duration is not None
-        and candidate_duration is not None
-        and abs(duration - candidate_duration)
-        > get_config().single_duration_tolerance_seconds
-    ):
-        return False
-    matched_identifier = False
-    expected_isrc = (isrc or "").strip().upper()
-    provider_isrcs = recording.get("isrcs") or [recording.get("isrc")]
-    if expected_isrc not in ("", "NONE", "NULL", "0") and any(provider_isrcs):
-        if not _recording_isrc_matches(expected_isrc, recording):
-            return False
-        matched_identifier = True
-    expected_itunes_id = (itunes_trackid or "").strip()
-    provider_itunes_id = str(
-        recording.get("itunes_trackid") or recording.get("trackId") or ""
-    ).strip()
-    if expected_itunes_id not in ("", "None", "null", "0") and provider_itunes_id:
-        if expected_itunes_id != provider_itunes_id:
-            return False
-        matched_identifier = True
-    candidate_artist = recording.get("artist") or recording.get("artistName")
-    candidate_title = recording.get("title") or recording.get("trackName")
-    if _is_generic_title(title):
-        return bool(
-            matched_identifier
-            and candidate_title
-            and recording_identity_matches(
-                None if _is_generic(artist, "artist") else artist,
-                str(candidate_title),
-                str(candidate_artist) if candidate_artist else None,
-                str(candidate_title),
-                expected_duration=duration,
-                candidate_duration=candidate_duration,
-            )
-        )
-    return _is_strong_track_match(
-        artist if candidate_artist and not _is_generic(artist, "artist") else None,
-        title,
-        str(candidate_artist) if candidate_artist else None,
-        str(candidate_title) if candidate_title else None,
-    )
-
-
-def _find_track_in_album_mapping(
-    tracks_by_title: Any,
-    tracks_by_pos: Any,
-    title: str | None,
-    track_number: int | None,
-    disc_number: int | None = None,
-    tracks_by_disc_and_position: Any = None,
-    *,
-    artist: str | None = None,
-    isrc: str | None = None,
-    itunes_trackid: str | None = None,
-    duration: float | None = None,
-) -> tuple[dict[str, Any] | None, bool]:
-    disc_keys: tuple[object, ...] = (
-        ((disc_number, track_number),)
-        if disc_number is not None and track_number is not None
-        else ()
-    )
-    combined_position_keys = (
-        (*disc_keys, f"{disc_number}-{track_number}") if disc_keys else ()
-    )
-    title_keys = (
-        tuple(dict.fromkeys((normalize_str(clean_title(title)), normalize_str(title))))
-        if title and not _is_generic_title(title)
-        else ()
-    )
-    candidate_indexes = (
-        (tracks_by_disc_and_position, disc_keys),
-        (tracks_by_pos, combined_position_keys),
-        (tracks_by_title, title_keys),
-        (tracks_by_pos, (track_number,) if track_number is not None else ()),
-    )
-    for recording_index, candidate_keys in candidate_indexes:
-        if not isinstance(recording_index, dict):
-            continue
-        for candidate_key in candidate_keys:
-            if candidate_key not in recording_index:
-                continue
-            recording = require_api_object(
-                recording_index[candidate_key], "Album recording"
-            )
-            # Position is an edition-specific hint; it must not import another song's fields.
-            if _catalog_recording_matches_track(
-                recording,
-                title,
-                artist,
-                isrc,
-                itunes_trackid,
-                duration,
-            ):
-                return recording, True
-    return None, False
 
 
 def _enrich_shazam(
@@ -343,8 +91,7 @@ def _enrich_shazam(
             )
             return
 
-        # If target_album_artist is known, do not allow Shazam to overwrite a track whose artist already
-        # matches the album artist with a completely different artist (sample hijacking)!
+        # Shared samples can identify a different performer than the album artist.
         if (
             target_album_artist
             and track_info.artist
@@ -408,11 +155,11 @@ def _enrich_shazam(
             track_info.label = shazam_match.label
         if shazam_match.lyrics and not track_info.lyrics:
             track_info.lyrics = shazam_match.lyrics
-        LOG.info(
+        LOG.detail(
             f"   ∟ ⚡ [Shazam] Identified: [white]{escape(shazam_match.artist)} - {escape(shazam_match.title)}[/]"
         )
     except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"Shazam acoustic recognition failed: {error}")
+        LOG.debug(f"Shazam acoustic recognition failed: {escape(str(error))}")
 
 
 def _enrich_itunes(
@@ -426,13 +173,10 @@ def _enrich_itunes(
         if album_itunes_details:
             api_payload, is_album_match = _find_track_in_album_mapping(
                 album_itunes_details.get("tracks_by_title"),
-                album_itunes_details.get("tracks_by_number"),
+                album_itunes_details.get("tracks_by_disc_and_position"),
                 track_info.title,
                 track_info.track_number,
                 disc_number=track_info.disc_number,
-                tracks_by_disc_and_position=album_itunes_details.get(
-                    "tracks_by_disc_and_position"
-                ),
                 artist=track_info.artist,
                 isrc=track_info.isrc,
                 itunes_trackid=track_info.itunes_trackid,
@@ -449,39 +193,33 @@ def _enrich_itunes(
             )
             if (
                 stored_recording
-                and stored_recording.get("artistName")
-                and stored_recording.get("trackName")
+                and stored_recording.get("artist")
+                and stored_recording.get("title")
                 and track_info.artist
                 and not recording_identity_matches(
                     track_info.artist,
                     track_info.title,
-                    str(stored_recording.get("artistName") or ""),
-                    str(stored_recording.get("trackName") or ""),
+                    str(stored_recording.get("artist") or ""),
+                    str(stored_recording.get("title") or ""),
                     expected_duration=track_info.duration,
-                    candidate_duration=(
-                        safe_float(stored_recording.get("trackTimeMillis")) or 0
-                    )
-                    / 1000
-                    or None,
+                    candidate_duration=safe_float(stored_recording.get("duration")),
                 )
             ):
                 if (
-                    "*" in str(stored_recording["trackName"]) + track_info.title
+                    "*" in str(stored_recording["title"]) + track_info.title
                     and track_info.duration is not None
                     and (
-                        stored_duration := safe_float(
-                            stored_recording.get("trackTimeMillis")
-                        )
+                        stored_duration := safe_float(stored_recording.get("duration"))
                     )
                     is not None
                     and stored_duration > 0
                     and recording_identity_matches(
                         track_info.artist,
                         track_info.title,
-                        str(stored_recording["artistName"]),
+                        str(stored_recording["artist"]),
                         track_info.title,
                         expected_duration=track_info.duration,
-                        candidate_duration=stored_duration / 1000,
+                        candidate_duration=stored_duration,
                     )
                 ):
                     track_info.metadata_conflicts["itunes_trackid"] = (
@@ -489,7 +227,7 @@ def _enrich_itunes(
                         "but recording identity requires independent verification."
                     )
                     return
-                LOG.warning(
+                LOG.detail(
                     f"Discarding conflicting iTunes identifier for {escape(track_info.artist)} - {escape(track_info.title)}"
                 )
                 track_info.itunes_trackid = None
@@ -500,33 +238,11 @@ def _enrich_itunes(
                 track_info.metadata_sources.pop("itunes_artistid", None)
             elif (
                 stored_recording
-                and stored_recording.get("artistName")
-                and stored_recording.get("trackName")
+                and stored_recording.get("artist")
+                and stored_recording.get("title")
                 and track_info.artist
             ):
-                if (
-                    track_info.advisory == "Explicit"
-                    and stored_recording.get("trackExplicitness") == "cleaned"
-                ):
-                    track_info.metadata_conflicts["itunes_trackid"] = (
-                        "Apple identifies a cleaned edition while local tags mark "
-                        "the recording explicit; identifier requires edition verification."
-                    )
-                    return
-                track_info.metadata_sources["itunes_trackid"] = "iTunes"
-                apply_metadata_mapping(
-                    track_info,
-                    {
-                        "itunes_collectionid": stored_recording.get("collectionId"),
-                        "itunes_artistid": stored_recording.get("artistId"),
-                    },
-                    {
-                        "itunes_collectionid": "itunes_collectionid",
-                        "itunes_artistid": "itunes_artistid",
-                    },
-                    force=True,
-                    source="iTunes",
-                )
+                api_payload = stored_recording
 
         if not api_payload and (
             force
@@ -549,12 +265,12 @@ def _enrich_itunes(
             track_info.itunes_trackid,
             track_info.duration,
         ):
-            LOG.warning(
+            LOG.detail(
                 f"Rejecting conflicting iTunes metadata for {escape(track_info.artist)} - {escape(track_info.title)}"
             )
             return
 
-        if api_payload and isinstance(api_payload, dict):
+        if api_payload:
             if (
                 track_info.advisory == "Explicit"
                 and api_payload.get("explicitness") == "cleaned"
@@ -564,14 +280,7 @@ def _enrich_itunes(
                     "the recording explicit; enrichment withheld."
                 )
                 return
-            if api_payload.get("itunes_trackid") and recording_identity_matches(
-                track_info.artist,
-                track_info.title,
-                str(api_payload.get("artist") or ""),
-                str(api_payload.get("title") or ""),
-                expected_duration=track_info.duration,
-                candidate_duration=safe_float(api_payload.get("duration")),
-            ):
+            if api_payload.get("itunes_trackid"):
                 apply_metadata_mapping(
                     track_info,
                     api_payload,
@@ -592,13 +301,7 @@ def _enrich_itunes(
                     "Explicit" if api_payload["explicitness"] == "explicit" else None
                 )
                 track_info.metadata_sources["advisory"] = "iTunes"
-            itunes_map = {
-                "genre": "genre",
-                "advisory": "advisory",
-                "itunes_trackid": "itunes_trackid",
-                "itunes_collectionid": "itunes_collectionid",
-                "itunes_artistid": "itunes_artistid",
-            }
+            itunes_map = {"genre": "genre", "advisory": "advisory"}
             if is_album_match or not track_info.copyright:
                 itunes_map["copyright"] = "copyright"
             if is_album_match and not is_valid_uuid(track_info.musicbrainz_albumid):
@@ -612,10 +315,8 @@ def _enrich_itunes(
                 and not is_valid_uuid(track_info.musicbrainz_albumid)
             ):
                 itunes_map["date"] = "date"
-            if (
-                not track_info.title or track_info.title == "Untitled"
-            ) and api_payload.get("trackName"):
-                itunes_map["trackName"] = "title"
+            if _is_generic_title(track_info.title) and api_payload.get("title"):
+                itunes_map["title"] = "title"
             apply_metadata_mapping(
                 track_info,
                 api_payload,
@@ -624,7 +325,9 @@ def _enrich_itunes(
                 source="iTunes",
             )
     except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"iTunes enrichment failed for {track_info.title}: {error}")
+        LOG.debug(
+            f"iTunes enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+        )
 
 
 def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
@@ -643,7 +346,7 @@ def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
             if normalized_genre:
                 track_info.genre = normalized_genre
                 track_info.metadata_sources["genre"] = "Last.fm"
-                LOG.info(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
+                LOG.detail(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
             if len(tags) > 1 and not track_info.style:
                 subgenres = [
                     t
@@ -678,7 +381,9 @@ def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
                         track_info.mood = t.title()
                         break
     except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"Last.fm enrichment failed for {track_info.title}: {error}")
+        LOG.debug(
+            f"Last.fm enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+        )
 
 
 def _enrich_discogs(
@@ -778,7 +483,46 @@ def _enrich_discogs(
                     source="Discogs",
                 )
     except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"Discogs enrichment failed for {track_info.title}: {error}")
+        LOG.debug(
+            f"Discogs enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+        )
+
+
+def _deezer_medium_track_count(
+    track_info: TrackInfo, recording: dict[str, Any], album: dict[str, Any]
+) -> int | None:
+    disc_number = safe_int(recording.get("disk_number")) or track_info.disc_number or 1
+    disc_positions = album.get("tracks_by_disc_and_position")
+    album_track_count = safe_int(album.get("nb_tracks"))
+    if isinstance(disc_positions, dict) and disc_positions:
+        if album_track_count is not None and len(disc_positions) != album_track_count:
+            return None
+        medium_positions = {
+            position[1]
+            for position in disc_positions
+            if isinstance(position, tuple)
+            and len(position) == 2
+            and position[0] == disc_number
+            and isinstance(position[1], int)
+        }
+        if medium_positions and medium_positions == set(
+            range(1, len(medium_positions) + 1)
+        ):
+            return len(medium_positions)
+        return None
+    # Deezer's nb_tracks counts the entire release, not the selected medium.
+    if (
+        max(
+            disc_number,
+            track_info.total_discs or 1,
+            safe_int(album.get("total_discs")) or 1,
+        )
+        == 1
+    ):
+        return (
+            album_track_count if album_track_count and album_track_count > 0 else None
+        )
+    return None
 
 
 def _enrich_deezer(
@@ -795,7 +539,7 @@ def _enrich_deezer(
             if not has_album_context
             else None
         )
-        if album and isinstance(album, dict):
+        if album:
             deezer_album_map = {
                 "genre": "genre",
                 "label": "label",
@@ -826,28 +570,16 @@ def _enrich_deezer(
                 track_info.album = preserve_unicode_repertoire(
                     track_info.album, clean_unicode_punct(str(album["title"]))
                 )
-            if (
-                album_deezer_details is not None
-                and not is_valid_uuid(track_info.musicbrainz_albumid)
-                and (force or not track_info.total_tracks)
-            ):
-                nb_tracks = safe_int(album.get("nb_tracks"))
-                if nb_tracks is not None:
-                    cur_tot = track_info.total_tracks or 0
-                    cur_num = track_info.track_number or 0
-                    if nb_tracks >= cur_tot and nb_tracks >= cur_num:
-                        track_info.total_tracks = nb_tracks
 
         track: dict[str, Any] | None = None
         track_is_from_album = False
-        if album and isinstance(album, dict):
+        if album:
             track, track_is_from_album = _find_track_in_album_mapping(
                 album.get("tracks_by_title"),
-                album.get("tracks_by_position"),
+                album.get("tracks_by_disc_and_position"),
                 track_info.title,
                 track_info.track_number,
                 disc_number=track_info.disc_number,
-                tracks_by_disc_and_position=album.get("tracks_by_disc_and_position"),
                 artist=track_info.artist,
                 isrc=track_info.isrc,
                 duration=track_info.duration,
@@ -869,7 +601,7 @@ def _enrich_deezer(
                     "Stored ISRC resolves to a conflicting Deezer recording; "
                     "existing value requires independent verification."
                 )
-                LOG.warning(
+                LOG.detail(
                     f"Rejected conflicting Deezer ISRC result for {escape(track_info.file_path.name)}"
                 )
 
@@ -880,21 +612,38 @@ def _enrich_deezer(
                 duration=track_info.duration,
             )
 
-        if not track or not isinstance(track, dict):
+        if not track:
             return
+
+        sequence_album = _compatible_release_layout(track_info, album_deezer_details)
+        track_is_from_album = track_is_from_album and sequence_album is not None
+        if (
+            track_is_from_album
+            and sequence_album is not None
+            and not is_valid_uuid(track_info.musicbrainz_albumid)
+            and (force or not track_info.total_tracks)
+        ):
+            medium_track_count = _deezer_medium_track_count(
+                track_info, track, sequence_album
+            )
+            if medium_track_count is not None and medium_track_count >= max(
+                track_info.total_tracks or 0, track_info.track_number or 0
+            ):
+                track_info.total_tracks = medium_track_count
+                track_info.metadata_sources["total_tracks"] = "Deezer"
 
         track_pos = safe_int(track.get("track_position"))
         if (
             track_pos is not None
             and track_info.track_number is None
-            and (track_is_from_album or not has_album_context)
+            and track_is_from_album
         ):
             track_info.track_number = track_pos
         disk_num = safe_int(track.get("disk_number"))
         if (
             disk_num is not None
             and track_info.disc_number is None
-            and (track_is_from_album or not has_album_context)
+            and track_is_from_album
         ):
             track_info.disc_number = disk_num
         explicit_lyrics = track.get("explicit_lyrics")
@@ -930,7 +679,9 @@ def _enrich_deezer(
             source="Deezer",
         )
     except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"Deezer enrichment failed for {track_info.title}: {error}")
+        LOG.debug(
+            f"Deezer enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+        )
 
 
 def _enrich_genius(
@@ -1016,7 +767,9 @@ def _enrich_genius(
             track_info.lyricist = str(genius_details["writers"])
         LOG.debug("   ∟ 📝 [Genius] Fetched song details & credits")
     except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"Genius enrichment failed for {track_info.title}: {error}")
+        LOG.debug(
+            f"Genius enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+        )
 
 
 def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
@@ -1059,4 +812,6 @@ def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
             source="TheAudioDB",
         )
     except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"TheAudioDB enrichment failed for {track_info.title}: {error}")
+        LOG.debug(
+            f"TheAudioDB enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+        )

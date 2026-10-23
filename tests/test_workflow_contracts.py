@@ -4,12 +4,36 @@ from unittest.mock import patch
 
 from sonora.audio import art, bpm, key, metadata, replaygain
 from sonora.core.models import RenameReport, TrackInfo
-from sonora.modules import normalization, organizer, renamer, track_processing
-from sonora.services import lyrics
+from sonora.modules import (
+    metadata_consensus,
+    normalization,
+    organizer,
+    renamer,
+    track_processing,
+)
 from tests.support import IsolatedTestCase
 
 
+def _change_proposal_annotations(recording: TrackInfo) -> None:
+    recording.metadata_sources["title"] = "Deezer"
+    recording.metadata_conflicts.clear()
+    recording._diff_descriptions.append("Provider change")
+
+
 class TestTrackProcessingContracts(IsolatedTestCase):
+    def test_provider_proposals_do_not_share_mutable_track_state(self) -> None:
+        self.recording.metadata_sources["title"] = "MusicBrainz"
+        self.recording.metadata_conflicts["album"] = "Review edition"
+        self.recording._diff_descriptions.append("Existing change")
+        proposal = metadata_consensus.collect_provider_proposal(
+            self.recording, _change_proposal_annotations
+        )
+        self.assertEqual(self.recording.metadata_sources, {"title": "MusicBrainz"})
+        self.assertEqual(self.recording.metadata_conflicts, {"album": "Review edition"})
+        self.assertEqual(self.recording._diff_descriptions, ["Existing change"])
+        self.assertEqual(proposal.changes, {})
+        self.assertEqual(proposal.conflicts, {})
+
     def test_blank_artist_and_album_fields_normalize_without_inventing_identity(
         self,
     ) -> None:
@@ -160,7 +184,7 @@ class TestTrackProcessingContracts(IsolatedTestCase):
                 self.subTest(existing=existing, force=force),
                 patch.object(metadata, "get_audio_duration", return_value=100),
                 patch.object(
-                    lyrics,
+                    track_processing,
                     "process_track_lyrics",
                     return_value=("[00:01] Lyrics", "synced"),
                 ),
@@ -170,7 +194,7 @@ class TestTrackProcessingContracts(IsolatedTestCase):
                 )
             self.assertEqual(self.recording.lyrics, "[00:01] Lyrics")
         with patch.object(
-            lyrics, "process_track_lyrics", side_effect=OSError("offline")
+            track_processing, "process_track_lyrics", side_effect=OSError("offline")
         ):
             track_processing._enrich_lyrics(self.recording, self.path, True)
         self.assertEqual(self.recording.lyrics, "[00:01] Lyrics")

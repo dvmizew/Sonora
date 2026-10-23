@@ -24,17 +24,17 @@ from sonora.core.titles import (
     recording_identity_matches,
     score_artist_title_match,
 )
-from sonora.modules.catalog_enrichment import (
-    _NETWORK_EXCEPTIONS,
-    apply_metadata_mapping,
-)
+from sonora.modules.catalog_enrichment import _NETWORK_EXCEPTIONS
 from sonora.modules.matching import (
+    _compatible_release_layout,
+    _get_album_recording,
     _is_generic,
     _is_generic_title,
     _is_strong_track_match,
     _recording_isrc_matches,
     _recording_matches_track_identity,
 )
+from sonora.modules.metadata_consensus import apply_metadata_mapping
 from sonora.services import acoustid as acoustid_service
 from sonora.services import artist_resolution
 from sonora.services import musicbrainz as musicbrainz_service
@@ -44,17 +44,18 @@ def _enrich_acoustid(
     track_info: TrackInfo,
     file_path: Path,
     acoustid_api_key: str | None,
-    album_track_mbids: dict[int, str] | None = None,
+    album_track_mbids: dict[tuple[int, int], str] | None = None,
     force: bool = False,
 ) -> None:
     if not acoustid_api_key:
         return
-    # If the album match already resolved an authoritative MBID for this track, skip expensive audio fingerprinting
+    # A verified album recording avoids another expensive audio fingerprint.
     album_mbids = album_track_mbids or {}
     if (
         track_info.track_number
-        and track_info.track_number in album_mbids
-        and track_info.musicbrainz_trackid == album_mbids[track_info.track_number]
+        and (track_info.disc_number or 1, track_info.track_number) in album_mbids
+        and track_info.musicbrainz_trackid
+        == album_mbids[(track_info.disc_number or 1, track_info.track_number)]
         and track_info.metadata_sources.get("musicbrainz_trackid") == "MusicBrainz"
     ):
         return
@@ -98,7 +99,7 @@ def _enrich_acoustid(
                     return
             track_info.musicbrainz_trackid = acoustid_mbid
             track_info.metadata_sources["musicbrainz_trackid"] = "AcoustID"
-            LOG.info(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
+            LOG.detail(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"AcoustID lookup failed for {track_info.title}: {error}")
 
@@ -111,24 +112,11 @@ def _find_album_release_recording(
     """Lookup candidate recording in pre-fetched album release details."""
     if not album_mb_release_details or not track_info.track_number:
         return None
-    tracks_by_disc = album_mb_release_details.get("tracks_by_disc_and_position")
-    if (
-        isinstance(tracks_by_disc, dict)
-        and (disc_num, track_info.track_number) in tracks_by_disc
-    ):
-        return require_api_object(
-            tracks_by_disc[(disc_num, track_info.track_number)], "Album disc recording"
-        )
-
-    tracks_by_pos = album_mb_release_details.get("tracks_by_position")
-    if isinstance(tracks_by_pos, dict):
-        candidate = (
-            tracks_by_pos.get((disc_num, track_info.track_number))
-            or tracks_by_pos.get(f"{disc_num}-{track_info.track_number}")
-            or tracks_by_pos.get(track_info.track_number)
-        )
-        return candidate if isinstance(candidate, dict) else None
-    return None
+    return _get_album_recording(
+        track_info.track_number,
+        disc_num,
+        album_mb_release_details=album_mb_release_details,
+    )
 
 
 def _heal_track_identity_from_release(
@@ -146,7 +134,7 @@ def _heal_track_identity_from_release(
         and _recording_matches_track_identity(track_info, candidate_rec)
         and clean_title(track_info.title).lower() != clean_title(str(rec_title)).lower()
     ):
-        LOG.info(
+        LOG.detail(
             f"   ∟ 🩹 [Healer] Track {track_info.track_number} verified by ISRC match. "
             f"Healing corrupted title '{escape(str(track_info.title))}' -> '{escape(str(rec_title))}'"
         )
@@ -157,7 +145,7 @@ def _heal_track_identity_from_release(
 
 def _resolve_musicbrainz_track_id(
     track_info: TrackInfo,
-    album_track_mbids: dict[Any, str] | None,
+    album_track_mbids: dict[tuple[int, int], str] | None,
     album_mb_release_details: dict[str, Any] | None,
     candidate_rec: dict[str, Any] | None,
     has_corrupt_identity: bool,
@@ -166,23 +154,13 @@ def _resolve_musicbrainz_track_id(
     """Resolve track MBID via album tracks position mapping or track search."""
     album_mbids = album_track_mbids or {}
     disc_num = track_info.disc_number or 1
-    disc_pos_key = (disc_num, track_info.track_number)
-    str_disc_pos_key = f"{disc_num}-{track_info.track_number}"
-    has_pos_match = bool(
-        track_info.track_number
-        and (
-            disc_pos_key in album_mbids
-            or str_disc_pos_key in album_mbids
-            or track_info.track_number in album_mbids
-        )
+    potential_mbid = (
+        album_mbids.get((disc_num, track_info.track_number))
+        if track_info.track_number is not None
+        else None
     )
     candidate_mbid: str | None = None
-    if has_pos_match:
-        potential_mbid = (
-            album_mbids.get(disc_pos_key)
-            or album_mbids.get(str_disc_pos_key)
-            or album_mbids.get(track_info.track_number)
-        )
+    if potential_mbid is not None:
         is_match = bool(
             candidate_rec
             and _recording_matches_track_identity(track_info, candidate_rec)
@@ -193,7 +171,7 @@ def _resolve_musicbrainz_track_id(
             candidate_mbid = potential_mbid
             track_info.musicbrainz_trackid = candidate_mbid
             track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
-            LOG.info(
+            LOG.detail(
                 f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {candidate_mbid[:8]}..."
             )
     elif not is_valid_uuid(track_info.musicbrainz_trackid) or (
@@ -203,7 +181,7 @@ def _resolve_musicbrainz_track_id(
         if is_valid_uuid(mbid):
             track_info.musicbrainz_trackid = mbid
             track_info.metadata_sources.pop("musicbrainz_trackid", None)
-            LOG.info(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
+            LOG.detail(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
 
 
 def _resolve_musicbrainz_album_id(
@@ -466,10 +444,11 @@ def _apply_mb_recording_metadata(
         "musicbrainz_workid": "musicbrainz_workid",
         "musicbrainz_artistid": "musicbrainz_artistid",
         "musicbrainz_albumartistid": "musicbrainz_albumartistid",
-        "disc_number": "disc_number",
-        "total_discs": "total_discs",
-        "disc_subtitle": "disc_subtitle",
     }
+    if is_album_rec:
+        mb_map.update(
+            {name: name for name in ("disc_number", "total_discs", "disc_subtitle")}
+        )
     rec_title = str(recording_details.get("title") or "")
     rec_artist = str(recording_details.get("artist") or "")
     has_corrupt_identity = has_corrupt_identity or bool(
@@ -514,7 +493,7 @@ def _apply_mb_recording_metadata(
         source="MusicBrainz",
     )
 
-    if recording_details.get("disc_total_tracks"):
+    if is_album_rec and recording_details.get("disc_total_tracks"):
         apply_metadata_mapping(
             track_info,
             recording_details,
@@ -637,6 +616,8 @@ def _apply_mb_release_metadata(
 
     if _release_edition_conflicts(track_info, mb_rel):
         return
+    if _compatible_release_layout(track_info, mb_rel) is None:
+        return
 
     release_artist = str(mb_rel.get("album_artist") or mb_rel.get("artist") or "")
     expected_artist = track_info.album_artist or track_info.artist or ""
@@ -737,24 +718,24 @@ def _apply_mb_release_metadata(
             ),
         )
 
-    if album_mb_release_details is not None:
-        if force or not track_info.total_tracks:
+    if album_mb_release_details is not None and (force or not track_info.total_tracks):
+        release_recording = _find_album_release_recording(
+            track_info, mb_rel, track_info.disc_number or 1
+        )
+        # TOTALTRACKS belongs to the current medium, not the entire box set.
+        total_tracks = safe_int(
+            release_recording.get("disc_total_tracks") if release_recording else None
+        )
+        if total_tracks is None and safe_int(mb_rel.get("total_discs")) in (None, 1):
             total_tracks = safe_int(mb_rel.get("total_tracks"))
-            if total_tracks is not None:
-                cur_tot = track_info.total_tracks or 0
-                cur_num = track_info.track_number or 0
-                if total_tracks >= cur_tot and total_tracks >= cur_num:
-                    track_info.total_tracks = total_tracks
-        if force or not track_info.total_discs:
-            total_discs = safe_int(mb_rel.get("total_discs"))
-            if total_discs is not None:
-                track_info.total_discs = total_discs
+        if total_tracks is not None and total_tracks >= (track_info.track_number or 0):
+            track_info.total_tracks = total_tracks
 
 
 def _enrich_musicbrainz(
     track_info: TrackInfo,
     album_mbid: str | None,
-    album_track_mbids: dict[Any, str] | None,
+    album_track_mbids: dict[tuple[int, int], str] | None,
     album_mb_release_details: dict[str, Any] | None,
     target_album_artist: str | None = None,
     force: bool = False,
@@ -762,6 +743,13 @@ def _enrich_musicbrainz(
     try:
         if _release_edition_conflicts(track_info, album_mb_release_details):
             return
+        if (
+            album_mb_release_details is not None
+            and _compatible_release_layout(track_info, album_mb_release_details) is None
+        ):
+            album_mbid = None
+            album_track_mbids = None
+            album_mb_release_details = None
         disc_num = track_info.disc_number or 1
         candidate_rec = _find_album_release_recording(
             track_info, album_mb_release_details, disc_num

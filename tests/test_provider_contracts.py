@@ -14,6 +14,96 @@ MBID = "11111111-2222-3333-4444-555555555555"
 
 
 class TestAcousticIdentityContracts(IsolatedTestCase):
+    def test_json_duration_precision_preserves_a_valid_acoustic_candidate(self) -> None:
+        recording_path = self.test_directory / "recording.flac"
+        recording_path.touch()
+        payload = {
+            "status": "ok",
+            "results": [
+                {
+                    "score": 1.0,
+                    "recordings": [
+                        {
+                            "id": MBID,
+                            "title": "Original Song",
+                            "artists": [{"name": "Alpha"}],
+                            "duration": 223.533,
+                        }
+                    ],
+                }
+            ],
+        }
+        with (
+            patch.object(fingerprint_service, "_ACOUSTID_CACHE", {}),
+            patch.object(
+                fingerprint_service, "get_cached_api", side_effect=[None, payload]
+            ) as cache_lookup,
+            patch.object(fingerprint_service, "set_cached_api"),
+            patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=b'{"duration":221.54,"fingerprint":"123456"}'
+                ),
+            ) as execute,
+        ):
+            self.assertEqual(
+                fingerprint_service.lookup_acoustid(
+                    recording_path, "fixture", "Alpha", "Original Song"
+                ),
+                MBID,
+            )
+        self.assertIn("-json", execute.call_args.args[0])
+        self.assertTrue(
+            cache_lookup.call_args_list[0].args[0].startswith("fingerprint:v2:")
+        )
+
+    def test_invalid_json_is_reported_as_a_fingerprint_decoding_failure(self) -> None:
+        for output in (b"", b"not JSON", b"\xff"):
+            with (
+                self.subTest(output=output),
+                patch(
+                    "subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout=output),
+                ),
+                self.assertRaisesRegex(OSError, "invalid JSON"),
+            ):
+                fingerprint_service._fingerprint_file_with_timeout(
+                    Path("recording.flac")
+                )
+
+    def test_json_fingerprint_rejects_nonfinite_or_empty_fields(self) -> None:
+        for output in (
+            b'{"duration":NaN,"fingerprint":"123456"}',
+            b'{"duration":Infinity,"fingerprint":"123456"}',
+            b'{"duration":-Infinity,"fingerprint":"123456"}',
+            b'{"duration":0,"fingerprint":"123456"}',
+            b'{"duration":10,"fingerprint":""}',
+            b'{"duration":10,"fingerprint":"  "}',
+            b'{"duration":10,"fingerprint":[1,2]}',
+            b"{}",
+        ):
+            with (
+                self.subTest(output=output),
+                patch(
+                    "subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout=output),
+                ),
+                self.assertRaisesRegex(OSError, "incomplete fingerprint"),
+            ):
+                fingerprint_service._fingerprint_file_with_timeout(
+                    Path("recording.flac")
+                )
+
+    def test_json_fingerprint_requires_an_object_envelope(self) -> None:
+        with (
+            patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=b"[]"),
+            ),
+            self.assertRaisesRegex(TypeError, "fpcalc output must be a JSON object"),
+        ):
+            fingerprint_service._fingerprint_file_with_timeout(Path("recording.flac"))
+
     def test_lower_scoring_candidate_cannot_replace_the_best_supported_recording(
         self,
     ) -> None:
@@ -55,10 +145,10 @@ class TestAcousticIdentityContracts(IsolatedTestCase):
 
     def test_fingerprint_output_requires_duration_and_signature(self) -> None:
         for output, expected in (
-            (b"DURATION=10.5\nFINGERPRINT=123456\nOTHER=value", (10.5, "123456")),
-            (b"FINGERPRINT=123456", None),
-            (b"DURATION=broken\nFINGERPRINT=123456", None),
-            (b"DURATION=10", None),
+            (b'{"duration":10.5,"fingerprint":"123456"}', (10.5, "123456")),
+            (b'{"fingerprint":"123456"}', None),
+            (b'{"duration":"broken","fingerprint":"123456"}', None),
+            (b'{"duration":10}', None),
         ):
             with (
                 self.subTest(output=output),

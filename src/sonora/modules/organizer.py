@@ -185,14 +185,16 @@ def _quarantine_duplicate_single(
     if not dry_run:
         try:
             _quarantine_file(path, quarantine_dir)
-            LOG.info(
+            LOG.detail(
                 f"   ∟ 📦 Quarantined duplicate single{reason}: {escape(key)} -> .duplicates/"
             )
         except OSError as error:
             LOG.debug(f"Failed to quarantine duplicate single {path}: {error}")
             raise
     else:
-        LOG.info(f"[DRY-RUN] Would quarantine duplicate single{reason}: {escape(key)}")
+        LOG.detail(
+            f"[DRY-RUN] Would quarantine duplicate single{reason}: {escape(key)}"
+        )
 
 
 def _is_single_folder(
@@ -251,14 +253,16 @@ def _is_single_folder(
             return False
 
         multi_track_declared = sum(
-            cnt for tot, cnt in total_tracks_counts.items() if tot >= 3
+            count
+            for total_tracks, count in total_tracks_counts.items()
+            if total_tracks >= 3
         )
         if multi_track_declared >= (file_count * 0.5):
             return False
 
         norm_folder = normalize_str(folder.name)
-        for alb in cleaned_albums:
-            if alb in norm_folder or norm_folder in alb:
+        for album in cleaned_albums:
+            if album in norm_folder or norm_folder in album:
                 return False
 
         return True
@@ -269,10 +273,10 @@ def _is_single_folder(
         ):
             return False
         if track_meta.album and not get_config().is_generic_container(track_meta.album):
-            norm_alb = normalize_str(track_meta.album)
+            normalized_album = normalize_str(track_meta.album)
             norm_folder = normalize_str(folder.name)
             if (
-                (norm_alb in norm_folder or norm_folder in norm_alb)
+                (normalized_album in norm_folder or norm_folder in normalized_album)
                 and track_meta.total_tracks
                 and track_meta.total_tracks > 1
             ):
@@ -456,9 +460,7 @@ def organize_library_singles(
             "[cyan]Organizing single tracks...", total=len(singles_to_process)
         )
 
-        quarantine_dir = (
-            target_singles_dir or (source_dir / "Singles")
-        ) / ".duplicates"
+        quarantine_dir = target_singles_dir / ".duplicates"
 
         try:
             for path, track_info in singles_to_process:
@@ -520,11 +522,11 @@ def organize_library_singles(
                                 path.parent, target_file.parent, dry_run=False
                             )
                         safe_case_rename(path, target_file)
-                        LOG.info(
+                        LOG.detail(
                             f"   ∟ 📁 Moved single: {escape(path.name)} -> {escape(target_file.parent.name)}/"
                         )
                     else:
-                        LOG.info(
+                        LOG.detail(
                             f"[DRY-RUN] Would move {escape(path.name)} -> {escape(str(target_file))}"
                         )
 
@@ -545,7 +547,7 @@ def organize_library_singles(
             raise InterruptedOperationError(moved_count) from None
 
     if removed_dupes > 0:
-        LOG.info(f"🗑️ Removed {removed_dupes} duplicate single(s).")
+        LOG.detail(f"🗑️ Removed {removed_dupes} duplicate single(s).")
 
     if not dry_run:
         consolidate_duplicate_artist_dirs(source_dir, dry_run=False)
@@ -611,7 +613,7 @@ def _consolidate_directory_entries(parent_dir: Path, dry_run: bool = False) -> i
             if cand_dir == canonical_dir:
                 continue
 
-            LOG.info(
+            LOG.detail(
                 f"Consolidating duplicate directory: {cand_dir.name} -> {canonical_dir.name}"
             )
             if not dry_run:

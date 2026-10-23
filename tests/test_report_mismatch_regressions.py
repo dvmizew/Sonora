@@ -8,8 +8,14 @@ from sonora.core.cache import set_cached_api
 from sonora.core.config import SonoraConfig
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
-from sonora.modules import catalog_enrichment, musicbrainz_enrichment
+from sonora.modules import (
+    catalog_enrichment,
+    matching,
+    metadata_consensus,
+    musicbrainz_enrichment,
+)
 from sonora.services import artist_resolution, itunes, lyrics, musicbrainz, shazam
+from sonora.services.itunes import _parse_itunes_track
 from sonora.services.shazam import ShazamTrackInfo
 from tests.regression_support import AudioRegressionTestCase
 from tests.support import IsolatedTestCase
@@ -290,7 +296,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                 }
                 musicbrainz_enrichment._resolve_musicbrainz_track_id(
                     track,
-                    {2: MATCHING_RECORDING_ID},
+                    {(1, 2): MATCHING_RECORDING_ID},
                     {"title": "Album"},
                     candidate,
                     False,
@@ -345,7 +351,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
         ):
             with self.subTest(artist=artist, duration=duration):
                 self.assertEqual(
-                    catalog_enrichment._catalog_recording_matches_track(
+                    matching._catalog_recording_matches_track(
                         {
                             "artist": artist,
                             "title": "Original Song",
@@ -361,7 +367,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                     expected,
                 )
         self.assertFalse(
-            catalog_enrichment._catalog_recording_matches_track(
+            matching._catalog_recording_matches_track(
                 {"artist": "Alpha", "title": "Original Song"},
                 "Untitled",
                 "Alpha",
@@ -388,11 +394,13 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
             patch.object(
                 itunes,
                 "lookup_itunes_track",
-                return_value={
-                    "artistName": "Alpha",
-                    "trackName": "Wrong Song",
-                    "trackTimeMillis": 180000,
-                },
+                return_value=_parse_itunes_track(
+                    {
+                        "artistName": "Alpha",
+                        "trackName": "Wrong Song",
+                        "trackTimeMillis": 180000,
+                    }
+                ),
             ) as lookup,
             patch.object(
                 itunes, "fetch_itunes_track_metadata", return_value=None
@@ -453,7 +461,13 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
             patch.object(
                 itunes,
                 "lookup_itunes_track",
-                return_value={"artistName": "Alpha", "trackName": "Original Song"},
+                return_value=_parse_itunes_track(
+                    {
+                        "trackId": 123,
+                        "artistName": "Alpha",
+                        "trackName": "Original Song",
+                    }
+                ),
             ),
             patch.object(itunes, "fetch_itunes_track_metadata") as search,
         ):
@@ -471,7 +485,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                 track = TrackInfo(Path("song.flac"))
                 setattr(track, position_field, position)
                 setattr(track, field, 20)
-                catalog_enrichment.apply_metadata_mapping(
+                metadata_consensus.apply_metadata_mapping(
                     track,
                     {field: total},
                     {field: field},
@@ -481,7 +495,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                 self.assertEqual(getattr(track, field), 20)
                 self.assertIn(field, track.metadata_conflicts)
         track = TrackInfo(Path("song.flac"), track_number=0, total_tracks=12)
-        catalog_enrichment.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             track, {"total": 12}, {"total": "total_tracks"}, force=True
         )
         self.assertEqual(track.track_number, 0)

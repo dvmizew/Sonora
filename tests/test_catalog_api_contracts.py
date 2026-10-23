@@ -1,11 +1,24 @@
+import contextlib
+from collections.abc import Callable
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 
+from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.config import SonoraConfig
 from sonora.core.http import SESSION
+from sonora.core.rate_limit import RateLimiter
 from sonora.services import deezer, discogs, itunes
+from sonora.services.deezer import fetch_deezer_track_details
+from sonora.services.discogs import search_discogs_release
+from sonora.services.fanart import _extract_image_urls, fetch_fanart_artist
+from sonora.services.genius import fetch_genius_song_details
+from sonora.services.itunes import search_itunes
+from sonora.services.lastfm import fetch_lastfm_tags
+from sonora.services.lyrics import _query_lrclib
+from sonora.services.musicbrainz import fetch_artist_discography
+from sonora.services.theaudiodb import fetch_theaudiodb_track_details
 from tests.support import IsolatedTestCase
 
 
@@ -270,7 +283,15 @@ class TestDeezerCatalogContracts(IsolatedTestCase):
     ) -> None:
         candidate = {**self.album, "title": "Long Album Recordings"}
         tracks = [
-            {"id": 1, "title": "First", "track_position": 1, "disk_number": 1},
+            {
+                "id": 1,
+                "title": "First",
+                "track_position": 1,
+                "disk_number": 1,
+                "artist": {"name": "Primary"},
+                "duration": "180.5",
+                "contributors": [{"name": "Writer", "role": "Composer"}],
+            },
             {"id": 2, "title": "Second", "track_position": 1, "disk_number": 2},
             {"id": 3, "title": "", "track_position": 2, "disk_number": 2},
         ]
@@ -289,7 +310,13 @@ class TestDeezerCatalogContracts(IsolatedTestCase):
                 "Primary", "Long Album Recording", expected_track_count=10
             )
         assert details is not None
-        self.assertEqual(details["tracks_by_position"][1]["id"], 1)
+        self.assertEqual(details["tracks_by_disc_and_position"][(1, 1)]["id"], 1)
+        album_recording = details["tracks_by_disc_and_position"][(1, 1)]
+        standalone_recording = deezer._parse_deezer_track_payload(tracks[0])
+        for name in ("title", "artist", "duration", "composer"):
+            self.assertEqual(album_recording[name], standalone_recording[name])
+        self.assertEqual(album_recording["composer"], "Writer")
+        self.assertEqual(album_recording["duration"], 180.5)
         self.assertEqual(details["tracks_by_disc_and_position"][(2, 1)]["id"], 2)
         self.assertNotIn("", details["tracks_by_title"])
         self.assertEqual(details["tracks_by_disc_and_position"][(2, 2)]["id"], 3)
@@ -687,3 +714,153 @@ class TestDiscogsCatalogContracts(IsolatedTestCase):
         )
         self.assertEqual(details["barcode"], "1234")
         self.assertIsNone(details["catalog_number"])
+
+
+class TestProviderContracts(IsolatedTestCase):
+    def setUp(self) -> None:
+        RateLimiter.set_disabled(True)
+        self.addCleanup(RateLimiter.set_disabled, False)
+
+    def test_valid_objects_and_empty_arrays(self) -> None:
+        self.assertEqual(require_api_object({}, "response"), {})
+        self.assertEqual(require_api_records([], "results"), [])
+        self.assertEqual(require_api_records([{"id": 1}], "results"), [{"id": 1}])
+
+    def test_invalid_envelope_types(self) -> None:
+        payload: object
+        for payload in (None, "wrong", [], 17):
+            with self.subTest(payload=payload), self.assertRaises(TypeError):
+                require_api_object(payload, "response")
+
+    def test_invalid_record_arrays(self) -> None:
+        payload: object
+        for payload in (None, "wrong", {}, [None], [{"id": 1}, "invalid"]):
+            with self.subTest(payload=payload), self.assertRaises(TypeError):
+                require_api_records(payload, "results")
+
+    def test_provider_boundaries_reject_malformed_roots_without_caching(self) -> None:
+        payload: object
+        boundaries: tuple[tuple[str, Callable[[], object]], ...] = (
+            ("itunes", lambda: search_itunes("Artist", "Title", "song")),
+            ("deezer", lambda: fetch_deezer_track_details("Artist", "Title")),
+            ("discogs", lambda: search_discogs_release("Artist", "Album", "token")),
+            ("genius", lambda: fetch_genius_song_details("Artist", "Title", "token")),
+            ("lastfm", lambda: fetch_lastfm_tags("Artist", "Title", "key")),
+            ("theaudiodb", lambda: fetch_theaudiodb_track_details("Artist", "Title")),
+            (
+                "fanart",
+                lambda: fetch_fanart_artist(
+                    "11111111-2222-3333-4444-555555555555", "key"
+                ),
+            ),
+            ("lyrics", lambda: _query_lrclib("Artist - Title")),
+        )
+        for service, invoke in boundaries:
+            for payload in ([], "schema changed", None):
+                with (
+                    self.subTest(service=service, payload=payload),
+                    contextlib.ExitStack() as resources,
+                ):
+                    response = MagicMock(status_code=200)
+                    response.json.return_value = payload
+                    resources.enter_context(
+                        patch(
+                            f"sonora.services.{service}.SESSION.get",
+                            return_value=response,
+                        )
+                    )
+                    resources.enter_context(
+                        patch(
+                            f"sonora.services.{service}.get_cached_api",
+                            return_value=None,
+                        )
+                    )
+                    write_cache = resources.enter_context(
+                        patch(f"sonora.services.{service}.set_cached_api")
+                    )
+                    with self.assertRaises(TypeError):
+                        invoke()
+                    write_cache.assert_not_called()
+
+    def test_itunes_rejects_missing_results_and_invalid_records(self) -> None:
+        for payload in ({}, {"results": "wrong"}, {"results": [None]}):
+            with (
+                self.subTest(payload=payload),
+                patch("sonora.services.itunes.get_cached_api", return_value=None),
+                patch("sonora.services.itunes.SESSION.get") as request,
+            ):
+                request.return_value.json.return_value = payload
+                with self.assertRaises(TypeError):
+                    search_itunes("Artist", "Title", "song")
+
+    def test_musicbrainz_schema_and_programming_errors_surface(self) -> None:
+        payload: object
+        for payload in ([], {"release-list": "wrong"}, {"release-list": [None]}):
+            with (
+                self.subTest(payload=payload),
+                patch(
+                    "sonora.services.musicbrainz._call_musicbrainz",
+                    return_value=payload,
+                ),
+                self.assertRaises(TypeError),
+            ):
+                fetch_artist_discography("Artist")
+        with (
+            patch(
+                "sonora.services.musicbrainz._call_musicbrainz",
+                side_effect=RuntimeError("internal bug"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "internal bug"),
+        ):
+            fetch_artist_discography("Artist")
+
+    def test_documented_empty_responses(self) -> None:
+        with patch("sonora.services.theaudiodb.SESSION.get") as request:
+            request.return_value.status_code = 200
+            request.return_value.json.return_value = {"track": None}
+            self.assertIsNone(fetch_theaudiodb_track_details("Artist", "Title"))
+        with patch("sonora.services.lastfm.SESSION.get") as request:
+            request.return_value.json.return_value = {"toptags": {"tag": []}}
+            self.assertEqual(fetch_lastfm_tags("Artist", "Title", "key"), [])
+        with patch("sonora.services.itunes.SESSION.get") as request:
+            request.return_value.json.return_value = {"results": []}
+            self.assertEqual(search_itunes("Artist", "Title", "song"), [])
+
+    def test_fanart_descriptor_validation_and_like_order(self) -> None:
+        self.assertEqual(_extract_image_urls(None), [])
+        self.assertEqual(_extract_image_urls([]), [])
+        with self.assertRaises(TypeError):
+            _extract_image_urls({"url": "https://example.com/art.jpg"})
+        with self.assertRaises(TypeError):
+            _extract_image_urls([None])
+        self.assertEqual(
+            _extract_image_urls(
+                [
+                    {"url": "https://example.com/first.jpg", "likes": "1"},
+                    {"url": "https://example.com/second.jpg", "likes": "9"},
+                ]
+            ),
+            ["https://example.com/second.jpg", "https://example.com/first.jpg"],
+        )
+
+    def test_lrclib_get_rejects_invalid_response_types(self) -> None:
+        for query, payload in (
+            ("Artist - Title", {"syncedLyrics": 42}),
+            ("Artist - Title", [None]),
+            ("Artist - Title", []),
+        ):
+            with (
+                self.subTest(query=query, payload=payload),
+                patch("sonora.services.lyrics.SESSION.get") as request,
+            ):
+                request.return_value.status_code = 200
+                request.return_value.json.return_value = payload
+                with self.assertRaises(TypeError):
+                    _query_lrclib(query)
+
+    def test_theaudiodb_current_free_api_key(self) -> None:
+        with patch("sonora.services.theaudiodb.SESSION.get") as request:
+            request.return_value.status_code = 200
+            request.return_value.json.return_value = {"track": None}
+            fetch_theaudiodb_track_details("Artist", "Title")
+            self.assertIn("/api/v1/json/123/", request.call_args.args[0])

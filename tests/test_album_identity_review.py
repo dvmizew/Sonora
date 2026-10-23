@@ -1,10 +1,13 @@
+import dataclasses
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from sonora.audio import metadata
 from sonora.core.models import TrackInfo
-from sonora.modules import matching, musicbrainz_enrichment
-from sonora.services import musicbrainz
+from sonora.modules import matching, musicbrainz_enrichment, tagger
+from sonora.modules.matching import _resolve_album_track_position, is_alien_album_track
+from sonora.services import artist_resolution, musicbrainz
 from tests.support import IsolatedTestCase
 
 
@@ -24,8 +27,8 @@ class TestAlbumIdentityReview(IsolatedTestCase):
                     identifier=identifier, artist=artist, title=title, duration=duration
                 ):
                     release = {
-                        "tracks_by_number": {
-                            4: {
+                        "tracks_by_disc_and_position": {
+                            (1, 4): {
                                 identifier: "KNOWN",
                                 "artist": artist,
                                 "title": title,
@@ -183,7 +186,7 @@ class TestAlbumIdentityReview(IsolatedTestCase):
                     track_number=1,
                 )
                 musicbrainz_enrichment._resolve_musicbrainz_track_id(
-                    track, {1: recording_id}, None, candidate, False
+                    track, {(1, 1): recording_id}, None, candidate, False
                 )
                 self.assertEqual(track.musicbrainz_trackid, expected)
 
@@ -233,3 +236,156 @@ class TestAlbumIdentityReview(IsolatedTestCase):
         self.assertEqual(
             matching._match_position_by_mbid(track, recording_id, None, indexes), 2
         )
+
+
+class TestAlbumIdentity(IsolatedTestCase):
+    def test_album_positions_reject_recording_variants(self) -> None:
+        pairs = (
+            ("The Journey Part 2", "The Journey Part 3"),
+            ("Long Summer Night (Alpha Remix)", "Long Summer Night (Omega Remix)"),
+            ("Long Summer Night", "Long Summer Night (Live)"),
+            ("Intro", "Outro"),
+        )
+        for query, candidate in pairs:
+            for position in (1, 99):
+                with self.subTest(query=query, candidate=candidate, position=position):
+                    track = dataclasses.replace(
+                        self._track(query),
+                        track_number=position,
+                        file_path=Path(f"/music/{position:02d} - Track.flac"),
+                    )
+                    self.assertIsNone(
+                        _resolve_album_track_position(
+                            track,
+                            track.file_path,
+                            album_deezer_details={
+                                "tracks_by_disc_and_position": {
+                                    (1, 1): {"title": candidate}
+                                }
+                            },
+                        )
+                    )
+
+    def test_album_identifiers_still_heal_corrupted_titles(self) -> None:
+        track = dataclasses.replace(self._track("Untitled"), isrc="USAAA2400001")
+        position = _resolve_album_track_position(
+            track,
+            track.file_path,
+            album_deezer_details={
+                "tracks_by_disc_and_position": {
+                    (1, 3): {
+                        "title": "Correct recording",
+                        "isrc": "USAAA2400001",
+                        "disc_number": 1,
+                    }
+                }
+            },
+        )
+        self.assertEqual(position, 3)
+
+    def test_variant_rejections_also_shield_alien_tracks(self) -> None:
+        for query, candidate in (
+            ("The Journey Part 2", "The Journey Part 3"),
+            ("Long Summer Night (Alpha Remix)", "Long Summer Night (Omega Remix)"),
+        ):
+            with self.subTest(query=query):
+                track = dataclasses.replace(
+                    self._track(query), album="Album", track_number=1
+                )
+                recordings = {
+                    (1, 1): {"artist": "Artist", "title": candidate},
+                    (1, 2): {"artist": "Artist", "title": "Different Recording"},
+                    (1, 3): {"artist": "Artist", "title": "Another Recording"},
+                }
+                release = {
+                    "artist": "Artist",
+                    "title": "Album",
+                    "tracks_by_disc_and_position": recordings,
+                }
+                self.assertTrue(
+                    is_alien_album_track(
+                        track,
+                        track.file_path,
+                        "Artist",
+                        "Album",
+                        album_deezer_details=release,
+                    )
+                )
+                track.isrc = "USAAA2400001"
+                recordings[(1, 1)]["isrc"] = track.isrc
+                self.assertTrue(
+                    is_alien_album_track(
+                        track,
+                        track.file_path,
+                        "Artist",
+                        "Album",
+                        album_deezer_details=release,
+                    )
+                )
+
+    def test_matching_title_does_not_override_a_conflicting_artist(
+        self,
+    ) -> None:
+        track = dataclasses.replace(
+            self._track("Correct recording"), artist="Damaged artist"
+        )
+        self.assertIsNone(
+            _resolve_album_track_position(
+                track,
+                track.file_path,
+                album_deezer_details={
+                    "tracks_by_disc_and_position": {
+                        (1, 1): {
+                            "title": "Correct recording",
+                            "artist": "Actual artist",
+                        }
+                    }
+                },
+            )
+        )
+
+    @staticmethod
+    def _track(title: str) -> TrackInfo:
+        return TrackInfo(
+            file_path=Path("/music/01 - Track.flac"), artist="Artist", title=title
+        )
+
+
+class TestStandaloneAlbumContext(IsolatedTestCase):
+    def setUp(self) -> None:
+        self.path = self.test_directory / "01 - Recording.wav"
+        self.path.touch()
+        self.recording = TrackInfo(
+            self.path,
+            artist="Primary",
+            title="Recording",
+            album="Record",
+            album_artist="Primary",
+            track_number=1,
+        )
+
+    def test_standalone_shielding_does_not_clear_shared_album_context(self) -> None:
+        context = tagger._AlbumMetadataContext(
+            sample_artist="Primary",
+            sample_album="Record",
+            track_mbids={(1, 1): "recording"},
+        )
+        with (
+            patch.object(
+                metadata,
+                "read_track_metadata",
+                return_value=self.recording,
+            ),
+            patch.object(
+                artist_resolution, "resolve_artist_name", return_value="Primary"
+            ),
+            patch.object(tagger, "is_alien_album_track", return_value=True),
+            patch.object(tagger, "_run_metadata_enrichment_pipeline") as enrich,
+            patch.object(
+                tagger, "_process_audio_and_save_tags", return_value=self.recording
+            ),
+        ):
+            tagger.process_single_track(self.path, album_context=context, dry_run=True)
+        self.assertFalse(enrich.call_args.kwargs["album_context"].has_album_context)
+        self.assertTrue(context.has_album_context)
+        self.assertEqual(context.track_mbids, {(1, 1): "recording"})

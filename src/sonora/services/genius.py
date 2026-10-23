@@ -30,7 +30,12 @@ def score_genius_song_match(artist: str, title: str, song: dict[str, object]) ->
         if expected_artists != credited_artists:
             return 0.0
         candidate_artist = artist
-    return score_artist_title_match(artist, title, candidate_artist, candidate_title)
+    return score_artist_title_match(
+        normalize_str(artist),
+        normalize_str(title),
+        normalize_str(candidate_artist),
+        normalize_str(candidate_title),
+    )
 
 
 def _normalize_genius_description(plain_description: object) -> str | None:
@@ -174,7 +179,7 @@ def fetch_genius_song_details(
 
     cleaned_title = clean_title(title)
     normalized_title = normalize_str(cleaned_title)
-    cache_key = f"genius_song:v6:{normalize_str(artist)}:{normalize_str(title)}"
+    cache_key = f"genius_song:v7:{normalize_str(artist)}:{normalize_str(title)}"
     cached = get_cached_api(cache_key)
     if cached == "":
         return None

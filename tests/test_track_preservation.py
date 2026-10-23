@@ -5,6 +5,7 @@ from PIL import Image
 from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.models import TrackInfo
 from sonora.modules.tagger import (
+    _AlbumMetadataContext,
     process_single_track,
 )
 from tests.fixtures import write_silent_wav
@@ -43,8 +44,9 @@ class TestTrackPreservation(OfflinePipelineTestCase):
                 fetch_itunes_art=False,
                 force=True,
                 dry_run=True,
-                target_album_title="LUCIFER",
-                target_album_artist="RAVA",
+                album_context=_AlbumMetadataContext(
+                    sample_album="LUCIFER", sample_artist="RAVA"
+                ),
             )
             self.assertIsNone(processed.musicbrainz_albumid)
             self.assertIsNone(processed.musicbrainz_releasegroupid)
@@ -79,8 +81,9 @@ class TestTrackPreservation(OfflinePipelineTestCase):
                 fetch_itunes_art=False,
                 force=True,
                 dry_run=True,
-                target_album_title="Fratemius High",
-                target_album_artist="Samurai",
+                album_context=_AlbumMetadataContext(
+                    sample_album="Fratemius High", sample_artist="Samurai"
+                ),
             )
             self.assertIsNone(processed.musicbrainz_albumid)
             self.assertIsNone(processed.musicbrainz_releasegroupid)
@@ -114,8 +117,9 @@ class TestTrackPreservation(OfflinePipelineTestCase):
                 fetch_itunes_art=False,
                 force=True,
                 dry_run=True,
-                target_album_title="Hollywood's Bleeding",
-                target_album_artist="Post Malone",
+                album_context=_AlbumMetadataContext(
+                    sample_album="Hollywood's Bleeding", sample_artist="Post Malone"
+                ),
             )
             self.assertEqual(
                 processed.musicbrainz_albumid, "11111111-2222-3333-4444-555555555555"
@@ -165,9 +169,9 @@ class TestTrackPreservation(OfflinePipelineTestCase):
                 fetch_itunes_art=True,
                 force=False,
                 dry_run=False,
-                album_cover_path=cover_img,
-                target_album_title="Album",
-                target_album_artist="Artist",
+                album_context=_AlbumMetadataContext(
+                    cover_path=cover_img, sample_album="Album", sample_artist="Artist"
+                ),
             )
             self.assertTrue(mock_write.called)
             called_cover_path = mock_write.call_args[1].get("cover_art_path")

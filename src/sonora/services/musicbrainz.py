@@ -196,7 +196,7 @@ def search_musicbrainz_release(
         return None
 
     count_suffix = f":{expected_track_count}" if expected_track_count else ""
-    cache_key = f"mb_release:v3:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}:{expected_advisory or ''}"
+    cache_key = f"mb_release:v4:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}:{expected_advisory or ''}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -284,7 +284,7 @@ def search_musicbrainz_release(
                     target_release = release
 
         if sum(score == best_score for score in candidate_scores.values()) > 1:
-            LOG.warning(
+            LOG.detail(
                 f"Ambiguous MusicBrainz release for {escape(artist)} - {escape(album)}; no edition selected"
             )
             target_release = None
@@ -354,7 +354,7 @@ def fetch_track_mbid(artist: str, title: str) -> str | None:
         if not ranked:
             return None
         if len(ranked) > 1 and scores[ranked[0]] == scores[ranked[1]]:
-            LOG.warning(
+            LOG.detail(
                 f"Ambiguous MusicBrainz recording for {escape(artist)} - {escape(title)}; identity unchanged"
             )
             return None
@@ -394,59 +394,45 @@ def fetch_cover_art_archive_url(release_mbid: str) -> str | None:
     return None
 
 
-@coalesce_lookup
-def fetch_album_track_mbids(release_mbid: str) -> dict[Any, str]:
-    """
-    Fetch all track recording MBIDs for an entire album release in ONE single API call.
-    Returns mapping of track_position (or (disc, pos) tuple) -> recording_mbid.
-    """
-    if not release_mbid or not is_valid_uuid(release_mbid):
-        return {}
+def _parse_recording_credits(recording: dict[str, Any]) -> dict[str, object]:
+    composers: list[str] = []
+    lyricists: list[str] = []
+    producers: list[str] = []
+    remixers: list[str] = []
 
-    cache_key = f"mb_album_tracks:{release_mbid}"
-    cached = get_cached_api(cache_key)
-    if isinstance(cached, dict) and any(isinstance(k, tuple) for k in cached):
-        return {k: str(v) for k, v in cached.items()}
+    artist_rels = require_api_records(
+        recording.get("artist-relation-list", []),
+        "MusicBrainz artist relationships",
+    )
+    for relationship in artist_rels:
+        relationship_type = str(relationship.get("type", "")).lower()
+        artist_name = relationship.get("artist", {}).get("name")
+        if not artist_name:
+            continue
+        if relationship_type in ("composer", "writer"):
+            composers.append(artist_name)
+        if relationship_type in ("lyricist", "writer"):
+            lyricists.append(artist_name)
+        if "producer" in relationship_type:
+            producers.append(artist_name)
+        if relationship_type == "remixer":
+            remixers.append(artist_name)
 
-    try:
-        release_data = _call_musicbrainz(
-            musicbrainzngs.get_release_by_id,
-            release_mbid,
-            includes=["recordings", "media", "artist-credits"],
-        )
-        musicbrainz_payload = require_api_object(
-            release_data, "MusicBrainz release tracks response"
-        )
-        release = require_api_object(
-            musicbrainz_payload.get("release"), "MusicBrainz release"
-        )
-        mediums = require_api_records(
-            release.get("medium-list", []), "MusicBrainz media"
-        )
-        mapping: dict[Any, str] = {}
-        for medium_idx, medium in enumerate(mediums, start=1):
-            disc_num = safe_int(medium.get("position")) or medium_idx
-            for track in require_api_records(
-                medium.get("track-list", []), "MusicBrainz medium tracks"
-            ):
-                position = track.get("position")
-                recording_id = track.get("recording", {}).get("id")
-                if position and recording_id:
-                    pos_int = safe_int(position)
-                    if pos_int is not None:
-                        recording_mbid = str(recording_id)
-                        mapping[(disc_num, pos_int)] = recording_mbid
-                        mapping[f"{disc_num}-{pos_int}"] = recording_mbid
-                        if disc_num == 1 or len(mediums) <= 1:
-                            mapping[pos_int] = recording_mbid
-        set_cached_api(cache_key, mapping)
-        return mapping
-    except (
-        MusicBrainzError,
-        OSError,
-    ) as error:
-        LOG.debug(f"MusicBrainz album track fetch failed for {release_mbid}: {error}")
-        return {}
+    work_rels = require_api_records(
+        recording.get("work-relation-list", []),
+        "MusicBrainz work relationships",
+    )
+    work_id = None
+    if work_rels:
+        work_id = work_rels[0].get("work", {}).get("id")
+
+    return {
+        "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
+        "lyricist": ", ".join(dict.fromkeys(lyricists)) if lyricists else None,
+        "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
+        "remixer": ", ".join(dict.fromkeys(remixers)) if remixers else None,
+        "musicbrainz_workid": str(work_id) if is_valid_uuid(work_id) else None,
+    }
 
 
 @coalesce_lookup
@@ -493,37 +479,6 @@ def fetch_musicbrainz_recording_details(
         isrc_list = recording_dict.get("isrc-list", [])
         isrc = str(isrc_list[0]) if isrc_list else None
 
-        composers: list[str] = []
-        lyricists: list[str] = []
-        producers: list[str] = []
-        remixers: list[str] = []
-
-        artist_rels = require_api_records(
-            recording_dict.get("artist-relation-list", []),
-            "MusicBrainz artist relationships",
-        )
-        for relationship in artist_rels:
-            relationship_type = str(relationship.get("type", "")).lower()
-            artist_name = relationship.get("artist", {}).get("name")
-            if not artist_name:
-                continue
-            if relationship_type in ("composer", "writer"):
-                composers.append(artist_name)
-            if relationship_type in ("lyricist", "writer"):
-                lyricists.append(artist_name)
-            if "producer" in relationship_type:
-                producers.append(artist_name)
-            if relationship_type == "remixer":
-                remixers.append(artist_name)
-
-        work_rels = require_api_records(
-            recording_dict.get("work-relation-list", []),
-            "MusicBrainz work relationships",
-        )
-        work_id = None
-        if work_rels:
-            work_id = work_rels[0].get("work", {}).get("id")
-
         artist_credits = recording_dict.get("artist-credit", [])
         artist_id = (
             artist_credits[0].get("artist", {}).get("id")
@@ -541,11 +496,7 @@ def fetch_musicbrainz_recording_details(
             "isrc": isrc,
             "isrcs": isrc_list,
             "disambiguation": recording_dict.get("disambiguation"),
-            "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
-            "lyricist": ", ".join(dict.fromkeys(lyricists)) if lyricists else None,
-            "producers": ", ".join(dict.fromkeys(producers)) if producers else None,
-            "remixer": ", ".join(dict.fromkeys(remixers)) if remixers else None,
-            "musicbrainz_workid": str(work_id) if is_valid_uuid(work_id) else None,
+            **_parse_recording_credits(recording_dict),
             "musicbrainz_artistid": str(artist_id)
             if is_valid_uuid(artist_id)
             else None,
@@ -573,7 +524,6 @@ def _release_track_indexes(
     media_format = None
     total_tracks = 0
     total_discs = len(mediums) if mediums else 1
-    tracks_by_position: dict[Any, dict[str, object]] = {}
     tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
     tracks_by_mbid: dict[str, dict[str, object]] = {}
     repeated_recording_ids: set[str] = set()
@@ -604,38 +554,6 @@ def _release_track_indexes(
                 recording_id = str(recording.get("id", "")).strip()
                 isrc_list = recording.get("isrc-list", [])
                 recording_isrc = str(isrc_list[0]) if isrc_list else None
-
-                rec_composers: list[str] = []
-                rec_lyricists: list[str] = []
-                rec_producers: list[str] = []
-                rec_remixers: list[str] = []
-
-                for relationship in require_api_records(
-                    recording.get("artist-relation-list", []),
-                    "MusicBrainz recording relationships",
-                ):
-                    relationship_type = str(relationship.get("type", "")).lower()
-                    credit_artist_name = relationship.get("artist", {}).get("name")
-                    if not credit_artist_name:
-                        continue
-                    if relationship_type in ("composer", "writer"):
-                        rec_composers.append(credit_artist_name)
-                    if relationship_type in ("lyricist", "writer"):
-                        rec_lyricists.append(credit_artist_name)
-                    if "producer" in relationship_type:
-                        rec_producers.append(credit_artist_name)
-                    if relationship_type == "remixer":
-                        rec_remixers.append(credit_artist_name)
-
-                work_rels = require_api_records(
-                    recording.get("work-relation-list", []),
-                    "MusicBrainz recording works",
-                )
-                rec_work_id = None
-                if work_rels:
-                    w_id = work_rels[0].get("work", {}).get("id")
-                    if is_valid_uuid(w_id):
-                        rec_work_id = str(w_id)
 
                 track_artist = (
                     track_item.get("artist-credit-phrase")
@@ -680,29 +598,9 @@ def _release_track_indexes(
                     "isrc": recording_isrc,
                     "isrcs": isrc_list,
                     "disambiguation": recording.get("disambiguation"),
-                    "composer": ", ".join(dict.fromkeys(rec_composers))
-                    if rec_composers
-                    else None,
-                    "lyricist": ", ".join(dict.fromkeys(rec_lyricists))
-                    if rec_lyricists
-                    else None,
-                    "producers": ", ".join(dict.fromkeys(rec_producers))
-                    if rec_producers
-                    else None,
-                    "remixer": ", ".join(dict.fromkeys(rec_remixers))
-                    if rec_remixers
-                    else None,
-                    "musicbrainz_workid": rec_work_id,
+                    **_parse_recording_credits(recording),
                 }
                 tracks_by_disc_and_position[(disc_num, pos_int)] = rec_details
-                tracks_by_position[(disc_num, pos_int)] = rec_details
-                tracks_by_position[f"{disc_num}-{pos_int}"] = rec_details
-                if (
-                    disc_num == 1
-                    or total_discs == 1
-                    or pos_int not in tracks_by_position
-                ):
-                    tracks_by_position[pos_int] = rec_details
                 if is_valid_uuid(recording_id):
                     # Recording identifiers identify audio, not a unique release slot.
                     if recording_id in tracks_by_mbid:
@@ -715,7 +613,6 @@ def _release_track_indexes(
         "media": media_format,
         "total_tracks": total_tracks if total_tracks > 0 else None,
         "total_discs": total_discs,
-        "tracks_by_position": tracks_by_position,
         "tracks_by_disc_and_position": tracks_by_disc_and_position,
         "tracks_by_mbid": tracks_by_mbid,
     }
@@ -732,7 +629,7 @@ def fetch_musicbrainz_release_details(
     if not release_mbid or not is_valid_uuid(release_mbid):
         return None
 
-    cache_key = f"mb_rel_details:v3:{release_mbid}"
+    cache_key = f"mb_rel_details:v4:{release_mbid}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict) and "tracks_by_disc_and_position" in cached:
         return cached

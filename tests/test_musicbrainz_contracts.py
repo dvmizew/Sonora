@@ -147,7 +147,12 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
                 }
             },
         ):
-            self.assertEqual(service.fetch_album_track_mbids(MBID), {})
+            self.assertEqual(
+                service._release_track_indexes(
+                    {"medium-list": [{"track-list": [{"position": "bad"}]}]}, None, None
+                )["tracks_by_disc_and_position"],
+                {},
+            )
 
     def setUp(self) -> None:
         cache_lookup = patch.object(service, "get_cached_api", return_value=None)
@@ -418,7 +423,6 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
             service, "_call_musicbrainz", return_value={"release": release}
         ):
             details = service.fetch_musicbrainz_release_details(MBID)
-            mbids = service.fetch_album_track_mbids(MBID)
         assert details is not None
         expected = {
             "label": "Publisher",
@@ -436,10 +440,6 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
         for field, value in expected.items():
             with self.subTest(field=field):
                 self.assertEqual(details[field], value)
-        self.assertEqual(
-            mbids,
-            {(1, 1): MBID, "1-1": MBID, 1: MBID, (2, 1): OTHER_MBID, "2-1": OTHER_MBID},
-        )
         indexes = details["tracks_by_disc_and_position"]
         assert isinstance(indexes, dict)
         self.assertEqual(indexes[(1, 1)]["disc_subtitle"], "First disc")
@@ -448,7 +448,6 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
 
     def test_release_empty_and_invalid_cached_requests(self) -> None:
         self.assertIsNone(service.fetch_musicbrainz_release_details(""))
-        self.assertEqual(service.fetch_album_track_mbids(""), {})
         with patch.object(
             service, "get_cached_api", return_value={"tracks_by_disc_and_position": {}}
         ):
@@ -456,8 +455,6 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
                 service.fetch_musicbrainz_release_details(MBID),
                 {"tracks_by_disc_and_position": {}},
             )
-        with patch.object(service, "get_cached_api", return_value={(1, 1): MBID}):
-            self.assertEqual(service.fetch_album_track_mbids(MBID), {(1, 1): MBID})
         with patch.object(service, "_call_musicbrainz", return_value={"release": {}}):
             self.assertIsNone(service.fetch_musicbrainz_release_details(MBID))
         with patch.object(
@@ -489,11 +486,12 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
             }
             with self.subTest(work_id=work_id):
                 details = service._release_track_indexes(release, "Primary", None)
-                tracks = details["tracks_by_position"]
+                tracks = details["tracks_by_disc_and_position"]
                 assert isinstance(tracks, dict)
-                self.assertEqual(tracks[1]["artist"], "Primary")
+                self.assertEqual(tracks[(1, 1)]["artist"], "Primary")
                 self.assertEqual(
-                    tracks[1]["musicbrainz_workid"], MBID if work_id == MBID else None
+                    tracks[(1, 1)]["musicbrainz_workid"],
+                    MBID if work_id == MBID else None,
                 )
-                self.assertIsNone(tracks[1]["recording_mbid"])
+                self.assertIsNone(tracks[(1, 1)]["recording_mbid"])
                 self.assertIsNone(details["total_tracks"])

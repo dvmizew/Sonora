@@ -1,6 +1,7 @@
 import re
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum, auto
 from pathlib import Path
 
 import orjson
@@ -35,7 +36,11 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import CheckReport, TrackInfo
-from sonora.core.sidecars import find_companion_lyrics
+from sonora.core.sidecars import (
+    find_companion_lyrics,
+    is_lyrics_duration_valid,
+    lyrics_identity_matches,
+)
 from sonora.core.text import is_valid_uuid, normalize_genre, normalize_str
 from sonora.core.titles import (
     _is_corrupt_bracket,
@@ -45,9 +50,14 @@ from sonora.core.titles import (
     recording_identity_matches,
 )
 from sonora.modules.matching import _is_generic
-from sonora.services.lyrics import is_lyrics_duration_valid, lyrics_identity_matches
 
 FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
+
+
+class _IssueCategory(Enum):
+    CORRUPT = auto()
+    MISSING_METADATA = auto()
+    MISSING_LYRICS = auto()
 
 
 def check_brackets_corruption(name: str) -> list[str]:
@@ -66,7 +76,11 @@ def check_file(
     file_path: Path,
     check_spectral: bool = False,
     track_metadata: TrackInfo | None = None,
+    *,
+    categories: set[_IssueCategory] | None = None,
 ) -> list[str]:
+    if categories is None:
+        categories = set()
     issues: list[str] = []
     track: TrackInfo | None = track_metadata
     if not file_path.exists():
@@ -78,16 +92,19 @@ def check_file(
     if file_path.suffix.lower() == ".flac":
         try:
             if not verify_flac_checksum(file_path):
+                categories.add(_IssueCategory.CORRUPT)
                 issues.append(
                     "FLAC audio stream MD5 checksum verification failed (corrupted FLAC)."
                 )
         except OSError as error:
+            categories.add(_IssueCategory.CORRUPT)
             issues.append(f"Checksum check failed: {error}")
 
         try:
             audio_flac = FLAC(str(file_path))
             for index, picture in enumerate(audio_flac.pictures):
                 if len(picture.data) == 0:
+                    categories.add(_IssueCategory.CORRUPT)
                     issues.append(f"Corrupt 0-byte picture block at index {index}.")
         except (MutagenError, OSError) as error:
             LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
@@ -100,6 +117,7 @@ def check_file(
         try:
             is_fake, _, description = detect_fake_lossless(file_path)
             if is_fake:
+                categories.add(_IssueCategory.CORRUPT)
                 issues.append(
                     description
                     or "Possible fake lossless (spectral cutoff below 16kHz)."
@@ -127,6 +145,7 @@ def check_file(
         ]
         for condition, msg in missing_checks:
             if condition:
+                categories.add(_IssueCategory.MISSING_METADATA)
                 issues.append(msg)
 
         for position, total, position_label, total_label in (
@@ -163,6 +182,7 @@ def check_file(
         ]:
             tag_value = getattr(track, field_name)
             if not tag_value and required:
+                categories.add(_IssueCategory.MISSING_METADATA)
                 issues.append(f"Missing {tag_label} tag.")
             elif tag_value and not is_valid_uuid(tag_value, allow_multivalue=True):
                 issues.append(f"Invalid UUID format in {tag_label}: '{tag_value}'")
@@ -252,8 +272,10 @@ def check_file(
         track_number=track.track_number if track is not None else None,
     )
     if not companion_lrcs:
+        categories.add(_IssueCategory.MISSING_LYRICS)
         issues.append("Missing synchronized lyrics (.lrc) file.")
     elif any(lrc.stat().st_size == 0 for lrc in companion_lrcs):
+        categories.add(_IssueCategory.CORRUPT)
         issues.append("Corrupt 0-byte synchronized lyrics (.lrc) file.")
 
     if track is not None:
@@ -279,17 +301,21 @@ def check_file(
 
 def _check_single_file(
     path: Path, check_spectral: bool = False
-) -> tuple[Path, list[str], TrackInfo | None]:
+) -> tuple[Path, list[str], TrackInfo | None, set[_IssueCategory]]:
     wait_if_paused()
     track_metadata: TrackInfo | None = None
     try:
         track_metadata = read_track_metadata(path)
     except OSError:
         pass
+    categories: set[_IssueCategory] = set()
     file_issues = check_file(
-        path, check_spectral=check_spectral, track_metadata=track_metadata
+        path,
+        check_spectral=check_spectral,
+        track_metadata=track_metadata,
+        categories=categories,
     )
-    return path, file_issues, track_metadata
+    return path, file_issues, track_metadata, categories
 
 
 def write_check_report_json(
@@ -343,12 +369,15 @@ def _check_folder_album_consistency(
     folder_path: Path,
     report: CheckReport,
     folder_issues: list[str],
+    metadata_issue_paths: set[Path] | None = None,
 ) -> tuple[str | None, str | None]:
     """
     Verify consistent ALBUM and ALBUMARTIST metadata across audio tracks in an album folder.
     Flags specific outlier files with mismatched album tags and records folder-level issues.
     Returns (dominant_album, dominant_artist) for downstream alien track detection.
     """
+    if metadata_issue_paths is None:
+        metadata_issue_paths = set()
     total_tracks = len(tracks_in_folder)
     if total_tracks == 0:
         return None, None
@@ -398,13 +427,13 @@ def _check_folder_album_consistency(
                         report.issues.setdefault(str(file_path), []).append(
                             mismatch_issue
                         )
-                        report.missing_metadata += 1
+                        metadata_issue_paths.add(file_path)
                         try:
                             display_name = str(file_path.relative_to(folder_path))
                         except ValueError:
                             display_name = file_path.name
-                        LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
-                        LOG.warning(f"   ∟ ⚠️  {escape(mismatch_issue)}")
+                        LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                        LOG.detail(f"   ∟ ⚠️  {escape(mismatch_issue)}")
 
     album_artist_counts: Counter[str] = Counter()
     artist_counts: Counter[str] = Counter()
@@ -432,12 +461,13 @@ def _check_folder_album_consistency(
                         f"(folder consensus: '{dominant_artist}')"
                     )
                     report.issues.setdefault(str(file_path), []).append(aa_issue)
+                    metadata_issue_paths.add(file_path)
                     try:
                         display_name = str(file_path.relative_to(folder_path))
                     except ValueError:
                         display_name = file_path.name
-                    LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.warning(f"   ∟ ⚠️  {escape(aa_issue)}")
+                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                    LOG.detail(f"   ∟ ⚠️  {escape(aa_issue)}")
     elif artist_counts:
         dominant_artist, _ = artist_counts.most_common(1)[0]
 
@@ -453,6 +483,7 @@ def _check_folder_alien_tracks(
     folder_path: Path,
     report: CheckReport,
     folder_issues: list[str],
+    metadata_issue_paths: set[Path] | None = None,
 ) -> None:
     """
     Detect alien or displaced tracks inside an album directory without external network queries.
@@ -461,6 +492,8 @@ def _check_folder_alien_tracks(
     2. Alien single tracks colliding on track number with discordant album tags.
     3. Extreme sequence position outliers exceeding the album sequence boundary.
     """
+    if metadata_issue_paths is None:
+        metadata_issue_paths = set()
     total_tracks = len(tracks_in_folder)
     if total_tracks < 2 or not dominant_album:
         return
@@ -550,13 +583,13 @@ def _check_folder_alien_tracks(
                 if issue_msg not in existing_issues:
                     existing_issues.append(issue_msg)
                     folder_issues.append(issue_msg)
-                    report.missing_metadata += 1
+                    metadata_issue_paths.add(file_path)
                     try:
                         display_name = str(file_path.relative_to(folder_path))
                     except ValueError:
                         display_name = file_path.name
-                    LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.warning(f"   ∟ ⚠️  {escape(issue_msg)}")
+                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                    LOG.detail(f"   ∟ ⚠️  {escape(issue_msg)}")
 
 
 def _check_identifier_conflicts(
@@ -597,7 +630,7 @@ def _check_identifier_conflicts(
             existing = report.issues.setdefault(str(path), [])
             if description not in existing:
                 existing.append(description)
-                LOG.warning(f"{escape(str(path))}: {escape(description)}")
+                LOG.detail(f"{escape(str(path))}: {escape(description)}")
 
 
 def check_library(
@@ -615,6 +648,7 @@ def check_library(
 
     files_to_process = find_audio_files(folder_path, recursive=True)
 
+    metadata_issue_paths: set[Path] = set()
     folder_tracks: dict[Path, list[tuple[Path, TrackInfo]]] = defaultdict(list)
     folder_tracks_found: dict[Path, dict[tuple[int, int], list[str]]] = defaultdict(
         lambda: defaultdict(list)
@@ -634,7 +668,12 @@ def check_library(
         with interactive_pause_listener(progress, task) as pause_stop_event:
             try:
                 for future in as_completed(future_to_path):
-                    path, file_issues, track_metadata = future.result()
+                    path, file_issues, track_metadata, categories = future.result()
+                    report.corrupt_files += _IssueCategory.CORRUPT in categories
+                    report.missing_lrc += _IssueCategory.MISSING_LYRICS in categories
+                    if _IssueCategory.MISSING_METADATA in categories:
+                        metadata_issue_paths.add(path)
+                    report.missing_metadata = len(metadata_issue_paths)
                     report.total_files += 1
                     folder = path.parent
 
@@ -649,29 +688,9 @@ def check_library(
                     if file_issues:
                         report.issues[str(path)] = file_issues
                         display_name = str(path.relative_to(folder_path))
-                        LOG.warning(f"🔍 [bold]{escape(display_name)}[/bold]")
+                        LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
                         for issue in file_issues:
-                            LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
-                        norm_issues = [normalize_str(issue) for issue in file_issues]
-                        if any(
-                            any(
-                                k in ni
-                                for k in (
-                                    "corrupted flac",
-                                    "checksum",
-                                    "0-byte",
-                                    "fake lossless",
-                                )
-                            )
-                            for ni in norm_issues
-                        ):
-                            report.corrupt_files += 1
-                        if any(
-                            "missing" in ni and "lrc" not in ni for ni in norm_issues
-                        ):
-                            report.missing_metadata += 1
-                        if any("missing" in ni and "lrc" in ni for ni in norm_issues):
-                            report.missing_lrc += 1
+                            LOG.detail(f"   ∟ ⚠️  {escape(issue)}")
 
                     progress.advance(task)
             except (KeyboardInterrupt, RuntimeError) as exc:
@@ -708,6 +727,7 @@ def check_library(
                 folder_path=folder_path,
                 report=report,
                 folder_issues=folder_issues,
+                metadata_issue_paths=metadata_issue_paths,
             )
             _check_folder_alien_tracks(
                 folder=folder,
@@ -718,6 +738,7 @@ def check_library(
                 folder_path=folder_path,
                 report=report,
                 folder_issues=folder_issues,
+                metadata_issue_paths=metadata_issue_paths,
             )
 
             discs: dict[int, set[int]] = defaultdict(set)
@@ -735,19 +756,11 @@ def check_library(
         if folder_issues:
             report.issues[str(folder)] = folder_issues
             display_folder = str(folder.relative_to(folder_path))
-            LOG.warning(f"📁 [bold]{escape(display_folder)}[/bold]")
+            LOG.detail(f"📁 [bold]{escape(display_folder)}[/bold]")
             for issue in folder_issues:
-                LOG.warning(f"   ∟ ⚠️  {escape(issue)}")
+                LOG.detail(f"   ∟ ⚠️  {escape(issue)}")
 
-    report.missing_metadata = sum(
-        any(
-            ("missing" in issue.lower() and "lrc" not in issue.lower())
-            or issue.startswith(("Mismatched", "Alien", "Displaced"))
-            for issue in issues
-        )
-        for path, issues in report.issues.items()
-        if Path(path).suffix.lower() in SUPPORTED_EXTS
-    )
+    report.missing_metadata = len(metadata_issue_paths)
     if output_json:
         write_check_report_json(report, folder_path, output_json, aborted_by_user=False)
 

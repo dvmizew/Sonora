@@ -1,4 +1,5 @@
 import dataclasses
+from pathlib import Path
 from unittest.mock import patch
 
 import taglib
@@ -10,12 +11,13 @@ from sonora.audio.metadata import (
 )
 from sonora.core.artists import get_primary_artist
 from sonora.core.models import TrackInfo
-from sonora.modules import catalog_enrichment as catalog_enrichment_module
-from sonora.modules import matching
+from sonora.modules import matching, metadata_consensus
 from sonora.modules import musicbrainz_enrichment as musicbrainz_enrichment_module
 from sonora.modules import track_processing as track_processing_module
-from sonora.services import artist_resolution as artists_module
+from sonora.modules.metadata_consensus import build_provider_proposal
+from sonora.services import artist_resolution
 from tests.regression_support import AudioRegressionTestCase
+from tests.support import IsolatedTestCase
 
 
 class TestMetadataIdentityRegressions(AudioRegressionTestCase):
@@ -31,8 +33,8 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
         release = {
             "album_artist": "Alpha",
             "title": "Album",
-            "tracks_by_position": {
-                1: {"artist": "Alpha", "title": "Intro", "isrc": "USAAA0000001"}
+            "tracks_by_disc_and_position": {
+                (1, 1): {"artist": "Alpha", "title": "Intro", "isrc": "USAAA0000001"}
             },
         }
         self.assertTrue(
@@ -108,8 +110,8 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
     def test_wrong_identifier_does_not_heal_from_title(self) -> None:
         track = TrackInfo(self.root / "track.flac", title="Original", track_number=2)
         release = {
-            "tracks_by_number": {
-                2: {"itunes_trackid": "different", "title": "Original"}
+            "tracks_by_disc_and_position": {
+                (1, 2): {"itunes_trackid": "different", "title": "Original"}
             }
         }
         self.assertIsNone(
@@ -121,7 +123,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
     def test_multiple_musicbrainz_isrcs_preserve_valid_existing_code(self) -> None:
         track = TrackInfo(self.root / "track.flac", isrc="SECOND")
         recording = {"title": "Original", "isrc": "FIRST", "isrcs": ["FIRST", "SECOND"]}
-        catalog_enrichment_module.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             track, recording, {"isrc": "isrc"}, force=True, source="MusicBrainz"
         )
         self.assertEqual(track.isrc, "SECOND")
@@ -131,7 +133,11 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
         self.assertFalse(matching._recording_isrc_matches("SECOND", {"isrcs": []}))
         self.assertEqual(
             matching._match_position_by_authoritative_id(
-                track, None, "isrc", "SECOND", [{"tracks_by_number": {3: recording}}]
+                track,
+                None,
+                "isrc",
+                "SECOND",
+                [{"tracks_by_disc_and_position": {(1, 3): recording}}],
             ),
             3,
         )
@@ -182,7 +188,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             with (
                 self.subTest(isrc=isrc),
                 patch.object(
-                    artists_module, "resolve_artist_name", return_value="Alpha"
+                    artist_resolution, "resolve_artist_name", return_value="Alpha"
                 ),
             ):
                 track = TrackInfo(
@@ -255,7 +261,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             producers="Producer One, Producer Two",
             copyright="2024 Major Records",
         )
-        catalog_enrichment_module.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             track,
             {
                 "label": "Major Records",
@@ -271,11 +277,11 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
         self.assertEqual(track.copyright, "2024 Major Records")
         self.assertNotIn("label", track.metadata_sources)
         blank = TrackInfo(track.file_path)
-        catalog_enrichment_module.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             blank, {"label": "Major Records"}, {"label": "label"}, force=True
         )
         self.assertEqual(blank.label, "Major Records")
-        catalog_enrichment_module.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             blank, {"label": "Different Records"}, {"label": "label"}, force=True
         )
         self.assertEqual(blank.label, "Different Records")
@@ -300,3 +306,36 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
                 write_track_metadata(track)
                 with taglib.File(str(audio_path)) as audio_tags:
                     self.assertEqual(audio_tags.tags["GENRE"], expected)
+
+
+class TestProviderDurationEvidence(IsolatedTestCase):
+    def test_duration_conflict_is_checked_without_artist_or_title_changes(self) -> None:
+        for duration, accepted in (
+            (180.0, True),
+            (182.0, True),
+            (190.0, False),
+            (60.0, False),
+            (None, True),
+        ):
+            with self.subTest(duration=duration):
+                recording = TrackInfo(
+                    Path("recording.flac"),
+                    artist="Alpha",
+                    title="Original Song",
+                    duration=180,
+                )
+                proposal = dataclasses.replace(
+                    recording,
+                    duration=duration,
+                    genre="Rock",
+                    metadata_sources={"genre": "iTunes"},
+                )
+                metadata_consensus.merge_provider_proposals(
+                    recording,
+                    [build_provider_proposal(recording, proposal)],
+                )
+                self.assertEqual(recording.genre, "Rock" if accepted else None)
+                self.assertEqual(
+                    "identity" in recording.metadata_conflicts, not accepted
+                )
+                self.assertEqual(recording.duration, 180)

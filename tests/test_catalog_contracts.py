@@ -4,13 +4,14 @@ from functools import partial
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 
 from sonora.core.config import SonoraConfig
 from sonora.core.models import TrackInfo
 from sonora.modules import catalog_enrichment as catalog
+from sonora.modules import matching, metadata_consensus
 from sonora.services import deezer as deezer_service
 from sonora.services import discogs as discogs_service
 from sonora.services import genius as genius_service
@@ -47,7 +48,7 @@ class TestMetadataMappingContracts(IsolatedTestCase):
             "label": "Publisher",
             "isrc": "USAAA2100001",
         }
-        catalog.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             recording,
             provider_fields,
             {name: name for name in provider_fields},
@@ -77,6 +78,8 @@ class TestMetadataMappingContracts(IsolatedTestCase):
             with self.subTest(field=name):
                 self.assertEqual(getattr(recording, name), value)
         self.assertEqual(recording.metadata_sources["label"], "Deezer")
+        for name in ("track_number", "disc_number", "total_tracks", "total_discs"):
+            self.assertEqual(recording.metadata_sources[name], "Deezer")
 
     def test_invalid_and_absent_provider_values_preserve_existing_tags(self) -> None:
         cases: tuple[tuple[str, object], ...] = (
@@ -95,7 +98,7 @@ class TestMetadataMappingContracts(IsolatedTestCase):
             recording = TrackInfo(Path("recording.flac"), artist="Primary")
             before = dataclasses.replace(recording)
             with self.subTest(field=field, value=value):
-                catalog.apply_metadata_mapping(
+                metadata_consensus.apply_metadata_mapping(
                     recording, {"value": value}, {"value": field}, force=True
                 )
                 self.assertEqual(recording, before)
@@ -109,7 +112,7 @@ class TestMetadataMappingContracts(IsolatedTestCase):
             track_number=3,
             disc_number=1,
         )
-        catalog.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             recording,
             {
                 "label": "Publisher",
@@ -129,22 +132,22 @@ class TestMetadataMappingContracts(IsolatedTestCase):
         recording = TrackInfo(
             Path("recording.flac"), label="Existing", track_number=3, disc_number=1
         )
-        catalog.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             recording,
             {"label": "Replacement", "track_number": 2, "disc_number": 1},
             {name: name for name in ("label", "track_number", "disc_number")},
             source="Deezer",
         )
         self.assertEqual((recording.label, recording.track_number), ("Existing", 3))
-        catalog.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             recording, {"label": "Existing"}, {"label": "label"}, source="Deezer"
         )
         self.assertEqual(recording.metadata_sources["label"], "Deezer")
-        catalog.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             recording, {"label": "Existing"}, {"label": "label"}, source="Discogs"
         )
         self.assertEqual(recording.metadata_sources["label"], "Deezer")
-        catalog.apply_metadata_mapping(
+        metadata_consensus.apply_metadata_mapping(
             recording, {"label": "Different"}, {"label": "label"}, force=True
         )
         self.assertEqual(recording.label, "Different")
@@ -188,7 +191,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "title": "Record",
             "nb_tracks": 5,
             "release_date": "2021",
-            "tracks_by_position": {3: {"title": "Song"}},
+            "tracks_by_disc_and_position": {(1, 3): {"title": "Song"}},
         }
         recording = dataclasses.replace(
             self.recording,
@@ -210,7 +213,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
     def test_clean_title_index_matches_without_a_position(self) -> None:
         recording = {"title": "Recording"}
         self.assertEqual(
-            catalog._find_track_in_album_mapping(
+            matching._find_track_in_album_mapping(
                 {"recording": recording}, None, "Recording (feat. Guest)", None
             ),
             (recording, True),
@@ -220,7 +223,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         recording = {"title": "Recording"}
         for title_index, position_index, disc_index, title, expected in (
             ({}, {}, {(2, 3): recording}, "Recording", recording),
-            ({}, {"2-3": recording}, None, "Recording", recording),
+            ({}, {(2, 3): recording}, None, "Recording", recording),
             (
                 {"recording feat guest": recording},
                 {},
@@ -235,8 +238,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 position_index=position_index,
                 disc_index=disc_index,
             ):
-                matched, from_album = catalog._find_track_in_album_mapping(
-                    title_index, position_index, title, 3, 2, disc_index
+                matched, from_album = matching._find_track_in_album_mapping(
+                    title_index, disc_index or position_index, title, 3, 2
                 )
                 self.assertEqual(matched, expected)
                 self.assertEqual(from_album, expected is not None)
@@ -296,8 +299,12 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         self.assertIsNone(recording.style)
         self.assertEqual(recording.mood, "Verified")
 
+    @patch.object(itunes_service, "fetch_itunes_track_metadata", return_value=None)
+    @patch.object(deezer_service, "fetch_deezer_track_details", return_value=None)
     def test_album_structure_preserves_existing_totals_and_authoritative_dates(
         self,
+        _deezer_lookup: MagicMock,
+        _itunes_lookup: MagicMock,
     ) -> None:
         recording = dataclasses.replace(
             self.recording,
@@ -310,8 +317,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         catalog._enrich_itunes(
             recording,
             {
-                "tracks_by_number": {
-                    3: {
+                "tracks_by_disc_and_position": {
+                    (1, 3): {
                         "title": "Song",
                         "date": "2021",
                         "disc_number": 1,
@@ -329,7 +336,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             {
                 "title": "Record",
                 "nb_tracks": "bad",
-                "tracks_by_position": {3: {"title": "Song"}},
+                "tracks_by_disc_and_position": {(1, 3): {"title": "Song"}},
             },
             has_album_context=True,
             force=True,
@@ -507,11 +514,11 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "date": "2020",
             "disc_number": 2,
             "total_discs": 2,
-            "trackName": "Found",
-            "artistName": "Primary",
+            "title": "Found",
+            "artist": "Primary",
             "itunes_trackid": "123",
         }
-        album = {"tracks_by_number": {1: track}}
+        album = {"tracks_by_disc_and_position": {(1, 1): track}}
         self.recording.title = "Untitled"
         self.recording.itunes_trackid = "123"
         self.recording.track_number = 1
@@ -626,7 +633,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             title="Untitled",
             isrc="USAAA2100001",
             track_number=1,
-            disc_number=None,
+            disc_number=2,
         )
         track = {
             "title": "Found Song",
@@ -640,10 +647,13 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         }
         album = {
             "title": "Found Album",
-            "nb_tracks": 8,
+            "nb_tracks": 9,
             "genre": "Rock",
             "release_date": "2021",
-            "tracks_by_position": {1: track},
+            "tracks_by_disc_and_position": {
+                (1, 1): {},
+                **{(2, position): track for position in range(1, 9)},
+            },
         }
         catalog._enrich_deezer(recording, album, has_album_context=True, force=True)
         self.assertEqual(
@@ -689,8 +699,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             ):
                 catalog._enrich_deezer(recording, None, has_album_context=has_context)
             lookup.assert_called_once_with(recording.isrc)
-            self.assertEqual(recording.track_number, None if has_context else 7)
-            self.assertEqual(recording.disc_number, None if has_context else 3)
+            self.assertIsNone(recording.track_number)
+            self.assertIsNone(recording.disc_number)
 
     def test_deezer_single_fallback_preserves_authoritative_credits(self) -> None:
         self.recording.musicbrainz_trackid = MBID

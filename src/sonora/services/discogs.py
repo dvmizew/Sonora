@@ -347,7 +347,7 @@ def search_discogs_release(
 
     count_suffix = f":{expected_track_count}" if expected_track_count else ""
     artist_key = normalize_str(artist)
-    cache_key = f"discogs_search:v4:{artist_key}:{normalize_str(album)}{count_suffix}"
+    cache_key = f"discogs_search:v5:{artist_key}:{normalize_str(album)}{count_suffix}"
 
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
@@ -394,7 +394,7 @@ def search_discogs_release(
                 tied_candidates = True
 
         if tied_candidates:
-            LOG.warning(
+            LOG.detail(
                 f"Ambiguous Discogs release for {escape(artist)} - {escape(album)}"
             )
             return None
@@ -412,7 +412,7 @@ def search_discogs_release(
                 expected_track_count is not None
                 and full_details.get("audio_track_count") != expected_track_count
             ):
-                LOG.warning(
+                LOG.detail(
                     f"Discogs release track count conflicts with {escape(artist)} - {escape(album)}"
                 )
                 return None

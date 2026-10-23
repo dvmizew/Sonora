@@ -9,12 +9,10 @@ from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.artists import (
     _load_user_overrides,
     is_artist_group_candidate,
+    normalize_artist_name,
 )
 from sonora.core.artists import (
     is_single_group_artist as is_known_group_artist,
-)
-from sonora.core.artists import (
-    resolve_artist_name as resolve_local_artist_name,
 )
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.coordination import coalesce_lookup
@@ -32,7 +30,7 @@ from sonora.services import musicbrainz
 @coalesce_lookup
 def resolve_artist_name(raw_name: str | None) -> str:
     """Resolve canonical artist branding through validated provider names and aliases."""
-    clean_name = resolve_local_artist_name(raw_name)
+    clean_name = normalize_artist_name(raw_name)
     if not raw_name or not str(raw_name).strip():
         return clean_name
     normalized = normalize_str(clean_name)
@@ -42,7 +40,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
     ):
         return clean_name
 
-    cache_key = f"canonical_artist:{normalized}"
+    cache_key = f"canonical_artist:v2:{normalized}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str) and cached:
         cached_words = cached.split()
@@ -161,13 +159,14 @@ def resolve_artist_name(raw_name: str | None) -> str:
         LOG.debug(f"Deezer API error during artist resolution: {error}")
 
     clean_words = clean_name.split()
+    alias_candidates: dict[str, str] = {}
     for artist in artists:
         candidate_artist = str(artist.get("name", "")).strip()
         if not candidate_artist:
             continue
         candidate_words = candidate_artist.split()
 
-        # Guardrail: Single-word stage names must never expand into multi-word entities via aliases
+        # Short stage names can also be aliases of unrelated, longer artist names.
         if len(clean_words) == 1 and len(candidate_words) > 1:
             continue
         for alias_item in artist.get("alias-list", []):
@@ -188,8 +187,14 @@ def resolve_artist_name(raw_name: str | None) -> str:
                 or normalize_str(alias_name) == normalized
             ):
                 canonical_artist = clean_unicode_punct(candidate_artist)
-                set_cached_api(cache_key, canonical_artist)
-                return canonical_artist
+                alias_candidates.setdefault(
+                    normalize_str(canonical_artist), canonical_artist
+                )
+
+    if len(alias_candidates) == 1:
+        canonical_artist = next(iter(alias_candidates.values()))
+        set_cached_api(cache_key, canonical_artist)
+        return canonical_artist
 
     normalized_artist = clean_unicode_punct(clean_name)
     set_cached_api(cache_key, normalized_artist)
@@ -225,7 +230,7 @@ def is_single_group_artist(raw_name: str | None) -> bool:
                 canonical_name = clean_unicode_punct(
                     str(artist.get("name", "")).strip()
                 )
-                set_cached_api(f"canonical_artist:{normalized}", canonical_name)
+                set_cached_api(f"canonical_artist:v2:{normalized}", canonical_name)
                 set_cached_api(cache_key, True)
                 return True
         set_cached_api(cache_key, False)

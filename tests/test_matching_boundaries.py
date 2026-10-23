@@ -3,8 +3,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from sonora.core.config import SonoraConfig
 from sonora.core.models import TrackInfo
-from sonora.modules import catalog_enrichment, matching
+from sonora.core.titles import recording_identity_matches, score_artist_title_match
+from sonora.modules import matching
+from sonora.modules.matching import _recording_matches_track_identity
 from tests.support import IsolatedTestCase
 
 MBID = "11111111-2222-3333-4444-555555555555"
@@ -14,24 +17,28 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
     def test_discless_and_incomplete_position_indexes_have_explicit_results(
         self,
     ) -> None:
-        self.assertEqual(
-            matching._get_album_track_details(
-                3, None, {"tracks_by_position": {3: {"title": "Recording"}}}
-            ),
-            (None, "Recording"),
+        self.assertTrue(
+            matching._pos_in_album(
+                3,
+                album_mb_release_details={
+                    "tracks_by_disc_and_position": {(1, 3): {"title": "Recording"}}
+                },
+            )
         )
-        self.assertEqual(
-            matching._get_album_track_details(
-                3, None, {"tracks_by_position": {3: {"artist": "Primary"}}}
-            ),
-            (None, None),
+        self.assertFalse(
+            matching._pos_in_album(
+                3,
+                album_mb_release_details={
+                    "tracks_by_disc_and_position": {(1, 3): {"artist": "Primary"}}
+                },
+            )
         )
         recording = TrackInfo(Path("recording.flac"))
         self.assertIsNone(
             matching._match_position_by_mbid(
                 recording,
                 MBID,
-                {1: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 2: MBID},
+                {(1, 1): "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", (1, 2): MBID},
                 None,
             )
         )
@@ -42,10 +49,12 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
         )
         operations: tuple[Callable[[], object], ...] = (
             partial(
-                matching._get_album_track_details,
+                matching._pos_in_album,
                 3,
                 2,
-                {"tracks_by_disc_and_position": {(2, 3): None}},
+                album_mb_release_details={
+                    "tracks_by_disc_and_position": {(2, 3): None}
+                },
             ),
             partial(
                 matching._match_position_by_mbid,
@@ -60,39 +69,42 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
                 None,
                 "isrc",
                 "USAAA2100001",
-                [{"tracks_by_position": {3: None}}],
+                [{"tracks_by_disc_and_position": {(1, 3): None}}],
             ),
             partial(
                 matching._extract_known_album_entities,
                 None,
                 None,
-                [{"tracks_by_position": {3: None}}],
+                [{"tracks_by_disc_and_position": {(1, 3): None}}],
             ),
             partial(
-                catalog_enrichment._find_track_in_album_mapping,
+                matching._find_track_in_album_mapping,
                 None,
-                None,
+                {(2, 3): None},
                 "Recording",
                 3,
                 2,
-                {(2, 3): None},
             ),
             partial(
-                catalog_enrichment._find_track_in_album_mapping,
+                matching._find_track_in_album_mapping,
                 {"recording": []},
                 None,
                 "Recording",
                 None,
             ),
             partial(
-                catalog_enrichment._find_track_in_album_mapping,
+                matching._find_track_in_album_mapping,
                 {"recording feat guest": []},
                 None,
                 "Recording (feat. Guest)",
                 None,
             ),
             partial(
-                catalog_enrichment._find_track_in_album_mapping, None, {3: []}, None, 3
+                matching._find_track_in_album_mapping,
+                None,
+                {(1, 3): []},
+                None,
+                3,
             ),
         )
         for operation_number, operation in enumerate(operations):
@@ -140,8 +152,12 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
             itunes_trackid="123",
         )
         release = {
-            "tracks_by_position": {
-                4: {"trackId": 123, "trackName": "Recording", "artist": "Primary"}
+            "tracks_by_disc_and_position": {
+                (1, 4): {
+                    "itunes_trackid": 123,
+                    "title": "Recording",
+                    "artist": "Primary",
+                }
             }
         }
         self.assertEqual(
@@ -194,7 +210,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
                 recording,
                 recording.file_path,
                 album_mb_release_details={
-                    "tracks_by_position": {3: {"title": "Recording"}}
+                    "tracks_by_disc_and_position": {(1, 3): {"title": "Recording"}}
                 },
             ),
             3,
@@ -207,7 +223,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
                 recording,
                 recording.file_path,
                 album_mb_release_details={
-                    "tracks_by_position": {3: {"title": "Recording"}}
+                    "tracks_by_disc_and_position": {(1, 3): {"title": "Recording"}}
                 },
             ),
             3,
@@ -224,23 +240,18 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
             matching._is_strong_track_match("Primary", "Recording", "Primary", None)
         )
 
-    def test_incomplete_disc_recording_falls_back_to_position_index(self) -> None:
+    def test_disc_position_does_not_fall_back_to_another_medium(self) -> None:
         release = {
             "tracks_by_disc_and_position": {(2, 3): {"artist": "Primary"}},
-            "tracks_by_position": {3: {"title": "Recording"}},
         }
-        self.assertEqual(
-            matching._get_album_track_details(3, 2, release), (None, "Recording")
-        )
-        self.assertEqual(matching._get_album_track_details(9, 2, release), (None, None))
-        self.assertTrue(matching._pos_in_album(3, 2, {"2-3": MBID}))
-        self.assertFalse(matching._pos_in_album(9, 2, {"2-3": MBID}))
+        self.assertFalse(matching._pos_in_album(3, 2, album_mb_release_details=release))
+        self.assertFalse(matching._pos_in_album(9, 2, album_mb_release_details=release))
+        self.assertTrue(matching._pos_in_album(3, 2, {(2, 3): MBID}))
+        self.assertFalse(matching._pos_in_album(9, 2, {(2, 3): MBID}))
 
     def test_missing_position_and_invalid_disc_do_not_invent_sequence(self) -> None:
         recording = TrackInfo(Path("recording.flac"))
         for index, release, expected in (
-            ({("bad", "bad"): MBID}, None, None),
-            ({(2, "bad"): MBID}, None, None),
             (
                 None,
                 {
@@ -287,7 +298,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
                 None,
                 "isrc",
                 "USAAA2100001",
-                [{"tracks_by_position": {"bad": {"isrc": "USAAA2100001"}}}],
+                [{"tracks_by_disc_and_position": {"bad": {"isrc": "USAAA2100001"}}}],
             )
         )
 
@@ -320,14 +331,14 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
             with self.subTest(filename=filename):
                 self.assertEqual(
                     matching._resolve_album_track_position(
-                        recording, recording.file_path, album_track_mbids={3: MBID}
+                        recording, recording.file_path, album_track_mbids={(1, 3): MBID}
                     ),
                     expected,
                 )
         recording = TrackInfo(Path("03 - Recording.flac"), title="Recording")
         self.assertEqual(
             matching._resolve_album_track_position(
-                recording, recording.file_path, album_track_mbids={3: MBID}
+                recording, recording.file_path, album_track_mbids={(1, 3): MBID}
             ),
             3,
         )
@@ -344,7 +355,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
         )
         release = {
             "tracks_by_disc_and_position": {
-                (2, 3): {"title": "Recording", "trackId": "123"}
+                (2, 3): {"title": "Recording", "itunes_trackid": "123"}
             }
         }
         self.assertEqual(
@@ -370,14 +381,13 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
         release: dict[str, Any] = {
             "artist": "Primary",
             "title": "Record",
-            "tracks_by_number": {
-                1: {
-                    "trackName": "Recording",
+            "tracks_by_disc_and_position": {
+                (1, 1): {
+                    "title": "Recording",
                     "artist": "Guest",
                     "isrcs": [None, "USAAA2100001"],
                 }
             },
-            "tracks_by_position": {"bad": {}, 3: {}},
             "tracks_by_mbid": {MBID.upper(): {}},
         }
         entities = matching._extract_known_album_entities(None, None, [release])
@@ -386,7 +396,7 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
         self.assertEqual(entities.albums, {"Record"})
         self.assertEqual(entities.isrcs, {"USAAA2100001"})
         self.assertEqual(entities.mbids, {MBID})
-        self.assertEqual(entities.positions, {3})
+        self.assertEqual(entities.positions, {1})
 
     def test_matching_recording_id_shields_corrupt_text(self) -> None:
         recording = TrackInfo(
@@ -416,7 +426,7 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
                 "Primary",
                 "Record",
                 album_mb_release_details={
-                    "tracks_by_position": {1: {"title": "Recording"}}
+                    "tracks_by_disc_and_position": {(1, 1): {"title": "Recording"}}
                 },
             )
         )
@@ -424,10 +434,10 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
     def test_related_artist_names_and_bonus_tracks_preserve_membership(self) -> None:
         release = {
             "title": "Record",
-            "tracks_by_position": {
-                1: {"title": "First"},
-                2: {"title": "Second"},
-                3: {"title": "Third"},
+            "tracks_by_disc_and_position": {
+                (1, 1): {"title": "First"},
+                (1, 2): {"title": "Second"},
+                (1, 3): {"title": "Third"},
             },
         }
         for artist, title, number, album, expected in (
@@ -468,7 +478,217 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
                 "Primary",
                 "Record",
                 album_mb_release_details={
-                    "tracks_by_position": {1: {"title": "Recording"}}
+                    "tracks_by_disc_and_position": {(1, 1): {"title": "Recording"}}
                 },
             )
         )
+
+    def test_different_release_disc_layout_cannot_renumber_local_tracks(self) -> None:
+        releases: tuple[dict[str, Any], ...] = (
+            {"total_discs": 1},
+            {"tracks_by_disc_and_position": {(1, 9): {"title": "Recording"}}},
+            {"total_discs": 2},
+            {},
+        )
+        for release in releases:
+            with self.subTest(release=release):
+                recording = TrackInfo(
+                    Path("2-01 - Recording.flac"),
+                    artist="Primary",
+                    title="Recording",
+                    track_number=1,
+                    disc_number=2,
+                    total_discs=2,
+                    total_tracks=6,
+                )
+                compatible = matching._compatible_release_layout(recording, release)
+                if release.get("total_discs") == 2:
+                    self.assertIs(compatible, release)
+                else:
+                    self.assertIsNone(compatible)
+                if release:
+                    release.setdefault(
+                        "tracks_by_disc_and_position",
+                        {
+                            (1, 9): {
+                                "title": "Recording",
+                                "artist": "Primary",
+                                "isrc": "USAAA2100001",
+                            }
+                        },
+                    )
+                recording.isrc = "USAAA2100001"
+                if release.get("total_discs") != 2:
+                    matching._resolve_album_track_position(
+                        recording,
+                        recording.file_path,
+                        album_deezer_details=release,
+                    )
+                    self.assertEqual(
+                        (recording.disc_number, recording.track_number), (2, 1)
+                    )
+
+
+class TestRecordingIdentityNormalization(IsolatedTestCase):
+    def test_canonical_equivalence_preserves_artist_and_title_variants(self) -> None:
+        for artist, title, candidate_artist, candidate_title in (
+            ("Adrian Sînă", "Hold On", "Adrian Sina", "Hold On"),
+            ("B.U.G. Mafia", "... Și Cui Îi Pasă?", "B.U.G. Mafia", "…Si Cui Ii Pasa"),
+            ("El Nino", "Păcat", "El Nino", "Pacat"),
+            ("Rauf & Faik", "Мосты", "Rauf & Faik", "Mosty"),
+            ("Rauf & Faik", "5 минут", "Rauf & Faik", "5 minut"),
+        ):
+            with self.subTest(artist=artist, title=title):
+                self.assertEqual(
+                    score_artist_title_match(
+                        artist, title, candidate_artist, candidate_title
+                    ),
+                    100,
+                )
+
+    def test_canonical_text_equivalence_cannot_override_wrong_artist(self) -> None:
+        self.assertEqual(
+            score_artist_title_match("El Nino", "Păcat", "Someone Else", "Pacat"),
+            0,
+        )
+
+    def test_version_remix_and_series_guards_survive_canonical_equivalence(
+        self,
+    ) -> None:
+        for title, candidate_title in (
+            ("Dărâmăm (Radio Edit)", "Daramam"),
+            ("Dărâmăm (Alpha Remix)", "Daramam (Beta Remix)"),
+            ("Înger, Part 1", "Inger, Part 2"),
+            ("Intro", "Outro"),
+        ):
+            with self.subTest(title=title, candidate_title=candidate_title):
+                self.assertEqual(
+                    score_artist_title_match("Alpha", title, "Alpha", candidate_title),
+                    0,
+                )
+
+    def test_empty_normalized_titles_do_not_become_equal(self) -> None:
+        self.assertEqual(score_artist_title_match("Alpha", "!!!", "Alpha", "???"), 0)
+
+    def test_canonical_text_equivalence_still_requires_compatible_duration(
+        self,
+    ) -> None:
+        for duration, expected in ((180, True), (181.5, True), (240, False)):
+            with self.subTest(duration=duration):
+                self.assertEqual(
+                    recording_identity_matches(
+                        "Adrian Sînă",
+                        "Păcat",
+                        "Adrian Sina",
+                        "Pacat",
+                        expected_duration=180,
+                        candidate_duration=duration,
+                    ),
+                    expected,
+                )
+
+    def test_feature_credits_are_compared_across_artist_and_title_fields(self) -> None:
+        for artist, title, candidate_artist, candidate_title, expected in (
+            (
+                "Orion Quartet",
+                "Night Signal (feat. Lyra)",
+                "Orion Quartet",
+                "Night Signal (feat. Vega)",
+                False,
+            ),
+            (
+                "Orion Quartet feat. Lyra",
+                "Night Signal",
+                "Orion Quartet",
+                "Night Signal (feat. Vega)",
+                False,
+            ),
+            (
+                "Orion Quartet feat. Lyra",
+                "Night Signal",
+                "Orion Quartet",
+                "Night Signal (feat. Lyra)",
+                True,
+            ),
+            (
+                "Orion Quartet",
+                "Night Signal (feat. Lýra)",
+                "Orion Quartet ft. Lyra",
+                "Night Signal",
+                True,
+            ),
+            (
+                "Orion Quartet",
+                "Night Signal (feat. Lyra & Vega)",
+                "Orion Quartet feat. Vega, Lyra",
+                "Night Signal",
+                True,
+            ),
+            (
+                "Orion Quartet",
+                "Night Signal (feat. Lyra)",
+                "Orion Quartet",
+                "Night Signal",
+                True,
+            ),
+        ):
+            with self.subTest(
+                artist=artist,
+                title=title,
+                candidate_artist=candidate_artist,
+                candidate_title=candidate_title,
+            ):
+                self.assertEqual(
+                    recording_identity_matches(
+                        artist, title, candidate_artist, candidate_title
+                    ),
+                    expected,
+                )
+                self.assertEqual(
+                    recording_identity_matches(
+                        candidate_artist, candidate_title, artist, title
+                    ),
+                    expected,
+                )
+
+
+class TestRecordingDurationPolicy(IsolatedTestCase):
+    def test_default_policy_rejects_shorter_edits_without_rejecting_rounding(
+        self,
+    ) -> None:
+        self.assertEqual(SonoraConfig().single_duration_tolerance_seconds, 2.0)
+        for candidate_duration, accepted in (
+            (180.0, True),
+            (179.0, True),
+            (182.0, True),
+            (182.1, False),
+            (165.2, False),
+        ):
+            with self.subTest(candidate_duration=candidate_duration):
+                self.assertEqual(
+                    recording_identity_matches(
+                        "Primary",
+                        "Original Song",
+                        "Primary",
+                        "Original Song",
+                        expected_duration=180.0,
+                        candidate_duration=candidate_duration,
+                    ),
+                    accepted,
+                )
+                self.assertEqual(
+                    _recording_matches_track_identity(
+                        TrackInfo(
+                            Path("recording.flac"),
+                            artist="Primary",
+                            title="Original Song",
+                            duration=180.0,
+                        ),
+                        {
+                            "artist": "Primary",
+                            "title": "Original Song",
+                            "duration": candidate_duration,
+                        },
+                    ),
+                    accepted,
+                )

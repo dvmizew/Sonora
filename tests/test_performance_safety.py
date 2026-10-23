@@ -14,6 +14,7 @@ from sonora.core.http import SESSION
 from sonora.core.models import MetadataSource, TrackInfo
 from sonora.core.state import LibraryStateVault
 from sonora.modules import catalog_enrichment, metadata_consensus, tagger
+from sonora.modules.metadata_consensus import build_provider_proposal
 from sonora.modules.track_processing import _record_persisted_album
 from sonora.services import acoustid, deezer, itunes, musicbrainz
 from tests.support import IsolatedTestCase
@@ -65,6 +66,39 @@ def _mark_identity_conflict(track_info: TrackInfo, **keywords: object) -> None:
 
 
 class TestPerformanceSafety(IsolatedTestCase):
+    def test_proposals_retain_only_changes_and_cannot_modify_audio_properties(
+        self,
+    ) -> None:
+        recording = TrackInfo(
+            Path("recording.flac"),
+            artist="Alpha",
+            title="Original Song",
+            genre="Rock",
+            sample_rate=44100,
+            is_lossless=True,
+        )
+        candidate = dataclasses.replace(
+            recording,
+            genre="Jazz",
+            sample_rate=8000,
+            is_lossless=False,
+            metadata_sources={"genre": "Deezer"},
+        )
+        proposal = build_provider_proposal(recording, candidate)
+        self.assertEqual(proposal.changes, {"genre": ("Jazz", "Deezer")})
+        metadata_consensus.merge_provider_proposals(recording, [proposal])
+        self.assertEqual(recording.genre, "Jazz")
+        self.assertEqual((recording.sample_rate, recording.is_lossless), (44100, True))
+        self.assertEqual(build_provider_proposal(recording, recording).changes, {})
+
+    def test_provider_confirmation_is_retained_without_changing_the_tag(self) -> None:
+        recording = TrackInfo(Path("recording.flac"), genre="Rock")
+        candidate = dataclasses.replace(recording, metadata_sources={"genre": "iTunes"})
+        proposal = build_provider_proposal(recording, candidate)
+        self.assertEqual(proposal.changes, {"genre": ("Rock", "iTunes")})
+        metadata_consensus.merge_provider_proposals(recording, [proposal])
+        self.assertEqual(recording.metadata_sources, {"genre": "iTunes"})
+
     def test_proposals_agree_or_preserve_conflicts_independent_of_order(self) -> None:
         for genres, expected in (
             (("Rock", "Rock"), "Rock"),
@@ -122,7 +156,10 @@ class TestPerformanceSafety(IsolatedTestCase):
                     genre="Rock",
                     metadata_sources={"isrc": "Deezer", "genre": "Deezer"},
                 )
-                metadata_consensus.merge_provider_proposals(merged, [proposal])
+                metadata_consensus.merge_provider_proposals(
+                    merged,
+                    [build_provider_proposal(merged, proposal)],
+                )
                 self.assertIsNone(merged.genre)
                 self.assertEqual(merged.isrc, original.isrc)
                 self.assertTrue(merged.metadata_conflicts)
@@ -188,17 +225,9 @@ class TestPerformanceSafety(IsolatedTestCase):
                 None,
                 None,
                 None,
-                None,
-                None,
-                None,
-                None,
-                False,
-                None,
-                None,
-                None,
-                None,
                 True,
                 provider_executor=executor,
+                album_context=tagger._AlbumMetadataContext(),
             )
         self.assertIsNone(original.genre)
         self.assertEqual(original.artist, "Alpha")
@@ -342,7 +371,6 @@ class TestPerformanceSafety(IsolatedTestCase):
                 fetch_itunes_art=False,
                 force=False,
                 dry_run=True,
-                failures=None,
                 window=2,
             )
             _, _, first = next(contexts)

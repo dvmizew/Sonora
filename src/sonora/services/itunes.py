@@ -1,5 +1,5 @@
 import re
-from typing import Any
+from collections.abc import Mapping
 
 import httpx
 from rapidfuzz import fuzz
@@ -109,7 +109,7 @@ def fetch_itunes_cover_art_url(
 
             collection_series = extract_series_number(normalized_collection)
 
-            # Reject mismatch between album series (e.g. Savage Mode vs Savage Mode II, or Pt 1 vs Pt 2)
+            # Numbered releases in a series may share the same base title.
             if collection_series != target_series:
                 continue
 
@@ -155,7 +155,7 @@ def lookup_itunes_track(track_id: str) -> dict[str, object] | None:
         )
         if str(candidate.get("trackId")) == track_id
     ]
-    return candidates[0] if len(candidates) == 1 else None
+    return _parse_itunes_track(candidates[0]) if len(candidates) == 1 else None
 
 
 def fetch_itunes_track_metadata(
@@ -178,14 +178,12 @@ def fetch_itunes_track_metadata(
         if candidate and recording_identity_matches(
             artist,
             title,
-            str(candidate.get("artistName") or ""),
-            str(candidate.get("trackName") or ""),
+            str(candidate.get("artist") or ""),
+            str(candidate.get("title") or ""),
             expected_duration=duration,
-            candidate_duration=(safe_float(candidate.get("trackTimeMillis")) or 0)
-            / 1000
-            or None,
+            candidate_duration=safe_float(candidate.get("duration")),
         ):
-            results = [candidate]
+            return candidate
     if not results:
         results = search_itunes(artist=artist, term=title, entity="song")
 
@@ -212,40 +210,44 @@ def fetch_itunes_track_metadata(
     )
     if not ranked or (len(ranked) > 1 and ranked[0][0] == ranked[1][0]):
         if ranked:
-            LOG.warning(
+            LOG.detail(
                 f"Ambiguous iTunes recording for {escape(artist)} - {escape(title)}; metadata unchanged"
             )
         return None
     best_result = ranked[0][1]
 
-    explicitness = str(best_result.get("trackExplicitness", "")).lower()
+    return _parse_itunes_track(best_result)
+
+
+def _parse_itunes_track(track_entry: Mapping[str, object]) -> dict[str, object]:
+    explicitness = str(track_entry.get("trackExplicitness", "")).lower()
     advisory = "Explicit" if explicitness == "explicit" else None
 
-    release_date_raw = best_result.get("releaseDate")
+    release_date_raw = track_entry.get("releaseDate")
     release_date_str = str(release_date_raw)[:10] if release_date_raw else None
 
     return {
-        "title": best_result.get("trackName"),
-        "artist": best_result.get("artistName"),
-        "duration": (safe_float(best_result.get("trackTimeMillis")) or 0) / 1000
+        "title": track_entry.get("trackName"),
+        "artist": track_entry.get("artistName"),
+        "duration": (safe_float(track_entry.get("trackTimeMillis")) or 0) / 1000
         or None,
-        "genre": best_result.get("primaryGenreName"),
+        "genre": track_entry.get("primaryGenreName"),
         "advisory": advisory,
         "explicitness": explicitness,
-        "copyright": best_result.get("copyright"),
-        "itunes_trackid": str(best_result["trackId"])
-        if best_result.get("trackId")
+        "copyright": track_entry.get("copyright"),
+        "itunes_trackid": str(track_entry["trackId"])
+        if track_entry.get("trackId")
         else None,
-        "itunes_collectionid": str(best_result["collectionId"])
-        if best_result.get("collectionId")
+        "itunes_collectionid": str(track_entry["collectionId"])
+        if track_entry.get("collectionId")
         else None,
-        "itunes_artistid": str(best_result["artistId"])
-        if best_result.get("artistId")
+        "itunes_artistid": str(track_entry["artistId"])
+        if track_entry.get("artistId")
         else None,
-        "track_number": best_result.get("trackNumber"),
-        "total_tracks": best_result.get("trackCount"),
-        "disc_number": best_result.get("discNumber"),
-        "total_discs": best_result.get("discCount"),
+        "track_number": track_entry.get("trackNumber"),
+        "total_tracks": track_entry.get("trackCount"),
+        "disc_number": track_entry.get("discNumber"),
+        "total_discs": track_entry.get("discCount"),
         "date": release_date_str,
     }
 
@@ -282,8 +284,7 @@ def fetch_itunes_album_details(
     artist: str, album: str, expected_track_count: int | None = None
 ) -> dict[str, object] | None:
     """
-    Fetch album metadata and all track details in ONE single lookup from iTunes Search API.
-    Returns mapping of album details and track items indexed by track number and title.
+    Fetch album details and index its recordings by title and disc position.
     """
     results = search_itunes(artist=artist, term=album, entity="album")
     if not results:
@@ -328,7 +329,7 @@ def fetch_itunes_album_details(
         reverse=True,
     )
     if len(ranked_albums) > 1 and ranked_albums[0][0] == ranked_albums[1][0]:
-        LOG.warning(f"Ambiguous iTunes album for {escape(artist)} - {escape(album)}")
+        LOG.detail(f"Ambiguous iTunes album for {escape(artist)} - {escape(album)}")
         return None
     best_album = ranked_albums[0][1]
 
@@ -336,7 +337,7 @@ def fetch_itunes_album_details(
     if not collection_id:
         return None
 
-    cache_key = f"itunes_album_lookup:v4:{collection_id}"
+    cache_key = f"itunes_album_lookup:v6:{collection_id}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -357,7 +358,6 @@ def fetch_itunes_album_details(
             itunes_payload.get("results"), "iTunes lookup results"
         )
 
-        tracks_by_number: dict[Any, dict[str, object]] = {}
         tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
         repeated_titles: set[str] = set()
@@ -369,7 +369,6 @@ def fetch_itunes_album_details(
             "genre": best_album.get("primaryGenreName"),
             "copyright": best_album.get("copyright"),
             "total_tracks": best_album.get("trackCount"),
-            "tracks_by_number": tracks_by_number,
             "tracks_by_disc_and_position": tracks_by_disc_and_position,
             "tracks_by_title": tracks_by_title,
         }
@@ -380,42 +379,14 @@ def fetch_itunes_album_details(
             track_number = safe_int(track_entry.get("trackNumber"))
             disc_number = safe_int(track_entry.get("discNumber")) or 1
             track_title = str(track_entry.get("trackName", ""))
-            explicitness = str(track_entry.get("trackExplicitness", "")).lower()
-            advisory = "Explicit" if explicitness == "explicit" else None
-            release_date = (
-                str(track_entry.get("releaseDate"))[:10]
-                if track_entry.get("releaseDate")
-                else None
-            )
-
-            track_metadata: dict[str, object] = {
-                "title": track_title,
-                "artist": track_entry.get("artistName"),
-                "duration": (safe_float(track_entry.get("trackTimeMillis")) or 0) / 1000
-                or None,
-                "genre": track_entry.get("primaryGenreName"),
-                "advisory": advisory,
-                "explicitness": explicitness,
-                "itunes_trackid": str(track_entry["trackId"])
-                if track_entry.get("trackId")
-                else None,
-                "itunes_collectionid": str(collection_id),
-                "itunes_artistid": str(track_entry.get("artistId"))
-                if track_entry.get("artistId")
-                else None,
-                "track_number": track_number,
-                "total_tracks": track_entry.get("trackCount"),
-                "disc_number": disc_number,
-                "date": release_date,
-            }
+            track_metadata = _parse_itunes_track(track_entry)
+            track_metadata["itunes_collectionid"] = str(collection_id)
+            track_metadata["track_number"] = track_number
+            track_metadata["disc_number"] = disc_number
             if track_number is not None:
                 tracks_by_disc_and_position[(disc_number, track_number)] = (
                     track_metadata
                 )
-                tracks_by_number[(disc_number, track_number)] = track_metadata
-                tracks_by_number[f"{disc_number}-{track_number}"] = track_metadata
-                if disc_number == 1 or track_number not in tracks_by_number:
-                    tracks_by_number[track_number] = track_metadata
             if track_title:
                 title_key = normalize_str(track_title)
                 if title_key in tracks_by_title or title_key in repeated_titles:

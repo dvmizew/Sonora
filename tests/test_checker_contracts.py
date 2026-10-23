@@ -23,7 +23,12 @@ class TestCheckerContracts(IsolatedTestCase):
                 patch.object(
                     checker,
                     "_check_single_file",
-                    return_value=(self.path, issues, recording),
+                    return_value=(
+                        self.path,
+                        issues,
+                        recording,
+                        {checker._IssueCategory.CORRUPT} if expected_corrupt else set(),
+                    ),
                 ),
             ):
                 self.assertIs(
@@ -143,7 +148,7 @@ class TestCheckerContracts(IsolatedTestCase):
         with patch.object(
             checker, "read_track_metadata", side_effect=OSError("broken audio")
         ):
-            path, issues, recording = checker._check_single_file(self.path)
+            path, issues, recording, _ = checker._check_single_file(self.path)
         self.assertEqual(path, self.path)
         self.assertIsNone(recording)
         self.assertTrue(issues)
@@ -451,3 +456,55 @@ class TestCheckerMetadataValidation(IsolatedTestCase):
                 )
                 issues = check_file(audio_path, track_metadata=track)
                 self.assertFalse(any("exceeds" in issue for issue in issues))
+
+
+class TestCheckerIssueCategories(IsolatedTestCase):
+    def setUp(self) -> None:
+        self.path = self.test_directory / "01 - Recording.wav"
+        self.path.touch()
+        self.recording = TrackInfo(
+            self.path,
+            artist="Primary",
+            title="Recording",
+            album="Record",
+            album_artist="Primary",
+            track_number=1,
+        )
+
+    def test_empty_artwork_and_lyrics_count_corrupt_files_without_parsing_messages(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "01 - Recording.flac"
+        audio_path.touch()
+        lyrics_path = audio_path.with_suffix(".lrc")
+        for picture_bytes, lyrics_text, expected_corrupt in (
+            (b"", "[00:01.00]Words", 1),
+            (b"picture", "", 1),
+            (b"picture", "[00:01.00]Words", 0),
+            (b"", "", 1),
+        ):
+            lyrics_path.write_text(lyrics_text)
+            with (
+                self.subTest(picture=picture_bytes, lyrics=lyrics_text),
+                patch.object(checker, "find_audio_files", return_value=[audio_path]),
+                patch.object(
+                    checker, "read_track_metadata", return_value=self.recording
+                ),
+                patch.object(checker, "verify_flac_checksum", return_value=True),
+                patch.object(
+                    checker,
+                    "FLAC",
+                    return_value=SimpleNamespace(
+                        pictures=[SimpleNamespace(data=picture_bytes)]
+                    ),
+                ),
+            ):
+                report = checker.check_library(self.test_directory)
+            self.assertEqual(report.corrupt_files, expected_corrupt)
+            self.assertEqual(report.missing_lrc, 0)
+
+    def test_missing_lyrics_are_distinct_from_corruption(self) -> None:
+        with patch.object(checker, "read_track_metadata", return_value=self.recording):
+            report = checker.check_library(self.test_directory)
+        self.assertEqual(report.missing_lrc, 1)
+        self.assertEqual(report.corrupt_files, 0)

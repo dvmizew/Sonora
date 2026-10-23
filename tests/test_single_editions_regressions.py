@@ -1,9 +1,24 @@
 import dataclasses
+from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+import soundfile as sf
+import taglib
+
+from sonora.audio.metadata import read_track_metadata
+from sonora.core.cache import (
+    get_api_cache_dir,
+)
 from sonora.core.models import TrackInfo
 from sonora.modules import organizer
+from sonora.modules.organizer import (
+    SingleDeduplicator,
+    _resolve_single_target_file,
+    organize_library_singles,
+)
 from tests.regression_support import AudioRegressionTestCase
+from tests.support import IsolatedTestCase
 
 
 class TestSingleEditionsRegressions(AudioRegressionTestCase):
@@ -154,3 +169,102 @@ class TestSingleEditionsRegressions(AudioRegressionTestCase):
         self.assertFalse(skipped)
         self.assertEqual(removed_count, 1)
         quarantine.assert_called_once()
+
+
+class TestSingleIdentity(IsolatedTestCase):
+    def test_guests_in_titles_artists_and_cobilling_remain_distinct(self) -> None:
+        from sonora.core.models import TrackInfo
+
+        for artist_a, artist_b, title_a, title_b in (
+            ("Artist", "Artist", "Song (feat. Alice)", "Song (feat. Bob)"),
+            ("Artist feat. Alice", "Artist feat. Bob", "Song", "Song"),
+            ("Artist & Alice", "Artist & Bob", "Song", "Song"),
+        ):
+            with self.subTest(artist=artist_a, title=title_a):
+                original = TrackInfo(
+                    file_path=Path("/a.flac"), artist=artist_a, title=title_a
+                )
+                original_snapshot = dataclasses.asdict(original)
+                registry = SingleDeduplicator()
+                registry.register(original)
+                self.assertFalse(
+                    registry.is_duplicate(
+                        TrackInfo(
+                            file_path=Path("/b.flac"),
+                            artist=artist_b,
+                            title=title_b,
+                        )
+                    )
+                )
+                self.assertEqual(dataclasses.asdict(original), original_snapshot)
+                other_edition = TrackInfo(
+                    file_path=Path("/b.flac"), artist=artist_b, title=title_b
+                )
+                self.assertNotEqual(
+                    _resolve_single_target_file(
+                        original.file_path, original, Path("/Singles")
+                    ),
+                    _resolve_single_target_file(
+                        other_edition.file_path, other_edition, Path("/Singles")
+                    ),
+                )
+
+    def test_equivalent_feature_encodings_are_duplicates(self) -> None:
+        from sonora.core.models import TrackInfo
+
+        registry = SingleDeduplicator()
+        registry.register(
+            TrackInfo(
+                file_path=Path("/a.flac"),
+                artist="Artist",
+                title="Song (feat. Guest)",
+            )
+        )
+        self.assertTrue(
+            registry.is_duplicate(
+                TrackInfo(
+                    file_path=Path("/b.flac"),
+                    artist="Artist",
+                    title="Song",
+                    featured_artists="Guest",
+                )
+            )
+        )
+
+    def test_real_flac_preview_preserves_distinct_guests(self) -> None:
+        source = get_api_cache_dir().parent / "fixtures"
+        for index, guest in enumerate(("Alice", "Bob")):
+            folder = source / f"Edition {index}"
+            folder.mkdir(parents=True)
+            audio_path = folder / "01 - Song.flac"
+            sf.write(audio_path, np.zeros(4410), 44100, subtype="PCM_16")
+            with taglib.File(str(audio_path)) as audio_tags:
+                audio_tags.tags = {
+                    "ARTIST": ["Artist"],
+                    "TITLE": [f"Song (feat. {guest})"],
+                }
+                audio_tags.save()
+            self.assertIsNone(read_track_metadata(audio_path).featured_artists)
+        originals = {path: path.read_bytes() for path in source.rglob("*.flac")}
+        self.assertEqual(
+            organize_library_singles(
+                source, source / "Singles", dry_run=True, max_threads=1
+            ),
+            2,
+        )
+        self.assertEqual({path: path.read_bytes() for path in originals}, originals)
+
+    def test_layout_is_independent_of_library_size(self) -> None:
+        from sonora.core.models import TrackInfo
+
+        source = get_api_cache_dir().parent / "library"
+        source.mkdir(parents=True)
+        track = TrackInfo(file_path=source / "Song.flac", artist="Artist", title="Song")
+        destination = source / "Singles"
+        expected = destination / "Artist - Song" / "01 - Song.flac"
+        for count in range(8):
+            (source / f"Artist {count}").mkdir()
+            self.assertEqual(
+                _resolve_single_target_file(track.file_path, track, destination),
+                expected,
+            )

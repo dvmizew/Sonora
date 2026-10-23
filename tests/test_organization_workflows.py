@@ -214,7 +214,6 @@ class TestOrganizationWorkflows(ModuleTestCase):
         )
         deduplicator.register(t1)
 
-        # Different duration (>15s): distinct mix / version, NOT a duplicate
         t2_remix = TrackInfo(
             file_path=Path("/tmp/t2.flac"),
             artist="Artist",
@@ -224,7 +223,6 @@ class TestOrganizationWorkflows(ModuleTestCase):
         )
         self.assertFalse(deduplicator.is_duplicate(t2_remix))
 
-        # Similar duration (<=15s): true duplicate
         t3_dup = TrackInfo(
             file_path=Path("/tmp/t3.flac"),
             artist="Artist",
@@ -232,6 +230,8 @@ class TestOrganizationWorkflows(ModuleTestCase):
             duration=203.0,
             bits_per_sample=16,
         )
+        self.assertFalse(deduplicator.is_duplicate(t3_dup))
+        t3_dup.duration = 202.0
         self.assertTrue(deduplicator.is_duplicate(t3_dup))
 
     def test_get_single_release_title(self) -> None:
