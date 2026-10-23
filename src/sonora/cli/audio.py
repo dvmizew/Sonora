@@ -36,7 +36,8 @@ from sonora.core.logger import (
     resume_workers,
     wait_if_paused,
 )
-from sonora.services.lyrics import init_musixmatch_token, process_track_lyrics
+from sonora.modules.track_processing import process_track_lyrics
+from sonora.services.lyrics import parse_musixmatch_token
 
 T = TypeVar("T")
 
@@ -89,7 +90,7 @@ def _run_parallel_audio_task(
 
 
 def _process_bpm_file(
-    audio_path: Path, force: bool, dry_run: bool
+    audio_path: Path, force: bool, dry_run: bool, musixmatch_token: str | None = None
 ) -> tuple[Path, float | None, bool]:
     wait_if_paused()
     try:
@@ -166,7 +167,7 @@ def bpm(
 
 
 def _process_key_file(
-    audio_path: Path, force: bool, dry_run: bool
+    audio_path: Path, force: bool, dry_run: bool, musixmatch_token: str | None = None
 ) -> tuple[Path, str | None, bool]:
     wait_if_paused()
     try:
@@ -327,7 +328,7 @@ def replaygain(
 
 @api_cache_session()
 def _process_lyrics_file(
-    audio_path: Path, force: bool, dry_run: bool
+    audio_path: Path, force: bool, dry_run: bool, musixmatch_token: str | None = None
 ) -> tuple[Path, str | None, str | None]:
     wait_if_paused()
     try:
@@ -344,6 +345,7 @@ def _process_lyrics_file(
             album_name=track_info.album,
             duration=audio_duration,
             existing_lyrics=track_info.lyrics,
+            musixmatch_token=musixmatch_token,
         )
         if lyrics_text and not dry_run:
             try:
@@ -370,9 +372,10 @@ def lyrics(
     """
     Fetch and save synchronized lyrics (.lrc) files and embedded lyrics.
     """
-    if not dry_run:
-        init_musixmatch_token(musixmatch_token or get_config().musixmatch_token)
-    worker = functools.partial(_process_lyrics_file, force=force, dry_run=dry_run)
+    token = parse_musixmatch_token(musixmatch_token or get_config().musixmatch_token)
+    worker = functools.partial(
+        _process_lyrics_file, force=force, dry_run=dry_run, musixmatch_token=token
+    )
     results, interrupted = _run_parallel_audio_task(
         path, "Fetching synchronized lyrics", worker, threads
     )

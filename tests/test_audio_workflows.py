@@ -2,7 +2,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sonora.audio.cuesheet import read_cuesheet_content
+from sonora.core.config import SonoraConfig
 from sonora.core.models import TrackInfo
+from sonora.core.titles import score_artist_title_match
 from sonora.modules.normalization import normalize_track_metadata
 from sonora.modules.track_processing import (
     _enrich_lyrics,
@@ -164,8 +166,8 @@ class TestAudioWorkflows(ModuleTestCase):
             library_results = normalize_library(
                 self.tmp_path, fetch_bpm=False, fetch_replaygain=False
             )
-            self.assertEqual(len(library_results), 1)
-            self.assertEqual(library_results[0].artist, "Artist")
+            self.assertEqual(len(library_results.tracks), 1)
+            self.assertEqual(library_results.tracks[0].artist, "Artist")
             self.assertEqual(library_results.total_scanned, 1)
             self.assertEqual(library_results.total_modified, 1)
             self.assertEqual(library_results.total_unchanged, 0)
@@ -205,7 +207,7 @@ class TestLyricsEnrichment(IsolatedTestCase):
                 with (
                     patch("sonora.audio.metadata.get_audio_duration", return_value=60),
                     patch(
-                        "sonora.services.lyrics.process_track_lyrics",
+                        "sonora.modules.track_processing.process_track_lyrics",
                         return_value=(None, None),
                     ),
                 ):
@@ -226,7 +228,7 @@ class TestLyricsEnrichment(IsolatedTestCase):
         with (
             patch("sonora.audio.metadata.get_audio_duration", return_value=60),
             patch(
-                "sonora.services.lyrics.process_track_lyrics",
+                "sonora.modules.track_processing.process_track_lyrics",
                 return_value=(replacement, "synced"),
             ),
         ):
@@ -242,8 +244,118 @@ class TestLyricsEnrichment(IsolatedTestCase):
         with (
             patch("sonora.audio.metadata.get_audio_duration", return_value=60),
             patch(
-                "sonora.services.lyrics.process_track_lyrics", return_value=(None, None)
+                "sonora.modules.track_processing.process_track_lyrics",
+                return_value=(None, None),
             ),
         ):
             _enrich_lyrics(track, audio_path, True, dry_run=True)
         self.assertNotIn("lyrics", track.metadata_conflicts)
+
+
+class TestDryRunReports(IsolatedTestCase):
+    def test_bpm_reports_computation_and_actual_writes_separately(self) -> None:
+        from sonora.cli import audio as audio_cli
+
+        audio_path = Path("track.flac")
+        for dry_run in (True, False):
+            with (
+                self.subTest(dry_run=dry_run),
+                patch(
+                    "sonora.cli.audio._run_parallel_audio_task",
+                    return_value=([(audio_path, 70.0, True)], False),
+                ),
+                patch("sonora.cli.audio._write_json_report") as report,
+            ):
+                self.assertEqual(
+                    audio_cli.bpm(
+                        audio_path, dry_run=dry_run, json_report=Path("report.json")
+                    ),
+                    0,
+                )
+                payload = report.call_args.args[1]
+                self.assertEqual(payload["summary"]["bpm_calculated"], 1)
+                self.assertEqual(payload["summary"]["bpm_tagged"], 0 if dry_run else 1)
+                self.assertEqual(payload["details"][0]["modified"], not dry_run)
+
+    def test_key_reports_detection_and_actual_writes_separately(self) -> None:
+        from sonora.cli import audio as audio_cli
+
+        audio_path = Path("track.flac")
+        for dry_run in (True, False):
+            with (
+                self.subTest(dry_run=dry_run),
+                patch(
+                    "sonora.cli.audio._run_parallel_audio_task",
+                    return_value=([(audio_path, "A minor (8A)", True)], False),
+                ),
+                patch("sonora.cli.audio._write_json_report") as report,
+            ):
+                self.assertEqual(
+                    audio_cli.key(
+                        audio_path, dry_run=dry_run, json_report=Path("report.json")
+                    ),
+                    0,
+                )
+                payload = report.call_args.args[1]
+                self.assertEqual(payload["summary"]["key_detected"], 1)
+                self.assertEqual(payload["summary"]["key_tagged"], 0 if dry_run else 1)
+                self.assertEqual(payload["details"][0]["modified"], not dry_run)
+
+    def test_failed_or_skipped_bpm_is_not_reported_as_modified(self) -> None:
+        from sonora.cli import audio as audio_cli
+
+        audio_path = Path("track.flac")
+        with (
+            patch(
+                "sonora.cli.audio._run_parallel_audio_task",
+                return_value=(
+                    [(audio_path, None, True), (audio_path, 70.0, False)],
+                    False,
+                ),
+            ),
+            patch("sonora.cli.audio._write_json_report") as report,
+        ):
+            audio_cli.bpm(audio_path, json_report=Path("report.json"))
+            payload = report.call_args.args[1]
+            self.assertEqual(payload["summary"]["bpm_tagged"], 0)
+            self.assertFalse(any(track["modified"] for track in payload["details"]))
+
+    def test_dsp_workers_do_not_write_during_dry_run(self) -> None:
+        from sonora.cli import audio as audio_cli
+        from sonora.core.models import TrackInfo
+
+        audio_path = Path("track.flac")
+        with (
+            patch(
+                "sonora.cli.audio.read_track_metadata",
+                return_value=TrackInfo(audio_path),
+            ),
+            patch("sonora.cli.audio.calculate_bpm", return_value=70.0),
+            patch(
+                "sonora.cli.audio.detect_key_details",
+                return_value=("A minor", "8A", 0.8),
+            ),
+            patch("sonora.cli.audio.write_track_metadata") as write_tags,
+        ):
+            self.assertEqual(
+                audio_cli._process_bpm_file(audio_path, force=True, dry_run=True)[1], 70
+            )
+            self.assertEqual(
+                audio_cli._process_key_file(audio_path, force=True, dry_run=True)[1],
+                "A minor (8A)",
+            )
+            write_tags.assert_not_called()
+
+    def test_exact_identity_survives_maximum_threshold(self) -> None:
+        with patch(
+            "sonora.core.titles.get_config",
+            return_value=SonoraConfig(
+                title_match_threshold=100, short_title_match_threshold=100
+            ),
+        ):
+            self.assertEqual(
+                score_artist_title_match("Artist", "Intro", "Artist", "Intro"), 100
+            )
+            self.assertEqual(
+                score_artist_title_match("Artist", "Intro", "Artist", "Outro"), 0
+            )

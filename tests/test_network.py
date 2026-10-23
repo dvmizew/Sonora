@@ -13,6 +13,7 @@ from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
 from sonora.core.rate_limit import RateLimiter
 from sonora.modules.tagger import process_single_track
+from sonora.modules.track_processing import process_track_lyrics
 from sonora.services.deezer import (
     fetch_deezer_album_details,
     fetch_deezer_cover_art_url,
@@ -29,9 +30,8 @@ from sonora.services.itunes import (
     search_itunes,
 )
 from sonora.services.lastfm import fetch_lastfm_tags
-from sonora.services.lyrics import fetch_synced_lyrics, process_track_lyrics
+from sonora.services.lyrics import fetch_synced_lyrics
 from sonora.services.musicbrainz import (
-    fetch_album_track_mbids,
     fetch_cover_art_archive_url,
     fetch_musicbrainz_recording_details,
     fetch_musicbrainz_release_details,
@@ -155,9 +155,6 @@ class TestNetwork(IsolatedTestCase):
 
         mock_mb.get_release_by_id.side_effect = musicbrainzngs.MusicBrainzError(
             "Gateway Timeout 504"
-        )
-        self.assertEqual(
-            fetch_album_track_mbids("c8b03190-306c-4125-9b32-3f9d86d60a12"), {}
         )
         self.assertIsNone(
             fetch_musicbrainz_release_details("c8b03190-306c-4125-9b32-3f9d86d60a12")

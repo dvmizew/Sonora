@@ -14,6 +14,7 @@ from sonora.audio.metadata import (
     write_track_metadata,
 )
 from sonora.audio.replaygain import LoudnessMeasurement, _album_loudness
+from sonora.core import sidecars
 from sonora.core.models import TrackInfo
 from sonora.core.sidecars import find_companion_lyrics, relocate_companion_lyrics
 from sonora.core.text import normalize_date
@@ -52,7 +53,9 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
         with patch.object(
             lyrics, "fetch_synced_lyrics", return_value="[00:00.50] line"
         ):
-            lyrics.process_track_lyrics(audio_path, "Alpha", "Song", duration=1.0)
+            track_processing_module.process_track_lyrics(
+                audio_path, "Alpha", "Song", duration=1.0
+            )
         self.assertEqual(notes.read_text(), "Recording notes")
 
     def test_lyrics_collision_preserves_source(self) -> None:
@@ -76,10 +79,10 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
 
     def test_enhanced_timestamps_validate_duration(self) -> None:
         self.assertFalse(
-            lyrics.is_lyrics_duration_valid("[00:00.00]<09:59.00>word", 60)
+            sidecars.is_lyrics_duration_valid("[00:00.00]<09:59.00>word", 60)
         )
-        self.assertTrue(lyrics.is_lyrics_duration_valid("<00:59.00>word", 60))
-        self.assertEqual(lyrics.get_lyrics_quality("[00:59]line"), 2)
+        self.assertTrue(sidecars.is_lyrics_duration_valid("<00:59.00>word", 60))
+        self.assertEqual(sidecars.get_lyrics_quality("[00:59]line"), 2)
 
     def test_plain_cache_cannot_satisfy_synced_only(self) -> None:
         with (

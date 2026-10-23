@@ -3,16 +3,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from sonora.core.config import SonoraConfig
-from sonora.services.genius import fetch_genius_song_details
-from sonora.services.lyrics import (
+from sonora.core.sidecars import (
     clean_lyrics_text,
-    detect_lrc_quality,
     extract_max_timestamp,
-    fetch_synced_lyrics,
     get_lyrics_quality,
     is_lyrics_duration_valid,
-    process_track_lyrics,
 )
+from sonora.modules.track_processing import process_track_lyrics
+from sonora.services.genius import fetch_genius_song_details
+from sonora.services.lyrics import fetch_synced_lyrics
 from tests.service_support import ServiceResponseTestCase
 
 
@@ -80,11 +79,13 @@ class TestLyricsResponses(ServiceResponseTestCase):
         mock_syncedlyrics.search.return_value = None
         result = fetch_synced_lyrics("Artist Without Lyrics", "Instrumental Track")
         self.assertIsNone(result)
-        # Verify negative cache sentinel was persisted
-        mock_set_cache.assert_called_with(
-            "lyrics:v5:True:artist without lyrics:instrumental track::[false, false, false, [], null, null, null]",
-            "",
+        self.assertEqual(mock_set_cache.call_args.args[1], "")
+        mock_get_cache.return_value = ""
+        mock_syncedlyrics.search.reset_mock()
+        self.assertIsNone(
+            fetch_synced_lyrics("Artist Without Lyrics", "Instrumental Track")
         )
+        mock_syncedlyrics.search.assert_not_called()
 
     def test_synced_lyrics_empty_query_returns_none(self) -> None:
         self.assertIsNone(fetch_synced_lyrics("", ""))
@@ -219,16 +220,6 @@ class TestLyricsResponses(ServiceResponseTestCase):
         self.assertFalse(is_lyrics_duration_valid(lrc_text, 141.0))
         # Song of 190s accepted (195.2 <= 190.0 + 15.0 = 205.0)
         self.assertTrue(is_lyrics_duration_valid(lrc_text, 190.0))
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            test_audio = Path(tmp_dir) / "track.flac"
-            test_audio.write_bytes(b"dummy")
-            test_lrc = Path(tmp_dir) / "track.lrc"
-            test_lrc.write_text(lrc_text, encoding="utf-8")
-            # Mismatched duration triggers quality 0
-            self.assertEqual(detect_lrc_quality(test_audio, audio_duration=120.0), 0)
-            # Matching duration returns quality 2 (synced)
-            self.assertEqual(detect_lrc_quality(test_audio, audio_duration=200.0), 2)
 
     def test_get_lyrics_quality_filters_empty_headers(self) -> None:
         header_only = "[ar:Artist]\n[ti:Title]\n[al:Album]"
