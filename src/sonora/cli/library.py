@@ -31,7 +31,7 @@ from sonora.modules.organizer import organize_library_singles
 from sonora.modules.renamer import rename_directory_files
 from sonora.modules.tagger import tag_album_folder
 from sonora.modules.track_processing import normalize_library
-from sonora.services.lyrics import init_musixmatch_token
+from sonora.services.lyrics import parse_musixmatch_token
 from sonora.services.musicbrainz import init_musicbrainz
 
 
@@ -99,8 +99,6 @@ def tag(
     load_app_environment(path)
     clear_config_cache()
     init_musicbrainz()
-    if not dry_run:
-        init_musixmatch_token(musixmatch_token or get_config().musixmatch_token)
 
     if no_dsp:
         fetch_bpm = False
@@ -116,7 +114,10 @@ def tag(
     resolved_genius_token = genius_api_token or config.genius_api_token
     resolved_fanart_key = fanart_api_key or config.fanart_api_key
     resolved_fanart_client_key = fanart_client_key or config.fanart_client_key
-    has_musixmatch = bool(musixmatch_token or config.musixmatch_token)
+    resolved_musixmatch_token = parse_musixmatch_token(
+        musixmatch_token or config.musixmatch_token
+    )
+    has_musixmatch = bool(resolved_musixmatch_token)
 
     active_keys: list[str] = []
     if resolved_discogs_token:
@@ -133,11 +134,9 @@ def tag(
         active_keys.append("[bold green]Fanart.tv[/]")
 
     if active_keys:
-        LOG.info(f"🔑 [bold]Active API Keys/Tokens:[/] {', '.join(active_keys)}")
+        LOG.detail(f"Active services:[/] {', '.join(active_keys)}")
     else:
-        LOG.info(
-            "🔑 [dim]Active API Keys/Tokens:[/] [yellow]None (using free unauthenticated tiers)[/]"
-        )
+        LOG.detail("Using services without API credentials")
 
     LOG.info(f"Tagging album directory: [bold]{escape(str(path))}[/bold]")
     interrupted = False
@@ -158,6 +157,7 @@ def tag(
             genius_api_token=resolved_genius_token,
             fanart_api_key=resolved_fanart_key,
             fanart_client_key=resolved_fanart_client_key,
+            musixmatch_token=resolved_musixmatch_token,
             enable_shazam=enable_shazam,
             force=force,
             dry_run=dry_run,
@@ -186,12 +186,23 @@ def tag(
         conflict_count = sum(bool(track.metadata_conflicts) for track in tagged_tracks)
         if conflict_count:
             LOG.warning(
-                f"{conflict_count} tracks have unresolved provider conflicts; review the tagging report."
+                f"{conflict_count} tracks need review because metadata sources disagree. "
+                "Uncertain fields were preserved. Use --verbose for details"
+                + (
+                    " or review the JSON report."
+                    if json_report
+                    else " or --json report.json to save them."
+                )
             )
     else:
         LOG.warning(
             f"Partially processed {len(tagged_tracks)} tracks before interruption."
         )
+
+    if dry_run:
+        LOG.info("Dry run: audio files and artwork/lyrics were not changed.")
+        if not LOG.verbose:
+            LOG.info("Use --verbose to see proposed per-file changes.")
 
     _emit_tag_summary_and_report(
         tagged_tracks,
@@ -256,6 +267,12 @@ def check(
         LOG.warning(
             f"Partially scanned {check_report.total_files} files before interruption."
         )
+
+    if check_report.issues and not LOG.verbose:
+        LOG.warning("Some files or folders need attention. Showing up to 5 locations:")
+        for location, issues in sorted(check_report.issues.items())[:5]:
+            LOG.warning(f"{escape(location)}: {escape('; '.join(issues[:2]))}")
+        LOG.info("Use --verbose for all findings or --json report.json to save them.")
 
     total = check_report.total_files
     issue_count = check_report.files_with_issues
@@ -341,7 +358,9 @@ def rename(
 
     if not interrupted:
         LOG.success(
-            f"Renaming completed: {report.files_renamed}/{report.total_files} files renamed on disk."
+            f"Rename preview: {report.files_renamed}/{report.total_files} files would be renamed."
+            if dry_run
+            else f"Renaming completed: {report.files_renamed}/{report.total_files} files renamed on disk."
         )
     else:
         LOG.warning(
@@ -441,7 +460,11 @@ def organize(
         )
 
     if not interrupted:
-        LOG.success(f"Organized and moved {organized_count} single tracks.")
+        LOG.success(
+            f"Organization preview: {organized_count} single tracks would be moved."
+            if dry_run
+            else f"Organized and moved {organized_count} single tracks."
+        )
     else:
         LOG.warning(
             f"Partially organized {organized_count} single tracks before interruption."
@@ -451,7 +474,7 @@ def organize(
         ("Source Directory", str(path.resolve()), None),
         ("Target Directory", str(destination_directory.resolve()), None),
         (
-            "Single Tracks Organized",
+            "Single Tracks Would Move" if dry_run else "Single Tracks Organized",
             str(organized_count),
             "green" if organized_count else "white",
         ),
@@ -611,7 +634,7 @@ def normalize(
     interrupted = False
     report = NormalizeReport([])
     try:
-        report_or_list = normalize_library(
+        report = normalize_library(
             path,
             fetch_bpm=fetch_bpm,
             fetch_key=fetch_key,
@@ -620,19 +643,14 @@ def normalize(
             dry_run=dry_run,
             max_threads=threads,
         )
-        if isinstance(report_or_list, NormalizeReport):
-            report = report_or_list
-        else:
-            report = NormalizeReport(report_or_list)
     except (KeyboardInterrupt, RuntimeError) as exc:
         if not is_interruption(exc):
             raise
         interrupted = True
-        if isinstance(exc, InterruptedOperationError):
-            if isinstance(exc.partial_result, NormalizeReport):
-                report = exc.partial_result
-            elif isinstance(exc.partial_result, list):
-                report = NormalizeReport(exc.partial_result)
+        if isinstance(exc, InterruptedOperationError) and isinstance(
+            exc.partial_result, NormalizeReport
+        ):
+            report = exc.partial_result
         LOG.warning(
             "\n⏹️  [bold yellow]INTERRUPTED[/] - Normalization stopped by user (Ctrl+C)."
         )
@@ -643,7 +661,10 @@ def normalize(
 
     if not interrupted:
         LOG.success(
-            f"Normalization completed: {total_modified} modified, {total_unchanged} already normalized ({total_scanned} total)."
+            f"Normalization preview: {total_modified} tracks would be updated, "
+            f"{total_unchanged} already normalized ({total_scanned} total)."
+            if dry_run
+            else f"Normalization completed: {total_modified} modified, {total_unchanged} already normalized ({total_scanned} total)."
         )
     else:
         LOG.warning(
@@ -654,7 +675,7 @@ def normalize(
         ("Target Directory", str(path.resolve()), None),
         ("Tracks Scanned", str(total_scanned), "cyan" if total_scanned else "white"),
         (
-            "Tracks Modified",
+            "Tracks Would Update" if dry_run else "Tracks Modified",
             str(total_modified),
             "green" if total_modified else "white",
         ),

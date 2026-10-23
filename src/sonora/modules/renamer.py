@@ -199,7 +199,7 @@ def rename_track_file(
                     except FileExistsError:
                         new_path = resolve_unique_path(new_path, current_path=file_path)
                 new_name = new_path.name
-                LOG.info(
+                LOG.detail(
                     f"   ∟ 🎵 [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
                 )
                 relocated = relocate_companion_lyrics(
@@ -213,7 +213,7 @@ def rename_track_file(
                 )
                 raise
         else:
-            LOG.info(
+            LOG.detail(
                 f"[DRY-RUN] Would rename {escape(file_path.name)} -> {escape(new_name)}"
             )
 
@@ -265,7 +265,7 @@ def rename_single_folder(
     if not dry_run:
         try:
             safe_case_rename(folder_path, new_folder)
-            LOG.info(
+            LOG.detail(
                 f"   ∟ 📂 Single folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
             )
             return new_folder
@@ -275,7 +275,7 @@ def rename_single_folder(
             )
             return folder_path
     else:
-        LOG.info(
+        LOG.detail(
             f"[DRY-RUN] Would rename single folder {escape(current_folder_name)} -> {escape(expected_name)}"
         )
         return new_folder
@@ -324,7 +324,7 @@ def rename_album_folder(
         if not dry_run:
             try:
                 safe_case_rename(folder_path, new_folder)
-                LOG.info(
+                LOG.detail(
                     f"   ∟ 📂 Album folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
                 )
                 return new_folder
@@ -334,7 +334,7 @@ def rename_album_folder(
                 )
                 return folder_path
         else:
-            LOG.info(
+            LOG.detail(
                 f"[DRY-RUN] Would rename album folder {escape(current_folder_name)} -> {escape(expected_name)}"
             )
             return new_folder

@@ -88,6 +88,31 @@ class TestTerminalContracts(IsolatedTestCase):
         self.assertIn("broken track", messages[0])
         self.assertIn("next recording", messages[1])
 
+    def test_default_output_keeps_warnings_and_hides_diagnostics(self) -> None:
+        instance = logger.SonoraLogger()
+        with patch.object(logger.CONSOLE, "print") as output:
+            instance.detail("Recording lookup and field changes")
+            instance.debug("Diagnostic request")
+            output.assert_not_called()
+            instance.info("Starting tagging")
+            instance.warning("Unable to save recording.flac")
+            instance.error("Disk full")
+        self.assertEqual(output.call_count, 3)
+        self.assertIn("Unable to save", output.call_args_list[1].args[0])
+        self.assertIn("Disk full", output.call_args_list[2].args[0])
+
+    def test_verbose_detail_preserves_worker_buffer_order(self) -> None:
+        instance = logger.SonoraLogger()
+        instance.verbose = True
+        with patch.object(logger.CONSOLE, "print") as output:
+            instance.start_buffering()
+            instance.detail("First decision")
+            instance.detail("Second decision")
+            output.assert_not_called()
+            instance.stop_buffering()
+        self.assertIn("First decision", output.call_args_list[0].args[0])
+        self.assertIn("Second decision", output.call_args_list[1].args[0])
+
     def test_worker_pause_waits_until_resume(self) -> None:
         with patch.object(
             logger._PAUSE_EVENT, "wait", side_effect=[False, False, True]

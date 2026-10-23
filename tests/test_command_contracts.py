@@ -18,9 +18,10 @@ entrypoint = importlib.import_module("sonora.cli.main")
 class TestEntrypointContracts(IsolatedTestCase):
     def test_user_interrupt_returns_shell_cancellation_status(self) -> None:
         with (
-            patch.object(entrypoint, "app", side_effect=KeyboardInterrupt),
+            patch.object(entrypoint, "app") as app,
             patch("sonora.core.logger.LOG.warning") as warning,
         ):
+            app.meta.side_effect = KeyboardInterrupt
             self.assertEqual(entrypoint.main(["tag"]), 130)
         self.assertIn("Aborted by user", warning.call_args.args[0])
 
@@ -63,25 +64,24 @@ class TestEntrypointContracts(IsolatedTestCase):
     def test_default_argv_and_noninteger_command_results(self) -> None:
         with (
             patch.object(sys, "argv", ["sonora", "--version"]),
-            patch.object(entrypoint, "app", return_value=None) as app,
+            patch.object(entrypoint, "app") as app,
         ):
+            app.meta.return_value = None
             self.assertEqual(entrypoint.main(), 0)
-        app.assert_called_once_with(["--version"], exit_on_error=False)
+        app.meta.assert_called_once_with(["--version"], exit_on_error=False)
 
     def test_programming_failures_propagate_and_expected_io_errors_return_one(
         self,
     ) -> None:
+        with patch.object(entrypoint, "app") as app:
+            app.meta.side_effect = RuntimeError("command bug")
+            with self.assertRaisesRegex(RuntimeError, "command bug"):
+                entrypoint.main(["tag"])
         with (
-            patch.object(entrypoint, "app", side_effect=RuntimeError("command bug")),
-            self.assertRaisesRegex(RuntimeError, "command bug"),
-        ):
-            entrypoint.main(["tag"])
-        with (
-            patch.object(
-                entrypoint, "app", side_effect=PermissionError("unwritable file")
-            ),
+            patch.object(entrypoint, "app") as app,
             patch("sonora.core.logger.LOG.error") as error,
         ):
+            app.meta.side_effect = PermissionError("unwritable file")
             self.assertEqual(entrypoint.main(["tag"]), 1)
         self.assertIn("unwritable file", error.call_args.args[0])
 
@@ -159,13 +159,12 @@ class TestLibraryCommandContracts(IsolatedTestCase):
             ):
                 entrypoint.main([command, str(self.test_directory)])
 
-    def test_normalize_list_results_and_partial_reports_preserve_counts(
+    def test_normalize_results_and_partial_reports_preserve_counts(
         self,
     ) -> None:
         recording = TrackInfo(self.test_directory / "recording.flac")
         for outcome in (
-            [recording],
-            InterruptedOperationError([recording]),
+            NormalizeReport([recording]),
             InterruptedOperationError(NormalizeReport([recording])),
             InterruptedOperationError(None),
         ):
@@ -218,7 +217,6 @@ class TestLibraryCommandContracts(IsolatedTestCase):
         ]
         with (
             patch.object(library, "tag_album_folder", return_value=[]) as tag,
-            patch.object(library, "init_musixmatch_token") as token,
         ):
             self.assertEqual(
                 entrypoint.main(["tag", str(self.test_directory), *flags, "--no-dsp"]),
@@ -227,7 +225,7 @@ class TestLibraryCommandContracts(IsolatedTestCase):
         self.assertEqual(tag.call_args.kwargs["acoustid_api_key"], "acoustid")
         self.assertEqual(tag.call_args.kwargs["lastfm_api_key"], "lastfm")
         self.assertEqual(tag.call_args.kwargs["genius_api_token"], "genius")
-        token.assert_called_once_with("musixmatch")
+        self.assertEqual(tag.call_args.kwargs["musixmatch_token"], "musixmatch")
 
 
 class TestAudioCommandFailureContracts(IsolatedTestCase):
@@ -273,7 +271,6 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
     def test_tag_preview_retains_default_dsp_options(self) -> None:
         with (
             patch.object(library, "tag_album_folder", return_value=[]) as tag,
-            patch.object(library, "init_musixmatch_token") as token,
         ):
             self.assertEqual(
                 entrypoint.main(["tag", str(self.test_directory), "--dry-run"]), 0
@@ -281,7 +278,7 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
         self.assertTrue(tag.call_args.kwargs["fetch_bpm"])
         self.assertTrue(tag.call_args.kwargs["fetch_key"])
         self.assertTrue(tag.call_args.kwargs["fetch_replaygain"])
-        token.assert_not_called()
+        self.assertIsNone(tag.call_args.kwargs["musixmatch_token"])
 
     def test_missing_and_empty_paths_never_start_workers(self) -> None:
         for command in (audio.bpm, audio.key, audio.lyrics, audio.replaygain):

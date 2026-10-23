@@ -11,6 +11,7 @@ from sonora.modules.renamer import (
     sync_lrc_metadata,
 )
 from sonora.modules.tagger import (
+    _AlbumMetadataContext,
     process_single_track,
 )
 from tests.fixtures import write_silent_wav
@@ -228,7 +229,7 @@ class TestRenameWorkflows(ModuleTestCase):
             track_number=1,  # Corrupted track number from single release
             album="Great Album",
         )
-        mbids = {1: "uuid-1", 2: "uuid-2"}
+        mbids = {(1, 1): "uuid-1", (1, 2): "uuid-2"}
         with (
             patch("sonora.modules.tagger._enrich_musicbrainz"),
             patch(
@@ -237,7 +238,7 @@ class TestRenameWorkflows(ModuleTestCase):
         ):
             track_metadata = process_single_track(
                 track_file,
-                album_track_mbids=mbids,
+                album_context=_AlbumMetadataContext(track_mbids=mbids),
                 force=True,
                 fetch_bpm=False,
                 fetch_itunes_art=False,

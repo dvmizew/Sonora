@@ -1,7 +1,3 @@
-"""
-Unit tests for Sonora CLI main entrypoint and subcommands.
-"""
-
 import json
 import tempfile
 import unittest
@@ -9,8 +5,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from sonora.cli.main import main
-from sonora.cli.reports import _emit_tag_summary_and_report
-from sonora.core.models import CheckReport, NormalizeReport, TrackInfo
+from sonora.cli.reports import _emit_tag_summary_and_report, _tag_coverage_counts
+from sonora.core.models import CheckReport, MetadataSource, NormalizeReport, TrackInfo
 from tests.support import IsolatedTestCase
 
 
@@ -21,6 +17,87 @@ class TestCLIInterface(IsolatedTestCase):
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
+
+    def test_verbose_works_before_and_after_commands_without_leaking(self) -> None:
+        from sonora.core.logger import LOG
+
+        def tag_with_diagnostics(*args: object, **kwargs: object) -> list[TrackInfo]:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                workers.submit(LOG.detail, "Provider decision").result()
+            return []
+
+        for arguments in (
+            ["--verbose", "tag", str(self.temporary_path)],
+            ["tag", str(self.temporary_path), "--verbose"],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch("sonora.cli.library.tag_album_folder", return_value=[]) as tag,
+                patch("sonora.core.logger.CONSOLE.print") as output,
+            ):
+                tag.side_effect = tag_with_diagnostics
+                self.assertEqual(main(arguments), 0)
+                self.assertTrue(
+                    any(
+                        "Provider decision" in str(call.args)
+                        for call in output.call_args_list
+                    )
+                )
+                self.assertFalse(LOG.verbose)
+        with (
+            patch("sonora.cli.library.tag_album_folder", return_value=[]) as tag,
+            patch("sonora.core.logger.CONSOLE.print") as output,
+        ):
+            tag.side_effect = tag_with_diagnostics
+            self.assertEqual(main(["tag", str(self.temporary_path)]), 0)
+            self.assertFalse(
+                any(
+                    "Provider decision" in str(call.args)
+                    for call in output.call_args_list
+                )
+            )
+
+    def test_verbose_resets_after_command_failure(self) -> None:
+        from sonora.core.logger import LOG
+
+        with patch(
+            "sonora.cli.library.tag_album_folder", side_effect=OSError("disk full")
+        ):
+            self.assertEqual(main(["tag", str(self.temporary_path), "--verbose"]), 1)
+        self.assertFalse(LOG.verbose)
+
+    def test_default_check_limits_console_findings_without_truncating_json(
+        self,
+    ) -> None:
+        output_path = self.temporary_path / "findings.json"
+        issues = {
+            str(self.temporary_path / f"recording-{index}.flac"): [
+                "Missing artist",
+                "Missing title",
+            ]
+            for index in range(8)
+        }
+        with (
+            patch(
+                "sonora.cli.library.check_library",
+                return_value=CheckReport(total_files=8, issues=issues),
+            ),
+            patch("sonora.core.logger.LOG.warning") as warning,
+        ):
+            self.assertEqual(
+                main(["check", str(self.temporary_path), "--json", str(output_path)]), 0
+            )
+        findings = [
+            call.args[0]
+            for call in warning.call_args_list
+            if "recording-" in call.args[0]
+        ]
+        self.assertEqual(len(findings), 5)
+        self.assertIn("recording-0.flac", findings[0])
+        report = json.loads(output_path.read_text())
+        self.assertEqual(len(report["issues"]), 8)
 
     def test_main_no_args_returns_zero(self) -> None:
         exit_code = main([])
@@ -414,3 +491,102 @@ class TestTagReportVerification(IsolatedTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReportProvenance(IsolatedTestCase):
+    def test_unrelated_comments_do_not_count_as_genius_metadata(self) -> None:
+        sources: tuple[MetadataSource | None, ...] = (
+            None,
+            "MusicBrainz",
+            "TheAudioDB",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                recording = TrackInfo(
+                    Path("recording.flac"),
+                    comment="An album description or a personal note",
+                    metadata_sources={"comment": source} if source else {},
+                )
+                self.assertEqual(_tag_coverage_counts([recording])["genius"], 0)
+
+    def test_genius_identifier_or_provenance_counts_each_track_once(self) -> None:
+        recordings = [
+            TrackInfo(Path("stored-id.flac"), genius_song_id="123"),
+            TrackInfo(
+                Path("description.flac"),
+                comment="Verified song description",
+                metadata_sources={"comment": "Genius"},
+            ),
+            TrackInfo(
+                Path("credits.flac"),
+                composer="Song Writer",
+                metadata_sources={"composer": "Genius"},
+            ),
+            TrackInfo(
+                Path("both.flac"),
+                genius_song_id="456",
+                metadata_sources={"genius_song_id": "Genius"},
+            ),
+            TrackInfo(Path("empty-id.flac"), genius_song_id=""),
+        ]
+        self.assertEqual(_tag_coverage_counts(recordings)["genius"], 4)
+
+    def test_report_and_summary_share_corrected_counts_and_existing_schema(
+        self,
+    ) -> None:
+        recordings = [
+            TrackInfo(Path("stored-id.flac"), genius_song_id="123"),
+            TrackInfo(
+                Path("other-provider.flac"),
+                comment="Album description",
+                metadata_sources={"comment": "TheAudioDB"},
+            ),
+        ]
+        output = self.test_directory / "report.json"
+        with patch("sonora.cli.reports.LOG.summary_table") as summary:
+            _emit_tag_summary_and_report(
+                recordings, [], False, self.test_directory, 1, output, dry_run=True
+            )
+
+        report = json.loads(output.read_text())
+        self.assertEqual(report["schema"], "tag_report_v1")
+        self.assertTrue(report["execution"]["dry_run"])
+        enrichment = report["statistics"]["enrichment"]
+        self.assertEqual(enrichment["genius_matched_count"], 1)
+        self.assertEqual(enrichment["genius_percentage"], 50.0)
+        self.assertEqual(enrichment["theaudiodb_matched_count"], 1)
+        self.assertEqual(
+            set(enrichment),
+            {
+                "musicbrainz_matched_count",
+                "musicbrainz_percentage",
+                "genre_tagged_count",
+                "genre_percentage",
+                "lyrics_tagged_count",
+                "lyrics_percentage",
+                "isrc_tagged_count",
+                "isrc_percentage",
+                "bpm_calculated_count",
+                "bpm_percentage",
+                "replaygain_calculated_count",
+                "replaygain_percentage",
+                "initial_key_count",
+                "initial_key_percentage",
+                "composer_tagged_count",
+                "composer_percentage",
+                "producers_tagged_count",
+                "producers_percentage",
+                "advisory_tagged_count",
+                "advisory_percentage",
+                "discogs_matched_count",
+                "discogs_percentage",
+                "genius_matched_count",
+                "genius_percentage",
+                "theaudiodb_matched_count",
+                "theaudiodb_percentage",
+            },
+        )
+        rows = summary.call_args.args[1]
+        self.assertIn(("Tracks with Genius Metadata", "1/2 (50.00%)", None), rows)
+        self.assertEqual(rows[0], ("Total Tracks Processed", "2", None))
+        self.assertEqual(rows[-1][0], "Audio Quality Breakdown")

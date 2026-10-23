@@ -1,5 +1,4 @@
 import contextlib
-import logging
 import re
 import select
 import sys
@@ -20,20 +19,6 @@ from rich.progress import (
 )
 from rich.table import Table
 from rich.theme import Theme
-
-for logger_name in [
-    "syncedlyrics",
-    "Musixmatch",
-    "Lrclib",
-    "NetEase",
-    "Megalobiz",
-    "Genius",
-    "urllib3",
-    "httpx",
-]:
-    external_logger = logging.getLogger(logger_name)
-    external_logger.setLevel(logging.CRITICAL)
-    external_logger.propagate = False
 
 _THEME = Theme(
     {"info": "cyan", "warning": "yellow", "error": "red", "success": "green bold"}
@@ -58,10 +43,6 @@ class SonoraLogger:
                 for message in messages:
                     CONSOLE.print(message, highlight=False)
 
-    def force_info(self, message: str) -> None:
-        with _LOG_LOCK:
-            CONSOLE.print(message, highlight=False)
-
     def _log_message(self, message: str) -> None:
         if hasattr(self.local, "buffer"):
             self.local.buffer.append(message)
@@ -74,6 +55,11 @@ class SonoraLogger:
             self._log_message(message)
         else:
             self._log_message(f"[info]INFO:[/info] {message}")
+
+    def detail(self, message: str) -> None:
+        """Show per-file decisions only when explicitly requested."""
+        if self.verbose:
+            self.info(message)
 
     def success(self, message: str) -> None:
         self._log_message(f"[success]SUCCESS:[/success] {message}")

@@ -30,68 +30,36 @@ def _write_json_report(
 
 
 def _tag_coverage_counts(tagged_tracks: list[TrackInfo]) -> dict[str, int]:
-    counts = {
-        "mb": sum(
-            1
-            for track_metadata in tagged_tracks
-            if track_metadata.musicbrainz_trackid is not None
-        ),
-        "genre": sum(
-            1 for track_metadata in tagged_tracks if track_metadata.genre is not None
-        ),
-        "lyrics": sum(
-            1
-            for track_metadata in tagged_tracks
-            if track_metadata.lyrics is not None
-            or track_metadata.synced_lyrics is not None
-        ),
-        "isrc": sum(
-            1 for track_metadata in tagged_tracks if track_metadata.isrc is not None
-        ),
-        "bpm": sum(
-            1 for track_metadata in tagged_tracks if track_metadata.bpm is not None
-        ),
-        "rg": sum(
-            1
-            for track_metadata in tagged_tracks
-            if track_metadata.replaygain_track_gain is not None
-        ),
-        "key": sum(
-            1
-            for track_metadata in tagged_tracks
-            if track_metadata.initial_key is not None
-        ),
-        "composer": sum(
-            1 for track_metadata in tagged_tracks if track_metadata.composer is not None
-        ),
-        "producers": sum(
-            1
-            for track_metadata in tagged_tracks
-            if track_metadata.producers is not None
-        ),
-        "advisory": sum(
-            1 for track_metadata in tagged_tracks if track_metadata.advisory is not None
-        ),
-        "discogs": sum(
-            1
-            for track_metadata in tagged_tracks
-            if track_metadata.discogs_release_id is not None
-        ),
-        "genius": sum(
-            1
-            for track_metadata in tagged_tracks
-            if track_metadata.genius_song_id is not None
-            or track_metadata.comment is not None
-        ),
-        "theaudiodb": sum(
-            1
-            for track in tagged_tracks
-            if "TheAudioDB" in track.metadata_sources.values()
-        ),
-        "lossless": sum(
-            1 for track_metadata in tagged_tracks if track_metadata.is_lossless
-        ),
+    presence_fields = {
+        "mb": "musicbrainz_trackid",
+        "genre": "genre",
+        "isrc": "isrc",
+        "bpm": "bpm",
+        "rg": "replaygain_track_gain",
+        "key": "initial_key",
+        "composer": "composer",
+        "producers": "producers",
+        "advisory": "advisory",
+        "discogs": "discogs_release_id",
     }
+    counts = {
+        metric: sum(getattr(track, field) is not None for track in tagged_tracks)
+        for metric, field in presence_fields.items()
+    }
+    counts.update(
+        lyrics=sum(
+            track.lyrics is not None or track.synced_lyrics is not None
+            for track in tagged_tracks
+        ),
+        genius=sum(
+            bool(track.genius_song_id) or "Genius" in track.metadata_sources.values()
+            for track in tagged_tracks
+        ),
+        theaudiodb=sum(
+            "TheAudioDB" in track.metadata_sources.values() for track in tagged_tracks
+        ),
+        lossless=sum(track.is_lossless for track in tagged_tracks),
+    )
     return counts
 
 
@@ -107,9 +75,9 @@ def _emit_tag_summary_and_report(
     total_tracks = len(tagged_tracks)
     counts = _tag_coverage_counts(tagged_tracks)
     lossy_count = total_tracks - counts["lossless"]
-    pcts = {
-        k: (v / total_tracks * 100) if total_tracks > 0 else 0.0
-        for k, v in counts.items()
+    percentages = {
+        metric: (count / total_tracks * 100) if total_tracks > 0 else 0.0
+        for metric, count in counts.items()
     }
     tracks_with_conflicts = [
         track for track in tagged_tracks if track.metadata_conflicts
@@ -123,62 +91,28 @@ def _emit_tag_summary_and_report(
         for track in tagged_tracks
     )
 
-    tag_summary_rows = [
+    coverage_labels = {
+        "mb": "Tracks with MusicBrainz ID",
+        "genre": "Genre & Styles Tagged",
+        "lyrics": "Tracks with Lyrics",
+        "isrc": "Tracks with ISRC",
+        "bpm": "Tracks with BPM",
+        "rg": "Tracks with ReplayGain",
+        "key": "Musical Key / Tonality",
+        "composer": "Composers & Writers",
+        "producers": "Producers & Studio Credits",
+        "genius": "Tracks with Genius Metadata",
+        "advisory": "Parental Advisory",
+    }
+    tag_summary_rows: list[tuple[str, str, str | None]] = [
         ("Total Tracks Processed", str(total_tracks), None),
-        (
-            "Tracks with MusicBrainz ID",
-            f"{counts['mb']}/{total_tracks} ({pcts['mb']:.2f}%)",
-            None,
-        ),
-        (
-            "Genre & Styles Tagged",
-            f"{counts['genre']}/{total_tracks} ({pcts['genre']:.2f}%)",
-            None,
-        ),
-        (
-            "Tracks with Lyrics",
-            f"{counts['lyrics']}/{total_tracks} ({pcts['lyrics']:.2f}%)",
-            None,
-        ),
-        (
-            "Tracks with ISRC",
-            f"{counts['isrc']}/{total_tracks} ({pcts['isrc']:.2f}%)",
-            None,
-        ),
-        (
-            "Tracks with BPM",
-            f"{counts['bpm']}/{total_tracks} ({pcts['bpm']:.2f}%)",
-            None,
-        ),
-        (
-            "Tracks with ReplayGain",
-            f"{counts['rg']}/{total_tracks} ({pcts['rg']:.2f}%)",
-            None,
-        ),
-        (
-            "Musical Key / Tonality",
-            f"{counts['key']}/{total_tracks} ({pcts['key']:.2f}%)",
-            None,
-        ),
-        (
-            "Composers & Writers",
-            f"{counts['composer']}/{total_tracks} ({pcts['composer']:.2f}%)",
-            None,
-        ),
-        (
-            "Producers & Studio Credits",
-            f"{counts['producers']}/{total_tracks} ({pcts['producers']:.2f}%)",
-            None,
-        ),
-        (
-            "Tracks with Genius Metadata",
-            f"{counts['genius']}/{total_tracks} ({pcts['genius']:.2f}%)",
-            None,
-        ),
-        (
-            "Parental Advisory",
-            f"{counts['advisory']}/{total_tracks} ({pcts['advisory']:.2f}%)",
-            None,
+        *(
+            (
+                label,
+                f"{counts[metric]}/{total_tracks} ({percentages[metric]:.2f}%)",
+                None,
+            )
+            for metric, label in coverage_labels.items()
         ),
         (
             "Tracks with Provider Conflicts",
@@ -201,12 +135,31 @@ def _emit_tag_summary_and_report(
     if json_report:
         summary_text = (
             f"Processed {total_tracks} tracks ({len(failures)} failures). "
-            f"MusicBrainz {counts['mb']}/{total_tracks} ({pcts['mb']:.2f}%), "
-            f"Genre {counts['genre']}/{total_tracks} ({pcts['genre']:.2f}%), "
-            f"Lyrics {counts['lyrics']}/{total_tracks} ({pcts['lyrics']:.2f}%), "
-            f"BPM tags present {counts['bpm']}/{total_tracks} ({pcts['bpm']:.2f}%), "
-            f"ReplayGain {counts['rg']}/{total_tracks} ({pcts['rg']:.2f}%)."
+            f"MusicBrainz {counts['mb']}/{total_tracks} ({percentages['mb']:.2f}%), "
+            f"Genre {counts['genre']}/{total_tracks} ({percentages['genre']:.2f}%), "
+            f"Lyrics {counts['lyrics']}/{total_tracks} ({percentages['lyrics']:.2f}%), "
+            f"BPM tags present {counts['bpm']}/{total_tracks} ({percentages['bpm']:.2f}%), "
+            f"ReplayGain {counts['rg']}/{total_tracks} ({percentages['rg']:.2f}%)."
         )
+        enrichment_keys = {
+            "mb": ("musicbrainz_matched_count", "musicbrainz_percentage"),
+            "genre": ("genre_tagged_count", "genre_percentage"),
+            "lyrics": ("lyrics_tagged_count", "lyrics_percentage"),
+            "isrc": ("isrc_tagged_count", "isrc_percentage"),
+            "bpm": ("bpm_calculated_count", "bpm_percentage"),
+            "rg": ("replaygain_calculated_count", "replaygain_percentage"),
+            "key": ("initial_key_count", "initial_key_percentage"),
+            "composer": ("composer_tagged_count", "composer_percentage"),
+            "producers": ("producers_tagged_count", "producers_percentage"),
+            "advisory": ("advisory_tagged_count", "advisory_percentage"),
+            "discogs": ("discogs_matched_count", "discogs_percentage"),
+            "genius": ("genius_matched_count", "genius_percentage"),
+            "theaudiodb": ("theaudiodb_matched_count", "theaudiodb_percentage"),
+        }
+        enrichment_statistics: dict[str, int | float] = {}
+        for metric, (count_key, percentage_key) in enrichment_keys.items():
+            enrichment_statistics[count_key] = counts[metric]
+            enrichment_statistics[percentage_key] = round(percentages[metric], 2)
         report_data = {
             "schema": "tag_report_v1",
             "generator": "Sonora",
@@ -222,34 +175,7 @@ def _emit_tag_summary_and_report(
             "statistics": {
                 "total_tracks": total_tracks,
                 "total_failures": len(failures),
-                "enrichment": {
-                    "musicbrainz_matched_count": counts["mb"],
-                    "musicbrainz_percentage": round(pcts["mb"], 2),
-                    "genre_tagged_count": counts["genre"],
-                    "genre_percentage": round(pcts["genre"], 2),
-                    "lyrics_tagged_count": counts["lyrics"],
-                    "lyrics_percentage": round(pcts["lyrics"], 2),
-                    "isrc_tagged_count": counts["isrc"],
-                    "isrc_percentage": round(pcts["isrc"], 2),
-                    "bpm_calculated_count": counts["bpm"],
-                    "bpm_percentage": round(pcts["bpm"], 2),
-                    "replaygain_calculated_count": counts["rg"],
-                    "replaygain_percentage": round(pcts["rg"], 2),
-                    "initial_key_count": counts["key"],
-                    "initial_key_percentage": round(pcts["key"], 2),
-                    "composer_tagged_count": counts["composer"],
-                    "composer_percentage": round(pcts["composer"], 2),
-                    "producers_tagged_count": counts["producers"],
-                    "producers_percentage": round(pcts["producers"], 2),
-                    "advisory_tagged_count": counts["advisory"],
-                    "advisory_percentage": round(pcts["advisory"], 2),
-                    "discogs_matched_count": counts["discogs"],
-                    "discogs_percentage": round(pcts["discogs"], 2),
-                    "genius_matched_count": counts["genius"],
-                    "genius_percentage": round(pcts["genius"], 2),
-                    "theaudiodb_matched_count": counts["theaudiodb"],
-                    "theaudiodb_percentage": round(pcts["theaudiodb"], 2),
-                },
+                "enrichment": enrichment_statistics,
                 "audio_formats": {
                     "lossless_tracks": counts["lossless"],
                     "lossy_tracks": lossy_count,

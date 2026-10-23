@@ -4,9 +4,10 @@ import socket
 import sqlite3
 import sys
 from collections.abc import Sequence
+from typing import Annotated
 
 import diskcache
-from cyclopts import App
+from cyclopts import App, Parameter
 from cyclopts.exceptions import CycloptsError
 from rich.markup import escape
 
@@ -55,6 +56,23 @@ app.command(cache_app)
 app.command(cache_clear_cmd, name="clear-cache")
 
 
+@app.meta.default
+def _run_command(
+    *tokens: Annotated[str, Parameter(show=False, allow_leading_hyphen=True)],
+    verbose: Annotated[
+        bool,
+        Parameter(negative="", help="Show per-file changes and provider diagnostics"),
+    ] = False,
+) -> int:
+    previous_verbose = LOG.verbose
+    LOG.verbose = verbose
+    try:
+        result = app(tokens or ("--help",), exit_on_error=False)
+        return result if isinstance(result, int) else 0
+    finally:
+        LOG.verbose = previous_verbose
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
     """
     CLI Entrypoint. Executes cyclopts App with provided or sys arguments.
@@ -63,11 +81,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         arguments = sys.argv[1:]
 
     if not arguments:
-        app(["--help"], exit_on_error=False)
+        app.meta(["--help"], exit_on_error=False)
         return 0
 
     try:
-        result = app(arguments, exit_on_error=False)
+        result = app.meta(arguments, exit_on_error=False)
         if isinstance(result, int):
             return result
         return 0
