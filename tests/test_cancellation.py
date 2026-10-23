@@ -1,6 +1,12 @@
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from unittest.mock import patch
 
 from sonora.audio.replaygain import calculate_album_replaygain
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
+from sonora.core.models import TrackInfo
+from sonora.modules import tagger
 from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.checker import (
     check_library,
@@ -17,6 +23,19 @@ from sonora.modules.tagger import (
 from sonora.modules.track_processing import normalize_library
 from tests.fixtures import write_silent_wav
 from tests.module_support import OfflinePipelineTestCase
+from tests.support import IsolatedTestCase
+
+
+def _observe_shutdown(
+    calls: list[tuple[ThreadPoolExecutor, bool, bool]],
+    original: Callable[..., None],
+    executor: ThreadPoolExecutor,
+    wait: bool = True,
+    *,
+    cancel_futures: bool = False,
+) -> None:
+    calls.append((executor, wait, cancel_futures))
+    original(executor, wait=wait, cancel_futures=cancel_futures)
 
 
 class TestCancellation(OfflinePipelineTestCase):
@@ -144,3 +163,69 @@ class TestCancellation(OfflinePipelineTestCase):
                 fetch_lyrics=False,
                 fetch_itunes_art=False,
             )
+
+
+class TestCancellationChains(IsolatedTestCase):
+    def test_keyboard_interrupt_and_ordinary_errors(self) -> None:
+        self.assertTrue(is_interruption(KeyboardInterrupt()))
+        self.assertFalse(is_interruption(RuntimeError("release unlocked lock")))
+        self.assertFalse(is_interruption(RuntimeError("internal failure")))
+
+    def test_nested_explicit_causes(self) -> None:
+        worker_error = RuntimeError("worker cleanup")
+        executor_error = RuntimeError("executor cleanup")
+        worker_error.__cause__ = KeyboardInterrupt()
+        executor_error.__cause__ = worker_error
+        self.assertTrue(is_interruption(executor_error))
+
+    def test_context_and_suppressed_context(self) -> None:
+        worker_error = RuntimeError("worker cleanup")
+        worker_error.__context__ = KeyboardInterrupt()
+        self.assertTrue(is_interruption(worker_error))
+        worker_error.__suppress_context__ = True
+        self.assertFalse(is_interruption(worker_error))
+
+    def test_cyclic_exception_chain(self) -> None:
+        first_error = RuntimeError("first")
+        second_error = RuntimeError("second")
+        first_error.__cause__ = second_error
+        second_error.__cause__ = first_error
+        self.assertFalse(is_interruption(first_error))
+
+
+class TestTaggingPoolCancellation(IsolatedTestCase):
+    def test_interrupt_cancels_all_worker_queues_before_joining_any_pool(self) -> None:
+        path = self.test_directory / "recording.flac"
+        path.touch()
+        recording = TrackInfo(path, artist="Alpha", title="Original Song")
+        calls: list[tuple[ThreadPoolExecutor, bool, bool]] = []
+        original = ThreadPoolExecutor.shutdown
+        with (
+            patch.object(
+                tagger,
+                "_resolve_album_metadata_context",
+                return_value=tagger._AlbumMetadataContext(),
+            ),
+            patch.object(tagger, "process_single_track", return_value=recording),
+            patch.object(tagger, "as_completed", side_effect=KeyboardInterrupt),
+            patch.object(
+                ThreadPoolExecutor,
+                "shutdown",
+                autospec=True,
+                side_effect=partial(_observe_shutdown, calls, original),
+            ),
+            self.assertRaises(InterruptedOperationError),
+        ):
+            tagger.tag_album_folder(
+                self.test_directory,
+                force=True,
+                dry_run=True,
+                max_threads=1,
+                fetch_itunes_art=False,
+                fetch_replaygain=False,
+            )
+        self.assertEqual(
+            [(wait, cancel) for _, wait, cancel in calls[:3]], [(False, True)] * 3
+        )
+        self.assertEqual(len({id(executor) for executor, _, _ in calls[:3]}), 3)
+        self.assertTrue(all(wait and cancel for _, wait, cancel in calls[3:6]))
