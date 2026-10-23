@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -100,6 +100,15 @@ class TrackInfo:
         default_factory=list, repr=False, compare=False
     )
 
+    def copy(self) -> "TrackInfo":
+        """Copy a track without sharing mutable provenance or proposed changes."""
+        return replace(
+            self,
+            metadata_sources=dict(self.metadata_sources),
+            metadata_conflicts=dict(self.metadata_conflicts),
+            _diff_descriptions=list(self._diff_descriptions),
+        )
+
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""
         track_dict: dict[str, object] = {
@@ -142,17 +151,12 @@ class RenameReport:
     failed_files: int = 0
 
 
-class NormalizeReport(list[TrackInfo]):
-    """Represents the results of library normalization, preserving list semantics for callers."""
+@dataclass
+class NormalizeReport:
+    """Tracks scanned and changes produced by offline normalization."""
 
-    def __init__(
-        self,
-        tracks: list[TrackInfo],
-        modified_files: dict[str, list[str]] | None = None,
-    ) -> None:
-        super().__init__(tracks)
-        self.tracks = tracks
-        self.modified_files: dict[str, list[str]] = modified_files or {}
+    tracks: list[TrackInfo] = field(default_factory=list)
+    modified_files: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def total_scanned(self) -> int:

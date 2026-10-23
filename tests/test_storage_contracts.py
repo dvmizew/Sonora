@@ -7,15 +7,35 @@ from functools import partial
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import diskcache
 import msgpack
 
 from sonora.core import cache as cache_module
 from sonora.core import state
-from sonora.core.cache import close_cache
+from sonora.core.cache import (
+    api_cache_session,
+    close_cache,
+    get_cache,
+    get_cached_api,
+    set_cached_api,
+)
 from sonora.core.cache_storage import CacheDecodeError, MetadataDisk
 from sonora.core.files import atomic_write_bytes, move_file_exclusively
 from sonora.core.state import LibraryStateVault
 from tests.support import IsolatedTestCase
+
+
+def _worker_cache_session(fail: bool = False) -> diskcache.Cache:
+    with api_cache_session():
+        owned_cache = get_cache()
+        assert owned_cache is not None
+        with api_cache_session():
+            assert get_cache() is owned_cache
+            set_cached_api("worker-session", {"title": "Recording"})
+        if fail:
+            raise OSError("worker failure")
+    assert get_cache() is None
+    return owned_cache
 
 
 def _close_and_remove_api_directory(api_directory: Path) -> None:
@@ -349,3 +369,82 @@ class TestLibraryStateFailureContracts(IsolatedTestCase):
     def test_state_size_tolerates_disappearing_or_locked_files(self) -> None:
         with patch("pathlib.Path.stat", side_effect=PermissionError("locked state")):
             self.assertEqual(self.vault.get_state_size(), 0)
+
+
+class TestWorkerCacheLifecycle(IsolatedTestCase):
+    def test_worker_closes_owned_cache_and_preserves_main_cache(self) -> None:
+        shared_cache = get_cache()
+        assert shared_cache is not None
+        original_close = diskcache.Cache.close
+        with (
+            patch.object(
+                diskcache.Cache, "close", autospec=True, side_effect=original_close
+            ) as close,
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            owned_cache = executor.submit(_worker_cache_session).result()
+            self.assertIsNot(owned_cache, shared_cache)
+            self.assertTrue(
+                any(call.args[0] is owned_cache for call in close.call_args_list)
+            )
+            self.assertFalse(
+                any(call.args[0] is shared_cache for call in close.call_args_list)
+            )
+            self.assertIs(get_cache(), shared_cache)
+            self.assertEqual(get_cached_api("worker-session"), {"title": "Recording"})
+
+    def test_worker_exception_closes_session_and_allows_next_task(self) -> None:
+        original_close = diskcache.Cache.close
+        with (
+            patch.object(
+                diskcache.Cache, "close", autospec=True, side_effect=original_close
+            ) as close,
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            with self.assertRaisesRegex(OSError, "worker failure"):
+                executor.submit(_worker_cache_session, True).result()
+            self.assertTrue(close.called)
+            executor.submit(_worker_cache_session).result()
+        self.assertEqual(get_cached_api("worker-session"), {"title": "Recording"})
+
+    def test_main_session_reuses_shared_cache(self) -> None:
+        shared_cache = get_cache()
+        with api_cache_session():
+            self.assertIs(get_cache(), shared_cache)
+        self.assertIs(get_cache(), shared_cache)
+
+
+class TestCacheErrorBoundaries(IsolatedTestCase):
+    def test_cache_programming_errors_are_not_silenced(self) -> None:
+        from sonora.core.cache import get_cached_api, set_cached_api
+
+        for exception in (RuntimeError("internal bug"), ValueError("internal bug")):
+            with (
+                self.subTest(exception=exception),
+                patch("sonora.core.cache.get_cache") as cache,
+            ):
+                cache.return_value.get.side_effect = exception
+                cache.return_value.set.side_effect = exception
+                with self.assertRaises(type(exception)):
+                    get_cached_api("track")
+                with self.assertRaises(type(exception)):
+                    set_cached_api("track", {"title": "Title"})
+
+    def test_unavailable_database_is_an_operational_error(self) -> None:
+        import sqlite3
+
+        from sonora.core.cache import get_cached_api, set_cached_api
+
+        with patch("sonora.core.cache.get_cache") as cache:
+            cache.return_value.get.side_effect = sqlite3.OperationalError("locked")
+            cache.return_value.set.side_effect = sqlite3.OperationalError("locked")
+            self.assertIsNone(get_cached_api("track"))
+            set_cached_api("track", {"title": "Title"})
+
+    def test_corrupted_serialized_cache_entry_is_an_operational_error(self) -> None:
+        from sonora.core.cache import get_cached_api
+        from sonora.core.cache_storage import CacheDecodeError
+
+        with patch("sonora.core.cache.get_cache") as cache:
+            cache.return_value.get.side_effect = CacheDecodeError("corrupted entry")
+            self.assertIsNone(get_cached_api("track"))

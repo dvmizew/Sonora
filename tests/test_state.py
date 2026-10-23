@@ -1,7 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from sonora.core import state
 from sonora.core.state import LibraryStateVault
 from tests.support import IsolatedTestCase
 
@@ -20,6 +22,37 @@ class TestLibraryState(IsolatedTestCase):
     def tearDown(self) -> None:
         self.state_mgr.close()
         self.temp_dir.cleanup()
+
+    def test_storage_stats_do_not_create_a_database_for_an_unused_library(self) -> None:
+        state_path = state.get_default_state_db_path()
+        self.assertFalse(state_path.exists())
+        self.assertEqual(state.get_state_storage_stats(), (0, 0))
+        self.assertFalse(state_path.exists())
+
+    def test_storage_stats_include_active_state_and_reopen_existing_database(
+        self,
+    ) -> None:
+        library_state = state.get_library_state()
+        library_state.record_track_state(self.test_file1, status="TAGGED_OK")
+        for reopen in (False, True):
+            with self.subTest(reopen=reopen):
+                if reopen:
+                    state.reset_library_state()
+                entry_count, storage_bytes = state.get_state_storage_stats()
+                self.assertEqual(entry_count, 1)
+                self.assertGreater(storage_bytes, 0)
+
+    def test_storage_stats_preserve_vault_io_failure_handling(self) -> None:
+        with patch.object(Path, "exists", side_effect=PermissionError("locked file")):
+            self.assertEqual(state.get_state_storage_stats(), (0, 0))
+        library_state = state.get_library_state()
+        for method in ("stat", "exists"):
+            with (
+                self.subTest(method=method),
+                patch.object(Path, method, side_effect=PermissionError("locked file")),
+            ):
+                self.assertEqual(state.get_state_storage_stats(), (0, 0))
+        self.assertIs(state.get_library_state(), library_state)
 
     def test_state_lifecycle(self) -> None:
         # Initially not up to date

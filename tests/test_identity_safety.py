@@ -10,7 +10,10 @@ from sonora.core.config import SonoraConfig
 from sonora.core.http import SESSION
 from sonora.core.models import CheckReport, TrackInfo
 from sonora.modules import catalog_enrichment, checker, matching, tagger
-from sonora.modules.metadata_consensus import merge_provider_proposals
+from sonora.modules.metadata_consensus import (
+    build_provider_proposal,
+    merge_provider_proposals,
+)
 from sonora.modules.normalization import normalize_track_metadata
 from sonora.services import (
     acoustid,
@@ -20,6 +23,7 @@ from sonora.services import (
     musicbrainz,
     theaudiodb,
 )
+from sonora.services.itunes import _parse_itunes_track
 from tests.support import IsolatedTestCase
 
 MBID = "11111111-2222-3333-4444-555555555555"
@@ -44,7 +48,7 @@ class TestRecordingSafety(IsolatedTestCase):
         correct = {"title": "Original Song", "artist": "Alpha", "isrc": "USAAA2400001"}
         wrong = {**correct, "title": "Different Song"}
         self.assertEqual(
-            catalog_enrichment._find_track_in_album_mapping(
+            matching._find_track_in_album_mapping(
                 {"original song": correct},
                 {(1, 1): wrong},
                 "Original Song",
@@ -56,7 +60,7 @@ class TestRecordingSafety(IsolatedTestCase):
             (correct, True),
         )
         self.assertEqual(
-            catalog_enrichment._find_track_in_album_mapping(
+            matching._find_track_in_album_mapping(
                 {},
                 {(1, 1): wrong},
                 "Original Song",
@@ -126,7 +130,13 @@ class TestRecordingSafety(IsolatedTestCase):
             )
             with (
                 self.subTest(response=response),
-                patch.object(itunes, "lookup_itunes_track", return_value=response),
+                patch.object(
+                    itunes,
+                    "lookup_itunes_track",
+                    return_value=_parse_itunes_track(response)
+                    if response is not None
+                    else None,
+                ),
                 patch.object(itunes, "fetch_itunes_track_metadata", return_value=None),
             ):
                 catalog_enrichment._enrich_itunes(track, force=True)
@@ -371,7 +381,13 @@ class TestProviderConflictHandling(IsolatedTestCase):
         agreed = dataclasses.replace(
             track, genre="Pop", metadata_sources={"genre": "iTunes"}
         )
-        merge_provider_proposals(track, [disputed, agreed])
+        merge_provider_proposals(
+            track,
+            [
+                build_provider_proposal(track, candidate)
+                for candidate in [disputed, agreed]
+            ],
+        )
         self.assertEqual(track.total_tracks, 14)
         self.assertEqual(
             track.metadata_conflicts,
@@ -387,7 +403,10 @@ class TestProviderConflictHandling(IsolatedTestCase):
             title="Entirely Different Recording",
             metadata_conflicts={"genre": "Unrelated conflict"},
         )
-        merge_provider_proposals(track, [unrelated])
+        merge_provider_proposals(
+            track,
+            [build_provider_proposal(track, unrelated)],
+        )
         self.assertIn("identity", track.metadata_conflicts)
         self.assertNotIn("genre", track.metadata_conflicts)
 
@@ -402,7 +421,10 @@ class TestProviderConflictHandling(IsolatedTestCase):
         proposal = dataclasses.replace(
             track, genre="Pop", metadata_sources={"genre": "iTunes"}
         )
-        merge_provider_proposals(track, [proposal])
+        merge_provider_proposals(
+            track,
+            [build_provider_proposal(track, proposal)],
+        )
         self.assertEqual(track.genre, "Jazz")
         self.assertNotIn("genre", track.metadata_sources)
 
@@ -453,7 +475,7 @@ class TestOfflineArtistNormalization(IsolatedTestCase):
                     artist_resolution, "get_cached_api", return_value=cached_identity
                 ) as cache_lookup,
             ):
-                self.assertEqual(artists.resolve_artist_name("Example"), "Example")
+                self.assertEqual(artists.normalize_artist_name("Example"), "Example")
                 self.assertEqual(
                     artists.get_primary_artist("Example & Partners"), "Example"
                 )
@@ -491,9 +513,9 @@ class TestOfflineArtistNormalization(IsolatedTestCase):
                 artist_resolution, "get_cached_api", return_value="Wrong Artist"
             ) as cache_lookup,
         ):
-            self.assertEqual(artists.resolve_artist_name("Legal Name"), "Stage")
+            self.assertEqual(artists.normalize_artist_name("Legal Name"), "Stage")
             self.assertEqual(artists.get_primary_artist("Legal Name"), "Stage")
-            self.assertEqual(artists.resolve_artist_name("Other Name"), "Other Name")
+            self.assertEqual(artists.normalize_artist_name("Other Name"), "Other Name")
             cache_lookup.assert_not_called()
 
     def test_normalization_uses_artist_resolver_only_when_injected(self) -> None:

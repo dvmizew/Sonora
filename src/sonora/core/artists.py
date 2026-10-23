@@ -53,7 +53,7 @@ def _load_user_overrides() -> dict[str, str]:
 
 
 @lru_cache(maxsize=4096)
-def resolve_artist_name(raw_name: str | None) -> str:
+def normalize_artist_name(raw_name: str | None) -> str:
     """
     Resolve legal names, aliases, or variations to canonical stage names.
     Returns the resolved canonical name or the cleaned input if not an alias.
@@ -117,12 +117,12 @@ def get_primary_artist(
     formatted_artist_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", raw_artist_name).strip()
     if (group_classifier or is_single_group_artist)(raw_artist_name):
         return sanitize_name(
-            (artist_resolver or resolve_artist_name)(formatted_artist_name)
+            (artist_resolver or normalize_artist_name)(formatted_artist_name)
         )
 
     parts = get_artist_split_pattern().split(raw_artist_name, maxsplit=1)
     primary = parts[0].strip()
-    return sanitize_name((artist_resolver or resolve_artist_name)(primary))
+    return sanitize_name((artist_resolver or normalize_artist_name)(primary))
 
 
 def extract_balanced_features(
@@ -173,6 +173,44 @@ def extract_balanced_features(
     return base_title, matches, open_char, close_char
 
 
+def _split_artist_credits(
+    featured_artists_input: str | Sequence[str | None],
+    group_classifier: Callable[[str | None], bool],
+) -> list[str]:
+    raw_credits: list[str] = (
+        [featured_artists_input]
+        if isinstance(featured_artists_input, str)
+        else [str(raw_entry) for raw_entry in featured_artists_input if raw_entry]
+    )
+    if not raw_credits:
+        return []
+
+    tokens: list[str] = []
+    feat_pattern = get_feat_tokens_pattern()
+    for raw_chunk in raw_credits:
+        cleaned_chunk = clean_unicode_punct(raw_chunk).strip()
+        if not cleaned_chunk:
+            continue
+        if group_classifier(cleaned_chunk):
+            tokens.append(cleaned_chunk)
+            continue
+
+        comma_parts = re.split(r"[,;\n]+|\s+/\s+", cleaned_chunk)
+        for part in comma_parts:
+            part_strip = part.strip()
+            if not part_strip:
+                continue
+            if group_classifier(part_strip):
+                tokens.append(part_strip)
+            else:
+                for subpart in feat_pattern.split(part_strip):
+                    subpart_clean = subpart.strip()
+                    if subpart_clean:
+                        tokens.append(subpart_clean)
+
+    return tokens
+
+
 def extract_featured_artist_tokens(
     featured_artists_input: str | Sequence[str | None] | None,
     primary_artist: str | None = None,
@@ -190,107 +228,73 @@ def extract_featured_artist_tokens(
     if not featured_artists_input:
         return []
 
-    raw_items: list[str] = (
-        [featured_artists_input]
-        if isinstance(featured_artists_input, str)
-        else [str(raw_entry) for raw_entry in featured_artists_input if raw_entry]
+    policy = get_config()
+    tokens = _split_artist_credits(
+        featured_artists_input, group_classifier or is_single_group_artist
     )
-    if not raw_items:
-        return []
-
-    tokens: list[str] = []
-    feat_pattern = get_feat_tokens_pattern()
-    for raw_chunk in raw_items:
-        cleaned_chunk = clean_unicode_punct(raw_chunk).strip()
-        if not cleaned_chunk:
-            continue
-        if (group_classifier or is_single_group_artist)(cleaned_chunk):
-            tokens.append(cleaned_chunk)
-            continue
-
-        comma_parts = re.split(r"[,;\n]+|\s+/\s+", cleaned_chunk)
-        for part in comma_parts:
-            part_strip = part.strip()
-            if not part_strip:
-                continue
-            if (group_classifier or is_single_group_artist)(part_strip):
-                tokens.append(part_strip)
-            else:
-                for subpart in feat_pattern.split(part_strip):
-                    subpart_clean = subpart.strip()
-                    if subpart_clean:
-                        tokens.append(subpart_clean)
-
     unique_artists: list[str] = []
-    norm_to_index: dict[str, int] = {}
-    primary_norm = normalize_str(primary_artist) if primary_artist else None
+    artist_indexes: dict[str, int] = {}
+    normalized_primary_artist = (
+        normalize_str(primary_artist) if primary_artist else None
+    )
     user_overrides = _load_user_overrides()
 
-    for tok in tokens:
-        clean_tok = clean_disambiguation(tok)
-        clean_tok = re.sub(r"[\(\)\[\]\{\}]", "", clean_tok).strip()
-        clean_tok = re.sub(
+    for artist_token in tokens:
+        clean_artist = clean_disambiguation(artist_token)
+        clean_artist = re.sub(r"[\(\)\[\]\{\}]", "", clean_artist).strip()
+        clean_artist = re.sub(
             r"^(?:fea?t(?:uring)?|ft|with|w/(?!\s*[oO](?:ut)?\b)|w\.|and|si|și|cu)\.?\s+",
             "",
-            clean_tok,
+            clean_artist,
             flags=re.IGNORECASE,
         ).strip()
-        if not clean_tok:
+        if not clean_artist:
             continue
 
-        norm = normalize_str(clean_tok)
-        if norm in user_overrides:
-            clean_tok = user_overrides[norm]
-            norm = normalize_str(clean_tok)
-        if (
-            not norm
-            or norm
-            in (
-                "unknown",
-                "unknown artist",
-                "various",
-                "various artists",
-                "untitled",
-                "none",
-                "null",
-            )
-            or clean_tok.lower()
-            in (
-                "unknown",
-                "unknown artist",
-                "various",
-                "various artists",
-                "untitled",
-                "none",
-                "null",
-            )
+        normalized_artist = normalize_str(clean_artist)
+        if normalized_artist in user_overrides:
+            clean_artist = user_overrides[normalized_artist]
+            normalized_artist = normalize_str(clean_artist)
+        if not normalized_artist or normalized_artist in {
+            "unknown",
+            "unknown artist",
+            "various",
+            "various artists",
+            "untitled",
+            "none",
+            "null",
+        }:
+            continue
+
+        if normalized_primary_artist and (
+            normalized_artist == normalized_primary_artist
+            or fuzz.ratio(normalized_artist, normalized_primary_artist)
+            >= policy.featured_artist_duplicate_threshold
         ):
             continue
 
-        if primary_norm and (
-            norm == primary_norm or fuzz.ratio(norm, primary_norm) >= 88
-        ):
-            continue
-
-        if norm in norm_to_index:
-            existing_idx = norm_to_index[norm]
-            unique_artists[existing_idx] = preserve_unicode_repertoire(
-                unique_artists[existing_idx], clean_tok
+        if normalized_artist in artist_indexes:
+            existing_index = artist_indexes[normalized_artist]
+            unique_artists[existing_index] = preserve_unicode_repertoire(
+                unique_artists[existing_index], clean_artist
             )
             continue
 
         fuzzy_matched = False
-        for existing_norm, idx in norm_to_index.items():
-            if fuzz.ratio(norm, existing_norm) >= 88:
-                unique_artists[idx] = preserve_unicode_repertoire(
-                    unique_artists[idx], clean_tok
+        for normalized_existing_artist, existing_index in artist_indexes.items():
+            if (
+                fuzz.ratio(normalized_artist, normalized_existing_artist)
+                >= policy.featured_artist_duplicate_threshold
+            ):
+                unique_artists[existing_index] = preserve_unicode_repertoire(
+                    unique_artists[existing_index], clean_artist
                 )
                 fuzzy_matched = True
                 break
 
         if not fuzzy_matched:
-            norm_to_index[norm] = len(unique_artists)
-            unique_artists.append(clean_tok)
+            artist_indexes[normalized_artist] = len(unique_artists)
+            unique_artists.append(clean_artist)
 
     registered_groups = [
         artist_token
@@ -302,19 +306,20 @@ def extract_featured_artist_tokens(
         filtered_unique_artists: list[str] = []
         for artist_token in unique_artists:
             is_subtoken = False
-            token_norm = normalize_str(artist_token)
+            normalized_token = normalize_str(artist_token)
             for registered_group in registered_groups:
                 if artist_token == registered_group:
                     continue
                 group_subtokens = [
-                    normalize_str(subtok)
-                    for subtok in feat_token_pattern.split(registered_group)
-                    if subtok.strip()
+                    normalize_str(group_member)
+                    for group_member in feat_token_pattern.split(registered_group)
+                    if group_member.strip()
                 ]
                 if any(
-                    token_norm == subtok_norm
-                    or fuzz.ratio(token_norm, subtok_norm) >= 90
-                    for subtok_norm in group_subtokens
+                    normalized_token == normalized_group_member
+                    or fuzz.ratio(normalized_token, normalized_group_member)
+                    >= policy.group_member_match_threshold
+                    for normalized_group_member in group_subtokens
                 ):
                     is_subtoken = True
                     break
@@ -405,3 +410,10 @@ def harmonize_artist_casing(candidate_artist: str, reference_artist: str) -> str
     if reference_artist.isupper() and not is_acronym and not candidate_artist.isupper():
         return candidate_artist
     return reference_artist
+
+
+def clear_artist_cache() -> None:
+    """Invalidate configured aliases and derived artist classifications."""
+    _load_user_overrides.cache_clear()
+    normalize_artist_name.cache_clear()
+    is_single_group_artist.cache_clear()

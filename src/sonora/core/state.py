@@ -24,7 +24,7 @@ def tagging_state_status(
     fetch_itunes_art: bool,
 ) -> str:
     state_policy = {
-        "metadata_policy": "consensus-v3",
+        "metadata_policy": "consensus-v5",
         "bpm": fetch_bpm,
         "key": fetch_key,
         "replaygain": fetch_replaygain,
@@ -264,9 +264,9 @@ class LibraryStateVault:
 
     def get_state_count(self) -> int:
         """Return total number of tracked files in the library state database."""
-        if not self.db_path.exists():
-            return 0
         try:
+            if not self.db_path.exists():
+                return 0
             with self._connection() as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM track_state;")
                 return int(next(cursor)[0])
@@ -337,6 +337,19 @@ def get_library_state() -> LibraryStateVault:
             if _STATE_INSTANCE is None:
                 _STATE_INSTANCE = LibraryStateVault()
     return _STATE_INSTANCE
+
+
+def get_state_storage_stats() -> tuple[int, int]:
+    """Return entry count and bytes without creating an unused state database."""
+    if _STATE_INSTANCE is None:
+        try:
+            if not get_default_state_db_path().exists():
+                return 0, 0
+        except OSError as error:
+            LOG.debug(f"Failed to inspect state database: {error}")
+            return 0, 0
+    library_state = get_library_state()
+    return library_state.get_state_count(), library_state.get_state_size()
 
 
 def reset_library_state() -> None:

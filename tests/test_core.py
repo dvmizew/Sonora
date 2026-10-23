@@ -505,7 +505,7 @@ class TestCoreUtils(IsolatedTestCase):
             self.assertEqual(resolve_artist_name("Crush"), "Crush")
 
     def test_offline_resolution_ignores_corrupt_cached_expansion(self) -> None:
-        from sonora.core.artists import resolve_artist_name
+        from sonora.core.artists import normalize_artist_name
 
         with (
             patch(
@@ -515,7 +515,7 @@ class TestCoreUtils(IsolatedTestCase):
             patch("sonora.services.artist_resolution.set_cached_api") as mock_set_cache,
         ):
             # Local normalization must not consult or mutate a provider cache.
-            resolved_artist_name = resolve_artist_name("Drei")
+            resolved_artist_name = normalize_artist_name("Drei")
             mock_set_cache.assert_not_called()
             self.assertEqual(resolved_artist_name, "Drei")
 
@@ -523,10 +523,10 @@ class TestCoreUtils(IsolatedTestCase):
     def test_offline_artist_resolution_does_not_query_providers(
         self, mock_get_cache: MagicMock
     ) -> None:
-        from sonora.core.artists import get_primary_artist, resolve_artist_name
+        from sonora.core.artists import get_primary_artist, normalize_artist_name
 
         with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
-            result = resolve_artist_name("Unknown Indierock Band")
+            result = normalize_artist_name("Unknown Indierock Band")
             self.assertEqual(result, "Unknown Indierock Band")
             mock_mb.assert_not_called()
 

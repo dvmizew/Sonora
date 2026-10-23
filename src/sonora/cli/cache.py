@@ -173,91 +173,64 @@ def cache_clear_cmd(
         )
         return 0
 
+    mode_label = "Purged" if purge else "Cleared"
+    active_style = "yellow" if dry_run else "green"
     if dry_run:
         LOG.info(
             f"[yellow][DRY RUN][/yellow] Simulated cache clearing for [bold]{escape(str(result.cache_dir))}[/bold]:"
         )
-        rows = [
-            (
-                "API Cache Target",
-                (
-                    f"{result.api_entries_cleared:,} entries ({_format_file_size(result.api_bytes_freed)})"
-                    if result.api_cleared
-                    else "Skipped"
-                ),
-                "yellow" if result.api_cleared else "white",
-            ),
-            (
-                "Library State Target",
-                (
-                    f"{result.state_entries_cleared:,} tracks ({_format_file_size(result.state_bytes_freed)})"
-                    if result.state_cleared
-                    else "Preserved (use --state or --all to clear)"
-                ),
-                "yellow" if result.state_cleared else "white",
-            ),
-            (
-                "In-Memory Cache Target",
-                (
-                    f"{result.memory_metadata_cleared:,} entries"
-                    if result.memory_cleared
-                    else "Skipped"
-                ),
-                "yellow" if result.memory_cleared else "white",
-            ),
-            (
-                "Action Mode",
-                "Purge completely from disk" if purge else "Clear & Reclaim",
-                "cyan",
-            ),
-            (
-                "Total Space Reclaimable",
-                _format_file_size(result.total_bytes_freed),
-                "bold yellow",
-            ),
-        ]
-        LOG.summary_table("Dry Run Cache Clearing", rows)
-        return 0
-
-    mode_label = "Purged" if purge else "Cleared"
-    rows = [
-        ("Cache Directory", escape(str(result.cache_dir)), "cyan"),
+    rows = [("Cache Directory", escape(str(result.cache_dir)), "cyan")]
+    for label, selected, count, size_bytes, unit, skipped in (
         (
             "API Metadata Cache",
-            (
-                f"{result.api_entries_cleared:,} entries cleared ({_format_file_size(result.api_bytes_freed)} freed)"
-                if result.api_cleared
-                else "Skipped"
-            ),
-            "green" if result.api_cleared else "white",
+            result.api_cleared,
+            result.api_entries_cleared,
+            result.api_bytes_freed,
+            "entries",
+            "Skipped",
         ),
         (
             "Library State Cache",
-            (
-                f"{result.state_entries_cleared:,} tracks cleared ({_format_file_size(result.state_bytes_freed)} freed)"
-                if result.state_cleared
-                else "Preserved (use --state or --all to clear)"
-            ),
-            "green" if result.state_cleared else "white",
+            result.state_cleared,
+            result.state_entries_cleared,
+            result.state_bytes_freed,
+            "tracks",
+            "Preserved (use --state or --all to clear)",
         ),
         (
             "In-Memory Caches",
+            result.memory_cleared,
+            result.memory_metadata_cleared,
+            None,
+            "entries",
+            "Skipped",
+        ),
+    ):
+        description = f"{count:,} {unit}" if selected else skipped
+        if selected and size_bytes is not None:
+            description += f" ({_format_file_size(size_bytes)})"
+        rows.append((label, description, active_style if selected else "white"))
+    rows.extend(
+        [
             (
-                f"{result.memory_metadata_cleared:,} entries reset"
-                if result.memory_cleared
-                else "Skipped"
+                "Action Mode",
+                ("Purge completely from disk" if purge else "Clear & Reclaim")
+                if dry_run
+                else mode_label,
+                "cyan",
             ),
-            "cyan" if result.memory_cleared else "white",
-        ),
-        ("Action Type", mode_label, "magenta"),
-        (
-            "Total Space Freed",
-            _format_file_size(result.total_bytes_freed),
-            "bold green",
-        ),
-    ]
-    LOG.summary_table(f"Cache {mode_label} Summary", rows)
-    LOG.success(f"Cache successfully {mode_label.lower()}.")
+            (
+                "Total Space Reclaimable" if dry_run else "Total Space Freed",
+                _format_file_size(result.total_bytes_freed),
+                f"bold {active_style}",
+            ),
+        ]
+    )
+    LOG.summary_table(
+        "Dry Run Cache Clearing" if dry_run else f"Cache {mode_label} Summary", rows
+    )
+    if not dry_run:
+        LOG.success(f"Cache successfully {mode_label.lower()}.")
     return 0
 
 

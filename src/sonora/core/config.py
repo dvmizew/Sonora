@@ -48,6 +48,14 @@ class SonoraConfig:
     artist_match_threshold: float = field(
         default_factory=lambda: float(_default_policy()["artist_match_threshold"])
     )
+    featured_artist_duplicate_threshold: float = field(
+        default_factory=lambda: float(
+            _default_policy()["featured_artist_duplicate_threshold"]
+        )
+    )
+    group_member_match_threshold: float = field(
+        default_factory=lambda: float(_default_policy()["group_member_match_threshold"])
+    )
     album_match_threshold: float = field(
         default_factory=lambda: float(_default_policy()["album_match_threshold"])
     )
@@ -183,6 +191,8 @@ class SonoraConfig:
     def __post_init__(self) -> None:
         for threshold in (
             self.artist_match_threshold,
+            self.featured_artist_duplicate_threshold,
+            self.group_member_match_threshold,
             self.album_match_threshold,
             self.genius_match_threshold,
             self.title_match_threshold,
@@ -359,6 +369,8 @@ def get_config() -> SonoraConfig:
 
     for policy_name in (
         "artist_match_threshold",
+        "featured_artist_duplicate_threshold",
+        "group_member_match_threshold",
         "album_match_threshold",
         "genius_match_threshold",
         "title_match_threshold",
@@ -446,64 +458,53 @@ def get_config() -> SonoraConfig:
             (genre.lower(), canonical) for genre, canonical in aliases.items()
         )
 
-    discogs_token = (
-        raw_data.get("discogs_token")
-        or raw_data.get("discogs_user_token")
-        or os.environ.get("DISCOGS_TOKEN")
-        or os.environ.get("DISCOGS_USER_TOKEN")
-    )
-    if discogs_token:
-        kwargs["discogs_token"] = str(discogs_token).strip()
-
-    acoustid_key = (
-        raw_data.get("acoustid_api_key")
-        or raw_data.get("acoustid_key")
-        or os.environ.get("ACOUSTID_API_KEY")
-    )
-    if acoustid_key:
-        kwargs["acoustid_api_key"] = str(acoustid_key).strip()
-
-    genius_token = (
-        raw_data.get("genius_api_token")
-        or raw_data.get("genius_token")
-        or os.environ.get("GENIUS_API_TOKEN")
-        or os.environ.get("GENIUS_TOKEN")
-    )
-    if genius_token:
-        kwargs["genius_api_token"] = str(genius_token).strip()
-
-    lastfm_key = (
-        raw_data.get("lastfm_api_key")
-        or raw_data.get("lastfm_key")
-        or os.environ.get("LASTFM_API_KEY")
-    )
-    if lastfm_key:
-        kwargs["lastfm_api_key"] = str(lastfm_key).strip()
-
-    musixmatch_token = (
-        raw_data.get("musixmatch_token")
-        or os.environ.get("MUSIXMATCH_TOKEN")
-        or os.environ.get("MUSIXMATCH_USER_TOKEN")
-    )
-    if musixmatch_token:
-        kwargs["musixmatch_token"] = str(musixmatch_token).strip()
-
-    fanart_key = (
-        raw_data.get("fanart_api_key")
-        or raw_data.get("fanart_key")
-        or os.environ.get("FANART_API_KEY")
-        or os.environ.get("FANART_KEY")
-    )
-    if fanart_key:
-        kwargs["fanart_api_key"] = str(fanart_key).strip()
-
-    fanart_client = (
-        raw_data.get("fanart_client_key")
-        or raw_data.get("fanart_client")
-        or os.environ.get("FANART_CLIENT_KEY")
-    )
-    if fanart_client:
-        kwargs["fanart_client_key"] = str(fanart_client).strip()
+    for credential, config_names, environment_names in (
+        (
+            "discogs_token",
+            ("discogs_token", "discogs_user_token"),
+            ("DISCOGS_TOKEN", "DISCOGS_USER_TOKEN"),
+        ),
+        (
+            "acoustid_api_key",
+            ("acoustid_api_key", "acoustid_key"),
+            ("ACOUSTID_API_KEY",),
+        ),
+        (
+            "genius_api_token",
+            ("genius_api_token", "genius_token"),
+            ("GENIUS_API_TOKEN", "GENIUS_TOKEN"),
+        ),
+        ("lastfm_api_key", ("lastfm_api_key", "lastfm_key"), ("LASTFM_API_KEY",)),
+        (
+            "musixmatch_token",
+            ("musixmatch_token",),
+            ("MUSIXMATCH_TOKEN", "MUSIXMATCH_USER_TOKEN"),
+        ),
+        (
+            "fanart_api_key",
+            ("fanart_api_key", "fanart_key"),
+            ("FANART_API_KEY", "FANART_KEY"),
+        ),
+        (
+            "fanart_client_key",
+            ("fanart_client_key", "fanart_client"),
+            ("FANART_CLIENT_KEY",),
+        ),
+    ):
+        configured_secret = next(
+            (raw_data[name] for name in config_names if raw_data.get(name)), None
+        )
+        if not configured_secret:
+            configured_secret = next(
+                (
+                    os.environ[name]
+                    for name in environment_names
+                    if os.environ.get(name)
+                ),
+                None,
+            )
+        if configured_secret:
+            kwargs[credential] = str(configured_secret).strip()
 
     shazam_env = os.environ.get("ENABLE_SHAZAM") or os.environ.get(
         "SONORA_ENABLE_SHAZAM"
@@ -538,6 +539,10 @@ def clear_config_cache() -> None:
     get_bracket_feat_pattern.cache_clear()
     get_balanced_feat_pattern.cache_clear()
     get_feat_tokens_pattern.cache_clear()
+
+    from sonora.core.cache import clear_normalization_cache
+
+    clear_normalization_cache()
 
 
 @functools.cache

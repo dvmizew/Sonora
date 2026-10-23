@@ -1,5 +1,8 @@
+import os
 from pathlib import Path
+from unittest.mock import patch
 
+from sonora.core.artists import extract_featured_artist_tokens, is_single_group_artist
 from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import (
     SonoraConfig,
@@ -36,6 +39,104 @@ class TestSonoraConfig(IsolatedTestCase):
 
     def tearDown(self) -> None:
         clear_config_cache()
+
+    def test_featured_artist_deduplication_uses_configured_threshold(self) -> None:
+        for threshold, expected in ((88.0, []), (100.0, ["Example Artists"])):
+            with (
+                self.subTest(threshold=threshold),
+                patch(
+                    "sonora.core.artists.get_config",
+                    return_value=SonoraConfig(
+                        featured_artist_duplicate_threshold=threshold
+                    ),
+                ),
+            ):
+                self.assertEqual(
+                    extract_featured_artist_tokens("Example Artists", "Example Artist"),
+                    expected,
+                )
+                self.assertEqual(
+                    extract_featured_artist_tokens(None, "Example Artist"), []
+                )
+                self.assertEqual(
+                    extract_featured_artist_tokens(
+                        "Different Performer", "Example Artist"
+                    ),
+                    ["Different Performer"],
+                )
+        for invalid in (-1.0, 101.0):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                SonoraConfig(featured_artist_duplicate_threshold=invalid)
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                SonoraConfig(group_member_match_threshold=invalid)
+
+    def test_config_refresh_invalidates_derived_artist_classifications(self) -> None:
+        configured_groups: dict[str, object] = {"known_group_artists": []}
+        with (
+            patch("sonora.core.config.load_app_environment"),
+            patch(
+                "sonora.core.config._discover_config_file",
+                return_value=Path("config.json"),
+            ),
+            patch(
+                "sonora.core.config._parse_config_data", return_value=configured_groups
+            ),
+        ):
+            clear_config_cache()
+            self.assertFalse(is_single_group_artist("Example & Ensemble"))
+            configured_groups["known_group_artists"] = ["Example & Ensemble"]
+            clear_config_cache()
+            self.assertTrue(is_single_group_artist("Example & Ensemble"))
+            configured_groups["known_group_artists"] = []
+            clear_config_cache()
+            self.assertFalse(is_single_group_artist("Example & Ensemble"))
+
+    def test_credentials_keep_config_alias_and_environment_precedence(self) -> None:
+        for credential, alias, environment_names in (
+            (
+                "discogs_token",
+                "discogs_user_token",
+                ("DISCOGS_TOKEN", "DISCOGS_USER_TOKEN"),
+            ),
+            ("acoustid_api_key", "acoustid_key", ("ACOUSTID_API_KEY",)),
+            ("genius_api_token", "genius_token", ("GENIUS_API_TOKEN", "GENIUS_TOKEN")),
+            ("lastfm_api_key", "lastfm_key", ("LASTFM_API_KEY",)),
+            (
+                "musixmatch_token",
+                "musixmatch_token",
+                ("MUSIXMATCH_TOKEN", "MUSIXMATCH_USER_TOKEN"),
+            ),
+            ("fanart_api_key", "fanart_key", ("FANART_API_KEY", "FANART_KEY")),
+            ("fanart_client_key", "fanart_client", ("FANART_CLIENT_KEY",)),
+        ):
+            for configured, expected in (
+                (
+                    {credential: " canonical ", alias: " alias "}
+                    if credential != alias
+                    else {credential: " canonical "},
+                    "canonical",
+                ),
+                ({alias: " alias "}, "alias"),
+                ({}, "environment"),
+            ):
+                with (
+                    self.subTest(credential=credential, configured=configured),
+                    patch("sonora.core.config.load_app_environment"),
+                    patch(
+                        "sonora.core.config._discover_config_file",
+                        return_value=Path("config.json"),
+                    ),
+                    patch(
+                        "sonora.core.config._parse_config_data", return_value=configured
+                    ),
+                    patch.dict(
+                        os.environ,
+                        {name: " environment " for name in environment_names},
+                        clear=True,
+                    ),
+                ):
+                    clear_config_cache()
+                    self.assertEqual(getattr(get_config(), credential), expected)
 
     def test_default_config_properties(self) -> None:
         cfg = get_config()

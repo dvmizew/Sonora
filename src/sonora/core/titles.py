@@ -18,6 +18,7 @@ from music_metadata_filter.functions import (
 from rapidfuzz import fuzz
 
 from sonora.core.artists import (
+    extract_artist_features,
     extract_balanced_features,
     extract_featured_artist_tokens,
     get_primary_artist,
@@ -32,6 +33,7 @@ from sonora.core.text import (
     _COLLAPSE_SPACES_PATTERN,
     _NON_WORD_SPACES_PATTERN,
     clean_unicode_punct,
+    normalize_str,
 )
 
 _ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50}
@@ -277,7 +279,11 @@ def _title_identity_score(query_title: str, candidate_title: str) -> float:
     ) > 1:
         return 0.0
 
-    if query_title_clean == candidate_title_clean:
+    normalized_query_title = normalize_str(query_title_clean)
+    normalized_candidate_title = normalize_str(candidate_title_clean)
+    if query_title_clean == candidate_title_clean or (
+        normalized_query_title and normalized_query_title == normalized_candidate_title
+    ):
         title_score = 100.0
     else:
         title_ratio = float(fuzz.ratio(query_title_clean, candidate_title_clean))
@@ -363,6 +369,15 @@ def _title_identity_score(query_title: str, candidate_title: str) -> float:
     return title_score
 
 
+@lru_cache(maxsize=8192)
+def _credited_feature_artists(artist: str, title: str) -> frozenset[str]:
+    primary_artist, artist_features = extract_artist_features(artist)
+    _, title_features = extract_title_features(title, primary_artist=primary_artist)
+    return frozenset(
+        normalize_str(credit) for credit in (*artist_features, *title_features)
+    )
+
+
 def score_artist_title_match(
     query_artist: str,
     query_title: str,
@@ -375,19 +390,29 @@ def score_artist_title_match(
     """
     if not query_title or not candidate_title:
         return 0.0
+    query_features = _credited_feature_artists(query_artist, query_title)
+    candidate_features = _credited_feature_artists(candidate_artist, candidate_title)
+    # Providers may omit credits; two different explicit credit sets are conflicting evidence.
+    if query_features and candidate_features and query_features != candidate_features:
+        return 0.0
 
     config = get_config()
     query_artist_clean = clean_title(query_artist).lower()
     candidate_artist_clean = clean_title(candidate_artist).lower()
     query_title_clean = clean_title(query_title).lower()
     candidate_title_clean = clean_title(candidate_title).lower()
+    normalized_query_artist = normalize_str(query_artist_clean)
+    normalized_candidate_artist = normalize_str(candidate_artist_clean)
 
     title_score = _title_identity_score(query_title, candidate_title)
 
     if query_artist_clean:
         if not candidate_artist_clean:
             artist_score = 50.0
-        elif query_artist_clean == candidate_artist_clean:
+        elif query_artist_clean == candidate_artist_clean or (
+            normalized_query_artist
+            and normalized_query_artist == normalized_candidate_artist
+        ):
             artist_score = 100.0
         else:
             query_primary = clean_title(get_primary_artist(query_artist_clean)).lower()
@@ -484,3 +509,8 @@ def recording_identity_matches(
         and abs(expected_duration - candidate_duration)
         > get_config().single_duration_tolerance_seconds
     )
+
+
+def clear_title_cache() -> None:
+    """Invalidate title results derived from configured feature delimiters."""
+    clean_title.cache_clear()

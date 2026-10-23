@@ -395,3 +395,16 @@ def is_valid_uuid(
         return str(parsed).lower() == cleaned_uuid.lower()
     except ValueError:
         return False
+
+
+def clear_text_cache() -> None:
+    """Discard cached text normalization after configuration changes."""
+    clean_disambiguation.cache_clear()
+    normalize_str.cache_clear()
+    normalize_date.cache_clear()
+    normalize_genre.cache_clear()
+    normalize_country_name.cache_clear()
+    normalize_language_name.cache_clear()
+    normalize_script_name.cache_clear()
+    preserve_unicode_repertoire.cache_clear()
+    normalize_legacy_diacritics.cache_clear()

@@ -207,6 +207,8 @@
     "singer/songwriter": "Singer/Songwriter",
     "mpb": "MPB"
   },
+  "featured_artist_duplicate_threshold": 88.0,
+  "group_member_match_threshold": 90.0,
   "artist_match_threshold": 85.0,
   "album_match_threshold": 75.0,
   "genius_match_threshold": 70.0,
@@ -219,7 +221,7 @@
   "version_mismatch_penalty": 35.0,
   "remix_modifier_mismatch_penalty": 60.0,
   "title_score_weight": 0.6,
-  "single_duration_tolerance_seconds": 15.0,
+  "single_duration_tolerance_seconds": 2.0,
   "single_identifier_title_threshold": 70.0,
   "acoustid_confidence_threshold": 0.8,
   "acoustid_match_margin": 0.02,

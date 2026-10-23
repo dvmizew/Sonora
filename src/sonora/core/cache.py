@@ -29,37 +29,13 @@ _WORKER_CACHE: ContextVar[diskcache.Cache | None] = ContextVar(
 
 def clear_normalization_cache() -> None:
     """Reset offline artist and metadata normalization caches."""
-    from sonora.core.artists import (
-        _load_user_overrides,
-        is_single_group_artist,
-        resolve_artist_name,
-    )
-    from sonora.core.text import (
-        clean_disambiguation,
-        normalize_country_name,
-        normalize_date,
-        normalize_genre,
-        normalize_language_name,
-        normalize_legacy_diacritics,
-        normalize_script_name,
-        normalize_str,
-        preserve_unicode_repertoire,
-    )
-    from sonora.core.titles import clean_title
+    from sonora.core.artists import clear_artist_cache
+    from sonora.core.text import clear_text_cache
+    from sonora.core.titles import clear_title_cache
 
-    clean_disambiguation.cache_clear()
-    _load_user_overrides.cache_clear()
-    resolve_artist_name.cache_clear()
-    is_single_group_artist.cache_clear()
-    clean_title.cache_clear()
-    normalize_str.cache_clear()
-    normalize_date.cache_clear()
-    normalize_genre.cache_clear()
-    normalize_country_name.cache_clear()
-    normalize_language_name.cache_clear()
-    normalize_script_name.cache_clear()
-    preserve_unicode_repertoire.cache_clear()
-    normalize_legacy_diacritics.cache_clear()
+    clear_artist_cache()
+    clear_text_cache()
+    clear_title_cache()
 
 
 def get_cache_dir() -> Path:
@@ -262,19 +238,9 @@ def get_cache_stats() -> CacheStats:
             ) as error:
                 LOG.debug(f"Failed to get cache length: {error}")
 
-    from sonora.core.state import (
-        _STATE_INSTANCE,
-        get_default_state_db_path,
-        get_library_state,
-    )
+    from sonora.core.state import get_state_storage_stats
 
-    state_entries = 0
-    state_size = 0
-    default_state_path = get_default_state_db_path()
-    if _STATE_INSTANCE is not None or default_state_path.exists():
-        library_state = get_library_state()
-        state_entries = library_state.get_state_count()
-        state_size = library_state.get_state_size()
+    state_entries, state_size = get_state_storage_stats()
 
     from sonora.audio.metadata import get_metadata_cache_size
 

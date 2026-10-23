@@ -1,20 +1,29 @@
+import dataclasses
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
+import numpy as np
 
+from sonora.audio.bpm import calculate_bpm
 from sonora.core import config
 from sonora.core.artists import get_primary_artist
 from sonora.core.cache import clear_normalization_cache
+from sonora.core.config import (
+    SonoraConfig,
+    _default_policy,
+    clear_config_cache,
+    get_config,
+)
 from sonora.core.constants import DIRS
 from sonora.core.models import TrackInfo
+from sonora.core.state import tagging_state_status
 from sonora.core.text import (
     is_noise_genre,
     is_valid_uuid,
@@ -33,6 +42,11 @@ from sonora.core.titles import (
     score_artist_title_match,
 )
 from tests.support import IsolatedTestCase
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 
 class TestConfigurationFiles(IsolatedTestCase):
@@ -306,3 +320,242 @@ class TestTextContracts(IsolatedTestCase):
         self.assertEqual(normalize_country_name.cache_info().currsize, 0)
         self.assertEqual(normalize_str.cache_info().currsize, 0)
         self.assertEqual(normalize_language_name.cache_info().currsize, 0)
+
+
+class TestPolicyConfiguration(IsolatedTestCase):
+    def test_defaults_are_loaded_once(self) -> None:
+        _default_policy.cache_clear()
+        original_read = Path.read_text
+        with patch.object(
+            Path, "read_text", autospec=True, wraps=Path.read_text
+        ) as read_text:
+            read_text.side_effect = original_read
+            SonoraConfig()
+            SonoraConfig()
+        self.assertEqual(read_text.call_count, 1)
+
+    def test_all_string_arrays_reject_invalid_types(self) -> None:
+        for policy in (
+            "disc_folder_patterns",
+            "generic_containers",
+            "codec_rip_keywords",
+            "featuring_conjunctions",
+            "known_group_artists",
+            "noise_genres",
+            "outlier_genres",
+        ):
+            for invalid in ("string", [1], [True], [None]):
+                with self.subTest(policy=policy, value=invalid):
+                    clear_config_cache()
+                    with (
+                        patch(
+                            "sonora.core.config._discover_config_file",
+                            return_value=Path("config.json"),
+                        ),
+                        patch(
+                            "sonora.core.config._parse_config_data",
+                            return_value={policy: invalid},
+                        ),
+                        self.assertRaisesRegex(TypeError, policy),
+                    ):
+                        get_config()
+
+    def test_configuration_requires_real_boolean(self) -> None:
+        value: object
+        for value in ("false", 0, 1, [], None):
+            with self.subTest(value=value):
+                clear_config_cache()
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch("sonora.core.config.load_app_environment"),
+                    patch(
+                        "sonora.core.config._discover_config_file",
+                        return_value=Path("config.json"),
+                    ),
+                    patch(
+                        "sonora.core.config._parse_config_data",
+                        return_value={"enable_shazam": value},
+                    ),
+                    self.assertRaisesRegex(TypeError, "enable_shazam"),
+                ):
+                    get_config()
+
+    def test_environment_boolean_and_valid_arrays(self) -> None:
+        for environment_value, expected in (("false", False), ("true", True)):
+            clear_config_cache()
+            with (
+                patch.dict(os.environ, {"ENABLE_SHAZAM": environment_value}),
+                patch(
+                    "sonora.core.config._discover_config_file",
+                    return_value=Path("config.json"),
+                ),
+                patch(
+                    "sonora.core.config._parse_config_data",
+                    return_value={
+                        "disc_folder_patterns": ["^disk[0-9]+$"],
+                        "generic_containers": ["Downloads"],
+                    },
+                ),
+            ):
+                configuration = get_config()
+                self.assertIs(configuration.enable_shazam, expected)
+                self.assertTrue(configuration.is_disc_folder("disk2"))
+                self.assertTrue(configuration.is_generic_container("downloads"))
+
+    def test_matching_policies_validate_bounds(self) -> None:
+        invalid_configs: tuple[Callable[[], SonoraConfig], ...] = (
+            lambda: SonoraConfig(version_mismatch_penalty=-1),
+            lambda: SonoraConfig(remix_modifier_mismatch_penalty=101),
+            lambda: SonoraConfig(title_score_weight=1.1),
+            lambda: SonoraConfig(single_duration_tolerance_seconds=float("inf")),
+        )
+        for invalid_config in invalid_configs:
+            with self.assertRaises(ValueError):
+                invalid_config()
+
+    def test_fingerprint_is_stable_in_separate_interpreters(self) -> None:
+        script = (
+            "from sonora.core.config import SonoraConfig; "
+            "from sonora.core.state import tagging_state_status; "
+            "print(tagging_state_status(SonoraConfig(),fetch_bpm=False,fetch_key=False,"
+            "fetch_replaygain=False,fetch_lyrics=False,fetch_itunes_art=False))"
+        )
+        statuses = []
+        for seed in ("1", "2", "3"):
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONHASHSEED": seed},
+            )
+            statuses.append(result.stdout.strip())
+        self.assertEqual(len(set(statuses)), 1)
+
+    def test_fingerprint_changes_for_meaningful_policy_changes(self) -> None:
+        flags = {
+            "fetch_bpm": False,
+            "fetch_key": False,
+            "fetch_replaygain": False,
+            "fetch_lyrics": False,
+            "fetch_itunes_art": False,
+        }
+        original = tagging_state_status(SonoraConfig(), **flags)
+        self.assertNotEqual(
+            original,
+            tagging_state_status(SonoraConfig(), **{**flags, "fetch_bpm": True}),
+        )
+        self.assertNotEqual(
+            original,
+            tagging_state_status(
+                dataclasses.replace(SonoraConfig(), title_match_threshold=90), **flags
+            ),
+        )
+
+
+class TestConfigurablePolicies(IsolatedTestCase):
+    def test_invalid_policy_bounds(self) -> None:
+        invalid_configs: tuple[Callable[[], SonoraConfig], ...] = (
+            lambda: SonoraConfig(title_match_threshold=84),
+            lambda: SonoraConfig(short_title_match_threshold=94),
+            lambda: SonoraConfig(short_title_length=7),
+            lambda: SonoraConfig(acoustid_confidence_threshold=1.1),
+            lambda: SonoraConfig(key_confidence_threshold=-0.1),
+            lambda: SonoraConfig(bpm_search_min=0),
+            lambda: SonoraConfig(bpm_search_max=float("inf")),
+            lambda: SonoraConfig(bpm_search_min=200, bpm_search_max=60),
+            lambda: SonoraConfig(bpm_octave_min=75),
+            lambda: SonoraConfig(bpm_octave_min=75, bpm_octave_max=140),
+        )
+        for construct_config in invalid_configs:
+            with (
+                self.subTest(construct_config=construct_config),
+                self.assertRaises(ValueError),
+            ):
+                construct_config()
+
+    def test_configuration_loads_new_policies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.write_text(
+                "[sonora]\ntitle_match_threshold = 91\nbpm_search_min = 40\nbpm_search_max = 240\nbpm_octave_min = 75\nbpm_octave_max = 190\n",
+                encoding="utf-8",
+            )
+            with patch(
+                "sonora.core.config._discover_config_file", return_value=config_path
+            ):
+                clear_config_cache()
+                config = get_config()
+            self.assertEqual(config.title_match_threshold, 91)
+            self.assertEqual((config.bpm_search_min, config.bpm_search_max), (40, 240))
+            self.assertEqual((config.bpm_octave_min, config.bpm_octave_max), (75, 190))
+
+    def test_invalid_numeric_configuration(self) -> None:
+        for configured in (True, "nan", "not a number"):
+            with (
+                self.subTest(configured=configured),
+                patch(
+                    "sonora.core.config._discover_config_file",
+                    return_value=Path("config.json"),
+                ),
+                patch(
+                    "sonora.core.config._parse_config_data",
+                    return_value={"bpm_search_min": configured},
+                ),
+            ):
+                clear_config_cache()
+                with self.assertRaises((TypeError, ValueError)):
+                    get_config()
+
+    def test_matching_policy_changes_acceptance(self) -> None:
+        self.assertGreater(
+            score_artist_title_match(
+                "Artist", "An ordinary song", "Artist", "An ordinary songs"
+            ),
+            0,
+        )
+        with patch(
+            "sonora.core.titles.get_config",
+            return_value=SonoraConfig(title_match_threshold=99),
+        ):
+            self.assertEqual(
+                score_artist_title_match(
+                    "Artist", "An ordinary song", "Artist", "An ordinary songs"
+                ),
+                0,
+            )
+            self.assertEqual(
+                score_artist_title_match(
+                    "Artist", "An ordinary song", "Artist", "An ordinary song"
+                ),
+                100,
+            )
+        self.assertEqual(
+            score_artist_title_match("Artist", "Intro", "Artist", "Outro"), 0
+        )
+
+    def test_slow_tempo_not_doubled_unless_configured(self) -> None:
+        sample_rate = 22050
+        pulse_samples = int(sample_rate * 60 / 70)
+        audio_samples = np.zeros(sample_rate * 20)
+        for pulse_start in range(0, len(audio_samples), pulse_samples):
+            pulse_length = min(256, len(audio_samples) - pulse_start)
+            audio_samples[pulse_start : pulse_start + pulse_length] = np.hanning(
+                pulse_length
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "70bpm.wav"
+            audio_path.touch()
+            with patch(
+                "sonora.audio.bpm.load_audio", return_value=(audio_samples, sample_rate)
+            ):
+                measured_bpm = calculate_bpm(audio_path)
+                assert measured_bpm is not None
+                self.assertAlmostEqual(measured_bpm, 70, delta=2)
+                with patch(
+                    "sonora.audio.bpm.get_config",
+                    return_value=SonoraConfig(bpm_octave_min=75, bpm_octave_max=190),
+                ):
+                    folded_bpm = calculate_bpm(audio_path)
+                assert folded_bpm is not None
+                self.assertAlmostEqual(folded_bpm, 140, delta=4)
