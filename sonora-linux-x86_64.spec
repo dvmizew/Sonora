@@ -27,7 +27,8 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Fingerprinting uses fpcalc directly; pyacoustid's optional decoder pulls in GUI stacks.
+    excludes=['audioread'],
     noarchive=False,
     optimize=0,
 )
@@ -43,7 +44,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,

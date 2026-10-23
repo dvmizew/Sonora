@@ -1,11 +1,7 @@
-import io
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from PIL import Image, ImageDraw
-
 from sonora.audio.art import (
-    check_image_similarity,
     process_artist_artwork,
     process_label_artwork,
 )
@@ -14,40 +10,6 @@ from tests.module_support import ModuleTestCase
 
 
 class TestArtworkWorkflows(ModuleTestCase):
-    def test_image_similarity(self) -> None:
-        # Image 1: White background with black square in top-left
-        image_1 = Image.new("RGB", (64, 64), color="white")
-        draw_1 = ImageDraw.Draw(image_1)
-        draw_1.rectangle([5, 5, 25, 25], fill="black")
-
-        # Image 2: Exact copy of image 1
-        image_2 = Image.new("RGB", (64, 64), color="white")
-        draw_2 = ImageDraw.Draw(image_2)
-        draw_2.rectangle([5, 5, 25, 25], fill="black")
-
-        # Image 3: Completely distinct pattern (large filled ellipse in bottom-right)
-        image_3 = Image.new("RGB", (64, 64), color="white")
-        draw_3 = ImageDraw.Draw(image_3)
-        draw_3.ellipse([30, 30, 60, 60], fill="black")
-
-        buffer_1, buffer_2, buffer_3 = io.BytesIO(), io.BytesIO(), io.BytesIO()
-
-        image_1.save(buffer_1, format="JPEG")
-        image_2.save(buffer_2, format="JPEG")
-        image_3.save(buffer_3, format="JPEG")
-
-        image_bytes_1 = buffer_1.getvalue()
-        image_bytes_2 = buffer_2.getvalue()
-        image_bytes_3 = buffer_3.getvalue()
-
-        self.assertTrue(
-            check_image_similarity(image_bytes_1, image_bytes_2, threshold=0.8)
-        )
-        self.assertFalse(
-            check_image_similarity(image_bytes_1, image_bytes_3, max_distance=6)
-        )
-        self.assertFalse(check_image_similarity(b"", image_bytes_2))
-
     @patch("sonora.services.theaudiodb.SESSION.get")
     def test_theaudiodb_service(self, mock_get: Any) -> None:
         mock_response = MagicMock()

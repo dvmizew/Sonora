@@ -25,7 +25,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-          cache: "pip"
+
+      - name: Setup locked dependency tooling
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
 
       - name: Install system packages
         run: |
@@ -33,31 +37,27 @@ jobs:
           sudo apt-get install -y libtag1-dev ffmpeg flac sox libchromaprint-dev libchromaprint-tools
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install ".[dev]"
+        run: uv sync --locked --extra dev --python ${{ matrix.python }}
 
       - name: Lint & type check
         run: |
-          ruff check src/ tests/
-          ruff format --check src/ tests/
-          mypy --strict src/ tests/
-          python -m pyflakes src/ tests/
-          pyright
+          uv run --no-sync ruff check src/ tests/
+          uv run --no-sync ruff format --check src/ tests/
+          uv run --no-sync mypy --strict src/ tests/
 
       - name: Security scan
         run: |
-          bandit -r src/ -s B404,B603,B310
+          uv run --no-sync bandit -r src/ -s B404,B603,B310
 
       - name: Run regression tests with coverage
         run: |
-          python -W error -m coverage run -m unittest discover -s tests
-          python -m coverage report
+          uv run --no-sync python -W error -m coverage run -m unittest discover -s tests
+          uv run --no-sync python -m coverage report
 
       - name: Generate coverage reports
         run: |
-          python -m coverage html
-          python -m coverage xml
+          uv run --no-sync python -m coverage html
+          uv run --no-sync python -m coverage xml
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
@@ -70,4 +70,5 @@ jobs:
 
       - name: Smoke test CLI
         run: |
-          sonora
+          uv run --no-sync sonora --version
+          uv run --no-sync sonora tag --help

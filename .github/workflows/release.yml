@@ -29,8 +29,12 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          python-version: "3.12.15"
+
+      - name: Setup locked dependency tooling
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -40,12 +44,9 @@ jobs:
 
       - name: Build binary with PyInstaller
         run: |
-          python -m pip install --upgrade pip
-          pip install ".[dev]"
-          python -m pyflakes src/ tests/
-          pyright
-          python -W error -m unittest discover -s tests
-          pyinstaller sonora-linux-x86_64.spec --clean -y
+          uv sync --locked --group build --python 3.12.15 --no-editable
+          uv run --no-sync python -W error -m unittest discover -s tests
+          uv run --no-sync pyinstaller sonora-linux-x86_64.spec --clean -y
           dist/${{ matrix.asset_name }} --version
           dist/${{ matrix.asset_name }} tag --help
 

@@ -70,3 +70,6 @@ sonora_cache/
 /.music_metadata_cache
 
 GEMINI.md
+.codex/
+graphify-out/
+AGENTS.md

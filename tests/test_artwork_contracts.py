@@ -166,17 +166,6 @@ class TestArtworkContracts(IsolatedTestCase):
         fallback.assert_called_once_with("Primary", artist_mbid=MBID)
         self.assertEqual(list(self.test_directory.iterdir()), [])
 
-    def test_image_modes_transparency_and_invalid_content(self) -> None:
-        for mode in ("RGB", "RGBA", "LA", "P", "L"):
-            with (
-                self.subTest(mode=mode),
-                art._load_normalized_image(image_bytes((20, 20), mode)) as image,
-            ):
-                self.assertEqual(image.mode, "RGB")
-                self.assertEqual(image.size, (20, 20))
-        self.assertFalse(art.check_image_similarity(b"invalid", image_bytes()))
-        self.assertFalse(art.check_image_similarity(image_bytes(), b"invalid"))
-
     def test_candidate_artwork_chooses_best_low_resolution_fallback(self) -> None:
         for dimensions in (
             ((100, 100), (200, 200), (150, 150)),
