@@ -34,7 +34,7 @@ from sonora.modules.matching import (
     _is_generic_title,
     _is_strong_track_match,
 )
-from sonora.modules.metadata_consensus import apply_metadata_mapping
+from sonora.modules.metadata_merge import apply_metadata_mapping
 from sonora.services import artist_resolution
 from sonora.services import deezer as deezer_service
 from sonora.services import discogs as discogs_service
@@ -54,7 +54,7 @@ _NETWORK_EXCEPTIONS = (
 )
 
 
-def _enrich_shazam(
+def _update_shazam(
     track_info: TrackInfo,
     file_path: Path,
     target_album_artist: str | None = None,
@@ -162,7 +162,7 @@ def _enrich_shazam(
         LOG.debug(f"Shazam acoustic recognition failed: {escape(str(error))}")
 
 
-def _enrich_itunes(
+def _update_itunes(
     track_info: TrackInfo,
     album_itunes_details: dict[str, Any] | None = None,
     force: bool = False,
@@ -277,7 +277,7 @@ def _enrich_itunes(
             ):
                 track_info.metadata_conflicts["itunes_trackid"] = (
                     "Apple identifies a cleaned edition while local tags mark "
-                    "the recording explicit; enrichment withheld."
+                    "the recording explicit; metadata updates withheld."
                 )
                 return
             if api_payload.get("itunes_trackid"):
@@ -326,11 +326,11 @@ def _enrich_itunes(
             )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(
-            f"iTunes enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+            f"iTunes metadata update failed for {escape(track_info.title)}: {escape(str(error))}"
         )
 
 
-def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
+def _update_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
     if not lastfm_api_key or track_info.genre:
         return
     try:
@@ -346,7 +346,7 @@ def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
             if normalized_genre:
                 track_info.genre = normalized_genre
                 track_info.metadata_sources["genre"] = "Last.fm"
-                LOG.detail(f"   ∟ 🏷️ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
+                LOG.detail(f"   ∟ [Last.fm] Genre: [cyan]{normalized_genre}[/]")
             if len(tags) > 1 and not track_info.style:
                 subgenres = [
                     t
@@ -382,11 +382,11 @@ def _enrich_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
                         break
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(
-            f"Last.fm enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+            f"Last.fm metadata update failed for {escape(track_info.title)}: {escape(str(error))}"
         )
 
 
-def _enrich_discogs(
+def _update_discogs(
     track_info: TrackInfo,
     discogs_user_token: str | None,
     album_discogs_release: dict[str, Any] | None,
@@ -556,7 +556,7 @@ def _enrich_discogs(
                 )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(
-            f"Discogs enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+            f"Discogs metadata update failed for {escape(track_info.title)}: {escape(str(error))}"
         )
 
 
@@ -597,7 +597,7 @@ def _deezer_medium_track_count(
     return None
 
 
-def _enrich_deezer(
+def _update_deezer(
     track_info: TrackInfo,
     album_deezer_details: dict[str, Any] | None,
     has_album_context: bool = False,
@@ -774,11 +774,11 @@ def _enrich_deezer(
         )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(
-            f"Deezer enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+            f"Deezer metadata update failed for {escape(track_info.title)}: {escape(str(error))}"
         )
 
 
-def _enrich_genius(track_info: TrackInfo, genius_api_token: str | None) -> None:
+def _update_genius(track_info: TrackInfo, genius_api_token: str | None) -> None:
     if not genius_api_token:
         return
     credited_artist = track_info.artist
@@ -847,8 +847,8 @@ def _enrich_genius(track_info: TrackInfo, genius_api_token: str | None) -> None:
             and replacement_genius_id
             and str(replacement_genius_id) != previous_genius_id
         ):
-            # A repaired identifier does not repair legacy fields retained by
-            # the non-destructive merge. Their original provenance may be lost.
+            # Changing the song ID does not validate existing credits;
+            # their original source may be unavailable.
             for field_name, provider_field in (
                 ("comment", "description"),
                 ("composer", "writers"),
@@ -895,11 +895,11 @@ def _enrich_genius(track_info: TrackInfo, genius_api_token: str | None) -> None:
         LOG.debug("   ∟ 📝 [Genius] Fetched song details & credits")
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(
-            f"Genius enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+            f"Genius metadata update failed for {escape(track_info.title)}: {escape(str(error))}"
         )
 
 
-def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
+def _update_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
     if not (
         force
         or not track_info.music_video_url
@@ -940,5 +940,5 @@ def _enrich_theaudiodb(track_info: TrackInfo, force: bool = False) -> None:
         )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(
-            f"TheAudioDB enrichment failed for {escape(track_info.title)}: {escape(str(error))}"
+            f"TheAudioDB metadata update failed for {escape(track_info.title)}: {escape(str(error))}"
         )

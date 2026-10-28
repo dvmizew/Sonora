@@ -197,7 +197,7 @@ def rename_track_file(
                         new_path = resolve_unique_path(new_path, current_path=file_path)
                 new_name = new_path.name
                 LOG.detail(
-                    f"   ∟ 🎵 [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
+                    f"   ∟ [dim]{escape(file_path.name)}[/] -> [white]{escape(new_name)}[/]"
                 )
                 relocated = relocate_companion_lyrics(
                     file_path, new_path, dry_run=False, sidecars=companion_lyrics
@@ -263,7 +263,7 @@ def rename_single_folder(
         try:
             safe_case_rename(folder_path, new_folder)
             LOG.detail(
-                f"   ∟ 📂 Single folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
+                f"   ∟ Single folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
             )
             return new_folder
         except OSError as error:
@@ -322,7 +322,7 @@ def rename_album_folder(
             try:
                 safe_case_rename(folder_path, new_folder)
                 LOG.detail(
-                    f"   ∟ 📂 Album folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
+                    f"   ∟ Album folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
                 )
                 return new_folder
             except OSError as error:
@@ -364,7 +364,7 @@ def rename_directory_files(
 ) -> list[Path]:
     """
     Scan a directory (recursively) and rename all supported audio files, their .lrc files,
-    and album folders based on consensus metadata.
+    and album folders based on metadata shared by the tracks.
     """
     if not dir_path.exists():
         raise FileNotFoundError(f"Directory not found: {dir_path}")
@@ -389,7 +389,7 @@ def rename_directory_files(
         ):
             try:
                 for folder, files in folder_files.items():
-                    album_consensus: Counter[tuple[str, str]] = Counter()
+                    album_counts: Counter[tuple[str, str]] = Counter()
                     folder_renamed_paths: list[Path] = []
                     folder_track_infos: list[TrackInfo] = []
                     playlist_renames: dict[Path, Path] = {}
@@ -422,7 +422,7 @@ def rename_directory_files(
                                 search_artist != "Unknown Artist"
                                 and track_info.album != "Unknown Album"
                             ):
-                                album_consensus[(search_artist, track_info.album)] += 1
+                                album_counts[(search_artist, track_info.album)] += 1
                             folder_renamed_paths.append(new_path)
                             playlist_renames[path] = new_path
                             if (
@@ -453,21 +453,21 @@ def rename_directory_files(
                             )
                             if final_folder != folder:
                                 report.folders_renamed += 1
-                    elif album_consensus:
-                        ranked_album_credits = album_consensus.most_common(1)
+                    elif album_counts:
+                        ranked_album_credits = album_counts.most_common(1)
                         if (
                             ranked_album_credits
                             and ranked_album_credits[0][1] > len(files) / 2
                         ):
                             album_artist, album_title = ranked_album_credits[0][0]
                         elif (
-                            len({album_title for _, album_title in album_consensus})
+                            len({album_title for _, album_title in album_counts})
                             == 1
-                            and sum(album_consensus.values()) > len(files) / 2
+                            and sum(album_counts.values()) > len(files) / 2
                         ):
                             album_artist, album_title = (
                                 "Various Artists",
-                                next(iter(album_consensus))[1],
+                                next(iter(album_counts))[1],
                             )
                         else:
                             album_artist, album_title = None, None

@@ -126,7 +126,7 @@ def backup_library_tags(
     if not directory.exists() or not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")
 
-    LOG.info(f"🔄 Scanning for files in {escape(str(directory))}...")
+    LOG.info(f"Scanning for files in {escape(str(directory))}...")
     audio_files = find_audio_files(directory, recursive=True)
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -135,7 +135,7 @@ def backup_library_tags(
     output_path = output_file or Path(f"backup_{timestamp}.json")
 
     LOG.info(
-        f"🔄 Creating full backup for {len(audio_files)} files (threads={max_threads})..."
+        f"Creating full backup for {len(audio_files)} files (threads={max_threads})..."
     )
     backed_up = 0
     failed = 0
@@ -208,10 +208,10 @@ def backup_library_tags(
                     raise
 
         LOG.info(
-            f"✅ Successfully backed up {backed_up}/{len(audio_files)} files to {escape(str(output_path))}"
+            f"Successfully backed up {backed_up}/{len(audio_files)} files to {escape(str(output_path))}"
         )
         if failed > 0:
-            LOG.warning(f"   ⚠️  {failed} files could not be read")
+            LOG.warning(f"   {failed} files could not be read")
         if failed:
             raise OSError(
                 f"Partial backup saved to {output_path}: {failed} unreadable files"
@@ -357,7 +357,7 @@ def restore_library_tags(
         raise ValueError("max_threads must be positive")
 
     LOG.info(
-        f"🔄 Starting tag restoration from {escape(str(backup_file))} (threads={max_threads})..."
+        f"Starting tag restoration from {escape(str(backup_file))} (threads={max_threads})..."
     )
     restored_count = 0
     failed_count = 0
@@ -423,9 +423,9 @@ def restore_library_tags(
                     executor.shutdown(wait=True, cancel_futures=True)
                     raise InterruptedOperationError(restored_count) from None
 
-    LOG.info(f"✅ Successfully restored {restored_count} files")
+    LOG.info(f"Successfully restored {restored_count} files")
     if missing_count > 0:
-        LOG.warning(f"   ⚠️  {missing_count} files in backup are missing from disk")
+        LOG.warning(f"   {missing_count} files in backup are missing from disk")
     if failed_count > 0:
-        LOG.warning(f"   ⚠️  {failed_count} files failed to restore")
+        LOG.warning(f"   {failed_count} files failed to restore")
     return restored_count

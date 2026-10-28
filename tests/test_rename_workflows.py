@@ -122,7 +122,7 @@ class TestRenameWorkflows(ModuleTestCase):
         self.assertTrue(new_folder.exists())
         self.assertEqual(new_folder.name, "21 Savage - Issa Album")
 
-    def test_rename_album_folder_shields_artist_container(self) -> None:
+    def test_rename_album_folder_preserves_artist_container(self) -> None:
         artist_folder = self.tmp_path / "3 Doors Down"
         artist_folder.mkdir()
         # Case 1: Folder name matches artist, but album is different -> should not rename artist folder
@@ -153,10 +153,10 @@ class TestRenameWorkflows(ModuleTestCase):
         self.assertTrue(renamed_folder.exists())
         self.assertEqual(renamed_folder.name, "Alex Velea - Minim Doi")
 
-        # rename_album_folder must be shielded and not touch single folder in Singles/
-        shielded = rename_album_folder(renamed_folder, "Alex Velea", "Track 2")
-        self.assertEqual(shielded, renamed_folder)
-        self.assertEqual(shielded.name, "Alex Velea - Minim Doi")
+        # rename_album_folder must be preserved and not touch single folder in Singles/
+        preserved = rename_album_folder(renamed_folder, "Alex Velea", "Track 2")
+        self.assertEqual(preserved, renamed_folder)
+        self.assertEqual(preserved.name, "Alex Velea - Minim Doi")
 
     @patch("sonora.modules.renamer.read_track_metadata")
     def test_rename_track_file_in_singles_forces_01(self, mock_read: Any) -> None:
@@ -182,7 +182,7 @@ class TestRenameWorkflows(ModuleTestCase):
         self.assertTrue((singles_folder / "01 - Song.lrc").exists())
 
     @patch("sonora.modules.renamer.read_track_metadata")
-    def test_rename_directory_files_heals_corrupted_singles(
+    def test_rename_directory_files_updates_corrupted_singles(
         self, mock_read: Any
     ) -> None:
         single_dir = (
@@ -208,12 +208,12 @@ class TestRenameWorkflows(ModuleTestCase):
         renamed = rename_directory_files(self.tmp_path)
         self.assertEqual(len(renamed), 1)
 
-        healed_folder = (
+        updated_folder = (
             self.tmp_path / "Connect-R" / "Singles" / "Connect-R - Tren De Noapte"
         )
-        self.assertTrue(healed_folder.exists())
-        self.assertTrue((healed_folder / "01 - Tren De Noapte.wav").exists())
-        self.assertTrue((healed_folder / "01 - Tren De Noapte.lrc").exists())
+        self.assertTrue(updated_folder.exists())
+        self.assertTrue((updated_folder / "01 - Tren De Noapte.wav").exists())
+        self.assertTrue((updated_folder / "01 - Tren De Noapte.lrc").exists())
 
     @patch("sonora.audio.metadata.write_track_metadata")
     @patch("sonora.audio.metadata.read_track_metadata")
@@ -231,7 +231,7 @@ class TestRenameWorkflows(ModuleTestCase):
         )
         mbids = {(1, 1): "uuid-1", (1, 2): "uuid-2"}
         with (
-            patch("sonora.modules.tagger._enrich_musicbrainz"),
+            patch("sonora.modules.tagger._update_musicbrainz"),
             patch(
                 "sonora.services.itunes.fetch_itunes_track_metadata", return_value=None
             ),

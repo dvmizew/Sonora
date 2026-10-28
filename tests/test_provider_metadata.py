@@ -3,16 +3,17 @@ from unittest.mock import patch
 
 from sonora.core.config import SonoraConfig
 from sonora.core.models import TrackInfo
-from sonora.modules import catalog_enrichment as catalog
-from sonora.modules.metadata_consensus import (
+from sonora.modules import catalog_metadata as catalog
+from sonora.modules.metadata_merge import (
     MetadataProposal,
     merge_provider_proposals,
 )
+from sonora.modules.normalization import normalize_track_metadata
 from sonora.services import deezer, genius, itunes
 from tests.support import IsolatedTestCase
 
 
-class TestReportFollowup(IsolatedTestCase):
+class TestProviderMetadata(IsolatedTestCase):
     def test_apple_id_accepts_feature_credit_placement_but_rejects_duration_conflict(
         self,
     ) -> None:
@@ -38,21 +39,33 @@ class TestReportFollowup(IsolatedTestCase):
                     duration=343.0,
                     itunes_trackid="123",
                 )
-                catalog._enrich_itunes(recording, force=True)
+                catalog._update_itunes(recording, force=True)
                 self.assertEqual(recording.itunes_trackid, expected)
 
-    def test_single_provider_cannot_append_unverified_artist_aliases(self) -> None:
-        recording = TrackInfo(Path("song.flac"), featured_artists="Guest")
-        merge_provider_proposals(
-            recording,
-            [
-                MetadataProposal(
-                    {"featured_artists": ("Guest, Guest Alias", "Genius")}, {}
+    def test_provider_aliases_preserve_existing_credits(self) -> None:
+        for sources in (("Genius",), ("Genius", "Deezer"), ("Deezer", "Genius")):
+            with self.subTest(sources=sources):
+                recording = TrackInfo(Path("song.flac"), featured_artists="Guest")
+                merge_provider_proposals(
+                    recording,
+                    [MetadataProposal(
+                        {"featured_artists": ("Guest, Guest Alias", source)}, {}
+                    ) for source in sources],
                 )
-            ],
-        )
-        self.assertEqual(recording.featured_artists, "Guest")
-        self.assertIn("featured_artists", recording.metadata_conflicts)
+                self.assertEqual(recording.featured_artists, "Guest")
+                self.assertIn("featured_artists", recording.metadata_conflicts)
+
+    def test_local_artist_aliases_preserve_existing_credits(self) -> None:
+        for artist, credits in (
+            ("Tyga feat. Pharrell", "Pharrell Williams"),
+            ("Tyga feat. Game", "The Game, Mario"),
+        ):
+            with self.subTest(artist=artist):
+                recording = TrackInfo(Path("song.flac"), artist=artist,
+                                      title="Song", featured_artists=credits)
+                normalize_track_metadata(recording)
+                self.assertEqual(recording.artist, "Tyga")
+                self.assertEqual(recording.featured_artists, credits)
 
     def test_genius_prose_requires_explicit_opt_in_and_preserves_comments(self) -> None:
         for opted_in, existing, expected in (
@@ -86,7 +99,7 @@ class TestReportFollowup(IsolatedTestCase):
                     album="Album",
                     comment=existing,
                 )
-                catalog._enrich_genius(recording, "fixture")
+                catalog._update_genius(recording, "fixture")
                 self.assertEqual(recording.comment, expected)
                 self.assertEqual(recording.composer, "Writer")
                 lookup.assert_called_once_with(
@@ -105,5 +118,5 @@ class TestReportFollowup(IsolatedTestCase):
                     title="Song",
                     album=f"Album ({edition})",
                 )
-                catalog._enrich_deezer(recording, {"title": "Album"}, force=True)
+                catalog._update_deezer(recording, {"title": "Album"}, force=True)
                 self.assertEqual(recording.album, f"Album ({edition})")

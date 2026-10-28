@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sonora.core.models import TrackInfo
-from sonora.modules import catalog_enrichment
+from sonora.modules import catalog_metadata
 from sonora.services import genius
 from tests.support import IsolatedTestCase
 
@@ -39,7 +39,7 @@ class TestGeniusLegacyMetadata(IsolatedTestCase):
                 "featured_artists": "Another guest",
             },
         ):
-            catalog_enrichment._enrich_genius(track, "fixture")
+            catalog_metadata._update_genius(track, "fixture")
         self.assertEqual(track.genius_song_id, "2")
         self.assertEqual(track.comment, "Description of the first album")
         self.assertEqual(track.composer, "Old writer")
@@ -58,6 +58,6 @@ class TestGeniusLegacyMetadata(IsolatedTestCase):
             "fetch_genius_song_details",
             return_value={"genius_song_id": "2", "description": "Community text"},
         ):
-            catalog_enrichment._enrich_genius(track, "fixture")
+            catalog_metadata._update_genius(track, "fixture")
         self.assertEqual(track.comment, "Personal comment")
         self.assertNotIn("comment", track.metadata_conflicts)

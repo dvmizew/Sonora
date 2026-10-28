@@ -139,7 +139,7 @@ class TestMetadataWorkflows(ModuleTestCase):
         )
 
         # Corrupted title with verified ISRC match should NOT be marked alien
-        healed_track = TrackInfo(
+        updated_track = TrackInfo(
             file_path=Path(
                 "/music/James Arthur - Back From the Edge/04 - Lust for Life.wav"
             ),
@@ -163,8 +163,8 @@ class TestMetadataWorkflows(ModuleTestCase):
         }
         self.assertFalse(
             is_alien_album_track(
-                track_info=healed_track,
-                file_path=healed_track.file_path,
+                track_info=updated_track,
+                file_path=updated_track.file_path,
                 target_album_artist="James Arthur",
                 target_album_title="Back From the Edge",
                 album_mb_release_details=mb_release_ja,

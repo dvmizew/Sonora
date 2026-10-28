@@ -18,7 +18,7 @@ MBID = "11111111-2222-3333-4444-555555555555"
 
 
 class TestAlbumPipelineContracts(IsolatedTestCase):
-    def test_genre_consensus_abstains_on_conflicts_and_ties(self) -> None:
+    def test_genre_agreement_abstains_on_conflicts_and_ties(self) -> None:
         for genres, deezer_album, itunes_album in (
             (["Unknown", "Rock"], {"genre": "Pop"}, {"genre": "Jazz"}),
             (["Rock", "Jazz", "Unknown", "Unknown"], None, None),
@@ -48,7 +48,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                     )
             write.assert_not_called()
 
-    def test_disputed_track_genre_does_not_vote_in_album_consensus(self) -> None:
+    def test_disputed_track_genre_does_not_vote_in_album_counts(self) -> None:
         recordings = [
             TrackInfo(
                 self.test_directory / "first.flac",
@@ -60,7 +60,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         tagger._harmonize_album_genres(recordings, None, None, dry_run=True)
         self.assertEqual(recordings[1].genre, "Unknown")
 
-    def test_root_directory_identity_and_blank_artist_consensus_remain_unknown(
+    def test_root_directory_identity_and_blank_artist_agreement_remain_unknown(
         self,
     ) -> None:
         self.assertEqual(
@@ -128,7 +128,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                 )
             self.assertIsNone(context.track_mbids)
 
-    def test_itunes_album_track_artists_are_preserved_during_identity_healing(
+    def test_itunes_album_track_artists_are_preserved_during_identity_updates(
         self,
     ) -> None:
         recording = TrackInfo(
@@ -143,7 +143,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                 (1, 3): {"title": "Recording", "artist": "Guest"}
             }
         }
-        tagger._heal_and_align_album_track(
+        tagger._apply_album_metadata(
             recording,
             recording.file_path,
             True,
@@ -165,7 +165,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         self.assertEqual(recordings[0].genre, "Pop")
         self.assertEqual(recordings[1].genre, "Rock")
 
-    def test_artist_consensus_preserves_distinct_artist_identity_in_compilations(
+    def test_artist_agreement_preserves_distinct_artist_identity_in_compilations(
         self,
     ) -> None:
         recordings = [
@@ -193,7 +193,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         )
         write.assert_called_once_with(recordings[2])
 
-    def test_itunes_album_genre_is_an_authoritative_consensus(self) -> None:
+    def test_itunes_album_genre_is_an_authoritative_agreement(self) -> None:
         recordings = [
             TrackInfo(self.test_directory / "first.flac", genre="Unknown"),
             TrackInfo(self.test_directory / "second.flac", genre="Rock"),
@@ -257,7 +257,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         self.assertEqual({recording.file_path for recording in results}, set(paths))
         self.assertEqual(tag.call_count, 2)
 
-    def test_up_to_date_album_skips_enrichment_and_preserves_results(self) -> None:
+    def test_up_to_date_album_skips_metadata_updates_and_preserves_results(self) -> None:
         self.recording.file_path.touch()
         with (
             patch.object(LibraryStateVault, "filter_outdated_tracks", return_value=[]),
@@ -332,7 +332,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                 (None, None),
             )
 
-    def test_single_track_genre_and_distinct_album_artist_need_no_consensus(
+    def test_single_track_genre_and_distinct_album_artist_need_no_agreement(
         self,
     ) -> None:
         with patch.object(metadata, "write_track_metadata") as write:

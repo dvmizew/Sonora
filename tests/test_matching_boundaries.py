@@ -47,7 +47,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
             )
         )
 
-    def test_malformed_album_records_surface_schema_errors_before_healing(self) -> None:
+    def test_malformed_album_records_surface_schema_errors_before_updates(self) -> None:
         recording = TrackInfo(
             Path("recording.flac"), artist="Primary", title="Recording"
         )
@@ -148,7 +148,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
         )
         self.assertEqual(recording.disc_number, 3)
 
-    def test_itunes_identifier_can_heal_corrupt_title_and_artist(self) -> None:
+    def test_itunes_identifier_can_update_corrupt_title_and_artist(self) -> None:
         recording = TrackInfo(
             Path("03 - Unknown.flac"),
             title="Untitled",
@@ -403,7 +403,7 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
         self.assertEqual(entities.mbids, {MBID})
         self.assertEqual(entities.positions, {1})
 
-    def test_matching_recording_id_shields_corrupt_text(self) -> None:
+    def test_matching_recording_id_preserves_corrupt_text(self) -> None:
         recording = TrackInfo(
             Path("recording.flac"),
             artist="Wrong",
@@ -420,7 +420,7 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
             )
         )
 
-    def test_known_titles_can_heal_unknown_artists(self) -> None:
+    def test_known_titles_can_update_unknown_artists(self) -> None:
         recording = TrackInfo(
             Path("Recording.flac"), artist="Unknown Artist", title="Recording"
         )

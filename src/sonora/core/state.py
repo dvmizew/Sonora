@@ -265,14 +265,14 @@ class LibraryStateVault:
     def get_state_count(self) -> int:
         """Return total number of tracked files in the library state database."""
         try:
-            if not self.db_path.exists():
-                return 0
+            self.db_path.stat()
             with self._connection() as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM track_state;")
                 return int(next(cursor)[0])
-        except (sqlite3.Error, OSError) as error:
-            LOG.debug(f"Failed to get state count: {error}")
+        except FileNotFoundError:
             return 0
+        except (sqlite3.Error, OSError) as error:
+            raise OSError(f"Cannot count library state entries: {self.db_path}") from error
 
     def get_state_size(self) -> int:
         """Return total disk size of the library state database including WAL files."""
@@ -283,10 +283,11 @@ class LibraryStateVault:
             self.db_path.with_name(f"{self.db_path.name}-shm"),
         ):
             try:
-                if p.exists():
-                    total += p.stat().st_size
-            except OSError:
-                pass
+                total += p.stat().st_size
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise OSError(f"Cannot read library state size: {p}") from error
         return total
 
     def clear_state(self, purge: bool = False) -> int:
@@ -343,11 +344,11 @@ def get_state_storage_stats() -> tuple[int, int]:
     """Return entry count and bytes without creating an unused state database."""
     if _STATE_INSTANCE is None:
         try:
-            if not get_default_state_db_path().exists():
-                return 0, 0
-        except OSError as error:
-            LOG.debug(f"Failed to inspect state database: {error}")
+            get_default_state_db_path().stat()
+        except FileNotFoundError:
             return 0, 0
+        except OSError as error:
+            raise OSError("Cannot inspect the library state database") from error
     library_state = get_library_state()
     return library_state.get_state_count(), library_state.get_state_size()
 

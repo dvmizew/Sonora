@@ -93,19 +93,19 @@ def _emit_tag_summary_and_report(
 
     coverage_labels = {
         "mb": "Tracks with MusicBrainz ID",
-        "genre": "Genre & Styles Tagged",
+        "genre": "Tracks with Genre",
         "lyrics": "Tracks with Lyrics",
         "isrc": "Tracks with ISRC",
         "bpm": "Tracks with BPM",
         "rg": "Tracks with ReplayGain",
         "key": "Musical Key / Tonality",
         "composer": "Composers & Writers",
-        "producers": "Producers & Studio Credits",
-        "genius": "Tracks with Genius Metadata",
+        "producers": "Tracks with Producer Credits",
+        "genius": "Tracks with Genius ID",
         "advisory": "Parental Advisory",
     }
     tag_summary_rows: list[tuple[str, str, str | None]] = [
-        ("Total Tracks Processed", str(total_tracks), None),
+        ("Total Tracks Previewed" if dry_run else "Total Tracks Processed", str(total_tracks), None),
         *(
             (
                 label,
@@ -120,12 +120,12 @@ def _emit_tag_summary_and_report(
             "yellow" if tracks_with_conflicts else None,
         ),
         (
-            "Recording ID Evidence This Run",
+            "Recording IDs Matched This Run",
             f"{tracks_with_recording_evidence}/{total_tracks}",
             None,
         ),
         (
-            "Audio Quality Breakdown",
+            "Audio Formats",
             f"{counts['lossless']} Lossless / {lossy_count} Lossy",
             None,
         ),
@@ -134,14 +134,14 @@ def _emit_tag_summary_and_report(
 
     if json_report:
         summary_text = (
-            f"Processed {total_tracks} tracks ({len(failures)} failures). "
+            f"{'Previewed' if dry_run else 'Processed'} {total_tracks} tracks ({len(failures)} failures). "
             f"MusicBrainz {counts['mb']}/{total_tracks} ({percentages['mb']:.2f}%), "
             f"Genre {counts['genre']}/{total_tracks} ({percentages['genre']:.2f}%), "
             f"Lyrics {counts['lyrics']}/{total_tracks} ({percentages['lyrics']:.2f}%), "
             f"BPM tags present {counts['bpm']}/{total_tracks} ({percentages['bpm']:.2f}%), "
             f"ReplayGain {counts['rg']}/{total_tracks} ({percentages['rg']:.2f}%)."
         )
-        enrichment_keys = {
+        coverage_keys = {
             "mb": ("musicbrainz_matched_count", "musicbrainz_percentage"),
             "genre": ("genre_tagged_count", "genre_percentage"),
             "lyrics": ("lyrics_tagged_count", "lyrics_percentage"),
@@ -156,10 +156,10 @@ def _emit_tag_summary_and_report(
             "genius": ("genius_matched_count", "genius_percentage"),
             "theaudiodb": ("theaudiodb_matched_count", "theaudiodb_percentage"),
         }
-        enrichment_statistics: dict[str, int | float] = {}
-        for metric, (count_key, percentage_key) in enrichment_keys.items():
-            enrichment_statistics[count_key] = counts[metric]
-            enrichment_statistics[percentage_key] = round(percentages[metric], 2)
+        coverage_statistics: dict[str, int | float] = {}
+        for metric, (count_key, percentage_key) in coverage_keys.items():
+            coverage_statistics[count_key] = counts[metric]
+            coverage_statistics[percentage_key] = round(percentages[metric], 2)
         report_data = {
             "schema": "tag_report_v1",
             "generator": "Sonora",
@@ -175,7 +175,7 @@ def _emit_tag_summary_and_report(
             "statistics": {
                 "total_tracks": total_tracks,
                 "total_failures": len(failures),
-                "enrichment": enrichment_statistics,
+                "enrichment": coverage_statistics,
                 "audio_formats": {
                     "lossless_tracks": counts["lossless"],
                     "lossy_tracks": lossy_count,

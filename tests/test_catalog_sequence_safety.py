@@ -5,7 +5,7 @@ import httpx
 
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
-from sonora.modules import catalog_enrichment, matching
+from sonora.modules import catalog_metadata, matching
 from sonora.services import artist_resolution, deezer, itunes, musicbrainz
 from tests.support import IsolatedTestCase
 
@@ -40,7 +40,7 @@ class TestCatalogSequenceSafety(IsolatedTestCase):
                             },
                         ),
                     ):
-                        catalog_enrichment._enrich_deezer(
+                        catalog_metadata._update_deezer(
                             recording, None, has_album_context=has_album_context
                         )
                     self.assertEqual(recording.track_number, position)
@@ -163,7 +163,7 @@ class TestDeezerMediumTotals(IsolatedTestCase):
                 (1, position): candidate for position in range(1, 20)
             },
         }
-        catalog_enrichment._enrich_deezer(
+        catalog_metadata._update_deezer(
             recording, album, has_album_context=True, force=True
         )
         self.assertEqual(
@@ -203,7 +203,7 @@ class TestDeezerMediumTotals(IsolatedTestCase):
                 (2, 2): {},
             },
         }
-        catalog_enrichment._enrich_deezer(
+        catalog_metadata._update_deezer(
             recording, album, has_album_context=True, force=True
         )
         self.assertEqual(recording.total_tracks, 2)
@@ -230,7 +230,7 @@ class TestDeezerMediumTotals(IsolatedTestCase):
             },
         }
         with patch.object(deezer, "fetch_deezer_track_details", return_value=None):
-            catalog_enrichment._enrich_deezer(
+            catalog_metadata._update_deezer(
                 recording, album, has_album_context=True, force=True
             )
         self.assertEqual(recording.total_tracks, 1)
@@ -246,7 +246,7 @@ class TestDeezerMediumTotals(IsolatedTestCase):
         for positions, expected_tracks in index_cases:
             with self.subTest(positions=positions):
                 self.assertIsNone(
-                    catalog_enrichment._deezer_medium_track_count(
+                    catalog_metadata._deezer_medium_track_count(
                         recording,
                         {"disk_number": 2},
                         {

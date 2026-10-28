@@ -228,15 +228,12 @@ def get_cache_stats() -> CacheStats:
         api_cache_dir.exists() and (api_cache_dir / "cache.db").exists()
     ):
         cache = get_cache()
-        if cache is not None:
-            try:
-                api_entries = len(cache)
-            except (
-                OSError,
-                sqlite3.Error,
-                diskcache.Timeout,
-            ) as error:
-                LOG.debug(f"Failed to get cache length: {error}")
+        if cache is None:
+            raise OSError(f"Cannot read API cache statistics: {api_cache_dir}")
+        try:
+            api_entries = len(cache)
+        except (OSError, sqlite3.Error, diskcache.Timeout) as error:
+            raise OSError(f"Cannot count API cache entries: {api_cache_dir}") from error
 
     from sonora.core.state import get_state_storage_stats
 

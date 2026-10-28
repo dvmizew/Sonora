@@ -205,5 +205,5 @@ def calculate_album_replaygain(
             raise
 
     tagged_count = sum(1 for success in write_results if success)
-    LOG.detail(f"✅ Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")
+    LOG.detail(f"Applied ReplayGain to {tagged_count}/{len(valid_files)} track(s).")
     return tagged_count > 0

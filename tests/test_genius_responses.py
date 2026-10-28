@@ -6,7 +6,7 @@ import httpx
 from sonora.core.config import SonoraConfig
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
-from sonora.modules.catalog_enrichment import _enrich_genius
+from sonora.modules.catalog_metadata import _update_genius
 from sonora.services import genius
 from sonora.services.genius import fetch_genius_song_details
 from tests.service_support import ServiceResponseTestCase
@@ -105,7 +105,7 @@ class TestGeniusSongIdentity(IsolatedTestCase):
             patch.object(genius, "fetch_genius_song_details", return_value=None),
             patch.object(genius, "lookup_genius_song_details", return_value=details),
         ):
-            _enrich_genius(track, "token")
+            _update_genius(track, "token")
         self.assertEqual(track.composer, "Verified Writer")
         self.assertFalse(track.metadata_conflicts)
 
@@ -144,7 +144,7 @@ class TestGeniusSongIdentity(IsolatedTestCase):
                         genius, "lookup_genius_song_details", return_value=song
                     ),
                 ):
-                    _enrich_genius(track, "token")
+                    _update_genius(track, "token")
                 self.assertEqual(track.genius_song_id, "222")
                 self.assertEqual(
                     track.composer, "Verified Writer" if accepted else None
@@ -172,7 +172,7 @@ class TestGeniusSongIdentity(IsolatedTestCase):
                         "producers": "Other Producer",
                     },
                 ) as lookup:
-                    _enrich_genius(track, "token")
+                    _update_genius(track, "token")
                 lookup.assert_called_once()
                 self.assertEqual(track.genius_song_id, "222")
                 self.assertEqual(track.metadata_sources.get("genius_song_id"), "Genius")

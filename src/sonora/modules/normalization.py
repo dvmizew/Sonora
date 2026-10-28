@@ -57,7 +57,7 @@ def normalize_track_metadata(
             track_info.title,
             primary_artist=track_info.artist,
         )
-        if title_feats:
+        if title_feats and not track_info.featured_artists:
             track_info.featured_artists = normalize_featured_artists(
                 [track_info.featured_artists, *title_feats],
                 primary_artist=track_info.artist,
@@ -69,7 +69,7 @@ def normalize_track_metadata(
         base_artist, extracted_features = extract_artist_features(track_info.artist)
         if base_artist:
             track_info.artist = base_artist
-        if extracted_features:
+        if extracted_features and not track_info.featured_artists:
             track_info.featured_artists = normalize_featured_artists(
                 [track_info.featured_artists, *extracted_features],
                 primary_artist=track_info.artist,

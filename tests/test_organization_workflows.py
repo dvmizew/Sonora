@@ -263,7 +263,7 @@ class TestOrganizationWorkflows(ModuleTestCase):
         self.assertEqual(get_single_release_title(t3), "Alien")
 
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library_singles_folder_sequence_shielding(
+    def test_check_library_singles_folder_sequence_preservation(
         self, mock_read: Any
     ) -> None:
         singles_dir = self.tmp_path / "Singles" / "Artist - Song"

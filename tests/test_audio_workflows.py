@@ -7,7 +7,7 @@ from sonora.core.models import TrackInfo
 from sonora.core.titles import score_artist_title_match
 from sonora.modules.normalization import normalize_track_metadata
 from sonora.modules.track_processing import (
-    _enrich_lyrics,
+    _update_lyrics,
     normalize_library,
     normalize_single_track,
 )
@@ -210,7 +210,7 @@ class TestLyricsEnrichment(IsolatedTestCase):
                         return_value=(None, None),
                     ),
                 ):
-                    _enrich_lyrics(track, audio_path, True, dry_run=True)
+                    _update_lyrics(track, audio_path, True, dry_run=True)
                 self.assertIn("lyrics", track.metadata_conflicts)
                 self.assertEqual(lrc_path.read_bytes(), lyrics)
 
@@ -231,7 +231,7 @@ class TestLyricsEnrichment(IsolatedTestCase):
                 return_value=(replacement, "synced"),
             ),
         ):
-            _enrich_lyrics(track, audio_path, True, dry_run=True)
+            _update_lyrics(track, audio_path, True, dry_run=True)
         self.assertEqual(track.lyrics, replacement)
         self.assertEqual(track.metadata_conflicts, {"genre": "Providers disagree"})
 
@@ -247,7 +247,7 @@ class TestLyricsEnrichment(IsolatedTestCase):
                 return_value=(None, None),
             ),
         ):
-            _enrich_lyrics(track, audio_path, True, dry_run=True)
+            _update_lyrics(track, audio_path, True, dry_run=True)
         self.assertNotIn("lyrics", track.metadata_conflicts)
 
 

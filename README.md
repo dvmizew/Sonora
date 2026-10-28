@@ -1,6 +1,6 @@
 # Sonora
 
-Sonora is a CLI tool for music tagging, metadata enrichment, tag backup/restore, and file organization.
+Sonora is a CLI tool for music tagging, metadata updates, tag backup/restore, and file organization.
 
 Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 
@@ -11,7 +11,7 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 - **Metadata & Tagging**: Multi-service tag lookup with AcoustID audio fingerprinting and MusicBrainz matching.
 - **Audio Processing**: Calculates BPM, Musical Key & Camelot wheel tonality (`INITIALKEY`), and ReplayGain 2.0 (ITU-R BS.1770-4 / EBU R128) for tracks and albums.
 - **High-Performance Architecture**: Compound album release queries, offline string distance matching, thread-safe persistent cache, and smart library state tracking.
-- **Spectral Analysis**: Detects fake lossless files (e.g. MP3 transcodes upscaled to FLAC) via FFT spectrogram cutoff checks.
+- **Spectral Analysis**: Checks for spectral signs of lossy transcoding using FFT cutoff analysis.
 - **Artwork & Lyrics**: Downloads high-resolution cover art (up to 3000x3000px) and synchronized `.lrc` lyrics.
 - **Library Tools**: Validates audio file integrity, standardizes file names (`NN - Title.ext`), organizes singles, and backs up tags to JSON / `.json.gz`.
 
@@ -149,7 +149,7 @@ Title matching retains strict scores above 85, or above 95 for titles shorter th
 
 Genius descriptions are community prose and can contain unrelated or vandalized text. They are not copied into comments by default; set `import_genius_descriptions = true` to opt in. Existing comments are preserved. Catalog agreement alone never clears an existing Explicit advisory, because providers may agree on a different clean edition.
 
-Independent enrichment providers receive separate copies of one resolved recording identity. Their proposals merge in a fixed order: conflicting recording identities or ISRCs prevent tag and asset writes, and conflicting individual fields preserve existing values. JSON reports include `metadata_conflicts` keyed by the disputed field. Tracks with unresolved conflicts are not recorded as complete. Provider agreement is evidence, not a correctness guarantee.
+Independent metadata providers receive separate copies of one resolved recording identity. Their proposals merge in a fixed order: conflicting recording identities or ISRCs prevent tag and asset writes, and conflicting individual fields preserve existing values. JSON reports include `metadata_conflicts` keyed by the disputed field. Tracks with unresolved conflicts are not recorded as complete. Provider agreement is evidence, not a correctness guarantee.
 
 Tagging uses bounded worker pools for tracks and provider queries, and prefetches at most two album contexts while retaining album finalization order. `--threads` controls each main pool; total worker count can therefore exceed that number. API quotas and identical cache-backed lookups are coordinated between Sonora processes using the same cache directory. The portable `filelock` dependency supplies native process locks; coordination files remain outside DiskCache's managed directory. Confirmed catalog misses expire after 30 minutes, successful metadata normally after 28 days, and transient network failures are not stored as misses. Fingerprints persist with file path, size, modification time, change time and decoder-setting invalidation. `--ignore-cache` deliberately bypasses cache reads; `--force` does not.
 
@@ -227,7 +227,7 @@ sonora tag /path/to/music --json tag_report.json
 
 ### `sonora check`
 
-Checks audio files for corruption, missing tags, bracket clutter in titles, and fake lossless audio.
+Checks audio integrity, missing tags, bracket clutter in titles, and spectral signs of lossy transcoding.
 
 Stored MusicBrainz, ISRC and iTunes identifiers are compared with available cached
 recording responses. Conflicting artists, titles and durations are reported for
@@ -254,7 +254,7 @@ sonora check /path/to/library --json report.json
 **Options:**
 - `path`: Directory to check (required).
 - `-t, --threads N`: Number of parallel threads (default: `8`).
-- `--spectral`: Check for fake lossless files via FFT spectral cutoff analysis.
+- `--spectral`: Check for spectral signs of lossy transcoding using FFT cutoff analysis.
 - `--json PATH`: Save check results to a JSON file.
 
 ---

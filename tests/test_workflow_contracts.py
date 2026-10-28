@@ -5,7 +5,7 @@ from unittest.mock import patch
 from sonora.audio import art, bpm, key, metadata, replaygain
 from sonora.core.models import RenameReport, TrackInfo
 from sonora.modules import (
-    metadata_consensus,
+    metadata_merge,
     normalization,
     organizer,
     renamer,
@@ -25,7 +25,7 @@ class TestTrackProcessingContracts(IsolatedTestCase):
         self.recording.metadata_sources["title"] = "MusicBrainz"
         self.recording.metadata_conflicts["album"] = "Review edition"
         self.recording._diff_descriptions.append("Existing change")
-        proposal = metadata_consensus.collect_provider_proposal(
+        proposal = metadata_merge.collect_provider_proposal(
             self.recording, _change_proposal_annotations
         )
         self.assertEqual(self.recording.metadata_sources, {"title": "MusicBrainz"})
@@ -72,15 +72,15 @@ class TestTrackProcessingContracts(IsolatedTestCase):
     ) -> None:
         companion = self.test_directory / "record.cue"
         companion.write_text('TITLE "Record"')
-        track_processing._enrich_cuesheet(self.recording, self.path, None)
+        track_processing._update_cuesheet(self.recording, self.path, None)
         self.assertEqual(self.recording.cuesheet, 'TITLE "Record"')
         companion.write_text('TITLE "Changed"')
-        track_processing._enrich_cuesheet(self.recording, self.path, None)
+        track_processing._update_cuesheet(self.recording, self.path, None)
         self.assertEqual(self.recording.cuesheet, 'TITLE "Record"')
-        track_processing._enrich_cuesheet(self.recording, self.path, 'TITLE "Explicit"')
+        track_processing._update_cuesheet(self.recording, self.path, 'TITLE "Explicit"')
         self.assertEqual(self.recording.cuesheet, 'TITLE "Explicit"')
 
-    def test_artwork_enrichment_can_be_disabled_and_recovers_from_io_errors(
+    def test_artwork_metadata_updates_can_be_disabled_and_recovers_from_io_errors(
         self,
     ) -> None:
         with patch.object(
@@ -89,11 +89,11 @@ class TestTrackProcessingContracts(IsolatedTestCase):
             side_effect=OSError("offline"),
         ) as fetch:
             self.assertIsNone(
-                track_processing._enrich_artwork(self.recording, self.path, False)
+                track_processing._update_artwork(self.recording, self.path, False)
             )
             fetch.assert_not_called()
             self.assertIsNone(
-                track_processing._enrich_artwork(self.recording, self.path, True)
+                track_processing._update_artwork(self.recording, self.path, True)
             )
         fetch.assert_called_once()
 
@@ -145,15 +145,15 @@ class TestTrackProcessingContracts(IsolatedTestCase):
             self.assertIsNone(normalized.producers)
         self.assertEqual(normalized.featured_artists, "Guest")
 
-    def test_dsp_enrichment_accepts_results_and_handles_decode_failures(self) -> None:
+    def test_dsp_metadata_updates_accepts_results_and_handles_decode_failures(self) -> None:
         with patch.object(bpm, "calculate_bpm", return_value=123.4):
-            track_processing._enrich_bpm(self.recording, self.path, True)
+            track_processing._update_bpm(self.recording, self.path, True)
         self.assertEqual(self.recording.bpm, 123.4)
         with patch.object(bpm, "calculate_bpm") as calculate:
-            track_processing._enrich_bpm(self.recording, self.path, True)
+            track_processing._update_bpm(self.recording, self.path, True)
         calculate.assert_not_called()
         with patch.object(key, "detect_musical_key", return_value="Am"):
-            track_processing._enrich_key(self.recording, self.path, True)
+            track_processing._update_key(self.recording, self.path, True)
         self.assertEqual(self.recording.initial_key, "Am")
         for result in (None, OSError("decode failed")):
             with (
@@ -165,16 +165,16 @@ class TestTrackProcessingContracts(IsolatedTestCase):
                     bpm, "calculate_bpm", return_value=None, side_effect=result
                 ),
             ):
-                track_processing._enrich_key(
+                track_processing._update_key(
                     self.recording, self.path, True, force=True
                 )
-                track_processing._enrich_bpm(
+                track_processing._update_bpm(
                     self.recording, self.path, True, force=True
                 )
             self.assertEqual(self.recording.initial_key, "Am")
             self.assertEqual(self.recording.bpm, 123.4)
 
-    def test_lyric_enrichment_logs_existing_forced_and_missing_assets(self) -> None:
+    def test_lyric_metadata_updates_logs_existing_forced_and_missing_assets(self) -> None:
         for existing, force in ((False, False), (True, False), (True, True)):
             if existing:
                 self.path.with_suffix(".lrc").write_text("[00:01] Existing")
@@ -187,14 +187,14 @@ class TestTrackProcessingContracts(IsolatedTestCase):
                     return_value=("[00:01] Lyrics", "synced"),
                 ),
             ):
-                track_processing._enrich_lyrics(
+                track_processing._update_lyrics(
                     self.recording, self.path, True, force=force
                 )
             self.assertEqual(self.recording.lyrics, "[00:01] Lyrics")
         with patch.object(
             track_processing, "process_track_lyrics", side_effect=OSError("offline")
         ):
-            track_processing._enrich_lyrics(self.recording, self.path, True)
+            track_processing._update_lyrics(self.recording, self.path, True)
         self.assertEqual(self.recording.lyrics, "[00:01] Lyrics")
 
     def test_normalization_read_failure_and_failed_write_produce_no_success(
@@ -509,7 +509,7 @@ class TestRenameFailureContracts(IsolatedTestCase):
             (1, 0, 0),
         )
 
-    def test_collaborative_album_consensus_and_mixed_release_directory(self) -> None:
+    def test_collaborative_album_counts_and_mixed_release_directory(self) -> None:
         paths = [
             self.test_directory / f"{position:02} - Recording {position}.flac"
             for position in range(1, 4)
@@ -660,7 +660,7 @@ class TestRenameFailureContracts(IsolatedTestCase):
 
 
 class TestOrganizationContracts(IsolatedTestCase):
-    def test_single_folder_classification_respects_album_sequence_and_consensus(
+    def test_single_folder_classification_respects_album_sequence_and_agreement(
         self,
     ) -> None:
         folder = self.test_directory / "Collection"

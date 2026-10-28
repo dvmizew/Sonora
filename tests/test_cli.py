@@ -342,7 +342,7 @@ class TestCLIInterface(IsolatedTestCase):
             mock_detect_key.assert_called_once()
             self.assertTrue(json_out.exists())
 
-            # Test auto-healing on invalid key (e.g. 'm')
+            # Test automatic correction on invalid key (e.g. 'm')
             mock_write.reset_mock()
             mock_read.reset_mock()
             mock_detect_key.reset_mock()
@@ -512,7 +512,7 @@ class TestTagReportVerification(IsolatedTestCase):
         report = json.loads(output.read_text())
         self.assertEqual(report["statistics"]["enrichment"]["genre_percentage"], 99.97)
         rows = summary.call_args.args[1]
-        self.assertIn(("Genre & Styles Tagged", "6507/6509 (99.97%)", None), rows)
+        self.assertIn(("Tracks with Genre", "6507/6509 (99.97%)", None), rows)
 
 
 if __name__ == "__main__":
@@ -577,12 +577,12 @@ class TestReportProvenance(IsolatedTestCase):
         report = json.loads(output.read_text())
         self.assertEqual(report["schema"], "tag_report_v1")
         self.assertTrue(report["execution"]["dry_run"])
-        enrichment = report["statistics"]["enrichment"]
-        self.assertEqual(enrichment["genius_matched_count"], 1)
-        self.assertEqual(enrichment["genius_percentage"], 50.0)
-        self.assertEqual(enrichment["theaudiodb_matched_count"], 1)
+        mb_metadata = report["statistics"]["enrichment"]
+        self.assertEqual(mb_metadata["genius_matched_count"], 1)
+        self.assertEqual(mb_metadata["genius_percentage"], 50.0)
+        self.assertEqual(mb_metadata["theaudiodb_matched_count"], 1)
         self.assertEqual(
-            set(enrichment),
+            set(mb_metadata),
             {
                 "musicbrainz_matched_count",
                 "musicbrainz_percentage",
@@ -613,6 +613,6 @@ class TestReportProvenance(IsolatedTestCase):
             },
         )
         rows = summary.call_args.args[1]
-        self.assertIn(("Tracks with Genius Metadata", "1/2 (50.00%)", None), rows)
-        self.assertEqual(rows[0], ("Total Tracks Processed", "2", None))
-        self.assertEqual(rows[-1][0], "Audio Quality Breakdown")
+        self.assertIn(("Tracks with Genius ID", "1/2 (50.00%)", None), rows)
+        self.assertEqual(rows[0], ("Total Tracks Previewed", "2", None))
+        self.assertEqual(rows[-1][0], "Audio Formats")

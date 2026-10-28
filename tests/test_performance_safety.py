@@ -13,8 +13,8 @@ from sonora.core import cache, coordination
 from sonora.core.http import SESSION
 from sonora.core.models import MetadataSource, TrackInfo
 from sonora.core.state import LibraryStateVault
-from sonora.modules import catalog_enrichment, metadata_consensus, tagger
-from sonora.modules.metadata_consensus import build_provider_proposal
+from sonora.modules import catalog_metadata, metadata_merge, tagger
+from sonora.modules.metadata_merge import build_provider_proposal
 from sonora.modules.track_processing import _record_persisted_album
 from sonora.services import acoustid, deezer, itunes, musicbrainz
 from tests.support import IsolatedTestCase
@@ -86,7 +86,7 @@ class TestPerformanceSafety(IsolatedTestCase):
         )
         proposal = build_provider_proposal(recording, candidate)
         self.assertEqual(proposal.changes, {"genre": ("Jazz", "Deezer")})
-        metadata_consensus.merge_provider_proposals(recording, [proposal])
+        metadata_merge.merge_provider_proposals(recording, [proposal])
         self.assertEqual(recording.genre, "Jazz")
         self.assertEqual((recording.sample_rate, recording.is_lossless), (44100, True))
         self.assertEqual(build_provider_proposal(recording, recording).changes, {})
@@ -96,7 +96,7 @@ class TestPerformanceSafety(IsolatedTestCase):
         candidate = dataclasses.replace(recording, metadata_sources={"genre": "iTunes"})
         proposal = build_provider_proposal(recording, candidate)
         self.assertEqual(proposal.changes, {"genre": ("Rock", "iTunes")})
-        metadata_consensus.merge_provider_proposals(recording, [proposal])
+        metadata_merge.merge_provider_proposals(recording, [proposal])
         self.assertEqual(recording.metadata_sources, {"genre": "iTunes"})
 
     def test_proposals_agree_or_preserve_conflicts_independent_of_order(self) -> None:
@@ -112,7 +112,7 @@ class TestPerformanceSafety(IsolatedTestCase):
             )
             sources: tuple[MetadataSource, ...] = ("iTunes", "Deezer")
             proposals = [
-                metadata_consensus.collect_provider_proposal(
+                metadata_merge.collect_provider_proposal(
                     original, partial(_propose_genre, genre=genre, source=source)
                 )
                 for genre, source in zip(genres, sources)
@@ -123,15 +123,15 @@ class TestPerformanceSafety(IsolatedTestCase):
                 merged = dataclasses.replace(
                     original, metadata_sources={}, metadata_conflicts={}
                 )
-                metadata_consensus.merge_provider_proposals(merged, ordered)
+                metadata_merge.merge_provider_proposals(merged, ordered)
                 self.assertEqual(merged.genre, expected)
                 self.assertEqual(
                     bool(merged.metadata_conflicts), genres[0] != genres[1]
                 )
-        metadata_consensus.merge_provider_proposals(original, [])
+        metadata_merge.merge_provider_proposals(original, [])
         self.assertEqual(original.genre, "Original")
 
-    def test_foreign_identity_and_conflicting_isrc_withhold_enrichment(self) -> None:
+    def test_foreign_identity_and_conflicting_isrc_withhold_metadata_updates(self) -> None:
         original = TrackInfo(
             Path("recording.flac"),
             artist="Alpha",
@@ -156,7 +156,7 @@ class TestPerformanceSafety(IsolatedTestCase):
                     genre="Rock",
                     metadata_sources={"isrc": "Deezer", "genre": "Deezer"},
                 )
-                metadata_consensus.merge_provider_proposals(
+                metadata_merge.merge_provider_proposals(
                     merged,
                     [build_provider_proposal(merged, proposal)],
                 )
@@ -171,54 +171,54 @@ class TestPerformanceSafety(IsolatedTestCase):
             Path("recording.flac"), artist="Alpha", title="Original Song"
         )
         with (
-            patch.object(tagger, "_enrich_musicbrainz"),
-            patch.object(tagger, "_enrich_acoustid"),
-            patch.object(tagger, "_enrich_shazam"),
+            patch.object(tagger, "_update_musicbrainz"),
+            patch.object(tagger, "_update_acoustid"),
+            patch.object(tagger, "_update_shazam"),
             patch.object(
                 tagger,
-                "_enrich_itunes",
+                "_update_itunes",
                 side_effect=partial(
                     _propose_genre, genre="Rock", source="iTunes", barrier=barrier
                 ),
             ),
             patch.object(
                 tagger,
-                "_enrich_deezer",
+                "_update_deezer",
                 side_effect=partial(
                     _propose_genre, genre="Jazz", source="Deezer", barrier=barrier
                 ),
             ),
             patch.object(
                 tagger,
-                "_enrich_lastfm",
+                "_update_lastfm",
                 side_effect=partial(
                     _propose_genre, genre="Rock", source="Last.fm", barrier=barrier
                 ),
             ),
             patch.object(
                 tagger,
-                "_enrich_discogs",
+                "_update_discogs",
                 side_effect=partial(
                     _propose_genre, genre="Rock", source="Discogs", barrier=barrier
                 ),
             ),
             patch.object(
                 tagger,
-                "_enrich_genius",
+                "_update_genius",
                 side_effect=partial(
                     _propose_genre, genre="Rock", source="Genius", barrier=barrier
                 ),
             ),
             patch.object(
                 tagger,
-                "_enrich_theaudiodb",
+                "_update_theaudiodb",
                 side_effect=partial(
                     _propose_genre, genre="Rock", source="TheAudioDB", barrier=barrier
                 ),
             ),
             ThreadPoolExecutor(max_workers=6) as executor,
         ):
-            tagger._run_metadata_enrichment_pipeline(
+            tagger._update_metadata(
                 original,
                 original.file_path,
                 None,
@@ -394,7 +394,7 @@ class TestPerformanceSafety(IsolatedTestCase):
             ),
             patch.object(
                 tagger,
-                "_run_metadata_enrichment_pipeline",
+                "_update_metadata",
                 side_effect=_mark_identity_conflict,
             ),
             patch.object(tagger, "_process_audio_and_save_tags") as persist,
@@ -475,7 +475,7 @@ class TestPerformanceSafety(IsolatedTestCase):
                 "copyright": "Reissue copyright",
             },
         ):
-            catalog_enrichment._enrich_itunes(recording, force=True)
+            catalog_metadata._update_itunes(recording, force=True)
         self.assertEqual(
             (recording.date, recording.release_country, recording.copyright),
             ("2020", "Romania", "Original copyright"),

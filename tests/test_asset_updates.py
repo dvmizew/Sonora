@@ -7,7 +7,7 @@ from tests.fixtures import image_bytes
 from tests.support import IsolatedTestCase
 
 
-class TestAssetRepairRegressions(IsolatedTestCase):
+class TestAssetUpdates(IsolatedTestCase):
     def test_playlist_recovers_catalog_album_version_suffix(self) -> None:
         target = self.test_directory / "01 - Careless World.flac"
         target.touch()

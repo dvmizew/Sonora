@@ -9,10 +9,10 @@ from sonora.core.config import SonoraConfig
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
 from sonora.modules import (
-    catalog_enrichment,
+    catalog_metadata,
     matching,
-    metadata_consensus,
-    musicbrainz_enrichment,
+    metadata_merge,
+    musicbrainz_metadata,
 )
 from sonora.services import artist_resolution, itunes, lyrics, musicbrainz, shazam
 from sonora.services.itunes import _parse_itunes_track
@@ -65,7 +65,7 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
                     patch.object(musicbrainz, "fetch_track_mbid", return_value=None),
                 ):
                     self.assertIsNone(
-                        musicbrainz_enrichment._fetch_standalone_recording(
+                        musicbrainz_metadata._fetch_standalone_recording(
                             recording, force=True
                         )
                     )
@@ -91,7 +91,7 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
             patch.object(musicbrainz, "fetch_track_mbid", return_value=MBID) as search,
         ):
             self.assertIsNone(
-                musicbrainz_enrichment._fetch_standalone_recording(
+                musicbrainz_metadata._fetch_standalone_recording(
                     recording, force=True
                 )
             )
@@ -118,7 +118,7 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
                     return_value=provider,
                 ):
                     self.assertEqual(
-                        musicbrainz_enrichment._fetch_standalone_recording(recording),
+                        musicbrainz_metadata._fetch_standalone_recording(recording),
                         provider,
                     )
 
@@ -137,13 +137,13 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
             with (
                 self.subTest(recognized=recognized),
                 patch.object(
-                    catalog_enrichment,
+                    catalog_metadata,
                     "get_config",
                     return_value=SonoraConfig(enable_shazam=True),
                 ),
                 patch.object(shazam, "recognize_audio_track", return_value=recognized),
             ):
-                catalog_enrichment._enrich_shazam(
+                catalog_metadata._update_shazam(
                     recording, recording.file_path, force=True
                 )
             self.assertEqual(
@@ -201,7 +201,7 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
                     "resolve_artist_name",
                     return_value="Alpha",
                 ):
-                    musicbrainz_enrichment._apply_mb_release_metadata(
+                    musicbrainz_metadata._apply_mb_release_metadata(
                         recording, MBID, release, force=True
                     )
                 self.assertEqual(recording.album, album)
@@ -266,7 +266,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                     "fetch_musicbrainz_recording_details",
                     return_value={"artist": "Other Performer", "title": "Other Song"},
                 ):
-                    musicbrainz_enrichment._resolve_musicbrainz_track_id(
+                    musicbrainz_metadata._resolve_musicbrainz_track_id(
                         track, {(1, 2): MATCHING_RECORDING_ID}, candidate
                     )
                 self.assertEqual(track.musicbrainz_trackid, MATCHING_RECORDING_ID)
@@ -295,7 +295,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                     "duration": duration,
                     "recording_mbid": candidate_id,
                 }
-                musicbrainz_enrichment._resolve_musicbrainz_track_id(
+                musicbrainz_metadata._resolve_musicbrainz_track_id(
                     track, {(1, 2): MATCHING_RECORDING_ID}, candidate
                 )
                 self.assertEqual(track.musicbrainz_trackid, CONFLICTING_RECORDING_ID)
@@ -323,7 +323,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
             return_value={"artist": "Other Performer", "title": "Other Song"},
         ):
             self.assertEqual(
-                musicbrainz_enrichment._extract_release_recording(
+                musicbrainz_metadata._extract_release_recording(
                     track, {"tracks_by_mbid": {}}, candidate
                 ),
                 candidate,
@@ -337,7 +337,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
             musicbrainz, "fetch_musicbrainz_recording_details", return_value=candidate
         ):
             self.assertEqual(
-                musicbrainz_enrichment._fetch_standalone_recording(track), candidate
+                musicbrainz_metadata._fetch_standalone_recording(track), candidate
             )
         self.assertEqual(
             track.metadata_sources.get("musicbrainz_trackid"), "MusicBrainz"
@@ -408,7 +408,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                 itunes, "fetch_itunes_track_metadata", return_value=None
             ) as search,
         ):
-            catalog_enrichment._enrich_itunes(track)
+            catalog_metadata._update_itunes(track)
         lookup.assert_called_once_with("123")
         self.assertIsNone(track.itunes_trackid)
         self.assertIsNone(track.itunes_collectionid)
@@ -437,7 +437,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                 with patch.object(
                     itunes, "fetch_itunes_track_metadata", return_value=payload
                 ):
-                    catalog_enrichment._enrich_itunes(track, force=True)
+                    catalog_metadata._update_itunes(track, force=True)
                 self.assertEqual(track.genre, "Pop")
                 self.assertIsNone(track.itunes_trackid)
                 self.assertIsNone(track.advisory)
@@ -455,7 +455,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
             patch.object(itunes, "lookup_itunes_track", return_value=None),
             patch.object(itunes, "fetch_itunes_track_metadata") as search,
         ):
-            catalog_enrichment._enrich_itunes(track)
+            catalog_metadata._update_itunes(track)
         self.assertEqual(track.itunes_trackid, "123")
         self.assertNotIn("itunes_trackid", track.metadata_sources)
         search.assert_not_called()
@@ -473,7 +473,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
             ),
             patch.object(itunes, "fetch_itunes_track_metadata") as search,
         ):
-            catalog_enrichment._enrich_itunes(track)
+            catalog_metadata._update_itunes(track)
         self.assertEqual(track.metadata_sources.get("itunes_trackid"), "iTunes")
         self.assertNotIn("itunes_collectionid", track.metadata_sources)
         search.assert_not_called()
@@ -487,7 +487,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                 track = TrackInfo(Path("song.flac"))
                 setattr(track, position_field, position)
                 setattr(track, field, 20)
-                metadata_consensus.apply_metadata_mapping(
+                metadata_merge.apply_metadata_mapping(
                     track,
                     {field: total},
                     {field: field},
@@ -497,7 +497,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                 self.assertEqual(getattr(track, field), 20)
                 self.assertIn(field, track.metadata_conflicts)
         track = TrackInfo(Path("song.flac"), track_number=0, total_tracks=12)
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             track, {"total": 12}, {"total": "total_tracks"}, force=True
         )
         self.assertEqual(track.track_number, 0)

@@ -552,8 +552,8 @@ def _check_folder_album_consistency(
             folder_issues.append(
                 f"Inconsistent ALBUM name in folder: {set(album_counts.keys())}"
             )
-            # When an established consensus exists (>= 50% or >= 2 tracks in small directories),
-            # flag each minority file diverging from the album consensus
+            # When a majority exists (>= 50% or >= 2 tracks in small directories),
+            # flag each minority file diverging from the most common album metadata
             if dominant_album_count >= max(2, int(total_tracks * 0.5)):
                 norm_dominant = normalize_str(dominant_album)
                 for file_path, track_metadata in tracks_in_folder:
@@ -565,7 +565,7 @@ def _check_folder_album_consistency(
                     if normalize_str(track_metadata.album) != norm_dominant:
                         mismatch_issue = (
                             f"Mismatched ALBUM tag '{track_metadata.album}' "
-                            f"(folder consensus album: '{dominant_album}')"
+                            f"(most common folder album: '{dominant_album}')"
                         )
                         report.issues.setdefault(str(file_path), []).append(
                             mismatch_issue
@@ -576,7 +576,7 @@ def _check_folder_album_consistency(
                         except ValueError:
                             display_name = file_path.name
                         LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                        LOG.detail(f"   ∟ ⚠️  {escape(mismatch_issue)}")
+                        LOG.detail(f"   ∟ {escape(mismatch_issue)}")
 
     album_artist_counts: Counter[str] = Counter()
     artist_counts: Counter[str] = Counter()
@@ -601,7 +601,7 @@ def _check_folder_album_consistency(
                 if normalize_str(track_metadata.album_artist) != norm_dom_aa:
                     aa_issue = (
                         f"Mismatched ALBUMARTIST tag '{track_metadata.album_artist}' "
-                        f"(folder consensus: '{dominant_artist}')"
+                        f"(most common folder artist: '{dominant_artist}')"
                     )
                     report.issues.setdefault(str(file_path), []).append(aa_issue)
                     metadata_issue_paths.add(file_path)
@@ -610,7 +610,7 @@ def _check_folder_album_consistency(
                     except ValueError:
                         display_name = file_path.name
                     LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.detail(f"   ∟ ⚠️  {escape(aa_issue)}")
+                    LOG.detail(f"   ∟ {escape(aa_issue)}")
     elif artist_counts:
         dominant_artist, _ = artist_counts.most_common(1)[0]
 
@@ -631,7 +631,7 @@ def _check_folder_alien_tracks(
     """
     Detect alien or displaced tracks inside an album directory without external network queries.
     Identifies:
-    1. Unrelated tracks whose artist and album both mismatch the folder consensus.
+    1. Unrelated tracks whose artist and album both mismatch the most common folder artist.
     2. Alien single tracks colliding on track number with discordant album tags.
     3. Extreme sequence position outliers exceeding the album sequence boundary.
     """
@@ -686,11 +686,11 @@ def _check_folder_alien_tracks(
             >= get_config().album_match_threshold
         )
 
-        # 1. Unrelated alien track: neither artist nor album matches consensus
+        # 1. Unrelated alien track: neither artist nor album matches the most common values
         if not artist_matches and not album_matches and norm_track_artist:
             track_issues.append(
                 f"Alien track detected in album folder: artist '{track_metadata.artist}' and "
-                f"album '{track_metadata.album}' do not match album consensus "
+                f"album '{track_metadata.album}' do not match most common album metadata "
                 f"'{dominant_artist or 'Unknown'} - {dominant_album}'"
             )
 
@@ -732,7 +732,7 @@ def _check_folder_alien_tracks(
                     except ValueError:
                         display_name = file_path.name
                     LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.detail(f"   ∟ ⚠️  {escape(issue_msg)}")
+                    LOG.detail(f"   ∟ {escape(issue_msg)}")
 
 
 def _check_identifier_conflicts(
@@ -833,7 +833,7 @@ def check_library(
                         display_name = str(path.relative_to(folder_path))
                         LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
                         for issue in file_issues:
-                            LOG.detail(f"   ∟ ⚠️  {escape(issue)}")
+                            LOG.detail(f"   ∟ {escape(issue)}")
 
                     progress.advance(task)
             except (KeyboardInterrupt, RuntimeError) as exc:
@@ -913,9 +913,9 @@ def check_library(
         if folder_issues:
             report.issues[str(folder)] = folder_issues
             display_folder = str(folder.relative_to(folder_path))
-            LOG.detail(f"📁 [bold]{escape(display_folder)}[/bold]")
+            LOG.detail(f"[bold]{escape(display_folder)}[/bold]")
             for issue in folder_issues:
-                LOG.detail(f"   ∟ ⚠️  {escape(issue)}")
+                LOG.detail(f"   ∟ {escape(issue)}")
 
     report.missing_metadata = len(metadata_issue_paths)
     if output_json:

@@ -94,7 +94,7 @@ def tag(
     dry_run: DryRunOpt = False,
 ) -> int:
     """
-    Tag audio files and albums automatically with all metadata, artwork, BPM, ReplayGain & lyrics.
+    Update metadata, artwork, lyrics and audio analysis tags.
     """
     load_app_environment(path)
     clear_config_cache()
@@ -172,7 +172,7 @@ def tag(
         ):
             tagged_tracks = exc.partial_result
         LOG.warning(
-            "\n⏹️  [bold yellow]INTERRUPTED[/] - Tagging stopped by user (Ctrl+C). Generating summary for processed tracks..."
+            "\n[bold yellow]INTERRUPTED[/] - Tagging stopped by user (Ctrl+C). Generating summary for processed tracks..."
         )
 
     if not interrupted:
@@ -187,7 +187,7 @@ def tag(
         if conflict_count:
             LOG.warning(
                 f"{conflict_count} tracks need review because metadata sources disagree. "
-                "Uncertain fields were preserved. Use --verbose for details"
+                "Use --verbose to review proposed changes"
                 + (
                     " or review the JSON report."
                     if json_report
@@ -226,13 +226,13 @@ def check(
         Parameter(
             name=["--spectral"],
             negative="",
-            help="Enable deep spectral cutoff analysis for fake lossless detection (slow)",
+            help="Check for spectral signs of lossy transcoding (slow)",
         ),
     ] = False,
     threads: ThreadsOpt = 8,
 ) -> int:
     """
-    Check music library for FLAC integrity, bracket corruption & missing LRCs.
+    Check audio integrity, metadata and synchronized lyrics.
     """
     LOG.info(f"Checking music library: [bold]{escape(str(path))}[/bold]")
     interrupted = False
@@ -256,7 +256,7 @@ def check(
         ):
             check_report = exc.partial_result
         LOG.warning(
-            "\n⏹️  [bold yellow]INTERRUPTED[/] - Check stopped by user (Ctrl+C). Generating summary for scanned files..."
+            "\n[bold yellow]INTERRUPTED[/] - Check stopped by user (Ctrl+C). Generating summary for scanned files..."
         )
 
     if not interrupted:
@@ -288,12 +288,12 @@ def check(
     validation_summary_rows = [
         ("Total Files Scanned", str(total), None),
         (
-            "✅ Files Passing Checks",
+            "Files Passing Checks",
             f"{passing_files}/{total} ({passing_percentage:.1f}%)",
             "green" if passing_files == total else None,
         ),
         (
-            "⚠️ Files with Issues",
+            "Files with Issues",
             f"{issue_count}/{total} ({issues_pct:.1f}%)",
             "red" if issue_count > 0 else "green",
         ),
@@ -308,7 +308,7 @@ def check(
             "yellow" if check_report.missing_lrc > 0 else "green",
         ),
         (
-            "Corrupted / Damaged Audio",
+            "Audio Integrity Failures",
             f"{check_report.corrupt_files} files ({corrupt_pct:.1f}%)",
             "red" if check_report.corrupt_files > 0 else "green",
         ),
@@ -353,7 +353,7 @@ def rename(
         ):
             report = exc.partial_result
         LOG.warning(
-            "\n⏹️  [bold yellow]INTERRUPTED[/] - Renaming stopped by user (Ctrl+C). Generating summary..."
+            "\n[bold yellow]INTERRUPTED[/] - Renaming stopped by user (Ctrl+C). Generating summary..."
         )
 
     if not interrupted:
@@ -464,7 +464,7 @@ def organize(
         ):
             organized_count = exc.partial_result
         LOG.warning(
-            "\n⏹️  [bold yellow]INTERRUPTED[/] - Organization stopped by user (Ctrl+C). Generating summary..."
+            "\n[bold yellow]INTERRUPTED[/] - Organization stopped by user (Ctrl+C). Generating summary..."
         )
 
     if not interrupted:
@@ -539,7 +539,7 @@ def backup(
         if not is_interruption(exc):
             raise
         LOG.warning(
-            "\n⏹️  [bold yellow]INTERRUPTED[/] - Backup stopped by user (Ctrl+C)."
+            "\n[bold yellow]INTERRUPTED[/] - Backup stopped by user (Ctrl+C)."
         )
         return 130
 
@@ -585,7 +585,7 @@ def restore(
         ):
             restored_count = exc.partial_result
         LOG.warning(
-            "\n⏹️  [bold yellow]INTERRUPTED[/] - Restoration stopped by user (Ctrl+C). Generating summary for restored files..."
+            "\n[bold yellow]INTERRUPTED[/] - Restoration stopped by user (Ctrl+C). Generating summary for restored files..."
         )
 
     if not interrupted:
@@ -666,7 +666,7 @@ def normalize(
         ):
             report = exc.partial_result
         LOG.warning(
-            "\n⏹️  [bold yellow]INTERRUPTED[/] - Normalization stopped by user (Ctrl+C)."
+            "\n[bold yellow]INTERRUPTED[/] - Normalization stopped by user (Ctrl+C)."
         )
 
     total_scanned = report.total_scanned

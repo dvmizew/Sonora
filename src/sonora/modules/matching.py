@@ -219,7 +219,7 @@ def _match_position_by_authoritative_id(
     id_value: str,
     release_dicts: list[dict[str, Any] | None],
 ) -> int | None:
-    """An exact recording identifier can heal corrupt titles and sequencing."""
+    """A matching recording identifier can resolve a missing title or track position."""
     matches: set[tuple[int, int]] = set()
     for release_details in release_dicts:
         if not release_details:
@@ -917,7 +917,7 @@ def _find_track_in_album_mapping(
 
 
 def provider_identity_matches(recording: TrackInfo, candidate: TrackInfo) -> bool:
-    """An enrichment provider may verify identity but cannot replace it."""
+    """A metadata provider may verify identity but cannot replace it."""
     return (
         (recording.artist, recording.title, recording.duration)
         == (candidate.artist, candidate.title, candidate.duration)

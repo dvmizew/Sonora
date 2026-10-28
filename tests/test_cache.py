@@ -189,7 +189,7 @@ class TestCacheArchitecture(IsolatedTestCase):
                 self.assertEqual(purged_count, 1)
                 self.assertFalse(db_file.exists())
 
-                # Re-record after purge on the same instance (verifying auto-schema healing)
+                # Re-record after purge on the same instance (verifying schema recreation)
                 state_vault.record_track_state(dummy_track, status="TAGGED_OK")
                 self.assertEqual(state_vault.get_state_count(), 1)
                 self.assertTrue(state_vault.is_track_up_to_date(dummy_track))
@@ -367,6 +367,21 @@ class TestCacheStatsAndResult(IsolatedTestCase):
                 "total_bytes_freed": 6144,
             },
         )
+
+    def test_cache_stats_reports_read_errors(self) -> None:
+        unreadable_cache = MagicMock()
+        unreadable_cache.__len__.side_effect = OSError("database is locked")
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory)
+            (cache_path / "cache.db").touch()
+            for cache in (None, unreadable_cache):
+                with (
+                    self.subTest(cache=cache),
+                    patch("sonora.core.cache.get_api_cache_dir", return_value=cache_path),
+                    patch("sonora.core.cache.get_cache", return_value=cache),
+                    self.assertRaisesRegex(OSError, "API cache"),
+                ):
+                    get_cache_stats()
 
     def test_get_cache_stats_populated(self) -> None:
         with (

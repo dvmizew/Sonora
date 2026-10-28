@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sonora.core.models import TrackInfo
-from sonora.modules import musicbrainz_enrichment
+from sonora.modules import musicbrainz_metadata
 from sonora.services import artist_resolution, musicbrainz
 from tests.support import IsolatedTestCase
 
@@ -43,7 +43,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                     with patch.object(
                         musicbrainz, "fetch_musicbrainz_recording_details"
                     ) as fetch:
-                        musicbrainz_enrichment._enrich_musicbrainz(
+                        musicbrainz_metadata._update_musicbrainz(
                             track,
                             RELEASE_ID,
                             {(1, 1): RECORDING_ID},
@@ -64,7 +64,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
         )
         with (
             patch.object(
-                musicbrainz_enrichment.acoustid_service,
+                musicbrainz_metadata.acoustid_service,
                 "lookup_acoustid",
                 return_value=RECORDING_ID,
             ),
@@ -79,7 +79,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                 },
             ),
         ):
-            musicbrainz_enrichment._enrich_acoustid(track, track.file_path, "test-key")
+            musicbrainz_metadata._update_acoustid(track, track.file_path, "test-key")
         self.assertIsNone(track.musicbrainz_trackid)
         self.assertIn("identity", track.metadata_conflicts)
 
@@ -101,7 +101,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                 "disambiguation": "clean",
             },
         ):
-            self.assertIsNone(musicbrainz_enrichment._fetch_standalone_recording(track))
+            self.assertIsNone(musicbrainz_metadata._fetch_standalone_recording(track))
         self.assertEqual(track.musicbrainz_trackid, RECORDING_ID)
         self.assertIn("identity", track.metadata_conflicts)
         self.assertNotIn("musicbrainz_trackid", track.metadata_sources)
@@ -121,7 +121,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                     Path("Song.flac"), disambiguation=local, advisory=advisory
                 )
                 self.assertEqual(
-                    musicbrainz_enrichment._release_edition_conflicts(
+                    musicbrainz_metadata._release_edition_conflicts(
                         track, {"disambiguation": candidate}
                     ),
                     conflict,
@@ -140,7 +140,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                 "date": "2016-11-25",
             },
         ):
-            musicbrainz_enrichment._resolve_musicbrainz_album_id(track, None, None)
+            musicbrainz_metadata._resolve_musicbrainz_album_id(track, None, None)
         self.assertIsNone(track.musicbrainz_albumid)
         self.assertIsNone(track.date)
         for title, expected in (
@@ -151,7 +151,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
         ):
             with self.subTest(title=title):
                 self.assertEqual(
-                    musicbrainz_enrichment._validate_mb_release_title(
+                    musicbrainz_metadata._validate_mb_release_title(
                         title, track.album
                     ),
                     expected,
@@ -166,7 +166,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
             with self.subTest(title=title, album=album):
                 track = TrackInfo(Path("Song.flac"), title=title, album=album)
                 self.assertEqual(
-                    musicbrainz_enrichment._release_edition_conflicts(
+                    musicbrainz_metadata._release_edition_conflicts(
                         track, {"disambiguation": "clean"}
                     ),
                     expected,
@@ -183,10 +183,10 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                 "disambiguation": "deluxe, explicit",
             },
         ):
-            musicbrainz_enrichment._resolve_musicbrainz_album_id(track, None, None)
+            musicbrainz_metadata._resolve_musicbrainz_album_id(track, None, None)
         self.assertEqual(track.musicbrainz_albumid, RELEASE_ID)
         self.assertFalse(
-            musicbrainz_enrichment._validate_mb_release_title(
+            musicbrainz_metadata._validate_mb_release_title(
                 "Album",
                 "Album (Deluxe)",
                 "Japanese bonus track",
@@ -240,7 +240,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                         return_value="Performer",
                     ),
                 ):
-                    musicbrainz_enrichment._enrich_musicbrainz(
+                    musicbrainz_metadata._update_musicbrainz(
                         track,
                         RELEASE_ID,
                         {(1, 1): OTHER_RECORDING_ID},
@@ -267,7 +267,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                 with patch.object(
                     artist_resolution, "resolve_artist_name", return_value="Performer"
                 ):
-                    musicbrainz_enrichment._apply_mb_release_metadata(
+                    musicbrainz_metadata._apply_mb_release_metadata(
                         track,
                         RELEASE_ID,
                         {"title": base_title, "album_artist": "Performer"},
@@ -299,9 +299,9 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
                 return_value=recording,
             ) as fetch,
         ):
-            musicbrainz_enrichment._resolve_musicbrainz_track_id(track, None, None)
+            musicbrainz_metadata._resolve_musicbrainz_track_id(track, None, None)
             self.assertEqual(
-                musicbrainz_enrichment._fetch_standalone_recording(track, force=True),
+                musicbrainz_metadata._fetch_standalone_recording(track, force=True),
                 recording,
             )
         search.assert_not_called()
@@ -342,15 +342,15 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
         with patch.object(
             artist_resolution, "resolve_artist_name", return_value="Performer"
         ):
-            musicbrainz_enrichment._apply_mb_release_metadata(
+            musicbrainz_metadata._apply_mb_release_metadata(
                 track, RELEASE_ID, release, force=True
             )
         self.assertEqual(track.musicbrainz_trackid, RECORDING_ID)
         self.assertEqual(track.metadata_sources["musicbrainz_trackid"], "MusicBrainz")
         self.assertIsNone(track.musicbrainz_albumid)
-        self.assertIsNone(track.musicbrainz_releasegroupid)
+        self.assertEqual(track.musicbrainz_releasegroupid, RELEASE_GROUP_ID)
         self.assertNotIn("musicbrainz_albumid", track.metadata_sources)
-        self.assertNotIn("musicbrainz_releasegroupid", track.metadata_sources)
+        self.assertEqual(track.metadata_sources["musicbrainz_releasegroupid"], "MusicBrainz")
         self.assertIn("musicbrainz_albumid", track.metadata_conflicts)
 
     def test_membership_failure_preserves_verified_recording_even_without_force(
@@ -366,7 +366,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
             musicbrainz_albumid=RELEASE_ID,
             metadata_sources={"musicbrainz_trackid": "AcoustID"},
         )
-        musicbrainz_enrichment._apply_mb_release_metadata(
+        musicbrainz_metadata._apply_mb_release_metadata(
             track,
             RELEASE_ID,
             {

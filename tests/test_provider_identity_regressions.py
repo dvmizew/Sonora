@@ -10,8 +10,8 @@ from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.http import SESSION, RetryTransport, _retry_delay
 from sonora.core.models import MetadataSource, TrackInfo
 from sonora.core.titles import recording_identity_matches, score_artist_title_match
-from sonora.modules import catalog_enrichment, musicbrainz_enrichment, tagger
-from sonora.modules.metadata_consensus import (
+from sonora.modules import catalog_metadata, musicbrainz_metadata, tagger
+from sonora.modules.metadata_merge import (
     build_provider_proposal,
     collect_provider_proposal,
     merge_provider_proposals,
@@ -28,7 +28,7 @@ CONFLICTING_RECORDING_MBID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 def _validate_genius_identifier(track_info: TrackInfo, **keywords: object) -> None:
     proposal = collect_provider_proposal(
         track_info,
-        partial(catalog_enrichment._enrich_genius, genius_api_token="fixture"),
+        partial(catalog_metadata._update_genius, genius_api_token="fixture"),
     )
     merge_provider_proposals(track_info, [proposal])
 
@@ -69,14 +69,14 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         },
                     ),
                 ):
-                    musicbrainz_enrichment._enrich_acoustid(
+                    musicbrainz_metadata._update_acoustid(
                         track, track.file_path, "fixture"
                     )
                 self.assertEqual(
                     track.musicbrainz_trackid, RECORDING_MBID if accepted else None
                 )
 
-    def test_deezer_search_cannot_enrich_conflicting_recording(self) -> None:
+    def test_deezer_search_cannot_update_conflicting_recording(self) -> None:
         for candidate in (
             {
                 "artist": "Christina Aguilera",
@@ -112,7 +112,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         "explicit_lyrics": False,
                     },
                 ):
-                    catalog_enrichment._enrich_deezer(
+                    catalog_metadata._update_deezer(
                         track, None, has_album_context=True, force=True
                     )
                 self.assertIsNone(track.isrc)
@@ -163,7 +163,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         "explicitness": explicitness,
                     },
                 ):
-                    catalog_enrichment._enrich_itunes(track, force=True)
+                    catalog_metadata._update_itunes(track, force=True)
                 self.assertEqual(track.advisory, expected)
                 if explicitness:
                     self.assertEqual(track.metadata_sources["advisory"], "iTunes")
@@ -193,7 +193,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         "explicit_lyrics": explicit_lyrics,
                     },
                 ):
-                    catalog_enrichment._enrich_deezer(
+                    catalog_metadata._update_deezer(
                         track, None, has_album_context=True, force=True
                     )
                 self.assertEqual(track.advisory, expected)
@@ -444,7 +444,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
         with self.assertRaises(TypeError):
             genius._normalize_genius_description({"html": "unexpected format"})
 
-    def test_reordered_album_enrichment_saves_only_matching_recording_credits(
+    def test_reordered_album_metadata_updates_saves_only_matching_recording_credits(
         self,
     ) -> None:
         recording = TrackInfo(
@@ -472,7 +472,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
             "tracks_by_title": {"original song": correct_recording},
         }
         with patch.object(deezer, "fetch_deezer_track_by_isrc") as lookup:
-            catalog_enrichment._enrich_deezer(recording, album, has_album_context=True)
+            catalog_metadata._update_deezer(recording, album, has_album_context=True)
         lookup.assert_not_called()
         write_track_metadata(recording)
         saved_recording = read_track_metadata(recording.file_path)
@@ -513,7 +513,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         deezer, "fetch_deezer_track_details", return_value=None
                     ),
                 ):
-                    catalog_enrichment._enrich_deezer(
+                    catalog_metadata._update_deezer(
                         recording, album, has_album_context=True, force=True
                     )
                 lookup.assert_called_once_with("USAAA2400001")
@@ -547,7 +547,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
             },
         }
         with patch.object(itunes, "fetch_itunes_track_metadata") as lookup:
-            catalog_enrichment._enrich_itunes(recording, album, force=True)
+            catalog_metadata._update_itunes(recording, album, force=True)
         lookup.assert_not_called()
         self.assertEqual(recording.genre, "Jazz")
         self.assertIsNone(recording.advisory)
@@ -584,7 +584,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     ),
                     patch.object(itunes, "fetch_itunes_track_metadata") as search,
                 ):
-                    catalog_enrichment._enrich_itunes(recording)
+                    catalog_metadata._update_itunes(recording)
                 search.assert_not_called()
                 self.assertEqual(
                     (
@@ -619,7 +619,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
             ),
             patch.object(itunes, "fetch_itunes_track_metadata", return_value=None),
         ):
-            catalog_enrichment._enrich_itunes(recording)
+            catalog_metadata._update_itunes(recording)
         self.assertIsNone(recording.itunes_artistid)
         self.assertNotIn("itunes_artistid", recording.metadata_sources)
 
@@ -668,7 +668,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         genius, "lookup_genius_song_details", return_value=stored
                     ),
                 ):
-                    catalog_enrichment._enrich_genius(recording, "fixture")
+                    catalog_metadata._update_genius(recording, "fixture")
                 self.assertEqual(recording.genius_song_id, expected)
                 if expected is None:
                     self.assertIsNone(recording.composer)
@@ -709,7 +709,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         },
                     },
                 }
-                catalog_enrichment._enrich_discogs(
+                catalog_metadata._update_discogs(
                     recording, "fixture", release, has_album_context=True
                 )
                 self.assertEqual(recording.composer, "Correct Writer")
@@ -719,7 +719,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
             title="Untitled",
             track_number=1,
         )
-        catalog_enrichment._enrich_discogs(
+        catalog_metadata._update_discogs(
             recording,
             "fixture",
             {
@@ -781,7 +781,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         deezer, "fetch_deezer_track_details", return_value=None
                     ),
                 ):
-                    catalog_enrichment._enrich_deezer(
+                    catalog_metadata._update_deezer(
                         recording, {}, has_album_context=True
                     )
                 self.assertIn("isrc", recording.metadata_conflicts)
@@ -822,7 +822,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         itunes, "fetch_itunes_track_metadata", return_value=None
                     ),
                 ):
-                    catalog_enrichment._enrich_itunes(recording, force=True)
+                    catalog_metadata._update_itunes(recording, force=True)
                 self.assertEqual(
                     recording.itunes_trackid, "1133782487" if preserved else None
                 )
@@ -846,7 +846,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 with (
                     patch.object(
                         tagger,
-                        "_run_metadata_enrichment_pipeline",
+                        "_update_metadata",
                         side_effect=_validate_genius_identifier,
                     ),
                     patch(
@@ -874,7 +874,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     (result.artist, result.title), ("Alpha", "Original Song")
                 )
 
-    def test_clean_apple_editions_do_not_enrich_explicit_recordings(self) -> None:
+    def test_clean_apple_editions_do_not_update_explicit_recordings(self) -> None:
         for album_context in (False, True):
             for explicitness in ("cleaned", "explicit", "notExplicit"):
                 with self.subTest(
@@ -925,7 +925,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                             return_value=normalized,
                         ),
                     ):
-                        catalog_enrichment._enrich_itunes(recording, album, force=True)
+                        catalog_metadata._update_itunes(recording, album, force=True)
                     self.assertEqual(recording.itunes_trackid, "11")
                     self.assertEqual(
                         recording.advisory,
@@ -943,7 +943,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
     def test_rejected_recording_clears_only_its_verified_dependent_work_id(
         self,
     ) -> None:
-        from sonora.modules import musicbrainz_enrichment
+        from sonora.modules import musicbrainz_metadata
         from sonora.services import musicbrainz
 
         recording_id = "11111111-2222-3333-4444-555555555555"
@@ -972,7 +972,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     },
                 ):
                     self.assertIsNone(
-                        musicbrainz_enrichment._fetch_standalone_recording(recording)
+                        musicbrainz_metadata._fetch_standalone_recording(recording)
                     )
                 self.assertIsNone(recording.musicbrainz_trackid)
                 self.assertEqual(recording.musicbrainz_workid, expected)
@@ -1084,7 +1084,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
     def test_release_membership_is_required_for_recording_specific_metadata(
         self,
     ) -> None:
-        from sonora.modules import musicbrainz_enrichment
+        from sonora.modules import musicbrainz_metadata
 
         for candidate, accepted in (
             ("Original Song", True),
@@ -1113,7 +1113,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     if candidate
                     else {}
                 )
-                musicbrainz_enrichment._apply_mb_release_metadata(
+                musicbrainz_metadata._apply_mb_release_metadata(
                     track,
                     identifier,
                     {
@@ -1135,7 +1135,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 )
 
     def test_album_release_date_cannot_postdate_an_existing_original_date(self) -> None:
-        from sonora.modules import musicbrainz_enrichment
+        from sonora.modules import musicbrainz_metadata
 
         for candidate, expected in (
             ("2021-09-24", "2020-10-16"),
@@ -1152,7 +1152,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     original_date="2020-10-16",
                     musicbrainz_albumid=identifier,
                 )
-                musicbrainz_enrichment._apply_mb_release_metadata(
+                musicbrainz_metadata._apply_mb_release_metadata(
                     track,
                     identifier,
                     {"artist": "Alpha", "title": "Album", "original_date": candidate},
@@ -1203,7 +1203,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                         genius, "lookup_genius_song_details", return_value=cached
                     ),
                 ):
-                    catalog_enrichment._enrich_genius(recording, "fixture")
+                    catalog_metadata._update_genius(recording, "fixture")
                 self.assertIsNone(recording.composer)
                 self.assertEqual(
                     recording.genius_song_id,
@@ -1261,13 +1261,13 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 self.assertEqual(track.advisory, expected)
 
     def test_recording_lookup_cannot_replace_release_sequence(self) -> None:
-        from sonora.modules.musicbrainz_enrichment import _apply_mb_recording_metadata
+        from sonora.modules.musicbrainz_metadata import _apply_mb_recording_metadata
 
         for album_recording in (False, True):
             with (
                 self.subTest(album_recording=album_recording),
                 patch(
-                    "sonora.modules.musicbrainz_enrichment.artist_resolution.resolve_artist_name",
+                    "sonora.modules.musicbrainz_metadata.artist_resolution.resolve_artist_name",
                     return_value="Alpha",
                 ),
             ):
@@ -1332,7 +1332,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     ),
                     patch.object(itunes, "fetch_itunes_track_metadata") as search,
                 ):
-                    catalog_enrichment._enrich_itunes(track)
+                    catalog_metadata._update_itunes(track)
                 search.assert_not_called()
                 self.assertEqual(track.advisory, expected)
                 self.assertEqual(

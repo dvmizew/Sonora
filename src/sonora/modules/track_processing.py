@@ -43,7 +43,7 @@ from sonora.core.sidecars import (
 from sonora.core.state import LibraryStateVault
 from sonora.core.text import normalize_str
 from sonora.core.titles import clean_title
-from sonora.modules.catalog_enrichment import _NETWORK_EXCEPTIONS
+from sonora.modules.catalog_metadata import _NETWORK_EXCEPTIONS
 from sonora.modules.normalization import normalize_track_metadata
 from sonora.services import lyrics as lyrics_service
 
@@ -64,7 +64,7 @@ _SKIP_DIFF_FIELDS: frozenset[str] = frozenset(
 )
 
 
-def _enrich_cuesheet(
+def _update_cuesheet(
     track_info: TrackInfo,
     file_path: Path,
     cuesheet_content: str | None,
@@ -77,7 +77,7 @@ def _enrich_cuesheet(
             track_info.cuesheet = cuesheet_module.read_cuesheet_content(companion_cue)
 
 
-def _enrich_bpm(
+def _update_bpm(
     track_info: TrackInfo,
     file_path: Path,
     fetch_bpm: bool,
@@ -88,12 +88,12 @@ def _enrich_bpm(
             bpm = bpm_module.calculate_bpm(file_path)
             if bpm is not None:
                 track_info.bpm = bpm
-                LOG.detail(f"   ∟ 🎵 BPM Calculated: [green]{bpm}[/]")
+                LOG.detail(f"   ∟ BPM Calculated: [green]{bpm}[/]")
         except OSError as error:
             LOG.debug(f"BPM calculation failed for {track_info.title}: {error}")
 
 
-def _enrich_key(
+def _update_key(
     track_info: TrackInfo,
     file_path: Path,
     fetch_key: bool,
@@ -110,13 +110,13 @@ def _enrich_key(
                 track_info.initial_key = detected_key
                 camelot = key_module.key_to_camelot(detected_key) or "Unknown"
                 LOG.detail(
-                    f"   ∟ 🎵 Musical Key: [green]{escape(detected_key)}[/] ({escape(camelot)})"
+                    f"   ∟ Musical Key: [green]{escape(detected_key)}[/] ({escape(camelot)})"
                 )
         except OSError as error:
             LOG.debug(f"Key calculation failed for {track_info.title}: {error}")
 
 
-def _enrich_artwork(
+def _update_artwork(
     track_info: TrackInfo,
     file_path: Path,
     fetch_itunes_art: bool,
@@ -140,7 +140,7 @@ def _enrich_artwork(
         return None
 
 
-def _enrich_lyrics(
+def _update_lyrics(
     track_info: TrackInfo,
     file_path: Path,
     fetch_lyrics: bool,
@@ -193,11 +193,11 @@ def _enrich_lyrics(
             track_info.metadata_conflicts.pop("lyrics", None)
             if not had_lrc:
                 LOG.detail(
-                    f"   ∟ [green]✅ Saved {tag_type} lyrics for {escape(file_path.name)}[/]"
+                    f"   ∟ [green]Saved {tag_type} lyrics for {escape(file_path.name)}[/]"
                 )
             elif force:
                 LOG.detail(
-                    f"   ∟ [yellow]🔄 Updated {tag_type} lyrics for {escape(file_path.name)}[/]"
+                    f"   ∟ [yellow]Updated {tag_type} lyrics for {escape(file_path.name)}[/]"
                 )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Lyrics fetch failed for {track_info.title}: {error}")
@@ -293,19 +293,19 @@ def _process_audio_and_save_tags(
     musixmatch_token: str | None = None,
 ) -> TrackInfo:
     """Computes audio DSP features, fetches lyrics/artwork, and writes updated tags."""
-    _enrich_cuesheet(track_info, file_path, cuesheet_content)
-    _enrich_bpm(track_info, file_path, fetch_bpm, force=force)
-    _enrich_key(track_info, file_path, fetch_key, force=force)
+    _update_cuesheet(track_info, file_path, cuesheet_content)
+    _update_bpm(track_info, file_path, fetch_bpm, force=force)
+    _update_key(track_info, file_path, fetch_key, force=force)
     cover_image = None
     if not track_info.is_alien:
         cover_image = (
             album_cover_path
             if album_cover_path and album_cover_path.exists()
-            else _enrich_artwork(
+            else _update_artwork(
                 track_info, file_path, fetch_itunes_art, force=force, dry_run=dry_run
             )
         )
-    _enrich_lyrics(
+    _update_lyrics(
         track_info,
         file_path,
         fetch_lyrics,
@@ -350,7 +350,7 @@ def _process_audio_and_save_tags(
             LOG.detail(f"   ∟ [DRY-RUN] {escape(file_path.name)}{''.join(diff_lines)}")
     else:
         LOG.detail(
-            f"   ∟ [bold dim]✨ SKIPPED:[/] [dim]{escape(file_path.name)}[/] [dim]tags are unchanged.[/]"
+            f"   ∟ [bold dim]Unchanged:[/] [dim]{escape(file_path.name)}[/] [dim]tags are unchanged.[/]"
         )
 
     return track_info
@@ -376,8 +376,8 @@ def normalize_single_track(
 
     original_metadata = current_info.copy()
 
-    _enrich_bpm(current_info, file_path, fetch_bpm, force=force)
-    _enrich_key(current_info, file_path, fetch_key, force=force)
+    _update_bpm(current_info, file_path, fetch_bpm, force=force)
+    _update_key(current_info, file_path, fetch_key, force=force)
 
     normalize_track_metadata(current_info)
 
@@ -679,7 +679,7 @@ def process_track_lyrics(
         lyrics_text = None
     if lyrics_text and not is_lyrics_duration_valid(lyrics_text, resolved_duration):
         LOG.warning(
-            f"   ∟ ⚠️  Rejected mismatched lyrics for {title}: "
+            f"   ∟ Rejected mismatched lyrics for {title}: "
             f"lyrics duration exceeds audio length ({int(resolved_duration or 0)}s)."
         )
         lyrics_text = None

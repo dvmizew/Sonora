@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from sonora.core.models import TrackInfo
-from sonora.modules import matching, musicbrainz_enrichment
+from sonora.modules import matching, musicbrainz_metadata
 from tests.support import IsolatedTestCase
 
 RELEASE_ID = "11111111-2222-3333-4444-555555555555"
@@ -132,7 +132,7 @@ class TestReleaseSequenceSafety(IsolatedTestCase):
                         }
                     },
                 }
-                musicbrainz_enrichment._apply_mb_release_metadata(
+                musicbrainz_metadata._apply_mb_release_metadata(
                     track, RELEASE_ID, release, force=True
                 )
                 self.assertEqual(track.total_tracks, disc_total)
@@ -149,7 +149,7 @@ class TestReleaseSequenceSafety(IsolatedTestCase):
                     total_tracks=10,
                     total_discs=2,
                 )
-                musicbrainz_enrichment._apply_mb_release_metadata(
+                musicbrainz_metadata._apply_mb_release_metadata(
                     track,
                     RELEASE_ID,
                     {
@@ -170,7 +170,7 @@ class TestReleaseSequenceSafety(IsolatedTestCase):
         track = TrackInfo(
             Path("Original Song.flac"), musicbrainz_albumid=RELEASE_ID, track_number=3
         )
-        musicbrainz_enrichment._apply_mb_release_metadata(
+        musicbrainz_metadata._apply_mb_release_metadata(
             track,
             RELEASE_ID,
             {"total_tracks": 10, "total_discs": 1},

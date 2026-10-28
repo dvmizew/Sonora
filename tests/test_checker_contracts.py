@@ -352,7 +352,7 @@ class TestCheckerContracts(IsolatedTestCase):
             genre="Rock",
         )
 
-    def test_placeholder_artist_does_not_become_a_folder_consensus(self) -> None:
+    def test_placeholder_artist_does_not_become_a_folder_agreement(self) -> None:
         report = CheckReport()
         folder_issues: list[str] = []
         recording = dataclasses.replace(
@@ -551,7 +551,7 @@ class TestCheckerContracts(IsolatedTestCase):
         self.assertTrue(any("ARTIST entry" in issue for issue in issues))
         self.assertFalse(any("seems unsplit" in issue for issue in issues))
 
-    def test_folder_consensus_flags_specific_outliers_and_empty_input(self) -> None:
+    def test_folder_agreement_flags_specific_outliers_and_empty_input(self) -> None:
         report = CheckReport()
         folder_issues: list[str] = []
         self.assertEqual(

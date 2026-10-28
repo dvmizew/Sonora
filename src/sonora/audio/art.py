@@ -196,7 +196,7 @@ def process_album_cover_art(
                     for current, replacement in zip(existing_dim, new_dim)
                 ):
                     LOG.detail(
-                        f"   ∟ 🛡️  [Quality Shield] Preserved cover: replacement reduces an image dimension ({existing_dim[0]}x{existing_dim[1]} -> {new_dim[0]}x{new_dim[1]})"
+                        f"   ∟ [Quality Shield] Preserved cover: replacement reduces an image dimension ({existing_dim[0]}x{existing_dim[1]} -> {new_dim[0]}x{new_dim[1]})"
                     )
                 else:
                     atomic_write_bytes(cover_image_path, new_artwork_bytes)
@@ -390,7 +390,7 @@ def process_label_artwork(
             if _save_image(label_path, logo_bytes):
                 name_display = escape(label_name) if label_name else "Record Label"
                 LOG.detail(
-                    f"   ∟ 🏷️  Downloaded label logo: {name_display} -> label.png"
+                    f"   ∟ Downloaded label logo: {name_display} -> label.png"
                 )
     except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Record label logo download failed for {label_mbid}: {error}")

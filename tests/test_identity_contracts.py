@@ -13,7 +13,7 @@ from sonora.core.constants import DIRS
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
 from sonora.modules import matching
-from sonora.modules import musicbrainz_enrichment as enrichment
+from sonora.modules import musicbrainz_metadata as mb_metadata
 from sonora.services import acoustid, artist_resolution, musicbrainz
 from tests.support import IsolatedTestCase
 
@@ -196,7 +196,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
             ):
                 self.assertEqual(artist_resolution.resolve_artist_name(query), expected)
 
-    def test_cached_corrupt_expansions_and_branding_do_not_poison_names(self) -> None:
+    def test_cached_corrupt_expansions_and_branding_preserve_existing_names(self) -> None:
         for query, cached, expected in (
             ("primary", "PRIMARY", "primary"),
             ("Alias", "Alias Ensemble", "Alias"),
@@ -347,12 +347,12 @@ class TestAlbumIdentityContracts(IsolatedTestCase):
         )
 
 
-class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
+class TestMusicBrainzMetadataContracts(IsolatedTestCase):
     def test_unmatched_fingerprints_do_not_create_a_musicbrainz_identifier(
         self,
     ) -> None:
         with patch.object(acoustid, "lookup_acoustid", return_value=None):
-            enrichment._enrich_acoustid(
+            mb_metadata._update_acoustid(
                 self.recording, self.recording.file_path, "fixture"
             )
         self.assertIsNone(self.recording.musicbrainz_trackid)
@@ -364,11 +364,11 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             Path("recording.flac"), track_number=3, musicbrainz_trackid=MBID
         )
         with self.assertRaisesRegex(TypeError, "JSON object"):
-            enrichment._find_album_release_recording(
+            mb_metadata._find_album_release_recording(
                 recording, {"tracks_by_disc_and_position": {(2, 3): None}}, 2
             )
         with self.assertRaisesRegex(TypeError, "JSON object"):
-            enrichment._extract_release_recording(
+            mb_metadata._extract_release_recording(
                 recording, {"tracks_by_mbid": {MBID: []}}, None
             )
 
@@ -378,14 +378,14 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self.recording.musicbrainz_trackid = MBID
         self.recording.date = "2019"
         with patch.object(musicbrainz, "fetch_track_mbid") as fetch:
-            enrichment._resolve_musicbrainz_track_id(self.recording, None, None)
+            mb_metadata._resolve_musicbrainz_track_id(self.recording, None, None)
         fetch.assert_not_called()
         with patch.object(
             musicbrainz,
             "search_musicbrainz_release",
             return_value={"id": OTHER_MBID, "date": "2020"},
         ):
-            enrichment._resolve_musicbrainz_album_id(self.recording, None, None)
+            mb_metadata._resolve_musicbrainz_album_id(self.recording, None, None)
         self.assertEqual(
             (
                 self.recording.musicbrainz_trackid,
@@ -408,7 +408,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             patch.object(musicbrainz, "fetch_track_mbid", return_value=OTHER_MBID),
         ):
             self.assertIsNone(
-                enrichment._fetch_standalone_recording(self.recording, force=True)
+                mb_metadata._fetch_standalone_recording(self.recording, force=True)
             )
         self.assertEqual(self.recording.musicbrainz_trackid, OTHER_MBID)
         self.assertEqual(self.recording.title, "Recording")
@@ -418,11 +418,11 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
     ) -> None:
         self.recording.total_tracks = 10
         self.recording.total_discs = 2
-        enrichment._apply_mb_recording_metadata(
+        mb_metadata._apply_mb_recording_metadata(
             self.recording, {"disc_total_tracks": "bad"}, True, None, False, force=True
         )
         self.recording.musicbrainz_albumid = MBID
-        enrichment._apply_mb_release_metadata(
+        mb_metadata._apply_mb_release_metadata(
             self.recording,
             MBID,
             {"title": "Record", "total_tracks": 5, "total_discs": 1},
@@ -450,7 +450,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
                 force=force,
             ):
                 self.assertEqual(
-                    enrichment._should_update_track_artist(
+                    mb_metadata._should_update_track_artist(
                         recording,
                         {"title": "Recording"},
                         candidate_artist,
@@ -480,7 +480,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         resolution.start()
         self.addCleanup(resolution.stop)
 
-    def test_any_recording_isrc_can_heal_a_corrupt_release_title(self) -> None:
+    def test_any_recording_isrc_can_fill_a_missing_title(self) -> None:
         self.recording.title = "Untitled"
         self.recording.isrc = "USAAA2100002"
         candidate = {
@@ -489,23 +489,23 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             "isrcs": ["USAAA2100001", "USAAA2100002"],
         }
         self.assertTrue(
-            enrichment._heal_track_identity_from_release(self.recording, candidate)
+            mb_metadata._fill_missing_title(self.recording, candidate)
         )
         self.assertEqual(self.recording.title, "Recording")
         self.assertFalse(
-            enrichment._heal_track_identity_from_release(self.recording, candidate)
+            mb_metadata._fill_missing_title(self.recording, candidate)
         )
         self.recording.title = "Unrelated"
         self.recording.isrc = "USAAA2100003"
         self.assertFalse(
-            enrichment._heal_track_identity_from_release(self.recording, candidate)
+            mb_metadata._fill_missing_title(self.recording, candidate)
         )
         self.assertEqual(self.recording.title, "Unrelated")
 
     def test_existing_mbid_skips_fingerprinting_without_force(self) -> None:
         self.recording.musicbrainz_trackid = MBID
         with patch.object(acoustid, "lookup_acoustid") as lookup:
-            enrichment._enrich_acoustid(
+            mb_metadata._update_acoustid(
                 self.recording, self.recording.file_path, "fixture"
             )
         lookup.assert_not_called()
@@ -513,7 +513,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
     def test_release_recording_lookup_uses_position_fallbacks(self) -> None:
         self.recording.track_number = 3
         self.assertEqual(
-            enrichment._find_album_release_recording(
+            mb_metadata._find_album_release_recording(
                 self.recording,
                 {"tracks_by_disc_and_position": {(2, 3): self.details}},
                 2,
@@ -521,7 +521,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             self.details,
         )
         self.assertIsNone(
-            enrichment._find_album_release_recording(
+            mb_metadata._find_album_release_recording(
                 self.recording, {"title": "Record"}, 2
             )
         )
@@ -530,16 +530,16 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self,
     ) -> None:
         self.recording.track_number = 3
-        enrichment._resolve_musicbrainz_track_id(
+        mb_metadata._resolve_musicbrainz_track_id(
             self.recording, {(1, 3): MBID}, self.details
         )
         self.assertEqual(self.recording.musicbrainz_trackid, MBID)
         self.recording.musicbrainz_trackid = None
-        enrichment._resolve_musicbrainz_track_id(
+        mb_metadata._resolve_musicbrainz_track_id(
             self.recording, {(1, 3): MBID}, {"title": "Unrelated", "artist": "Wrong"}
         )
         self.assertIsNone(self.recording.musicbrainz_trackid)
-        enrichment._resolve_musicbrainz_track_id(self.recording, {(1, 3): MBID}, None)
+        mb_metadata._resolve_musicbrainz_track_id(self.recording, {(1, 3): MBID}, None)
         self.assertIsNone(self.recording.musicbrainz_trackid)
 
     def test_recording_extraction_prefers_mbid_and_rejects_unrelated_titles(
@@ -547,20 +547,20 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
     ) -> None:
         self.recording.musicbrainz_trackid = MBID
         self.assertEqual(
-            enrichment._extract_release_recording(
+            mb_metadata._extract_release_recording(
                 self.recording, {"tracks_by_mbid": {MBID: self.details}}, None
             ),
             self.details,
         )
         self.assertIsNone(
-            enrichment._extract_release_recording(
+            mb_metadata._extract_release_recording(
                 self.recording,
                 {"title": "Record"},
                 {"title": "Other", "artist": "Wrong"},
             )
         )
         self.assertIsNone(
-            enrichment._extract_release_recording(
+            mb_metadata._extract_release_recording(
                 self.recording, {"title": "Record"}, None
             )
         )
@@ -572,7 +572,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         with patch.object(
             musicbrainz, "fetch_musicbrainz_recording_details", return_value=None
         ):
-            self.assertIsNone(enrichment._fetch_standalone_recording(self.recording))
+            self.assertIsNone(mb_metadata._fetch_standalone_recording(self.recording))
         with (
             patch.object(
                 musicbrainz,
@@ -582,25 +582,25 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             patch.object(musicbrainz, "fetch_track_mbid", return_value=None),
         ):
             self.assertIsNone(
-                enrichment._fetch_standalone_recording(self.recording, force=True)
+                mb_metadata._fetch_standalone_recording(self.recording, force=True)
             )
         self.assertIsNone(self.recording.musicbrainz_trackid)
 
     def test_valid_album_identifiers_dates_and_totals_are_preserved(self) -> None:
         self.recording.musicbrainz_albumid = MBID
         self.recording.date = "2019"
-        enrichment._resolve_musicbrainz_album_id(self.recording, OTHER_MBID, None)
+        mb_metadata._resolve_musicbrainz_album_id(self.recording, OTHER_MBID, None)
         self.assertEqual(
             (self.recording.musicbrainz_albumid, self.recording.date), (MBID, "2019")
         )
         with patch.object(
             musicbrainz, "fetch_musicbrainz_release_details", return_value=None
         ):
-            enrichment._apply_mb_release_metadata(self.recording, None, None)
+            mb_metadata._apply_mb_release_metadata(self.recording, None, None)
         self.assertEqual(self.recording.musicbrainz_albumid, MBID)
         self.recording.total_tracks = 5
         self.recording.total_discs = 1
-        enrichment._apply_mb_release_metadata(
+        mb_metadata._apply_mb_release_metadata(
             self.recording,
             MBID,
             {"title": "Record", "total_tracks": "bad", "total_discs": "bad"},
@@ -619,13 +619,13 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
                 return_value=self.details,
             ),
         ):
-            enrichment._enrich_acoustid(
+            mb_metadata._update_acoustid(
                 self.recording, self.recording.file_path, "fixture"
             )
             self.assertEqual(self.recording.musicbrainz_trackid, MBID)
             self.recording.track_number = 1
             self.recording.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
-            enrichment._enrich_acoustid(
+            mb_metadata._update_acoustid(
                 self.recording,
                 self.recording.file_path,
                 "fixture",
@@ -644,10 +644,10 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
                     return_value=details,
                 ),
             ):
-                enrichment._enrich_acoustid(recording, recording.file_path, "fixture")
+                mb_metadata._update_acoustid(recording, recording.file_path, "fixture")
             self.assertIsNone(recording.musicbrainz_trackid)
         with patch.object(acoustid, "lookup_acoustid", side_effect=OSError("offline")):
-            enrichment._enrich_acoustid(
+            mb_metadata._update_acoustid(
                 self.recording, self.recording.file_path, "fixture", force=True
             )
 
@@ -667,7 +667,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
                     musicbrainz, "search_musicbrainz_release", return_value=release
                 ),
             ):
-                enrichment._resolve_musicbrainz_album_id(recording, None, None)
+                mb_metadata._resolve_musicbrainz_album_id(recording, None, None)
             self.assertEqual(
                 (recording.musicbrainz_albumid, recording.date),
                 (expected_id, expected_date),
@@ -682,7 +682,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         with patch.object(
             musicbrainz, "fetch_musicbrainz_recording_details", return_value=wrong
         ):
-            self.assertIsNone(enrichment._fetch_standalone_recording(self.recording))
+            self.assertIsNone(mb_metadata._fetch_standalone_recording(self.recording))
         self.assertIsNone(self.recording.musicbrainz_trackid)
         self.assertNotIn("musicbrainz_trackid", self.recording.metadata_sources)
         self.recording.musicbrainz_trackid = MBID
@@ -695,12 +695,12 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             patch.object(musicbrainz, "fetch_track_mbid", return_value=OTHER_MBID),
         ):
             self.assertEqual(
-                enrichment._fetch_standalone_recording(self.recording, force=True),
+                mb_metadata._fetch_standalone_recording(self.recording, force=True),
                 self.details,
             )
         self.assertEqual(self.recording.musicbrainz_trackid, OTHER_MBID)
 
-    def test_unknown_and_alien_artists_can_be_healed_without_poisoning_known_artists(
+    def test_unknown_and_alien_artists_can_be_updated_while_preserving_known_artists(
         self,
     ) -> None:
         for artist, alien, corrupt, expected in (
@@ -715,7 +715,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             )
             with self.subTest(artist=artist, alien=alien, corrupt=corrupt):
                 self.assertEqual(
-                    enrichment._should_update_track_artist(
+                    mb_metadata._should_update_track_artist(
                         recording, {}, "Other", False, None, corrupt
                     ),
                     expected,
@@ -739,9 +739,12 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
                     return_value=release,
                 ),
             ):
-                enrichment._apply_mb_release_metadata(recording, None, None)
+                mb_metadata._apply_mb_release_metadata(recording, None, None)
             self.assertIsNone(recording.musicbrainz_albumid)
-            self.assertIsNone(recording.musicbrainz_releasegroupid)
+            self.assertEqual(
+                recording.musicbrainz_releasegroupid,
+                None if release["album_artist"] == "Unrelated" else OTHER_MBID,
+            )
 
     def test_release_metadata_preserves_track_counts_and_normalizes_album_identity(
         self,
@@ -761,7 +764,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self.recording.musicbrainz_albumid = MBID
         self.recording.album = "Unknown Album"
         self.recording.track_number = 3
-        enrichment._apply_mb_release_metadata(self.recording, MBID, release, force=True)
+        mb_metadata._apply_mb_release_metadata(self.recording, MBID, release, force=True)
         self.assertEqual(
             (
                 self.recording.album,
@@ -781,10 +784,10 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         )
         self.recording.track_number = 12
         self.recording.total_tracks = None
-        enrichment._apply_mb_release_metadata(self.recording, MBID, release, force=True)
+        mb_metadata._apply_mb_release_metadata(self.recording, MBID, release, force=True)
         self.assertIsNone(self.recording.total_tracks)
 
-    def test_recording_metadata_heals_corrupt_identity_and_preserves_disc_totals(
+    def test_recording_metadata_updates_missing_identity_and_preserves_disc_totals(
         self,
     ) -> None:
         self.recording.artist = "Unknown Artist"
@@ -795,7 +798,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             "disc_total_tracks": "10",
             "first-release-date": "2020",
         }
-        enrichment._apply_mb_recording_metadata(
+        mb_metadata._apply_mb_recording_metadata(
             self.recording, details, True, "Primary", False
         )
         self.assertEqual(
@@ -812,7 +815,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         with patch.object(
             musicbrainz, "fetch_track_mbid", side_effect=OSError("offline")
         ):
-            enrichment._enrich_musicbrainz(self.recording, None, None, None)
+            mb_metadata._update_musicbrainz(self.recording, None, None, None)
         self.assertEqual(self.recording.title, "Recording")
 
 

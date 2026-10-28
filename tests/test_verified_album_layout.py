@@ -39,7 +39,7 @@ class TestVerifiedAlbumLayout(IsolatedTestCase):
                     },
                     itunes_layout_verified=verified,
                 )
-                tagger._heal_and_align_album_track(
+                tagger._apply_album_metadata(
                     track, track.file_path, True, album_context=context
                 )
                 self.assertEqual(track.total_tracks, 3 if verified else 2)

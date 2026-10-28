@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from sonora.audio import metadata
 from sonora.core.models import TrackInfo
-from sonora.modules import matching, musicbrainz_enrichment, tagger
+from sonora.modules import matching, musicbrainz_metadata, tagger
 from sonora.modules.matching import _resolve_album_track_position, is_alien_album_track
 from sonora.services import artist_resolution, musicbrainz
 from tests.support import IsolatedTestCase
@@ -99,7 +99,7 @@ class TestAlbumIdentityReview(IsolatedTestCase):
             matching._search_release_positions_by_title(track, [], {}, None, None, None)
         )
 
-    def test_standalone_isrc_heals_only_missing_identity_components(self) -> None:
+    def test_standalone_isrc_updates_only_missing_identity_components(self) -> None:
         recording_id = "11111111-1111-4111-8111-111111111111"
         for title, artist, candidate_title, candidate_artist, expected in (
             ("Untitled", "Alpha", "Original Song", "Alpha", True),
@@ -131,12 +131,12 @@ class TestAlbumIdentityReview(IsolatedTestCase):
                     return_value=recording,
                 ):
                     self.assertEqual(
-                        musicbrainz_enrichment._fetch_standalone_recording(track)
+                        musicbrainz_metadata._fetch_standalone_recording(track)
                         is not None,
                         expected,
                     )
 
-    def test_release_isrc_healing_preserves_meaningful_title_and_artist(self) -> None:
+    def test_release_isrc_updates_preserves_meaningful_title_and_artist(self) -> None:
         for title, artist, candidate_artist, expected in (
             ("Untitled", "Alpha", "Alpha", True),
             ("Untitled", "Alpha", "Beta", False),
@@ -149,7 +149,7 @@ class TestAlbumIdentityReview(IsolatedTestCase):
                     Path("song.flac"), title=title, artist=artist, isrc="KNOWN"
                 )
                 self.assertEqual(
-                    musicbrainz_enrichment._heal_track_identity_from_release(
+                    musicbrainz_metadata._fill_missing_title(
                         track,
                         {
                             "title": "Original Song",
@@ -185,7 +185,7 @@ class TestAlbumIdentityReview(IsolatedTestCase):
                     duration=180,
                     track_number=1,
                 )
-                musicbrainz_enrichment._resolve_musicbrainz_track_id(
+                musicbrainz_metadata._resolve_musicbrainz_track_id(
                     track, {(1, 1): recording_id}, candidate
                 )
                 self.assertEqual(track.musicbrainz_trackid, expected)
@@ -266,7 +266,7 @@ class TestAlbumIdentity(IsolatedTestCase):
                         )
                     )
 
-    def test_album_identifiers_still_heal_corrupted_titles(self) -> None:
+    def test_album_identifiers_still_update_corrupted_titles(self) -> None:
         track = dataclasses.replace(self._track("Untitled"), isrc="USAAA2400001")
         position = _resolve_album_track_position(
             track,
@@ -283,7 +283,7 @@ class TestAlbumIdentity(IsolatedTestCase):
         )
         self.assertEqual(position, 3)
 
-    def test_variant_rejections_also_shield_alien_tracks(self) -> None:
+    def test_variant_rejections_also_preserve_alien_tracks(self) -> None:
         for query, candidate in (
             ("The Journey Part 2", "The Journey Part 3"),
             ("Long Summer Night (Alpha Remix)", "Long Summer Night (Omega Remix)"),
@@ -364,7 +364,7 @@ class TestStandaloneAlbumContext(IsolatedTestCase):
             track_number=1,
         )
 
-    def test_standalone_shielding_does_not_clear_shared_album_context(self) -> None:
+    def test_standalone_preservation_does_not_clear_shared_album_context(self) -> None:
         context = tagger._AlbumMetadataContext(
             sample_artist="Primary",
             sample_album="Record",
@@ -380,7 +380,7 @@ class TestStandaloneAlbumContext(IsolatedTestCase):
                 artist_resolution, "resolve_artist_name", return_value="Primary"
             ),
             patch.object(tagger, "is_alien_album_track", return_value=True),
-            patch.object(tagger, "_run_metadata_enrichment_pipeline") as enrich,
+            patch.object(tagger, "_update_metadata") as enrich,
             patch.object(
                 tagger, "_process_audio_and_save_tags", return_value=self.recording
             ),

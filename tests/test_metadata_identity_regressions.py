@@ -11,10 +11,10 @@ from sonora.audio.metadata import (
 )
 from sonora.core.artists import get_primary_artist
 from sonora.core.models import TrackInfo
-from sonora.modules import matching, metadata_consensus
-from sonora.modules import musicbrainz_enrichment as musicbrainz_enrichment_module
+from sonora.modules import matching, metadata_merge
+from sonora.modules import musicbrainz_metadata as musicbrainz_metadata_module
 from sonora.modules import track_processing as track_processing_module
-from sonora.modules.metadata_consensus import build_provider_proposal
+from sonora.modules.metadata_merge import build_provider_proposal
 from sonora.services import artist_resolution
 from tests.regression_support import AudioRegressionTestCase
 from tests.support import IsolatedTestCase
@@ -47,7 +47,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             self.assertEqual(song.tags["ORIGINALYEAR"], ["2007"])
             self.assertEqual(song.tags["COMMENT"], ["Preserve this comment"])
 
-    def test_same_title_different_artist_is_shielded(self) -> None:
+    def test_same_title_different_artist_is_preserved(self) -> None:
         audio_path = self.root / "01 - Intro.flac"
         unrelated = TrackInfo(
             audio_path,
@@ -90,7 +90,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             self.assertEqual(get_primary_artist("Example & Partners"), "Example")
             api_cache.assert_not_called()
 
-    def test_identifier_heals_corrupt_title_and_position(self) -> None:
+    def test_identifier_updates_corrupt_title_and_position(self) -> None:
         for id_field in ("isrc", "itunes_trackid"):
             with self.subTest(id_field=id_field):
                 track = TrackInfo(
@@ -133,7 +133,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             4,
         )
 
-    def test_wrong_identifier_does_not_heal_from_title(self) -> None:
+    def test_wrong_identifier_does_not_update_from_title(self) -> None:
         track = TrackInfo(self.root / "track.flac", title="Original", track_number=2)
         release = {
             "tracks_by_disc_and_position": {
@@ -149,7 +149,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
     def test_multiple_musicbrainz_isrcs_preserve_valid_existing_code(self) -> None:
         track = TrackInfo(self.root / "track.flac", isrc="SECOND")
         recording = {"title": "Original", "isrc": "FIRST", "isrcs": ["FIRST", "SECOND"]}
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             track, recording, {"isrc": "isrc"}, force=True, source="MusicBrainz"
         )
         self.assertEqual(track.isrc, "SECOND")
@@ -199,7 +199,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             [],
         )
 
-    def test_album_verified_isrc_heals_corrupt_identity(self) -> None:
+    def test_album_verified_isrc_updates_missing_identity(self) -> None:
         recording = {
             "title": "Original Song",
             "artist": "Alpha",
@@ -224,7 +224,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
                     isrc=isrc,
                     track_number=98,
                 )
-                musicbrainz_enrichment_module._apply_mb_recording_metadata(
+                musicbrainz_metadata_module._apply_mb_recording_metadata(
                     track, recording, True, None, False
                 )
                 self.assertEqual(track.title, expected_title)
@@ -287,7 +287,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
             producers="Producer One, Producer Two",
             copyright="2024 Major Records",
         )
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             track,
             {
                 "label": "Major Records",
@@ -303,11 +303,11 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
         self.assertEqual(track.copyright, "2024 Major Records")
         self.assertNotIn("label", track.metadata_sources)
         blank = TrackInfo(track.file_path)
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             blank, {"label": "Major Records"}, {"label": "label"}, force=True
         )
         self.assertEqual(blank.label, "Major Records")
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             blank, {"label": "Different Records"}, {"label": "label"}, force=True
         )
         self.assertEqual(blank.label, "Different Records")
@@ -356,7 +356,7 @@ class TestProviderDurationEvidence(IsolatedTestCase):
                     genre="Rock",
                     metadata_sources={"genre": "iTunes"},
                 )
-                metadata_consensus.merge_provider_proposals(
+                metadata_merge.merge_provider_proposals(
                     recording,
                     [build_provider_proposal(recording, proposal)],
                 )

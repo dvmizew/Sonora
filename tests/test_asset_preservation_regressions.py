@@ -149,7 +149,7 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
         )
         original = dataclasses.replace(track)
         with patch.object(
-            track_processing_module, "_enrich_artwork"
+            track_processing_module, "_update_artwork"
         ) as artwork_provider:
             track_processing_module._process_audio_and_save_tags(
                 track,

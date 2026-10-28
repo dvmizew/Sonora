@@ -5,13 +5,13 @@ from unittest.mock import MagicMock, patch
 
 from sonora.audio.metadata import write_track_metadata
 from sonora.core.models import TrackInfo
-from sonora.modules.catalog_enrichment import (
-    _enrich_deezer,
-    _enrich_shazam,
+from sonora.modules.catalog_metadata import (
+    _update_deezer,
+    _update_shazam,
 )
 from sonora.modules.matching import _resolve_album_track_position
-from sonora.modules.metadata_consensus import apply_metadata_mapping
-from sonora.modules.musicbrainz_enrichment import _enrich_musicbrainz
+from sonora.modules.metadata_merge import apply_metadata_mapping
+from sonora.modules.musicbrainz_metadata import _update_musicbrainz
 from sonora.modules.tagger import (
     _AlbumMetadataContext,
     _resolve_album_folder_identity,
@@ -179,7 +179,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         }
 
         # Case 1: Misnumbered file on disk (named 06 - That's My Name.flac, track_number=6)
-        # Should resolve to position 2 by title match (and not get poisoned by track 6 Amor Gitana)
+        # Should resolve to position 2 by title match (and not match the unrelated track 6 Amor Gitana)
         track_misnumbered = TrackInfo(
             file_path=Path("/music/Akcent - That's My Name/06 - That's My Name.flac"),
             artist="Akcent",
@@ -227,7 +227,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         )
         self.assertIsNone(pos)
 
-    def test_enrich_musicbrainz_candidate_rec_mismatch_prevents_metadata_poisoning(
+    def test_update_musicbrainz_candidate_rec_mismatch_prevents_incorrect_metadata(
         self,
     ) -> None:
         track = TrackInfo(
@@ -251,7 +251,7 @@ class TestTaggingWorkflows(ModuleTestCase):
                 },
             },
         }
-        _enrich_musicbrainz(
+        _update_musicbrainz(
             track_info=track,
             album_mbid="9d90908d-0a74-4df0-8e76-13c6473b33e5",
             album_track_mbids={(1, 4): "548be1ad-0000-0000-0000-000000000000"},
@@ -265,7 +265,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         self.assertIsNone(track.musicbrainz_trackid)
         self.assertIsNone(track.producers)
 
-    def test_enrich_musicbrainz_heals_corrupted_title_via_isrc(self) -> None:
+    def test_update_musicbrainz_updates_corrupted_title_via_isrc(self) -> None:
         track = TrackInfo(
             file_path=Path("dummy.wav"),
             artist="James Arthur",
@@ -295,7 +295,7 @@ class TestTaggingWorkflows(ModuleTestCase):
                 "isrc": "USAAA2400001",
             },
         ) as stored_lookup:
-            _enrich_musicbrainz(
+            _update_musicbrainz(
                 track_info=track,
                 album_mbid="c6b7d374-1425-4414-ba65-2ddcb4d98196",
                 album_track_mbids={(1, 4): "c8b03190-306c-4125-9b32-3f9d86d60a12"},
@@ -310,7 +310,7 @@ class TestTaggingWorkflows(ModuleTestCase):
 
     @patch("sonora.audio.metadata.write_track_metadata")
     @patch("sonora.audio.metadata.read_track_metadata")
-    def test_process_single_track_shields_alien_track(
+    def test_process_single_track_preserves_alien_track(
         self, mock_read: Any, mock_write: Any
     ) -> None:
         track_file = self.tmp_path / "03 - Blue Jeans.wav"
@@ -333,12 +333,12 @@ class TestTaggingWorkflows(ModuleTestCase):
             },
         }
         with (
-            patch("sonora.modules.tagger._enrich_musicbrainz"),
-            patch("sonora.modules.tagger._enrich_acoustid"),
-            patch("sonora.modules.tagger._enrich_deezer"),
-            patch("sonora.modules.tagger._enrich_itunes"),
-            patch("sonora.modules.tagger._enrich_theaudiodb"),
-            patch("sonora.modules.tagger._enrich_genius"),
+            patch("sonora.modules.tagger._update_musicbrainz"),
+            patch("sonora.modules.tagger._update_acoustid"),
+            patch("sonora.modules.tagger._update_deezer"),
+            patch("sonora.modules.tagger._update_itunes"),
+            patch("sonora.modules.tagger._update_theaudiodb"),
+            patch("sonora.modules.tagger._update_genius"),
         ):
             track_metadata = process_single_track(
                 track_file,
@@ -435,7 +435,7 @@ class TestTaggingWorkflows(ModuleTestCase):
 
     @patch.dict(os.environ, {"ENABLE_SHAZAM": "true"})
     @patch("sonora.services.shazam.recognize_audio_track")
-    def test_enrich_shazam_generic_and_force(self, mock_recognize: MagicMock) -> None:
+    def test_update_shazam_generic_and_force(self, mock_recognize: MagicMock) -> None:
         audio_file = self.tmp_path / "01.flac"
         audio_file.write_bytes(b"dummy")
 
@@ -451,9 +451,9 @@ class TestTaggingWorkflows(ModuleTestCase):
             lyrics="Lyrics Line 1\nLyrics Line 2",
         )
 
-        # Case 1: Generic title and artist gets healed by Shazam
+        # Case 1: Generic title and artist gets updated by Shazam
         trk = TrackInfo(file_path=audio_file, title="Track 01", artist="Unknown Artist")
-        _enrich_shazam(trk, audio_file, force=False)
+        _update_shazam(trk, audio_file, force=False)
         self.assertEqual(trk.title, "Recognized Title")
         self.assertEqual(trk.artist, "Recognized Artist")
         self.assertEqual(trk.album, "Recognized Album")
@@ -469,13 +469,13 @@ class TestTaggingWorkflows(ModuleTestCase):
             file_path=audio_file, title="Original Title", artist="Original Artist"
         )
         mock_recognize.reset_mock()
-        _enrich_shazam(trk2, audio_file, force=False)
+        _update_shazam(trk2, audio_file, force=False)
         self.assertEqual(trk2.title, "Original Title")
         self.assertEqual(trk2.artist, "Original Artist")
         mock_recognize.assert_not_called()
 
         # Forced recognition still requires the existing identity to match.
-        _enrich_shazam(trk2, audio_file, force=True)
+        _update_shazam(trk2, audio_file, force=True)
         self.assertEqual(trk2.title, "Original Title")
         self.assertEqual(trk2.artist, "Original Artist")
 
@@ -496,15 +496,15 @@ class TestTaggingWorkflows(ModuleTestCase):
         )
         self.assertEqual(trk.genre, "Hip-Hop/Rap")
 
-    @patch("sonora.modules.tagger._enrich_musicbrainz")
-    @patch("sonora.modules.tagger._enrich_acoustid")
-    @patch("sonora.modules.tagger._enrich_itunes")
-    @patch("sonora.modules.tagger._enrich_deezer")
-    @patch("sonora.modules.tagger._enrich_lastfm")
-    @patch("sonora.modules.tagger._enrich_discogs")
-    @patch("sonora.modules.tagger._enrich_genius")
-    @patch("sonora.modules.tagger._enrich_theaudiodb")
-    def test_album_context_identity_healing(
+    @patch("sonora.modules.tagger._update_musicbrainz")
+    @patch("sonora.modules.tagger._update_acoustid")
+    @patch("sonora.modules.tagger._update_itunes")
+    @patch("sonora.modules.tagger._update_deezer")
+    @patch("sonora.modules.tagger._update_lastfm")
+    @patch("sonora.modules.tagger._update_discogs")
+    @patch("sonora.modules.tagger._update_genius")
+    @patch("sonora.modules.tagger._update_theaudiodb")
+    def test_album_context_identity_updates(
         self,
         mock_tadb: MagicMock,
         mock_genius: MagicMock,
@@ -553,11 +553,11 @@ class TestTaggingWorkflows(ModuleTestCase):
                 sample_album="The Arrival",
             ),
         )
-        # Corrupted artist 'Kavinsky' must be healed to 'Aaryan Shah'
+        # Missing artist is filled from the matched album context.
         self.assertEqual(result.artist, "Aaryan Shah")
         self.assertEqual(result.album, "The Arrival")
 
-    def test_enrich_deezer_fallback_preserves_album_track_number(self) -> None:
+    def test_update_deezer_fallback_preserves_album_track_number(self) -> None:
         """Fallback track search from Deezer (e.g. single track_position=1) must not overwrite album track number."""
         trk = TrackInfo(
             file_path=Path("/music/album/17 - Dip.flac"),
@@ -584,7 +584,7 @@ class TestTaggingWorkflows(ModuleTestCase):
                 "disk_number": 1,
                 "producers": "D.A. Got That Dope",
             }
-            _enrich_deezer(
+            _update_deezer(
                 trk,
                 album_deezer_details=incomplete_album,
                 has_album_context=True,
@@ -596,7 +596,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         self.assertEqual(trk.disc_number, 1)
         self.assertEqual(trk.producers, "D.A. Got That Dope")
 
-    def test_healer_preserves_credited_collaborative_artist(self) -> None:
+    def test_updater_preserves_credited_collaborative_artist(self) -> None:
         """Legitimate track artist on collaborative/multi-artist album must not be overwritten by album artist."""
         audio_file = self.tmp_path / "2-02 - What's in Your Heart.wav"
         write_silent_wav(audio_file)
@@ -622,12 +622,12 @@ class TestTaggingWorkflows(ModuleTestCase):
         }
 
         with (
-            patch("sonora.modules.tagger._enrich_musicbrainz"),
-            patch("sonora.modules.tagger._enrich_acoustid"),
-            patch("sonora.modules.tagger._enrich_deezer"),
-            patch("sonora.modules.tagger._enrich_itunes"),
-            patch("sonora.modules.tagger._enrich_theaudiodb"),
-            patch("sonora.modules.tagger._enrich_genius"),
+            patch("sonora.modules.tagger._update_musicbrainz"),
+            patch("sonora.modules.tagger._update_acoustid"),
+            patch("sonora.modules.tagger._update_deezer"),
+            patch("sonora.modules.tagger._update_itunes"),
+            patch("sonora.modules.tagger._update_theaudiodb"),
+            patch("sonora.modules.tagger._update_genius"),
         ):
             track_metadata = process_single_track(
                 file_path=audio_file,
@@ -646,8 +646,8 @@ class TestTaggingWorkflows(ModuleTestCase):
         self.assertEqual(track_metadata.artist, "Swae Lee")
         self.assertEqual(track_metadata.album_artist, "Rae Sremmurd")
 
-    def test_album_genre_consensus_harmonization(self) -> None:
-        """Album genre consensus must harmonize isolated instrumental/unknown outliers to dominant genre."""
+    def test_album_genre_agreement_harmonization(self) -> None:
+        """Album genre majority must harmonize isolated instrumental/unknown outliers to dominant genre."""
         album_dir = self.tmp_path / "Lewis Capaldi - Divinely Uninspired"
         album_dir.mkdir(parents=True, exist_ok=True)
 
@@ -713,12 +713,12 @@ class TestTaggingWorkflows(ModuleTestCase):
             ),
             patch("sonora.audio.art.process_artist_artwork"),
             patch("sonora.audio.replaygain.calculate_album_replaygain"),
-            patch("sonora.modules.tagger._enrich_musicbrainz"),
-            patch("sonora.modules.tagger._enrich_acoustid"),
-            patch("sonora.modules.tagger._enrich_deezer"),
-            patch("sonora.modules.tagger._enrich_itunes"),
-            patch("sonora.modules.tagger._enrich_theaudiodb"),
-            patch("sonora.modules.tagger._enrich_genius"),
+            patch("sonora.modules.tagger._update_musicbrainz"),
+            patch("sonora.modules.tagger._update_acoustid"),
+            patch("sonora.modules.tagger._update_deezer"),
+            patch("sonora.modules.tagger._update_itunes"),
+            patch("sonora.modules.tagger._update_theaudiodb"),
+            patch("sonora.modules.tagger._update_genius"),
         ):
             results = tag_album_folder(
                 album_dir,
@@ -734,8 +734,8 @@ class TestTaggingWorkflows(ModuleTestCase):
         self.assertEqual(genres["Maybe"], "Alternative")
         self.assertEqual(genres["Grace"], "Alternative")
 
-    def test_album_artist_casing_consensus_harmonization(self) -> None:
-        """Album artist and track artist casing must harmonize to canonical consensus."""
+    def test_album_artist_casing_agreement_harmonization(self) -> None:
+        """Album artist and track artist casing must harmonize to canonical majority."""
         album_dir = self.tmp_path / "Alex - Test Release"
         album_dir.mkdir(parents=True, exist_ok=True)
 
@@ -789,12 +789,12 @@ class TestTaggingWorkflows(ModuleTestCase):
             ),
             patch("sonora.audio.art.process_artist_artwork"),
             patch("sonora.audio.replaygain.calculate_album_replaygain"),
-            patch("sonora.modules.tagger._enrich_musicbrainz"),
-            patch("sonora.modules.tagger._enrich_acoustid"),
-            patch("sonora.modules.tagger._enrich_deezer"),
-            patch("sonora.modules.tagger._enrich_itunes"),
-            patch("sonora.modules.tagger._enrich_theaudiodb"),
-            patch("sonora.modules.tagger._enrich_genius"),
+            patch("sonora.modules.tagger._update_musicbrainz"),
+            patch("sonora.modules.tagger._update_acoustid"),
+            patch("sonora.modules.tagger._update_deezer"),
+            patch("sonora.modules.tagger._update_itunes"),
+            patch("sonora.modules.tagger._update_theaudiodb"),
+            patch("sonora.modules.tagger._update_genius"),
             patch(
                 "sonora.services.artist_resolution.resolve_artist_name",
                 side_effect=lambda name, **kwargs: name,

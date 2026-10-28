@@ -214,7 +214,7 @@ class TestCheckingWorkflows(ModuleTestCase):
         )
 
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library_compilation_shielded_from_alien(
+    def test_check_library_compilation_preserved_from_alien(
         self, mock_read: Any
     ) -> None:
         album_dir = self.tmp_path / "Various Artists - OST"

@@ -24,7 +24,7 @@ from sonora.core.titles import (
     recording_identity_matches,
     score_artist_title_match,
 )
-from sonora.modules.catalog_enrichment import _NETWORK_EXCEPTIONS
+from sonora.modules.catalog_metadata import _NETWORK_EXCEPTIONS
 from sonora.modules.matching import (
     _compatible_release_layout,
     _get_album_recording,
@@ -34,13 +34,13 @@ from sonora.modules.matching import (
     _recording_isrc_matches,
     _recording_matches_track_identity,
 )
-from sonora.modules.metadata_consensus import apply_metadata_mapping
+from sonora.modules.metadata_merge import apply_metadata_mapping
 from sonora.services import acoustid as acoustid_service
 from sonora.services import artist_resolution
 from sonora.services import musicbrainz as musicbrainz_service
 
 
-def _enrich_acoustid(
+def _update_acoustid(
     track_info: TrackInfo,
     file_path: Path,
     acoustid_api_key: str | None,
@@ -102,7 +102,7 @@ def _enrich_acoustid(
                     return
             track_info.musicbrainz_trackid = acoustid_mbid
             track_info.metadata_sources["musicbrainz_trackid"] = "AcoustID"
-            LOG.detail(f"   ∟ 🎯 [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
+            LOG.detail(f"   ∟ [acoustid] Matched MBID: {acoustid_mbid[:8]}...")
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"AcoustID lookup failed for {track_info.title}: {error}")
 
@@ -122,7 +122,7 @@ def _find_album_release_recording(
     )
 
 
-def _heal_track_identity_from_release(
+def _fill_missing_title(
     track_info: TrackInfo,
     candidate_rec: dict[str, Any] | None,
 ) -> bool:
@@ -138,8 +138,8 @@ def _heal_track_identity_from_release(
         and clean_title(track_info.title).lower() != clean_title(str(rec_title)).lower()
     ):
         LOG.detail(
-            f"   ∟ 🩹 [Healer] Track {track_info.track_number} verified by ISRC match. "
-            f"Healing corrupted title '{escape(str(track_info.title))}' -> '{escape(str(rec_title))}'"
+            f"   ∟ Track {track_info.track_number} verified by ISRC match. "
+            f"Updating title '{escape(str(track_info.title))}' -> '{escape(str(rec_title))}'"
         )
         track_info.title = preserve_unicode_repertoire(track_info.title, str(rec_title))
         return True
@@ -176,7 +176,7 @@ def _resolve_musicbrainz_track_id(
             track_info.musicbrainz_trackid = candidate_mbid
             track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
             LOG.detail(
-                f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {candidate_mbid[:8]}..."
+                f"   ∟ [MusicBrainz Album Match] Found MBID: {candidate_mbid[:8]}..."
             )
     elif not is_valid_uuid(track_info.musicbrainz_trackid):
         # Validate a stored recording before searching: artist/title alone cannot
@@ -185,7 +185,7 @@ def _resolve_musicbrainz_track_id(
         if is_valid_uuid(mbid):
             track_info.musicbrainz_trackid = mbid
             track_info.metadata_sources.pop("musicbrainz_trackid", None)
-            LOG.detail(f"   ∟ 🏷️ [MusicBrainz] Found MBID: {mbid[:8]}...")
+            LOG.detail(f"   ∟ [MusicBrainz] Found MBID: {mbid[:8]}...")
 
 
 def _resolve_musicbrainz_album_id(
@@ -401,11 +401,11 @@ def _should_update_track_artist(
     cleaned_artist: str,
     is_album_rec: bool,
     target_album_artist: str | None,
-    has_corrupt_identity: bool,
+    title_updated: bool,
     force: bool = False,
 ) -> bool:
     """Evaluates whether track artist should be updated from MusicBrainz recording."""
-    if has_corrupt_identity or not track_info.artist:
+    if title_updated or not track_info.artist:
         return True
     if track_info.artist.lower() in ("unknown", "unknown artist"):
         return True
@@ -461,7 +461,7 @@ def _apply_mb_recording_metadata(
     recording_details: dict[str, Any],
     is_album_rec: bool,
     target_album_artist: str | None,
-    has_corrupt_identity: bool,
+    title_updated: bool,
     force: bool = False,
 ) -> None:
     """Applies recording metadata and resolves track artist updates."""
@@ -482,7 +482,7 @@ def _apply_mb_recording_metadata(
         )
     rec_title = str(recording_details.get("title") or "")
     rec_artist = str(recording_details.get("artist") or "")
-    has_corrupt_identity = has_corrupt_identity or bool(
+    title_updated = title_updated or bool(
         is_album_rec
         and rec_title
         and rec_artist
@@ -505,7 +505,7 @@ def _apply_mb_recording_metadata(
         rec_title,
     )
     if (
-        has_corrupt_identity
+        title_updated
         or not track_info.title
         or track_info.title == "Untitled"
         or _is_generic_title(track_info.title)
@@ -520,7 +520,7 @@ def _apply_mb_recording_metadata(
         track_info,
         recording_details,
         mb_map,
-        force=force or has_corrupt_identity,
+        force=force or title_updated,
         source="MusicBrainz",
     )
 
@@ -547,7 +547,7 @@ def _apply_mb_recording_metadata(
             cleaned_artist,
             is_album_rec,
             target_album_artist,
-            has_corrupt_identity,
+            title_updated,
             force=force,
         ):
             track_info.artist = cleaned_artist
@@ -651,7 +651,7 @@ def _release_edition_conflicts(
     ):
         track_info.metadata_conflicts["identity"] = (
             "MusicBrainz clean/explicit edition is not established by local "
-            "evidence; recording and release enrichment withheld."
+            "evidence; recording and release metadata updates withheld."
         )
         return True
     return False
@@ -666,9 +666,7 @@ def _apply_mb_release_metadata(
     """Applies release-level metadata, validating album artist and album title."""
     if "musicbrainz_albumid" in track_info.metadata_conflicts:
         track_info.musicbrainz_albumid = None
-        track_info.musicbrainz_releasegroupid = None
         track_info.metadata_sources.pop("musicbrainz_albumid", None)
-        track_info.metadata_sources.pop("musicbrainz_releasegroupid", None)
         return
     if not is_valid_uuid(track_info.musicbrainz_albumid):
         return
@@ -704,9 +702,7 @@ def _apply_mb_release_metadata(
         release_title, track_info.album, str(mb_rel.get("disambiguation") or "")
     ):
         track_info.musicbrainz_albumid = None
-        track_info.musicbrainz_releasegroupid = None
         track_info.metadata_sources.pop("musicbrainz_albumid", None)
-        track_info.metadata_sources.pop("musicbrainz_releasegroupid", None)
         track_info.metadata_conflicts["musicbrainz_albumid"] = (
             "MusicBrainz release title describes a different edition; "
             "release metadata withheld."
@@ -733,9 +729,7 @@ def _apply_mb_release_metadata(
         )
     ):
         track_info.musicbrainz_albumid = None
-        track_info.musicbrainz_releasegroupid = None
         track_info.metadata_sources.pop("musicbrainz_albumid", None)
-        track_info.metadata_sources.pop("musicbrainz_releasegroupid", None)
         track_info.metadata_conflicts["musicbrainz_albumid"] = (
             "MusicBrainz release does not contain the verified recording; "
             "release identifier removed and release metadata withheld."
@@ -820,7 +814,7 @@ def _apply_mb_release_metadata(
             track_info.total_tracks = total_tracks
 
 
-def _enrich_musicbrainz(
+def _update_musicbrainz(
     track_info: TrackInfo,
     album_mbid: str | None,
     album_track_mbids: dict[tuple[int, int], str] | None,
@@ -844,7 +838,7 @@ def _enrich_musicbrainz(
         )
         if _release_edition_conflicts(track_info, candidate_rec):
             return
-        has_corrupt_identity = _heal_track_identity_from_release(
+        title_updated = _fill_missing_title(
             track_info, candidate_rec
         )
 
@@ -854,9 +848,7 @@ def _enrich_musicbrainz(
             album_mb_release_details = None
             candidate_rec = None
             track_info.musicbrainz_albumid = None
-            track_info.musicbrainz_releasegroupid = None
             track_info.metadata_sources.pop("musicbrainz_albumid", None)
-            track_info.metadata_sources.pop("musicbrainz_releasegroupid", None)
         else:
             _resolve_musicbrainz_album_id(
                 track_info, album_mbid, album_mb_release_details, force=force
@@ -871,7 +863,7 @@ def _enrich_musicbrainz(
                 recording_details,
                 is_album_rec,
                 target_album_artist,
-                has_corrupt_identity,
+                title_updated,
                 force=force,
             )
 
@@ -879,4 +871,4 @@ def _enrich_musicbrainz(
             track_info, album_mbid, album_mb_release_details, force=force
         )
     except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"MusicBrainz enrichment failed for {track_info.title}: {error}")
+        LOG.debug(f"MusicBrainz metadata update failed for {track_info.title}: {error}")

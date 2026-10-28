@@ -79,7 +79,7 @@ def build_provider_proposal(
             {},
             {
                 "identity": (
-                    "Provider proposed a conflicting recording identity; enrichment withheld."
+                    "Provider proposed a conflicting recording identity; metadata updates withheld."
                 )
             },
         )
@@ -114,7 +114,7 @@ def merge_provider_proposals(
         recording_isrcs.add(normalize_str(recording.isrc))
     if len(recording_isrcs) > 1:
         description = (
-            "Providers disagree on ISRC; recording-specific enrichment withheld."
+            "Providers disagree on ISRC; recording-specific metadata updates withheld."
         )
         recording.metadata_conflicts["isrc"] = description
         LOG.detail(f"{escape(recording.file_path.name)}: {escape(description)}")
@@ -138,10 +138,10 @@ def _merge_provider_field(
             for value, source in candidates
             if value != original and source is not None
         }
-        if expanding_sources and len(expanding_sources) < 2:
+        if expanding_sources:
             recording.metadata_conflicts[field_name] = (
                 "Provider expansion of existing featured credits requires "
-                "independent corroboration; existing credits preserved."
+                "artist identity verification; existing credits preserved."
             )
             return
     if field_name == "advisory" and original == "Explicit":
@@ -191,6 +191,7 @@ def apply_metadata_mapping(
     force: bool = False,
     source: MetadataSource | None = None,
 ) -> None:
+    stored_featured = track_info.featured_artists
     for src_key, target_attr in field_map.items():
         provider_value = metadata_dict.get(src_key)
         if provider_value is None:
@@ -234,7 +235,7 @@ def apply_metadata_mapping(
             clean_t, extracted_feats = extract_title_features(
                 normalized_value, primary_artist=track_info.artist
             )
-            if extracted_feats:
+            if extracted_feats and (force or not track_info.featured_artists):
                 track_info.featured_artists = normalize_featured_artists(
                     [track_info.featured_artists, *extracted_feats],
                     primary_artist=track_info.artist,
@@ -267,14 +268,16 @@ def apply_metadata_mapping(
             continue
         elif target_attr == "featured_artists":
             existing_featured = getattr(track_info, "featured_artists", None)
-            if existing_featured and not force:
+            if stored_featured and not force:
                 normalized_result = normalize_featured_artists(
-                    [existing_featured, normalized_value],
+                    stored_featured,
                     primary_artist=track_info.artist,
                 )
             else:
                 normalized_result = normalize_featured_artists(
-                    normalized_value,
+                    [existing_featured, normalized_value]
+                    if not force
+                    else normalized_value,
                     primary_artist=track_info.artist,
                 )
             if not normalized_result:
@@ -304,10 +307,7 @@ def apply_metadata_mapping(
                     )
                     continue
             cur_int = safe_int(getattr(track_info, target_attr, None))
-            if target_attr in ("disc_number", "total_discs"):
-                if cur_int is None or cur_int != val_int:
-                    setattr(track_info, target_attr, val_int)
-            elif cur_int is None or force:
+            if cur_int is None or force:
                 setattr(track_info, target_attr, val_int)
             if source is not None and getattr(track_info, target_attr) == val_int:
                 if cur_int != val_int or force:

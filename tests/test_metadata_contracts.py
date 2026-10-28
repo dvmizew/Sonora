@@ -11,7 +11,7 @@ from mutagen.mp4 import MP4
 from sonora.audio import metadata
 from sonora.core.models import NormalizeReport, TrackInfo
 from sonora.modules.backup import backup_library_tags, restore_library_tags
-from sonora.modules.metadata_consensus import apply_metadata_mapping
+from sonora.modules.metadata_merge import apply_metadata_mapping
 from sonora.modules.track_processing import normalize_single_track
 from tests.fixtures import image_bytes
 from tests.regression_support import AudioRegressionTestCase

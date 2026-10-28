@@ -526,7 +526,7 @@ def organize_library_singles(
                             )
                         safe_case_rename(path, target_file)
                         LOG.detail(
-                            f"   ∟ 📁 Moved single: {escape(path.name)} -> {escape(target_file.parent.name)}/"
+                            f"   ∟ Moved single: {escape(path.name)} -> {escape(target_file.parent.name)}/"
                         )
                     else:
                         LOG.detail(
@@ -558,7 +558,7 @@ def organize_library_singles(
             updated_playlists.extend(changed_playlists)
 
     if removed_dupes > 0:
-        LOG.detail(f"🗑️ Removed {removed_dupes} duplicate single(s).")
+        LOG.detail(f"Removed {removed_dupes} duplicate single(s).")
 
     if not dry_run:
         consolidate_duplicate_artist_dirs(source_dir, dry_run=False)

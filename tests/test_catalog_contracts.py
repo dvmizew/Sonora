@@ -10,8 +10,8 @@ import httpx
 
 from sonora.core.config import SonoraConfig
 from sonora.core.models import TrackInfo
-from sonora.modules import catalog_enrichment as catalog
-from sonora.modules import matching, metadata_consensus
+from sonora.modules import catalog_metadata as catalog
+from sonora.modules import matching, metadata_merge
 from sonora.services import deezer as deezer_service
 from sonora.services import discogs as discogs_service
 from sonora.services import genius as genius_service
@@ -38,7 +38,7 @@ class TestMetadataMappingContracts(IsolatedTestCase):
         self.assertEqual(track.title, "?")
         self.assertIsNone(track.mood)
         self.assertIsNone(track.style)
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             track,
             {"mood": "...", "style": "…", "composer": "Unknown"},
             {"mood": "mood", "style": "style", "composer": "composer"},
@@ -70,7 +70,7 @@ class TestMetadataMappingContracts(IsolatedTestCase):
             "label": "Publisher",
             "isrc": "USAAA2100001",
         }
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             recording,
             provider_fields,
             {name: name for name in provider_fields},
@@ -120,7 +120,7 @@ class TestMetadataMappingContracts(IsolatedTestCase):
             recording = TrackInfo(Path("recording.flac"), artist="Primary")
             before = dataclasses.replace(recording)
             with self.subTest(field=field, value=value):
-                metadata_consensus.apply_metadata_mapping(
+                metadata_merge.apply_metadata_mapping(
                     recording, {"value": value}, {"value": field}, force=True
                 )
                 self.assertEqual(recording, before)
@@ -134,7 +134,7 @@ class TestMetadataMappingContracts(IsolatedTestCase):
             track_number=3,
             disc_number=1,
         )
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             recording,
             {
                 "label": "Publisher",
@@ -154,28 +154,28 @@ class TestMetadataMappingContracts(IsolatedTestCase):
         recording = TrackInfo(
             Path("recording.flac"), label="Existing", track_number=3, disc_number=1
         )
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             recording,
             {"label": "Replacement", "track_number": 2, "disc_number": 1},
             {name: name for name in ("label", "track_number", "disc_number")},
             source="Deezer",
         )
         self.assertEqual((recording.label, recording.track_number), ("Existing", 3))
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             recording, {"label": "Existing"}, {"label": "label"}, source="Deezer"
         )
         self.assertEqual(recording.metadata_sources["label"], "Deezer")
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             recording, {"label": "Existing"}, {"label": "label"}, source="Discogs"
         )
         self.assertEqual(recording.metadata_sources["label"], "Deezer")
-        metadata_consensus.apply_metadata_mapping(
+        metadata_merge.apply_metadata_mapping(
             recording, {"label": "Different"}, {"label": "label"}, force=True
         )
         self.assertEqual(recording.label, "Different")
 
 
-class TestCatalogEnrichmentContracts(IsolatedTestCase):
+class TestCatalogMetadataContracts(IsolatedTestCase):
     def test_shazam_cannot_invent_an_album_when_recognition_has_none(self) -> None:
         recording = TrackInfo(Path("recording.flac"))
         with (
@@ -188,7 +188,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 return_value=ShazamTrackInfo("Recording", "Primary"),
             ),
         ):
-            catalog._enrich_shazam(
+            catalog._update_shazam(
                 recording, recording.file_path, has_album_context=True
             )
         self.assertEqual(
@@ -196,9 +196,9 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             ("Recording", "Primary", "Unknown Album"),
         )
 
-    def test_unmatched_discogs_track_credits_do_not_poison_the_recording(self) -> None:
+    def test_unmatched_discogs_track_credits_preserve_the_recording(self) -> None:
         recording = dataclasses.replace(self.recording)
-        catalog._enrich_discogs(
+        catalog._update_discogs(
             recording,
             "fixture",
             {"id": 1, "track_credits": {"other": {"producers": "Wrong"}}},
@@ -213,7 +213,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         with patch.object(
             deezer_service, "fetch_deezer_track_details", return_value=None
         ):
-            catalog._enrich_deezer(
+            catalog._update_deezer(
                 track,
                 {
                     "title": "Album",
@@ -245,14 +245,14 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             date="2020",
             musicbrainz_albumid=MBID,
         )
-        catalog._enrich_deezer(recording, album, has_album_context=True)
+        catalog._update_deezer(recording, album, has_album_context=True)
         self.assertEqual(
             (recording.album, recording.total_tracks, recording.date),
             ("Record", 10, "2020"),
         )
         recording.musicbrainz_albumid = None
-        catalog._enrich_deezer(recording, album, has_album_context=True)
-        catalog._enrich_deezer(recording, album, has_album_context=True, force=True)
+        catalog._update_deezer(recording, album, has_album_context=True)
+        catalog._update_deezer(recording, album, has_album_context=True, force=True)
         self.assertEqual(recording.total_tracks, 10)
 
     def test_deezer_preserves_conflicting_isrc_even_for_exact_duration_match(
@@ -292,7 +292,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 return_value=exact_edit,
             ) as lookup,
         ):
-            catalog._enrich_deezer(recording, None, has_album_context=True)
+            catalog._update_deezer(recording, None, has_album_context=True)
         lookup.assert_called_once_with(
             "Cheyanne & Ex Habit", "i lied - sped up", duration=147.698
         )
@@ -333,7 +333,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 },
             ),
         ):
-            catalog._enrich_deezer(recording, None, has_album_context=True)
+            catalog._update_deezer(recording, None, has_album_context=True)
         self.assertEqual(recording.isrc, "UKZGC2506039")
         self.assertIn("isrc", recording.metadata_conflicts)
 
@@ -401,7 +401,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                     shazam_service, "recognize_audio_track", return_value=recognized
                 ),
             ):
-                catalog._enrich_shazam(
+                catalog._update_shazam(
                     recording,
                     recording.file_path,
                     has_album_context=has_context,
@@ -421,7 +421,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         with patch.object(
             lastfm_service, "fetch_lastfm_tags", return_value=["rock", "Rock"]
         ):
-            catalog._enrich_lastfm(recording, "fixture")
+            catalog._update_lastfm(recording, "fixture")
         self.assertEqual(recording.genre, "Rock")
         self.assertIsNone(recording.style)
         self.assertEqual(recording.mood, "Verified")
@@ -441,7 +441,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             total_tracks=10,
             date="2020",
         )
-        catalog._enrich_itunes(
+        catalog._update_itunes(
             recording,
             {
                 "tracks_by_disc_and_position": {
@@ -458,7 +458,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             (recording.disc_number, recording.total_discs, recording.date),
             (2, 2, "2020"),
         )
-        catalog._enrich_deezer(
+        catalog._update_deezer(
             recording,
             {
                 "title": "Record",
@@ -479,17 +479,17 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "fetch_genius_song_details",
             return_value={"writers": "Writer", "release_date": "2021"},
         ):
-            catalog._enrich_genius(recording, "fixture")
+            catalog._update_genius(recording, "fixture")
         self.assertEqual((recording.date, recording.lyricist), ("2020", "Verified"))
 
-    def test_theaudiodb_existing_rating_and_genre_survive_enrichment(self) -> None:
+    def test_theaudiodb_existing_rating_and_genre_survive_metadata_updates(self) -> None:
         recording = dataclasses.replace(self.recording, genre="Rock", rating=8.5)
         with patch.object(
             theaudiodb_service,
             "fetch_theaudiodb_track_details",
             return_value={"rating": 1, "genre": "Pop", "mood": "Chill"},
         ):
-            catalog._enrich_theaudiodb(recording)
+            catalog._update_theaudiodb(recording)
         self.assertEqual(
             (recording.genre, recording.rating, recording.mood), ("Rock", 8.5, "Chill")
         )
@@ -530,7 +530,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 shazam_service, "recognize_audio_track", return_value=recognized
             ),
         ):
-            catalog._enrich_shazam(recording, recording.file_path)
+            catalog._update_shazam(recording, recording.file_path)
         self.assertEqual(
             (recording.title, recording.artist, recording.album),
             ("Song", "Primary", "Album"),
@@ -596,7 +596,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 expected_album,
             ) in cases:
                 with self.subTest(path=recording.file_path, album=album):
-                    catalog._enrich_shazam(
+                    catalog._update_shazam(
                         recording,
                         recording.file_path,
                         artist,
@@ -613,7 +613,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 "recognize_audio_track",
                 return_value=ShazamTrackInfo("Wrong", "Unrelated Artist"),
             ):
-                catalog._enrich_shazam(
+                catalog._update_shazam(
                     self.recording, self.recording.file_path, "Primary", force=True
                 )
                 self.assertEqual(
@@ -629,9 +629,9 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 shazam_service, "recognize_audio_track", return_value=None
             ) as recognize,
         ):
-            catalog._enrich_shazam(self.recording, self.recording.file_path)
+            catalog._update_shazam(self.recording, self.recording.file_path)
             recognize.assert_not_called()
-            catalog._enrich_shazam(self.recording, self.recording.file_path, force=True)
+            catalog._update_shazam(self.recording, self.recording.file_path, force=True)
             recognize.assert_called_once()
 
     def test_itunes_album_structure_and_musicbrainz_date_precedence(self) -> None:
@@ -650,7 +650,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         self.recording.itunes_trackid = "123"
         self.recording.track_number = 1
         with patch.object(itunes_service, "fetch_itunes_track_metadata") as lookup:
-            catalog._enrich_itunes(self.recording, album, force=True)
+            catalog._update_itunes(self.recording, album, force=True)
         lookup.assert_not_called()
         self.assertEqual(
             (
@@ -669,7 +669,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 itunes_service, "fetch_itunes_track_metadata", return_value=None
             ),
         ):
-            catalog._enrich_itunes(self.recording, album, force=True)
+            catalog._update_itunes(self.recording, album, force=True)
         self.assertEqual(self.recording.date, "2019")
 
     def test_itunes_single_fallback_does_not_copy_album_positions(self) -> None:
@@ -685,7 +685,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 "title": "Song",
             },
         ):
-            catalog._enrich_itunes(self.recording)
+            catalog._update_itunes(self.recording)
         self.assertEqual(self.recording.genre, "Rock")
         self.assertIsNone(self.recording.disc_number)
         self.assertIsNone(self.recording.total_discs)
@@ -702,7 +702,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 self.subTest(tags=tags),
                 patch.object(lastfm_service, "fetch_lastfm_tags", return_value=tags),
             ):
-                catalog._enrich_lastfm(recording, "fixture")
+                catalog._update_lastfm(recording, "fixture")
             self.assertEqual(
                 (recording.genre, recording.style, recording.mood), expected
             )
@@ -719,7 +719,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         self.recording.title = "Found Song"
         self.recording.track_number = 2
         self.recording.discogs_release_id = "123"
-        catalog._enrich_discogs(
+        catalog._update_discogs(
             self.recording, "fixture", release, has_album_context=True
         )
         self.assertEqual(
@@ -739,7 +739,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         release["track_credits"] = {
             "found song": {"title": "Found Song", "composer": "Composer"}
         }
-        catalog._enrich_discogs(self.recording, "fixture", release, force=True)
+        catalog._update_discogs(self.recording, "fixture", release, force=True)
         self.assertEqual(self.recording.date, "2020")
         self.assertEqual(self.recording.composer, "Composer")
 
@@ -767,7 +767,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                         album="Album",
                         **identifiers,
                     )
-                    catalog._enrich_discogs(track, "fixture", release, force=force)
+                    catalog._update_discogs(track, "fixture", release, force=force)
                     self.assertEqual(track.style, "House")
                     self.assertIsNone(track.catalog_number)
                     self.assertIsNone(track.media)
@@ -790,7 +790,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             barcode="1234567890",
             media="Digital Media",
         )
-        catalog._enrich_discogs(
+        catalog._update_discogs(
             track,
             "fixture",
             {
@@ -810,7 +810,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         track = TrackInfo(
             Path("Song.flac"), artist="Primary", album="Album", barcode="001234567890"
         )
-        catalog._enrich_discogs(
+        catalog._update_discogs(
             track,
             "fixture",
             {
@@ -829,11 +829,11 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         with patch.object(
             discogs_service, "search_discogs_release", return_value=None
         ) as search:
-            catalog._enrich_discogs(
+            catalog._update_discogs(
                 self.recording, "fixture", None, has_album_context=True
             )
             search.assert_not_called()
-            catalog._enrich_discogs(self.recording, "fixture", None)
+            catalog._update_discogs(self.recording, "fixture", None)
             search.assert_called_once()
 
     def test_deezer_album_metadata_and_structure(self) -> None:
@@ -865,7 +865,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 **{(2, position): track for position in range(1, 9)},
             },
         }
-        catalog._enrich_deezer(recording, album, has_album_context=True, force=True)
+        catalog._update_deezer(recording, album, has_album_context=True, force=True)
         self.assertEqual(
             (
                 recording.album,
@@ -907,7 +907,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                     },
                 ) as lookup,
             ):
-                catalog._enrich_deezer(recording, None, has_album_context=has_context)
+                catalog._update_deezer(recording, None, has_album_context=has_context)
             lookup.assert_called_once_with(recording.isrc)
             self.assertIsNone(recording.track_number)
             self.assertIsNone(recording.disc_number)
@@ -931,7 +931,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 },
             ),
         ):
-            catalog._enrich_deezer(self.recording, None, force=True)
+            catalog._update_deezer(self.recording, None, force=True)
         self.assertEqual(self.recording.producers, "Verified Producer")
         self.assertEqual(self.recording.date, "2021")
         self.assertIsNone(self.recording.bpm)
@@ -946,7 +946,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 "release_date": "2020",
             },
         ):
-            catalog._enrich_genius(self.recording, "fixture")
+            catalog._update_genius(self.recording, "fixture")
         self.assertEqual(
             (
                 self.recording.composer,
@@ -967,7 +967,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 "description": "Description",
             },
         ):
-            catalog._enrich_theaudiodb(self.recording)
+            catalog._update_theaudiodb(self.recording)
         self.assertEqual(
             (self.recording.rating, self.recording.initial_key, self.recording.genre),
             (8.5, "Am", "Rock"),
@@ -981,7 +981,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         with patch.object(
             genius_service, "fetch_genius_song_details", return_value=None
         ) as genius:
-            catalog._enrich_genius(self.recording, "fixture")
+            catalog._update_genius(self.recording, "fixture")
             genius.assert_called_once()
         self.recording.music_video_url = "https://example.com"
         self.recording.mood = "Chill"
@@ -993,9 +993,9 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "fetch_theaudiodb_track_details",
             return_value=None,
         ) as lookup:
-            catalog._enrich_theaudiodb(self.recording)
+            catalog._update_theaudiodb(self.recording)
             lookup.assert_not_called()
-            catalog._enrich_theaudiodb(self.recording, force=True)
+            catalog._update_theaudiodb(self.recording, force=True)
             lookup.assert_called_once()
         self.recording.rating = None
         with patch.object(
@@ -1003,7 +1003,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "fetch_theaudiodb_track_details",
             return_value={"rating": "invalid"},
         ):
-            catalog._enrich_theaudiodb(self.recording)
+            catalog._update_theaudiodb(self.recording)
         self.assertIsNone(self.recording.rating)
 
     def test_provider_network_errors_leave_tags_unchanged(self) -> None:
@@ -1011,18 +1011,18 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             (
                 itunes_service,
                 "fetch_itunes_track_metadata",
-                catalog._enrich_itunes,
+                catalog._update_itunes,
             ),
             (
                 lastfm_service,
                 "fetch_lastfm_tags",
-                partial(catalog._enrich_lastfm, lastfm_api_key="fixture"),
+                partial(catalog._update_lastfm, lastfm_api_key="fixture"),
             ),
             (
                 discogs_service,
                 "search_discogs_release",
                 partial(
-                    catalog._enrich_discogs,
+                    catalog._update_discogs,
                     discogs_user_token="fixture",
                     album_discogs_release=None,
                 ),
@@ -1030,17 +1030,17 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             (
                 deezer_service,
                 "fetch_deezer_album_details",
-                partial(catalog._enrich_deezer, album_deezer_details=None),
+                partial(catalog._update_deezer, album_deezer_details=None),
             ),
             (
                 genius_service,
                 "fetch_genius_song_details",
-                partial(catalog._enrich_genius, genius_api_token="fixture"),
+                partial(catalog._update_genius, genius_api_token="fixture"),
             ),
             (
                 theaudiodb_service,
                 "fetch_theaudiodb_track_details",
-                catalog._enrich_theaudiodb,
+                catalog._update_theaudiodb,
             ),
         )
         for service, name, enrich in providers:
@@ -1063,5 +1063,5 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 side_effect=OSError("decode failed"),
             ),
         ):
-            catalog._enrich_shazam(self.recording, self.recording.file_path, force=True)
+            catalog._update_shazam(self.recording, self.recording.file_path, force=True)
         self.assertEqual(self.recording.title, "Song")

@@ -174,10 +174,13 @@ class TestCacheFailureContracts(IsolatedTestCase):
         (directory / "record.val").write_bytes(b"recording")
         self.assertEqual(cache_module._get_api_cache_size(self.test_directory), 9)
 
-    def test_unavailable_cache_client_has_zero_entries_in_stats(self) -> None:
+    def test_cache_stats_report_unavailable_client(self) -> None:
         cache_module.get_cache()
-        with patch.object(cache_module, "get_cache", return_value=None):
-            self.assertEqual(cache_module.get_cache_stats().api_entries, 0)
+        with (
+            patch.object(cache_module, "get_cache", return_value=None),
+            self.assertRaisesRegex(OSError, "Cannot read API cache statistics"),
+        ):
+            cache_module.get_cache_stats()
 
     def test_cache_purge_tolerates_directory_removal_after_close(self) -> None:
         cache_module.set_cached_api("recording", "metadata")
@@ -322,14 +325,17 @@ class TestCacheFailureContracts(IsolatedTestCase):
                 )
             unreadable_entry.stat.assert_called_once_with()
 
-    def test_cache_stats_tolerate_database_length_failure(self) -> None:
+    def test_cache_stats_report_database_length_failure(self) -> None:
         cache_module.get_cache()
         failing_cache = Mock()
         failing_cache.__len__ = Mock(
             side_effect=sqlite3.OperationalError("locked database")
         )
-        with patch("sonora.core.cache.get_cache", return_value=failing_cache):
-            self.assertEqual(cache_module.get_cache_stats().api_entries, 0)
+        with (
+            patch("sonora.core.cache.get_cache", return_value=failing_cache),
+            self.assertRaisesRegex(OSError, "Cannot count API cache entries"),
+        ):
+            cache_module.get_cache_stats()
 
     def test_cache_close_failure_does_not_reuse_failed_client(self) -> None:
         cache = cache_module.get_cache()
@@ -373,7 +379,8 @@ class TestLibraryStateFailureContracts(IsolatedTestCase):
             self.assertEqual(
                 self.vault.filter_outdated_tracks([self.audio_path]), [self.audio_path]
             )
-            self.assertEqual(self.vault.get_state_count(), 0)
+            with self.assertRaisesRegex(OSError, "Cannot count library state entries"):
+                self.vault.get_state_count()
             self.vault.record_track_state(self.audio_path)
             self.vault.record_tracks_state_batch([self.audio_path])
         self.assertEqual(self.vault.get_state_count(), 0)
@@ -398,9 +405,12 @@ class TestLibraryStateFailureContracts(IsolatedTestCase):
         self.vault.record_track_state(self.audio_path)
         self.assertTrue(self.vault.is_track_up_to_date(self.audio_path))
 
-    def test_state_size_tolerates_disappearing_or_locked_files(self) -> None:
-        with patch("pathlib.Path.stat", side_effect=PermissionError("locked state")):
-            self.assertEqual(self.vault.get_state_size(), 0)
+    def test_state_size_ignores_missing_files_and_reports_locked_files(self) -> None:
+        with (
+            patch("pathlib.Path.stat", side_effect=PermissionError("locked state")),
+            self.assertRaisesRegex(OSError, "Cannot read library state size"),
+        ):
+            self.vault.get_state_size()
 
 
 class TestWorkerCacheLifecycle(IsolatedTestCase):

@@ -9,8 +9,8 @@ from sonora.core import artists
 from sonora.core.config import SonoraConfig
 from sonora.core.http import SESSION
 from sonora.core.models import CheckReport, TrackInfo
-from sonora.modules import catalog_enrichment, checker, matching, tagger
-from sonora.modules.metadata_consensus import (
+from sonora.modules import catalog_metadata, checker, matching, tagger
+from sonora.modules.metadata_merge import (
     build_provider_proposal,
     merge_provider_proposals,
 )
@@ -139,7 +139,7 @@ class TestRecordingSafety(IsolatedTestCase):
                 ),
                 patch.object(itunes, "fetch_itunes_track_metadata", return_value=None),
             ):
-                catalog_enrichment._enrich_itunes(track, force=True)
+                catalog_metadata._update_itunes(track, force=True)
             self.assertEqual(track.itunes_trackid, expected_id)
             self.assertEqual(track.itunes_collectionid, "456" if expected_id else None)
 

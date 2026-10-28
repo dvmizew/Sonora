@@ -83,7 +83,7 @@ def _run_parallel_audio_task(
                 executor.shutdown(wait=True, cancel_futures=True)
                 interrupted = True
                 LOG.warning(
-                    f"\n⏹️  [bold yellow]INTERRUPTED[/] - {description} stopped by user (Ctrl+C)."
+                    f"\n[bold yellow]INTERRUPTED[/] - {description} stopped by user (Ctrl+C)."
                 )
 
     return results, interrupted
@@ -273,7 +273,7 @@ def replaygain(
                 resume_workers(pause_stop_event)
                 interrupted = True
                 LOG.warning(
-                    "\n⏹️  [bold yellow]INTERRUPTED[/] - ReplayGain stopped by user (Ctrl+C)."
+                    "\n[bold yellow]INTERRUPTED[/] - ReplayGain stopped by user (Ctrl+C)."
                 )
 
     summary_rows = [

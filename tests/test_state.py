@@ -42,16 +42,18 @@ class TestLibraryState(IsolatedTestCase):
                 self.assertEqual(entry_count, 1)
                 self.assertGreater(storage_bytes, 0)
 
-    def test_storage_stats_preserve_vault_io_failure_handling(self) -> None:
-        with patch.object(Path, "exists", side_effect=PermissionError("locked file")):
-            self.assertEqual(state.get_state_storage_stats(), (0, 0))
+    def test_storage_stats_report_io_failures(self) -> None:
+        with (
+            patch.object(Path, "stat", side_effect=PermissionError("locked file")),
+            self.assertRaises(OSError),
+        ):
+            state.get_state_storage_stats()
         library_state = state.get_library_state()
-        for method in ("stat", "exists"):
-            with (
-                self.subTest(method=method),
-                patch.object(Path, method, side_effect=PermissionError("locked file")),
-            ):
-                self.assertEqual(state.get_state_storage_stats(), (0, 0))
+        with (
+            patch.object(Path, "stat", side_effect=PermissionError("locked file")),
+            self.assertRaises(OSError),
+        ):
+            state.get_state_storage_stats()
         self.assertIs(state.get_library_state(), library_state)
 
     def test_state_lifecycle(self) -> None:

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from sonora.core.http import SESSION
 from sonora.core.models import TrackInfo
-from sonora.modules.catalog_enrichment import _enrich_genius
+from sonora.modules.catalog_metadata import _update_genius
 from sonora.services import genius
 from tests.support import IsolatedTestCase
 
@@ -33,7 +33,7 @@ class TestGeniusAlbumIdentity(IsolatedTestCase):
                         genius, "lookup_genius_song_details", return_value=song
                     ),
                 ):
-                    _enrich_genius(track, "token")
+                    _update_genius(track, "token")
                 self.assertIn("nav", cache.call_args.args[0])
                 self.assertEqual(track.featured_artists, "NAV")
                 if guest == "NAV":
@@ -70,7 +70,7 @@ class TestGeniusAlbumIdentity(IsolatedTestCase):
                 },
             ),
         ):
-            _enrich_genius(track, "token")
+            _update_genius(track, "token")
         self.assertEqual(track.genius_song_id, "1")
         self.assertEqual(track.comment, "Existing comment")
         self.assertIsNone(track.composer)

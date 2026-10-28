@@ -7,7 +7,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from rapidfuzz import fuzz
 from rich.markup import escape
 
 from sonora.audio import art as art_module
@@ -41,30 +40,29 @@ from sonora.core.text import (
     preserve_unicode_repertoire,
     safe_int,
 )
-from sonora.modules.catalog_enrichment import (
+from sonora.modules.catalog_metadata import (
     _NETWORK_EXCEPTIONS,
-    _enrich_deezer,
-    _enrich_discogs,
-    _enrich_genius,
-    _enrich_itunes,
-    _enrich_lastfm,
-    _enrich_shazam,
-    _enrich_theaudiodb,
+    _update_deezer,
+    _update_discogs,
+    _update_genius,
+    _update_itunes,
+    _update_lastfm,
+    _update_shazam,
+    _update_theaudiodb,
 )
 from sonora.modules.matching import (
     _compatible_release_layout,
-    _extract_known_album_entities,
     _is_generic,
     _is_generic_title,
     _recording_matches_track_identity,
     _resolve_album_track_position,
     is_alien_album_track,
 )
-from sonora.modules.metadata_consensus import (
+from sonora.modules.metadata_merge import (
     collect_provider_proposal,
     merge_provider_proposals,
 )
-from sonora.modules.musicbrainz_enrichment import _enrich_acoustid, _enrich_musicbrainz
+from sonora.modules.musicbrainz_metadata import _update_acoustid, _update_musicbrainz
 from sonora.modules.track_processing import (
     _process_audio_and_save_tags,
     _record_persisted_album,
@@ -101,14 +99,14 @@ class _AlbumMetadataContext:
         )
 
 
-def _heal_and_align_album_track(
+def _apply_album_metadata(
     track_info: TrackInfo,
     file_path: Path,
     force: bool,
     *,
     album_context: _AlbumMetadataContext,
 ) -> None:
-    """Aligns track position and heals corrupted track artist/album identity from release context."""
+    """Apply album metadata while preserving existing track identity and numbering."""
     resolved_pos = _resolve_album_track_position(
         track_info=track_info,
         file_path=file_path,
@@ -147,64 +145,13 @@ def _heal_and_align_album_track(
     if (
         album_context.sample_artist
         and not _is_generic(album_context.sample_artist, "artist")
-        and (not track_info.album_artist or force)
     ):
-        track_info.album_artist = preserve_unicode_repertoire(
-            track_info.album_artist, album_context.sample_artist
-        )
-
-    known_album_entities = _extract_known_album_entities(
-        None,
-        None,
-        [
-            album_context.mb_release_details,
-            album_context.deezer_details,
-            album_context.itunes_details,
-        ],
-    )
-    known_album_track_artists = {
-        normalize_str(artist) for artist in known_album_entities.artists
-    }
-
-    is_legitimate_track_artist = False
-    normalized_current_artist = (
-        normalize_str(track_info.artist) if track_info.artist else ""
-    )
-    if (
-        normalized_current_artist
-        and known_album_track_artists
-        and (
-            normalized_current_artist in known_album_track_artists
-            or any(
-                fuzz.ratio(normalized_current_artist, known_artist)
-                >= get_config().artist_similarity_threshold
-                or known_artist in normalized_current_artist
-                or normalized_current_artist in known_artist
-                for known_artist in known_album_track_artists
+        if not track_info.album_artist or force:
+            track_info.album_artist = preserve_unicode_repertoire(
+                track_info.album_artist, album_context.sample_artist
             )
-        )
-    ):
-        is_legitimate_track_artist = True
-
-    if (
-        not is_legitimate_track_artist
-        and album_context.sample_artist
-        and not _is_generic(album_context.sample_artist, "artist")
-        and track_info.artist
-    ):
-        normalized_target_artist = normalize_str(album_context.sample_artist)
-        if (
-            normalized_target_artist != normalized_current_artist
-            and normalized_target_artist not in normalized_current_artist
-            and normalized_current_artist not in normalized_target_artist
-            and fuzz.ratio(normalized_target_artist, normalized_current_artist) < 50
-        ):
-            LOG.detail(
-                f"   ∟ 🩹 [Healer] Healing corrupted artist '[bold red]{escape(track_info.artist)}[/]' -> '[bold green]{escape(album_context.sample_artist)}[/]'"
-            )
-            track_info.artist = preserve_unicode_repertoire(
-                track_info.artist, album_context.sample_artist
-            )
+        if _is_generic(track_info.artist, "artist"):
+            track_info.artist = album_context.sample_artist
 
     if (
         album_context.sample_album
@@ -216,7 +163,7 @@ def _heal_and_align_album_track(
         )
 
 
-def _run_metadata_enrichment_pipeline(
+def _update_metadata(
     track_info: TrackInfo,
     file_path: Path,
     lastfm_api_key: str | None,
@@ -230,7 +177,7 @@ def _run_metadata_enrichment_pipeline(
 ) -> None:
     """Resolve recording identity before collecting independent provider proposals."""
     has_album_context = album_context.has_album_context
-    _enrich_musicbrainz(
+    _update_musicbrainz(
         track_info,
         album_context.musicbrainz_id,
         album_context.track_mbids,
@@ -245,7 +192,7 @@ def _run_metadata_enrichment_pipeline(
         or _is_generic(track_info.artist, "artist")
         or (not has_album_context and (force or not track_info.musicbrainz_trackid))
     ):
-        _enrich_shazam(
+        _update_shazam(
             track_info,
             file_path,
             target_album_artist=album_context.sample_artist,
@@ -254,7 +201,7 @@ def _run_metadata_enrichment_pipeline(
             force=force,
         )
     previous_recording_id = track_info.musicbrainz_trackid
-    _enrich_acoustid(
+    _update_acoustid(
         track_info,
         file_path,
         acoustid_api_key,
@@ -265,29 +212,29 @@ def _run_metadata_enrichment_pipeline(
         track_info.musicbrainz_trackid != previous_recording_id
         and track_info.metadata_sources.get("musicbrainz_trackid") == "AcoustID"
     ):
-        _enrich_musicbrainz(track_info, None, None, None, force=force)
+        _update_musicbrainz(track_info, None, None, None, force=force)
     providers = [
         partial(
-            _enrich_itunes,
+            _update_itunes,
             album_itunes_details=album_context.itunes_details,
             force=force,
         ),
-        partial(_enrich_lastfm, lastfm_api_key=lastfm_api_key),
+        partial(_update_lastfm, lastfm_api_key=lastfm_api_key),
         partial(
-            _enrich_discogs,
+            _update_discogs,
             discogs_user_token=discogs_user_token,
             album_discogs_release=album_context.discogs_release,
             has_album_context=has_album_context,
             force=force,
         ),
         partial(
-            _enrich_deezer,
+            _update_deezer,
             album_deezer_details=album_context.deezer_details,
             has_album_context=has_album_context,
             force=force,
         ),
-        partial(_enrich_genius, genius_api_token=genius_api_token),
-        partial(_enrich_theaudiodb, force=force),
+        partial(_update_genius, genius_api_token=genius_api_token),
+        partial(_update_theaudiodb, force=force),
     ]
     if provider_executor is None:
         proposals = [
@@ -339,7 +286,7 @@ def process_single_track(
             _is_generic_title(track_info.title)
             or _is_generic(track_info.artist, "artist")
         ):
-            _enrich_shazam(track_info, file_path, force=False)
+            _update_shazam(track_info, file_path, force=False)
 
         has_album_context = album_context.has_album_context
         if has_album_context and is_alien_album_track(
@@ -362,24 +309,24 @@ def process_single_track(
             disp_artist = str(track_info.artist or "Unknown Artist")
             disp_title = str(track_info.title or file_path.stem)
             LOG.detail(
-                f"⚠️  [bold yellow]Alien track detected in album folder:[/] [white]{escape(file_path.name)}[/]\n"
+                f"[bold yellow]Track does not match album context:[/] [white]{escape(file_path.name)}[/]\n"
                 f"   ∟ Found '[bold]{escape(disp_artist)} - {escape(disp_title)}'[/] inside '[bold]{escape(album_desc)}[/]'.\n"
-                f"   ∟ [cyan]Shielding track from album metadata poisoning. Tagging independently as standalone track.[/]"
+                f"   ∟ [cyan]Processing track independently.[/]"
             )
             album_context = _AlbumMetadataContext()
             has_album_context = False
 
         if has_album_context:
-            _heal_and_align_album_track(
+            _apply_album_metadata(
                 track_info=track_info,
                 file_path=file_path,
                 album_context=album_context,
                 force=force,
             )
 
-        LOG.detail(f"🎧 Processing track: [white]{escape(file_path.name)}[/]")
+        LOG.detail(f"Processing track: [white]{escape(file_path.name)}[/]")
 
-        _run_metadata_enrichment_pipeline(
+        _update_metadata(
             track_info=track_info,
             file_path=file_path,
             album_context=album_context,
@@ -418,7 +365,7 @@ def process_single_track(
         LOG.stop_buffering()
 
 
-def _resolve_album_entity_consensus(
+def _select_album_value(
     entity_votes: dict[str, int], folder_entity: str | None
 ) -> str | None:
     if not entity_votes:
@@ -438,7 +385,7 @@ def _resolve_album_folder_identity(
     """
     Resolve canonical artist and album name for a directory by combining
     directory structure ("Artist - Album" or parent artist directory) with
-    metadata consensus across audio files.
+    metadata shared by the audio files.
     """
     effective_dir = get_album_root_directory(album_dir)
 
@@ -484,8 +431,8 @@ def _resolve_album_folder_identity(
         except OSError:
             pass
 
-    resolved_album = _resolve_album_entity_consensus(album_counts, folder_album)
-    resolved_artist = _resolve_album_entity_consensus(artist_counts, folder_artist)
+    resolved_album = _select_album_value(album_counts, folder_album)
+    resolved_artist = _select_album_value(artist_counts, folder_artist)
 
     return resolved_artist, resolved_album
 
@@ -682,7 +629,7 @@ def _harmonize_album_genres(
     album_itunes_details: dict[str, Any] | None,
     dry_run: bool = False,
 ) -> None:
-    """Harmonizes outlier/noise genres across valid album tracks to the consensus genre."""
+    """Updates outlier genres across valid album tracks to the most common genre."""
     if len(valid_tracks) < 2:
         return
 
@@ -733,7 +680,7 @@ def _harmonize_album_genres(
             not track.genre or is_noise_genre(track.genre)
         ) and track.genre != dominant_genre:
             LOG.detail(
-                f"   ∟ 🏷️ [Consensus] Harmonizing genre '[bold red]{escape(str(track.genre))}[/]' -> '[bold green]{escape(dominant_genre)}[/]' on '{escape(track.file_path.name)}'"
+                f"   ∟ Updating genre '[bold red]{escape(str(track.genre))}[/]' -> '[bold green]{escape(dominant_genre)}[/]' on '{escape(track.file_path.name)}'"
             )
             track.genre = dominant_genre
             if not dry_run:
@@ -814,7 +761,7 @@ def _harmonize_album_artists(
             and track.album_artist != dominant_album_artist
         ):
             LOG.detail(
-                f"   ∟ 🏷️ [Consensus] Harmonizing album artist casing '[bold red]{escape(track.album_artist)}[/]' -> '[bold green]{escape(dominant_album_artist)}[/]' on '{escape(track.file_path.name)}'"
+                f"   ∟ Updating album artist casing '[bold red]{escape(track.album_artist)}[/]' -> '[bold green]{escape(dominant_album_artist)}[/]' on '{escape(track.file_path.name)}'"
             )
             track.album_artist = dominant_album_artist
             modified = True
@@ -825,7 +772,7 @@ def _harmonize_album_artists(
                 canonical_name = canonical_track_artists[normalized_track_artist]
                 if track.artist != canonical_name:
                     LOG.detail(
-                        f"   ∟ 🏷️ [Consensus] Harmonizing track artist casing '[bold red]{escape(track.artist)}[/]' -> '[bold green]{escape(canonical_name)}[/]' on '{escape(track.file_path.name)}'"
+                        f"   ∟ Updating track artist casing '[bold red]{escape(track.artist)}[/]' -> '[bold green]{escape(canonical_name)}[/]' on '{escape(track.file_path.name)}'"
                     )
                     track.artist = canonical_name
                     modified = True
@@ -1053,7 +1000,7 @@ def tag_album_folder(
                             continue
                     folder_name = album_dir.name
                     LOG.detail(
-                        f"📁 [bold cyan]Album:[/] [white]{escape(folder_name)}[/] [dim]({len(audio_files)} tracks)[/]"
+                        f"[bold cyan]Album:[/] [white]{escape(folder_name)}[/] [dim]({len(audio_files)} tracks)[/]"
                     )
 
                     companion_cue = cuesheet_module.find_companion_cuesheet(album_dir)
