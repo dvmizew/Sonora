@@ -83,15 +83,18 @@ def _enrich_acoustid(
                 )
                 if not recording_details or not isinstance(recording_details, dict):
                     return
+                if _release_edition_conflicts(track_info, recording_details):
+                    return
                 candidate_artist = str(recording_details.get("artist") or "")
                 candidate_title = str(recording_details.get("title") or "")
-                score = score_artist_title_match(
-                    track_info.artist or "",
-                    track_info.title or "",
+                if not recording_identity_matches(
+                    track_info.artist,
+                    track_info.title,
                     candidate_artist,
                     candidate_title,
-                )
-                if score <= 0.0:
+                    expected_duration=track_info.duration,
+                    candidate_duration=safe_float(recording_details.get("duration")),
+                ):
                     LOG.debug(
                         f"Rejecting AcoustID MBID {acoustid_mbid} ('{candidate_artist} - {candidate_title}') "
                         f"conflicting with ('{track_info.artist} - {track_info.title}')"
@@ -146,10 +149,7 @@ def _heal_track_identity_from_release(
 def _resolve_musicbrainz_track_id(
     track_info: TrackInfo,
     album_track_mbids: dict[tuple[int, int], str] | None,
-    album_mb_release_details: dict[str, Any] | None,
     candidate_rec: dict[str, Any] | None,
-    has_corrupt_identity: bool,
-    force: bool = False,
 ) -> None:
     """Resolve track MBID via album tracks position mapping or track search."""
     album_mbids = album_track_mbids or {}
@@ -167,16 +167,20 @@ def _resolve_musicbrainz_track_id(
             and candidate_rec.get("recording_mbid") == potential_mbid
         )
 
-        if is_match and is_valid_uuid(potential_mbid):
+        if (
+            is_match
+            and is_valid_uuid(potential_mbid)
+            and _album_recording_can_replace_stored_id(track_info, potential_mbid)
+        ):
             candidate_mbid = potential_mbid
             track_info.musicbrainz_trackid = candidate_mbid
             track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
             LOG.detail(
                 f"   ∟ 🏷️ [MusicBrainz Album Match] Found MBID: {candidate_mbid[:8]}..."
             )
-    elif not is_valid_uuid(track_info.musicbrainz_trackid) or (
-        force and not track_info.is_alien
-    ):
+    elif not is_valid_uuid(track_info.musicbrainz_trackid):
+        # Validate a stored recording before searching: artist/title alone cannot
+        # distinguish recordings with the same name on different releases.
         mbid = musicbrainz_service.fetch_track_mbid(track_info.artist, track_info.title)
         if is_valid_uuid(mbid):
             track_info.musicbrainz_trackid = mbid
@@ -206,7 +210,11 @@ def _resolve_musicbrainz_album_id(
             expected_track_count=track_info.total_tracks,
             expected_advisory=track_info.advisory,
         )
-        if release:
+        if release and _validate_mb_release_title(
+            str(release.get("title") or ""),
+            track_info.album,
+            str(release.get("disambiguation") or ""),
+        ):
             musicbrainz_id = release.get("id")
             if is_valid_uuid(str(musicbrainz_id)):
                 track_info.musicbrainz_albumid = str(musicbrainz_id)
@@ -220,7 +228,6 @@ def _extract_release_recording(
     track_info: TrackInfo,
     album_mb_release_details: dict[str, Any] | None,
     candidate_rec: dict[str, Any] | None,
-    has_corrupt_identity: bool,
 ) -> dict[str, Any] | None:
     """Extracts candidate recording from pre-fetched album release details."""
     if not album_mb_release_details:
@@ -239,11 +246,34 @@ def _extract_release_recording(
 
     if candidate_rec and _recording_matches_track_identity(track_info, candidate_rec):
         recording_id = candidate_rec.get("recording_mbid")
-        if is_valid_uuid(recording_id):
+        if is_valid_uuid(recording_id) and _album_recording_can_replace_stored_id(
+            track_info, str(recording_id)
+        ):
             track_info.musicbrainz_trackid = str(recording_id)
             track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
             return candidate_rec
     return None
+
+
+def _album_recording_can_replace_stored_id(
+    track_info: TrackInfo, candidate_id: str
+) -> bool:
+    if (
+        not is_valid_uuid(track_info.musicbrainz_trackid)
+        or track_info.musicbrainz_trackid == candidate_id
+    ):
+        return True
+    if "musicbrainz_albumid" not in track_info.metadata_conflicts:
+        _fetch_standalone_recording(track_info)
+    if not is_valid_uuid(track_info.musicbrainz_trackid):
+        return True
+    # Both recordings can share text and duration. A release slot cannot
+    # disprove an independently validated recording (or an unavailable lookup).
+    track_info.metadata_conflicts["musicbrainz_albumid"] = (
+        "Album slot disagrees with the stored recording identifier; "
+        "recording identifier preserved and release metadata withheld."
+    )
+    return False
 
 
 def _fetch_standalone_recording(
@@ -257,6 +287,8 @@ def _fetch_standalone_recording(
         track_info.musicbrainz_trackid
     )
     if not fetched_rec or not isinstance(fetched_rec, dict):
+        return None
+    if _release_edition_conflicts(track_info, fetched_rec):
         return None
     isrc_matches = _recording_isrc_matches(track_info.isrc, fetched_rec)
     rec_artist = str(fetched_rec.get("artist") or "")
@@ -347,7 +379,6 @@ def _fetch_or_extract_mb_recording(
     track_info: TrackInfo,
     album_mb_release_details: dict[str, Any] | None,
     candidate_rec: dict[str, Any] | None,
-    has_corrupt_identity: bool,
     force: bool = False,
 ) -> tuple[dict[str, Any] | None, bool]:
     """
@@ -356,7 +387,7 @@ def _fetch_or_extract_mb_recording(
     Returns (mb_rec, is_album_rec).
     """
     release_rec = _extract_release_recording(
-        track_info, album_mb_release_details, candidate_rec, has_corrupt_identity
+        track_info, album_mb_release_details, candidate_rec
     )
     if release_rec is not None:
         return release_rec, True
@@ -551,10 +582,28 @@ def _validate_mb_release_artist(release_artist: str, expected_artist: str) -> bo
     )
 
 
-def _validate_mb_release_title(release_title: str, cur_album: str | None) -> bool:
+def _validate_mb_release_title(
+    release_title: str, cur_album: str | None, disambiguation: str | None = None
+) -> bool:
     """Validates that release title matches current album title."""
     if not release_title or not cur_album or _is_generic(cur_album, "album"):
         return True
+    edition_markers = {
+        "deluxe",
+        "expanded",
+        "bonus",
+        "anniversary",
+        "live",
+        "acoustic",
+        "remix",
+        "remixes",
+        "instrumental",
+        "karaoke",
+    }
+    if edition_markers.intersection(
+        normalize_str(f"{release_title} {disambiguation or ''}").split()
+    ) != (edition_markers.intersection(normalize_str(cur_album).split())):
+        return False
     norm_rel = clean_title(release_title).lower()
     norm_alb = clean_title(cur_album).lower()
     thresh = (
@@ -574,17 +623,35 @@ def _validate_mb_release_title(release_title: str, cur_album: str | None) -> boo
 def _release_edition_conflicts(
     track_info: TrackInfo, release: dict[str, Any] | None
 ) -> bool:
-    if not release or track_info.advisory != "Explicit":
+    if not release:
         return False
     edition_tokens = set(
         normalize_str(str(release.get("disambiguation") or "")).split()
     )
-    if {"clean", "cleaned"}.intersection(
-        edition_tokens
-    ) and "explicit" not in edition_tokens:
+    local_tokens = set(normalize_str(track_info.disambiguation or "").split())
+    for qualifier in re.findall(
+        r"[\(\[]([^\)\]]+)[\)\]]", f"{track_info.title} {track_info.album or ''}"
+    ):
+        local_tokens.update(normalize_str(qualifier).split())
+    clean_tokens = {"clean", "cleaned", "censored"}
+    candidate_clean = bool(clean_tokens.intersection(edition_tokens)) and (
+        "explicit" not in edition_tokens and "uncensored" not in edition_tokens
+    )
+    local_clean = bool(clean_tokens.intersection(local_tokens)) and (
+        track_info.advisory != "Explicit"
+        and "explicit" not in local_tokens
+        and "uncensored" not in local_tokens
+    )
+    # An absent advisory is unknown, not evidence of a censored recording.
+    # Album position, shared ISRCs and matching duration do not prove the edit.
+    if (
+        candidate_clean
+        and not local_clean
+        or (local_clean and {"explicit", "uncensored"}.intersection(edition_tokens))
+    ):
         track_info.metadata_conflicts["identity"] = (
-            "MusicBrainz release is described as clean while local tags "
-            "mark the recording explicit; edition verification required."
+            "MusicBrainz clean/explicit edition is not established by local "
+            "evidence; recording and release enrichment withheld."
         )
         return True
     return False
@@ -597,6 +664,12 @@ def _apply_mb_release_metadata(
     force: bool = False,
 ) -> None:
     """Applies release-level metadata, validating album artist and album title."""
+    if "musicbrainz_albumid" in track_info.metadata_conflicts:
+        track_info.musicbrainz_albumid = None
+        track_info.musicbrainz_releasegroupid = None
+        track_info.metadata_sources.pop("musicbrainz_albumid", None)
+        track_info.metadata_sources.pop("musicbrainz_releasegroupid", None)
+        return
     if not is_valid_uuid(track_info.musicbrainz_albumid):
         return
 
@@ -627,9 +700,17 @@ def _apply_mb_release_metadata(
         return
 
     release_title = str(mb_rel.get("title") or "").strip()
-    if not _validate_mb_release_title(release_title, track_info.album):
+    if not _validate_mb_release_title(
+        release_title, track_info.album, str(mb_rel.get("disambiguation") or "")
+    ):
         track_info.musicbrainz_albumid = None
         track_info.musicbrainz_releasegroupid = None
+        track_info.metadata_sources.pop("musicbrainz_albumid", None)
+        track_info.metadata_sources.pop("musicbrainz_releasegroupid", None)
+        track_info.metadata_conflicts["musicbrainz_albumid"] = (
+            "MusicBrainz release title describes a different edition; "
+            "release metadata withheld."
+        )
         return
 
     release_recordings = mb_rel.get("tracks_by_mbid")
@@ -637,14 +718,24 @@ def _apply_mb_release_metadata(
         isinstance(release_recordings, dict)
         and not _is_generic(track_info.artist, "artist")
         and not _is_generic_title(track_info.title)
-        and not any(
-            _recording_matches_track_identity(track_info, recording)
-            for recording in release_recordings.values()
-            if isinstance(recording, dict)
+        and (
+            (
+                is_valid_uuid(track_info.musicbrainz_trackid)
+                and track_info.metadata_sources.get("musicbrainz_trackid")
+                in ("MusicBrainz", "AcoustID")
+                and track_info.musicbrainz_trackid not in release_recordings
+            )
+            or not any(
+                _recording_matches_track_identity(track_info, recording)
+                for recording in release_recordings.values()
+                if isinstance(recording, dict)
+            )
         )
     ):
         track_info.musicbrainz_albumid = None
+        track_info.musicbrainz_releasegroupid = None
         track_info.metadata_sources.pop("musicbrainz_albumid", None)
+        track_info.metadata_sources.pop("musicbrainz_releasegroupid", None)
         track_info.metadata_conflicts["musicbrainz_albumid"] = (
             "MusicBrainz release does not contain the verified recording; "
             "release identifier removed and release metadata withheld."
@@ -680,16 +771,13 @@ def _apply_mb_release_metadata(
         track_info, mb_rel, mb_rel_map, force=force, source="MusicBrainz"
     )
 
-    # Equivalent base titles do not prove that a release has the same edition.
-    preserves_album_edition = bool(
-        track_info.album
-        and clean_title(track_info.album).casefold()
-        == clean_title(release_title).casefold()
-        and track_info.album.casefold() != release_title.casefold()
-    )
+    # A fuzzy base-title match does not establish the local release edition.
     if (
-        not preserves_album_edition
-        and mb_rel.get("title")
+        mb_rel.get("title")
+        and (
+            _is_generic(track_info.album, "album")
+            or normalize_str(track_info.album) == normalize_str(release_title)
+        )
         and (
             (
                 album_mb_release_details is not None
@@ -754,28 +842,28 @@ def _enrich_musicbrainz(
         candidate_rec = _find_album_release_recording(
             track_info, album_mb_release_details, disc_num
         )
+        if _release_edition_conflicts(track_info, candidate_rec):
+            return
         has_corrupt_identity = _heal_track_identity_from_release(
             track_info, candidate_rec
         )
 
-        _resolve_musicbrainz_track_id(
-            track_info,
-            album_track_mbids,
-            album_mb_release_details,
-            candidate_rec,
-            has_corrupt_identity,
-            force=force,
-        )
-        _resolve_musicbrainz_album_id(
-            track_info, album_mbid, album_mb_release_details, force=force
-        )
+        _resolve_musicbrainz_track_id(track_info, album_track_mbids, candidate_rec)
+        if "musicbrainz_albumid" in track_info.metadata_conflicts:
+            album_mbid = None
+            album_mb_release_details = None
+            candidate_rec = None
+            track_info.musicbrainz_albumid = None
+            track_info.musicbrainz_releasegroupid = None
+            track_info.metadata_sources.pop("musicbrainz_albumid", None)
+            track_info.metadata_sources.pop("musicbrainz_releasegroupid", None)
+        else:
+            _resolve_musicbrainz_album_id(
+                track_info, album_mbid, album_mb_release_details, force=force
+            )
 
         recording_details, is_album_rec = _fetch_or_extract_mb_recording(
-            track_info,
-            album_mb_release_details,
-            candidate_rec,
-            has_corrupt_identity,
-            force=force,
+            track_info, album_mb_release_details, candidate_rec, force=force
         )
         if recording_details:
             _apply_mb_recording_metadata(

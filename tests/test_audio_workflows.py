@@ -166,8 +166,7 @@ class TestAudioWorkflows(ModuleTestCase):
             library_results = normalize_library(
                 self.tmp_path, fetch_bpm=False, fetch_replaygain=False
             )
-            self.assertEqual(len(library_results.tracks), 1)
-            self.assertEqual(library_results.tracks[0].artist, "Artist")
+            self.assertEqual(mock_write.call_args.args[0].artist, "Artist")
             self.assertEqual(library_results.total_scanned, 1)
             self.assertEqual(library_results.total_modified, 1)
             self.assertEqual(library_results.total_unchanged, 0)

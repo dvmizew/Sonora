@@ -287,13 +287,22 @@ class TestTaggingWorkflows(ModuleTestCase):
                 },
             },
         }
-        _enrich_musicbrainz(
-            track_info=track,
-            album_mbid="c6b7d374-1425-4414-ba65-2ddcb4d98196",
-            album_track_mbids={(1, 4): "c8b03190-306c-4125-9b32-3f9d86d60a12"},
-            album_mb_release_details=mb_release,
-            force=False,
-        )
+        with patch(
+            "sonora.services.musicbrainz.fetch_musicbrainz_recording_details",
+            return_value={
+                "artist": "James Arthur",
+                "title": "A Different Recording",
+                "isrc": "USAAA2400001",
+            },
+        ) as stored_lookup:
+            _enrich_musicbrainz(
+                track_info=track,
+                album_mbid="c6b7d374-1425-4414-ba65-2ddcb4d98196",
+                album_track_mbids={(1, 4): "c8b03190-306c-4125-9b32-3f9d86d60a12"},
+                album_mb_release_details=mb_release,
+                force=False,
+            )
+        stored_lookup.assert_called_once_with("56a71671-a4cd-4fe7-96aa-1aadab6cd94e")
         self.assertEqual(track.title, "Can I Be Him")
         self.assertEqual(
             track.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
@@ -418,7 +427,8 @@ class TestTaggingWorkflows(ModuleTestCase):
         self.assertEqual(
             track_metadata.musicbrainz_trackid, "c8b03190-306c-4125-9b32-3f9d86d60a12"
         )
-        self.assertTrue(str(track_metadata.date).startswith("2024"))
+        self.assertIsNone(track_metadata.date)
+        self.assertNotIn("discogs_release_id", track_metadata.metadata_conflicts)
         mock_acoustid.assert_called_once()
         mock_discogs.assert_called_once()
         mock_write.assert_called_once()

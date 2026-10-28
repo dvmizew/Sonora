@@ -36,6 +36,21 @@ class TestCueSheetContracts(IsolatedTestCase):
 
 
 class TestAudioDecodingContracts(IsolatedTestCase):
+    def test_seek_near_or_beyond_end_never_restarts_the_track(self) -> None:
+        path = self.test_directory / "short.wav"
+        signal = np.arange(2000, dtype=np.float32) / 2000
+        soundfile.write(path, signal, 1000, subtype="FLOAT")
+        for offset, expected in (
+            (1.5, signal[1500:]),
+            (2, signal[:0]),
+            (3, signal[:0]),
+        ):
+            with self.subTest(offset=offset):
+                loaded = load_audio(path, mono=True, offset_seconds=offset)
+                assert loaded is not None
+                samples, _ = loaded
+                np.testing.assert_array_equal(samples, expected)
+
     def test_real_seek_and_duration_limit(self) -> None:
         audio_path = self.test_directory / "album.wav"
         signal = np.zeros(5000, dtype=np.float32)

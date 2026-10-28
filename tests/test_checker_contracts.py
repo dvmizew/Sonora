@@ -9,6 +9,77 @@ from tests.support import IsolatedTestCase
 
 
 class TestCheckerContracts(IsolatedTestCase):
+    def test_embedded_provider_duration_is_evidence_not_a_corruption_verdict(
+        self,
+    ) -> None:
+        path = self.path.with_suffix(".flac")
+        path.touch()
+        for snapshot, expected in (
+            ('{"duration":137}', True),
+            ('{"duration":197}', False),
+            ('{"duration":null}', False),
+            ("broken", True),
+        ):
+            with (
+                self.subTest(snapshot=snapshot),
+                patch.object(checker, "verify_flac_checksum", return_value=True),
+                patch.object(
+                    checker,
+                    "FLAC",
+                    return_value=SimpleNamespace(
+                        tags={"tidal_data": [snapshot]},
+                        pictures=[],
+                        info=SimpleNamespace(length=197.206),
+                    ),
+                ),
+            ):
+                categories = set()
+                issues = checker.check_file(
+                    path, track_metadata=self.recording, categories=categories
+                )
+                self.assertEqual(
+                    any("Embedded TIDAL_DATA" in issue for issue in issues), expected
+                )
+                self.assertNotIn(checker._IssueCategory.CORRUPT, categories)
+
+    def test_single_filename_one_can_keep_its_published_release_position(self) -> None:
+        folder = self.test_directory / "Singles" / "Recording"
+        folder.mkdir(parents=True)
+        path = folder / "01 - Recording.wav"
+        path.touch()
+        track = dataclasses.replace(self.recording, track_number=26)
+        issues = checker.check_file(path, track_metadata=track)
+        self.assertFalse(any("Filename track number" in issue for issue in issues))
+        (folder / "02 - Another recording.wav").touch()
+        issues = checker.check_file(path, track_metadata=track)
+        self.assertTrue(any("Filename track number" in issue for issue in issues))
+
+    def test_conflicting_raw_date_aliases_are_reported_without_rewriting(self) -> None:
+        path = self.path.with_suffix(".flac")
+        path.touch()
+        for tags, expected in (
+            ({"date": ["2021-07-01"], "year": ["2019"]}, 1),
+            ({"originaldate": ["2009"], "originalyear": ["2020"]}, 1),
+            ({"date": ["2021-07-01"], "year": ["2021"]}, 0),
+            ({"date": ["2021-07-01"]}, 0),
+        ):
+            original = {key: list(value) for key, value in tags.items()}
+            with (
+                self.subTest(tags=tags),
+                patch.object(checker, "verify_flac_checksum", return_value=True),
+                patch.object(
+                    checker,
+                    "FLAC",
+                    return_value=SimpleNamespace(tags=tags, pictures=[]),
+                ),
+            ):
+                issues = checker.check_file(path, track_metadata=self.recording)
+            self.assertEqual(
+                sum(issue.startswith("Conflicting date aliases:") for issue in issues),
+                expected,
+            )
+            self.assertEqual(tags, original)
+
     def test_supplied_reports_count_worker_outcomes_without_false_issue_categories(
         self,
     ) -> None:
@@ -114,6 +185,160 @@ class TestCheckerContracts(IsolatedTestCase):
         self.assertEqual(report.total_files, 1)
         self.assertNotIn(str(folder), report.issues)
 
+    def test_cached_identifier_duration_detects_a_truncated_recording(self) -> None:
+        recording = dataclasses.replace(
+            self.recording,
+            artist="The Weeknd",
+            title="Earned It (Fifty Shades of Grey)",
+            duration=30.093,
+            itunes_trackid="1440822253",
+        )
+        payload = {
+            "results": [
+                {
+                    "trackId": 1440822253,
+                    "artistName": "The Weeknd",
+                    "trackName": "Earned It (Fifty Shades of Grey)",
+                    "trackTimeMillis": 277724,
+                }
+            ]
+        }
+        with patch.object(checker, "get_cached_api", return_value=payload):
+            issues = check_file(self.path, track_metadata=recording)
+        self.assertTrue(
+            any("Audio duration 30.093s conflicts" in issue for issue in issues)
+        )
+
+    def test_cached_identity_conflicts_are_reported_without_rewriting_tags(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(self.recording, isrc="US83W0500050")
+        with patch.object(
+            checker,
+            "get_cached_api",
+            return_value={
+                "artist": "Aventura",
+                "title": "Si Me Dejas Muero",
+                "duration": 225,
+            },
+        ):
+            issues = check_file(self.path, track_metadata=recording)
+        self.assertTrue(
+            any("Cached Deezer ISRC identifier" in issue for issue in issues)
+        )
+        self.assertEqual(recording.artist, "Primary")
+        self.assertEqual(recording.isrc, "US83W0500050")
+
+    def test_verified_cached_artist_alias_still_requires_title_and_duration(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(
+            self.recording,
+            artist="NF",
+            title="Overdose",
+            duration=200,
+            isrc="USX9P1010892",
+        )
+        for title, duration in (("Overdose", 200), ("Overdose", 225), ("Mansion", 200)):
+            cache = {
+                "deezer_isrc:v2:USX9P1010892": {
+                    "artist": "Nathan Feuerstein",
+                    "title": title,
+                    "duration": duration,
+                },
+                "canonical_artist:v2:nathan feuerstein": "NF",
+            }
+            with (
+                self.subTest(title=title, duration=duration),
+                patch.object(checker, "get_cached_api", side_effect=cache.get),
+            ):
+                issues = check_file(self.path, track_metadata=recording)
+            conflicts = [issue for issue in issues if "cached" in issue.lower()]
+            self.assertEqual(bool(conflicts), title != "Overdose" or duration != 200)
+
+    def test_unavailable_or_wrong_id_cached_results_do_not_validate_recordings(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(
+            self.recording, itunes_trackid="123", duration=30
+        )
+        for payload in (
+            None,
+            "",
+            {},
+            {"results": None},
+            *(
+                {
+                    "results": [
+                        {
+                            "trackId": 123,
+                            "artistName": "Primary",
+                            "trackName": "Recording",
+                            "trackTimeMillis": duration,
+                        }
+                    ]
+                }
+                for duration in (None, 0, -1, "invalid", float("nan"))
+            ),
+            {
+                "results": [
+                    {
+                        "trackId": 456,
+                        "artistName": "Other",
+                        "trackName": "Other",
+                        "trackTimeMillis": 277000,
+                    }
+                ]
+            },
+        ):
+            with (
+                self.subTest(payload=payload),
+                patch.object(checker, "get_cached_api", return_value=payload),
+            ):
+                issues = check_file(self.path, track_metadata=recording)
+            self.assertFalse(
+                any("Cached " in issue or "cached " in issue for issue in issues)
+            )
+
+    def test_cached_duration_accepts_small_mastering_differences(self) -> None:
+        recording = dataclasses.replace(
+            self.recording, duration=200, isrc="AA1234567890"
+        )
+        with patch.object(
+            checker,
+            "get_cached_api",
+            return_value={
+                "artist": "Primary",
+                "title": "Recording",
+                "duration": 202,
+            },
+        ):
+            issues = check_file(self.path, track_metadata=recording)
+        self.assertFalse(any("cached " in issue for issue in issues))
+
+    def test_filename_and_nonpositive_positions_are_reported(self) -> None:
+        recording = dataclasses.replace(
+            self.recording, track_number=2, disc_number=0, total_tracks=-1
+        )
+        issues = check_file(self.path, track_metadata=recording)
+        self.assertIn("Filename track number 1 differs from TRACKNUMBER 2.", issues)
+        self.assertIn("Invalid DISCNUMBER 0; positions start at 1.", issues)
+        self.assertIn("Invalid TRACKTOTAL -1; totals must be positive.", issues)
+
+    def test_known_consistent_totals_reveal_missing_trailing_tracks(self) -> None:
+        with patch.object(
+            checker,
+            "read_track_metadata",
+            return_value=dataclasses.replace(
+                self.recording,
+                total_tracks=3,
+            ),
+        ):
+            report = checker.check_library(self.test_directory)
+        self.assertTrue(
+            any("[2-3]" in issue for issue in report.issues[str(self.test_directory)])
+        )
+
     def setUp(self) -> None:
         self.path = self.test_directory / "01 - Recording.wav"
         self.path.touch()
@@ -209,6 +434,15 @@ class TestCheckerContracts(IsolatedTestCase):
             folder_issues,
         )
         self.assertEqual(folder_issues, [])
+
+    def test_large_track_number_uses_compact_missing_ranges(self) -> None:
+        recording = dataclasses.replace(self.recording, track_number=10**9)
+        with patch.object(checker, "read_track_metadata", return_value=recording):
+            report = checker.check_library(self.test_directory)
+        self.assertIn(
+            "Missing track numbers in sequence for Disc 1: [1-999999999]",
+            report.issues[str(self.test_directory)],
+        )
 
     def test_library_reports_missing_sequence_in_the_album_folder(
         self,

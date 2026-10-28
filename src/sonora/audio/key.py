@@ -122,7 +122,6 @@ def get_chroma_filterbank(
     Construct a librosa-compatible Gaussian chroma filterbank matrix.
     Projects linear FFT magnitude bins onto 12 pitch classes (C, C#, ..., B).
     """
-    wts = np.zeros((n_chroma, n_fft), dtype=np.float64)
     frequencies = np.linspace(0, sr, n_fft, endpoint=False, dtype=np.float64)[1:]
 
     frqbins = n_chroma * _hz_to_octs(
@@ -137,7 +136,7 @@ def get_chroma_filterbank(
         np.remainder(diff_matrix + n_chroma2 + 10.0 * n_chroma, n_chroma) - n_chroma2
     )
 
-    wts = np.exp(-0.5 * (2.0 * diff_matrix / np.tile(binwidthbins, (n_chroma, 1))) ** 2)
+    wts = np.exp(-0.5 * (2.0 * diff_matrix / binwidthbins) ** 2)
 
     col_norms = np.sqrt(np.sum(wts**2, axis=0, keepdims=True))
     col_norms[col_norms == 0] = 1.0

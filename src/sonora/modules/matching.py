@@ -372,10 +372,9 @@ def _compatible_release_layout(
             ),
             default=None,
         )
-    if (
-        track_info.total_discs
-        and release_disc_count
-        and track_info.total_discs != release_disc_count
+    if release_disc_count and (
+        (track_info.total_discs and track_info.total_discs != release_disc_count)
+        or (track_info.disc_number and track_info.disc_number > release_disc_count)
     ):
         track_info.metadata_conflicts["album_sequence"] = (
             "Provider disc count differs from the local release; "
@@ -741,11 +740,37 @@ def is_alien_album_track(
                 artist_matches = True
                 break
 
+    album_matches = bool(
+        effective_album
+        and any(
+            normalize_str(clean_title(effective_album))
+            == normalize_str(clean_title(album))
+            for album in entities.albums
+        )
+    )
     if (
         effective_artist
         and not _is_generic(effective_artist, "artist")
         and not artist_matches
     ):
+        # A collective's album can credit individual performers. Without a
+        # tracklist, a different performer does not establish non-membership.
+        if not entities.titles and album_matches:
+            return False
+        if track_info.compilation and album_matches and title_matches:
+            for release in (
+                album_mb_release_details,
+                album_deezer_details,
+                album_itunes_details,
+            ):
+                recordings = (release or {}).get("tracks_by_disc_and_position", {})
+                if not isinstance(recordings, dict):
+                    continue
+                for recording in recordings.values():
+                    if not recording.get("artist") and _is_strong_track_match(
+                        None, effective_title, None, recording.get("title")
+                    ):
+                        return False
         return True
 
     if (
@@ -754,8 +779,11 @@ def is_alien_album_track(
         and not _is_generic_title(effective_title)
         and not title_matches
     ):
-        album_matches = False
-        if effective_album and not _is_generic(effective_album, "album"):
+        if (
+            not album_matches
+            and effective_album
+            and not _is_generic(effective_album, "album")
+        ):
             clean_eff_alb = clean_title(effective_album).lower()
             for known_album_title in entities.albums:
                 clean_kalb = clean_title(known_album_title).lower()

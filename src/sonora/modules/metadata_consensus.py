@@ -132,16 +132,25 @@ def _merge_provider_field(
 ) -> None:
     original = getattr(recording, field_name)
     original_source = recording.metadata_sources.get(field_name)
+    if field_name == "featured_artists" and original:
+        expanding_sources = {
+            source
+            for value, source in candidates
+            if value != original and source is not None
+        }
+        if expanding_sources and len(expanding_sources) < 2:
+            recording.metadata_conflicts[field_name] = (
+                "Provider expansion of existing featured credits requires "
+                "independent corroboration; existing credits preserved."
+            )
+            return
     if field_name == "advisory" and original == "Explicit":
         nonexplicit_sources = {
             source for value, source in candidates if value is None and source
         }
-        # Text and duration cannot distinguish equally long censored editions.
-        if nonexplicit_sources and (
-            len(nonexplicit_sources) < 2
-            or "itunes_trackid" in recording.metadata_conflicts
-            or "identity" in recording.metadata_conflicts
-        ):
+        # Multiple catalogs can describe the same clean edition. Their agreement
+        # does not establish that the local audio belongs to that edition.
+        if nonexplicit_sources:
             recording.metadata_conflicts["advisory"] = (
                 "Provider rating does not independently verify the local edition; "
                 "existing Explicit advisory preserved."
@@ -151,6 +160,7 @@ def _merge_provider_field(
         "MusicBrainz",
         "AcoustID",
         "Shazam",
+        "Tidal",
     }:
         candidates.append((original, original_source))
     distinct = {
@@ -188,6 +198,19 @@ def apply_metadata_mapping(
         normalized_value: str | None = str(provider_value).strip()
         if not normalized_value or normalized_value.lower() in ("none", "null"):
             continue
+        if target_attr in {
+            "mood",
+            "style",
+            "genre",
+            "comment",
+            "composer",
+            "lyricist",
+            "producers",
+        } and (
+            not any(character.isalnum() for character in normalized_value)
+            or normalized_value.casefold() in {"unknown", "n/a"}
+        ):
+            continue
 
         if target_attr == "isrc" and _recording_isrc_matches(
             track_info.isrc, metadata_dict
@@ -224,6 +247,12 @@ def apply_metadata_mapping(
         elif target_attr in ("artist", "album", "album_artist"):
             normalized_value = clean_unicode_punct(normalized_value)
             existing_val = getattr(track_info, target_attr, None)
+            if (
+                target_attr == "album"
+                and existing_val
+                and str(existing_val).casefold() == normalized_value.casefold()
+            ):
+                normalized_value = str(existing_val)
             normalized_value = preserve_unicode_repertoire(
                 str(existing_val) if existing_val else None, normalized_value
             )

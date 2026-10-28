@@ -2,6 +2,7 @@
 
 
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
@@ -32,6 +33,8 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Sonora uses ISO names and codes, without gettext translation catalogs.
+a.datas = [entry for entry in a.datas if Path(entry[0]).parts[:2] != ("pycountry", "locales")]
 pyz = PYZ(a.pure)
 
 exe = EXE(

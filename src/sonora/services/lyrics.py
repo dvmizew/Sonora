@@ -117,6 +117,8 @@ def _query_lrclib(
             headers={"User-Agent": USER_AGENT},
         )
         if response.status_code != 200:
+            if response.status_code != 404:
+                response.raise_for_status()
             return None
         lyrics_payload = require_api_object(response.json(), "LRCLIB lyrics response")
 
@@ -157,6 +159,7 @@ def _query_lrclib(
             return clean_lyrics_text(plain_lyrics.strip()) or None
     except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"LRCLIB request failed: {error}")
+        raise
     return None
 
 
@@ -172,18 +175,24 @@ def _query_syncedlyrics(
     musixmatch_token: str | None = None,
 ) -> str | None:
     checked_lrclib = (not providers or "Lrclib" in providers) and not lang
+    lrclib_error: Exception | None = None
     if checked_lrclib:
-        lrclib_result = _query_lrclib(
-            query_str,
-            plain_only=plain_only,
-            synced_only=synced_only,
-            album_name=album_name,
-            duration=duration,
-        )
-        if lrclib_result:
-            return lrclib_result
+        try:
+            lrclib_result = _query_lrclib(
+                query_str,
+                plain_only=plain_only,
+                synced_only=synced_only,
+                album_name=album_name,
+                duration=duration,
+            )
+            if lrclib_result:
+                return lrclib_result
+        except (httpx.HTTPError, OSError) as error:
+            lrclib_error = error
 
     if not providers and not get_config().allow_unverified_lyrics:
+        if lrclib_error:
+            raise lrclib_error
         return None
     LOG.warning(
         "Using an explicitly enabled lyrics source without returned recording identity"
@@ -204,6 +213,8 @@ def _query_syncedlyrics(
             if provider != "Lrclib"
         ]
         if not fallback_providers:
+            if lrclib_error:
+                raise lrclib_error
             return None
         kwargs["providers"] = fallback_providers
     elif providers is not None:
@@ -229,6 +240,8 @@ def _query_syncedlyrics(
         if lang and result is None:
             return None
     if result is None and not kwargs.get("providers") and musixmatch_token:
+        if lrclib_error:
+            raise lrclib_error
         return None
     if result is None:
         result = retry_network_call(
@@ -246,6 +259,8 @@ def _query_syncedlyrics(
         cleaned_lyrics = clean_lyrics_text(result.strip())
         if cleaned_lyrics and is_lyrics_duration_valid(cleaned_lyrics, duration):
             return cleaned_lyrics
+    if lrclib_error:
+        raise lrclib_error
     return None
 
 
@@ -286,7 +301,7 @@ def fetch_synced_lyrics(
         ],
         ensure_ascii=False,
     )
-    cache_key = f"lyrics:v7:{get_config().allow_unverified_lyrics}:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}:{constraints}"
+    cache_key = f"lyrics:v8:{get_config().allow_unverified_lyrics}:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}:{constraints}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, str):
         cached_quality = get_lyrics_quality(cached)

@@ -9,6 +9,7 @@ from sonora import __version__
 from sonora.core.files import atomic_write_bytes
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
+from sonora.core.text import safe_float
 
 
 def _write_json_report(
@@ -16,7 +17,6 @@ def _write_json_report(
     report_data: dict[str, Any],
     label: str = "report",
 ) -> None:
-    json_report.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(
         json_report,
         orjson.dumps(
@@ -34,7 +34,6 @@ def _tag_coverage_counts(tagged_tracks: list[TrackInfo]) -> dict[str, int]:
         "mb": "musicbrainz_trackid",
         "genre": "genre",
         "isrc": "isrc",
-        "bpm": "bpm",
         "rg": "replaygain_track_gain",
         "key": "initial_key",
         "composer": "composer",
@@ -47,6 +46,7 @@ def _tag_coverage_counts(tagged_tracks: list[TrackInfo]) -> dict[str, int]:
         for metric, field in presence_fields.items()
     }
     counts.update(
+        bpm=sum((safe_float(track.bpm) or 0) > 0 for track in tagged_tracks),
         lyrics=sum(
             track.lyrics is not None or track.synced_lyrics is not None
             for track in tagged_tracks

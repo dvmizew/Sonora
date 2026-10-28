@@ -26,6 +26,28 @@ MBID = "11111111-2222-3333-4444-555555555555"
 
 
 class TestMetadataMappingContracts(IsolatedTestCase):
+    def test_provider_placeholders_cannot_become_metadata_or_destroy_a_title(
+        self,
+    ) -> None:
+        from sonora.modules.normalization import normalize_track_metadata
+
+        track = TrackInfo(
+            Path("Song.flac"), artist="Primary", title="?", mood="...", style="…"
+        )
+        normalize_track_metadata(track)
+        self.assertEqual(track.title, "?")
+        self.assertIsNone(track.mood)
+        self.assertIsNone(track.style)
+        metadata_consensus.apply_metadata_mapping(
+            track,
+            {"mood": "...", "style": "…", "composer": "Unknown"},
+            {"mood": "mood", "style": "style", "composer": "composer"},
+            source="TheAudioDB",
+        )
+        self.assertIsNone(track.mood)
+        self.assertIsNone(track.style)
+        self.assertIsNone(track.composer)
+
     def test_mapping_normalizes_valid_metadata_and_records_provenance(self) -> None:
         recording = TrackInfo(Path("recording.flac"), artist="Primary")
         provider_fields = {
@@ -181,8 +203,31 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             "fixture",
             {"id": 1, "track_credits": {"other": {"producers": "Wrong"}}},
         )
-        self.assertEqual(recording.discogs_release_id, "1")
+        self.assertIsNone(recording.discogs_release_id)
         self.assertIsNone(recording.producers)
+
+    def test_deezer_base_album_cannot_supply_deluxe_release_selectors(self) -> None:
+        track = TrackInfo(
+            Path("Song.flac"), artist="Primary", title="Song", album="Album (Deluxe)"
+        )
+        with patch.object(
+            deezer_service, "fetch_deezer_track_details", return_value=None
+        ):
+            catalog._enrich_deezer(
+                track,
+                {
+                    "title": "Album",
+                    "nb_tracks": 18,
+                    "barcode": "wrong-base-upc",
+                    "release_date": "2016-11-25",
+                    "label": "Base Edition Label",
+                },
+                has_album_context=True,
+            )
+        self.assertIsNone(track.barcode)
+        self.assertIsNone(track.date)
+        self.assertIsNone(track.label)
+        self.assertEqual(track.album, "Album (Deluxe)")
 
     def test_deezer_preserves_authoritative_dates_and_consistent_album_totals(
         self,
@@ -209,6 +254,88 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         catalog._enrich_deezer(recording, album, has_album_context=True)
         catalog._enrich_deezer(recording, album, has_album_context=True, force=True)
         self.assertEqual(recording.total_tracks, 10)
+
+    def test_deezer_replaces_conflicting_isrc_only_for_exact_duration_match(
+        self,
+    ) -> None:
+        recording = TrackInfo(
+            Path("i lied - sped up.flac"),
+            artist="Cheyanne & Ex Habit",
+            title="i lied - sped up",
+            album="i lied",
+            isrc="UKZGC2506039",
+            duration=147.698,
+            producers="Verified producer",
+            musicbrainz_trackid=MBID,
+        )
+        conflicting = {
+            "artist": "Cheyanne & Ex Habit",
+            "title": "i lied",
+            "duration": 165,
+            "isrc": "UKZGC2506039",
+        }
+        exact_edit = {
+            "artist": "Cheyanne & Ex Habit",
+            "title": "i lied - sped up",
+            "duration": 148,
+            "isrc": "UKZGC2506040",
+        }
+        with (
+            patch.object(
+                deezer_service,
+                "fetch_deezer_track_by_isrc",
+                return_value=conflicting,
+            ),
+            patch.object(
+                deezer_service,
+                "fetch_deezer_track_details",
+                return_value=exact_edit,
+            ) as lookup,
+        ):
+            catalog._enrich_deezer(recording, None, has_album_context=True)
+        lookup.assert_called_once_with(
+            "Cheyanne & Ex Habit", "i lied - sped up", duration=147.698
+        )
+        self.assertEqual(recording.isrc, "UKZGC2506040")
+        self.assertEqual(recording.metadata_sources["isrc"], "Deezer")
+        self.assertNotIn("isrc", recording.metadata_conflicts)
+
+    def test_deezer_keeps_conflicting_isrc_when_search_result_is_not_exact(
+        self,
+    ) -> None:
+        recording = TrackInfo(
+            Path("i lied - sped up.flac"),
+            artist="Cheyanne & Ex Habit",
+            title="i lied - sped up",
+            isrc="UKZGC2506039",
+            duration=147.698,
+            producers="Verified producer",
+        )
+        with (
+            patch.object(
+                deezer_service,
+                "fetch_deezer_track_by_isrc",
+                return_value={
+                    "artist": "Cheyanne & Ex Habit",
+                    "title": "i lied",
+                    "duration": 165,
+                    "isrc": "UKZGC2506039",
+                },
+            ),
+            patch.object(
+                deezer_service,
+                "fetch_deezer_track_details",
+                return_value={
+                    "artist": "Different Artist",
+                    "title": "Other Song",
+                    "duration": 148,
+                    "isrc": "UKZGC2506040",
+                },
+            ),
+        ):
+            catalog._enrich_deezer(recording, None, has_album_context=True)
+        self.assertEqual(recording.isrc, "UKZGC2506039")
+        self.assertIn("isrc", recording.metadata_conflicts)
 
     def test_clean_title_index_matches_without_a_position(self) -> None:
         recording = {"title": "Recording"}
@@ -591,6 +718,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         }
         self.recording.title = "Found Song"
         self.recording.track_number = 2
+        self.recording.discogs_release_id = "123"
         catalog._enrich_discogs(
             self.recording, "fixture", release, has_album_context=True
         )
@@ -614,6 +742,88 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         catalog._enrich_discogs(self.recording, "fixture", release, force=True)
         self.assertEqual(self.recording.date, "2020")
         self.assertEqual(self.recording.composer, "Composer")
+
+    def test_discogs_album_match_cannot_invent_pressing_metadata(self) -> None:
+        release = {
+            "id": 123,
+            "barcode": "001234567890",
+            "catalog_number": "OTHER-1",
+            "country": "JP",
+            "media": "CD",
+            "year": 2016,
+            "label": "Other Label",
+            "styles": ["House"],
+        }
+        for force in (False, True):
+            for identifiers in (
+                {},
+                {"barcode": "999999999999"},
+                {"discogs_release_id": "123", "barcode": "999999999999"},
+            ):
+                with self.subTest(force=force, identifiers=identifiers):
+                    track = TrackInfo(
+                        Path("Song.flac"),
+                        artist="Primary",
+                        album="Album",
+                        **identifiers,
+                    )
+                    catalog._enrich_discogs(track, "fixture", release, force=force)
+                    self.assertEqual(track.style, "House")
+                    self.assertIsNone(track.catalog_number)
+                    self.assertIsNone(track.media)
+                    self.assertIsNone(track.date)
+                    self.assertIsNone(track.label)
+                    self.assertEqual(track.barcode, identifiers.get("barcode"))
+                    self.assertEqual(
+                        track.discogs_release_id, identifiers.get("discogs_release_id")
+                    )
+                    self.assertEqual(
+                        "discogs_release_id" in track.metadata_conflicts,
+                        bool(identifiers),
+                    )
+
+    def test_discogs_matching_identifier_does_not_override_source_medium(self) -> None:
+        track = TrackInfo(
+            Path("Song.flac"),
+            artist="Primary",
+            album="Album",
+            barcode="1234567890",
+            media="Digital Media",
+        )
+        catalog._enrich_discogs(
+            track,
+            "fixture",
+            {
+                "id": 123,
+                "barcode": "1234567890",
+                "catalog_number": "CD-1",
+                "media": "CD, Album",
+            },
+            force=True,
+        )
+        self.assertIsNone(track.discogs_release_id)
+        self.assertIsNone(track.catalog_number)
+        self.assertEqual(track.media, "Digital Media")
+        self.assertIn("discogs_release_id", track.metadata_conflicts)
+
+    def test_discogs_matching_barcode_allows_edition_metadata(self) -> None:
+        track = TrackInfo(
+            Path("Song.flac"), artist="Primary", album="Album", barcode="001234567890"
+        )
+        catalog._enrich_discogs(
+            track,
+            "fixture",
+            {
+                "id": 123,
+                "barcode": "1234567890",
+                "catalog_number": "KNOWN-1",
+                "media": "CD",
+            },
+        )
+        self.assertEqual(track.discogs_release_id, "123")
+        self.assertEqual(track.catalog_number, "KNOWN-1")
+        self.assertEqual(track.media, "CD")
+        self.assertNotIn("discogs_release_id", track.metadata_conflicts)
 
     def test_discogs_does_not_search_other_albums_in_album_context(self) -> None:
         with patch.object(
@@ -713,6 +923,8 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
                 deezer_service,
                 "fetch_deezer_track_details",
                 return_value={
+                    "artist": self.recording.artist,
+                    "title": self.recording.title,
                     "producers": "Wrong Producer",
                     "release_date": "2021",
                     "bpm": "invalid",
@@ -770,9 +982,6 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
             genius_service, "fetch_genius_song_details", return_value=None
         ) as genius:
             catalog._enrich_genius(self.recording, "fixture")
-            genius.assert_called_once()
-            genius.reset_mock()
-            catalog._enrich_genius(self.recording, "fixture", force=True)
             genius.assert_called_once()
         self.recording.music_video_url = "https://example.com"
         self.recording.mood = "Chill"

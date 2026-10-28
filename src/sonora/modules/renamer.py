@@ -26,6 +26,7 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import RenameReport, TrackInfo
+from sonora.core.playlists import update_local_playlists
 from sonora.core.sidecars import find_companion_lyrics, relocate_companion_lyrics
 from sonora.core.text import normalize_str, safe_int, sanitize_name
 from sonora.core.titles import clean_title, strip_corrupt_brackets
@@ -36,7 +37,7 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
     Update or insert [ar: Artist] and [ti: Title] metadata headers into an .lrc file.
     Preserve synchronized lyrics and return True only when header changes are saved.
     """
-    if not lrc_path.exists() or not lrc_path.is_file():
+    if not lrc_path.is_file():
         return False
 
     try:
@@ -44,39 +45,35 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
             lines = file_handle.readlines()
 
         new_lines: list[str] = []
-        artist_header_found = False
-        title_header_found = False
+        identity_headers = {"ar": artist, "ti": title}
+        found_headers: set[str] = set()
 
         for line in lines:
             line_stripped = line.strip()
-            if line_stripped.lower().startswith("[ar:"):
+            header_key = next(
+                (
+                    key
+                    for key in identity_headers
+                    if line_stripped.lower().startswith(f"[{key}:")
+                ),
+                None,
+            )
+            if header_key is not None:
+                header = f"[{header_key}:{identity_headers[header_key]}]"
                 line_ending = line[len(line.rstrip("\r\n")) :]
                 new_lines.append(
-                    line
-                    if line_stripped == f"[ar:{artist}]"
-                    else f"[ar:{artist}]{line_ending}"
+                    line if line_stripped == header else f"{header}{line_ending}"
                 )
-                artist_header_found = True
-            elif line_stripped.lower().startswith("[ti:"):
-                line_ending = line[len(line.rstrip("\r\n")) :]
-                new_lines.append(
-                    line
-                    if line_stripped == f"[ti:{title}]"
-                    else f"[ti:{title}]{line_ending}"
-                )
-                title_header_found = True
+                found_headers.add(header_key)
             else:
                 new_lines.append(line)
 
-        headers: list[str] = []
-        if not artist_header_found and artist:
-            headers.append(f"[ar:{artist}]\n")
-        if not title_header_found and title:
-            headers.append(f"[ti:{title}]\n")
-        if headers:
-            new_lines = headers + new_lines
-
-        updated_lyrics = "".join(new_lines)
+        headers = [
+            f"[{key}:{value}]\n"
+            for key, value in identity_headers.items()
+            if key not in found_headers and value
+        ]
+        updated_lyrics = "".join(headers + new_lines)
         if updated_lyrics == "".join(lines):
             return False
         atomic_write_bytes(lrc_path, updated_lyrics.encode("utf-8"))
@@ -395,6 +392,7 @@ def rename_directory_files(
                     album_consensus: Counter[tuple[str, str]] = Counter()
                     folder_renamed_paths: list[Path] = []
                     folder_track_infos: list[TrackInfo] = []
+                    playlist_renames: dict[Path, Path] = {}
 
                     file_results = (
                         (
@@ -426,6 +424,7 @@ def rename_directory_files(
                             ):
                                 album_consensus[(search_artist, track_info.album)] += 1
                             folder_renamed_paths.append(new_path)
+                            playlist_renames[path] = new_path
                             if (
                                 new_path.name != path.name
                                 or new_path.parent != path.parent
@@ -437,6 +436,15 @@ def rename_directory_files(
                             report.failed_files += 1
                         progress.advance(task)
 
+                    for playlist_folder in {folder, *(path.parent for path in files)}:
+                        report.playlists_updated += len(
+                            update_local_playlists(
+                                playlist_folder,
+                                playlist_renames,
+                                folder_track_infos,
+                                dry_run=dry_run,
+                            )
+                        )
                     final_folder = folder
                     if is_in_singles_hierarchy(folder, root_dir=dir_path):
                         if folder_track_infos:

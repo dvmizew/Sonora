@@ -261,13 +261,14 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                     "duration": 180,
                     "recording_mbid": MATCHING_RECORDING_ID,
                 }
-                musicbrainz_enrichment._resolve_musicbrainz_track_id(
-                    track,
-                    {(1, 2): MATCHING_RECORDING_ID},
-                    {"title": "Album"},
-                    candidate,
-                    False,
-                )
+                with patch.object(
+                    musicbrainz,
+                    "fetch_musicbrainz_recording_details",
+                    return_value={"artist": "Other Performer", "title": "Other Song"},
+                ):
+                    musicbrainz_enrichment._resolve_musicbrainz_track_id(
+                        track, {(1, 2): MATCHING_RECORDING_ID}, candidate
+                    )
                 self.assertEqual(track.musicbrainz_trackid, MATCHING_RECORDING_ID)
                 self.assertEqual(
                     track.metadata_sources.get("musicbrainz_trackid"), "MusicBrainz"
@@ -295,11 +296,7 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                     "recording_mbid": candidate_id,
                 }
                 musicbrainz_enrichment._resolve_musicbrainz_track_id(
-                    track,
-                    {(1, 2): MATCHING_RECORDING_ID},
-                    {"title": "Album"},
-                    candidate,
-                    False,
+                    track, {(1, 2): MATCHING_RECORDING_ID}, candidate
                 )
                 self.assertEqual(track.musicbrainz_trackid, CONFLICTING_RECORDING_ID)
                 self.assertNotIn("musicbrainz_trackid", track.metadata_sources)
@@ -320,12 +317,17 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
             duration=180,
             musicbrainz_trackid=CONFLICTING_RECORDING_ID,
         )
-        self.assertEqual(
-            musicbrainz_enrichment._extract_release_recording(
-                track, {"tracks_by_mbid": {}}, candidate, False
-            ),
-            candidate,
-        )
+        with patch.object(
+            musicbrainz,
+            "fetch_musicbrainz_recording_details",
+            return_value={"artist": "Other Performer", "title": "Other Song"},
+        ):
+            self.assertEqual(
+                musicbrainz_enrichment._extract_release_recording(
+                    track, {"tracks_by_mbid": {}}, candidate
+                ),
+                candidate,
+            )
         self.assertEqual(track.musicbrainz_trackid, MATCHING_RECORDING_ID)
         self.assertEqual(
             track.metadata_sources.get("musicbrainz_trackid"), "MusicBrainz"

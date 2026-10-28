@@ -1,10 +1,13 @@
 import dataclasses
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 import httpx
+from mutagen import MutagenError
 from PIL import Image
+from rapidfuzz import fuzz
 from rich.markup import escape
 
 from sonora.audio import art as art_module
@@ -38,6 +41,8 @@ from sonora.core.sidecars import (
     strip_lyrics_headers,
 )
 from sonora.core.state import LibraryStateVault
+from sonora.core.text import normalize_str
+from sonora.core.titles import clean_title
 from sonora.modules.catalog_enrichment import _NETWORK_EXCEPTIONS
 from sonora.modules.normalization import normalize_track_metadata
 from sonora.services import lyrics as lyrics_service
@@ -181,6 +186,7 @@ def _enrich_lyrics(
             duration=resolved_duration,
             existing_lyrics=track_info.lyrics,
             musixmatch_token=musixmatch_token,
+            conflicts=track_info.metadata_conflicts,
         )
         if lyrics_text and tag_type:
             track_info.lyrics = lyrics_text
@@ -221,6 +227,20 @@ def _compute_tag_diffs(
     ):
         diff_entries.append(
             ("advisory", "noncanonical tag encoding", track_info.advisory)
+        )
+    if original_metadata._numbering_needs_normalization or (
+        "album_sequence" in original_metadata.metadata_conflicts
+        and any(
+            field in track_info.metadata_sources
+            for field in ("total_tracks", "total_discs")
+        )
+    ):
+        diff_entries.append(
+            (
+                "numbering",
+                "conflicting total aliases",
+                f"track total {track_info.total_tracks}, disc total {track_info.total_discs}",
+            )
         )
     return diff_entries
 
@@ -320,7 +340,7 @@ def _process_audio_and_save_tags(
             f"cover_art: upgraded from {previous_artwork_dimensions}"
         )
 
-    if diff_lines or force or has_art_upgrade:
+    if diff_lines or force:
         if not dry_run:
             metadata_module.write_track_metadata(track_info, cover_art_path=cover_image)
             LOG.detail(
@@ -344,16 +364,7 @@ def normalize_single_track(
     force: bool = False,
     dry_run: bool = False,
 ) -> TrackInfo | None:
-    """
-    Locally cleans and normalizes metadata for a single audio file without any API requests.
-    - Repairs mojibake/UTF-8 encoding via ftfy
-    - Strips bracket junk: (Official Video), [FLAC], [320kbps], (2011 Remaster), [Explicit]
-    - Cleans disambiguation suffixes: 'Armin (ROU)' -> 'Armin'
-    - Canonicalizes genres via normalize_genre
-    - Standardizes dates via normalize_date
-    - Optionally calculates audio BPM locally
-    - Optionally detects musical key locally
-    """
+    """Normalize tags offline, optionally adding locally measured BPM and key."""
     if not file_path.exists():
         return None
 
@@ -413,11 +424,10 @@ def normalize_library(
     audio_files = find_audio_files(directory, recursive=True)
     if not audio_files:
         LOG.warning("No audio files found to normalize.")
-        return NormalizeReport([])
+        return NormalizeReport()
 
     album_groups = group_files_by_album_root(audio_files)
-    results: list[TrackInfo] = []
-    modified_files: dict[str, list[str]] = {}
+    report = NormalizeReport()
 
     with create_progress() as progress:
         task = progress.add_task(
@@ -444,12 +454,14 @@ def normalize_library(
                     for future in as_completed(futures):
                         wait_if_paused()
                         worker_track = future.result()
+                        report.total_scanned += 1
                         if worker_track is not None:
-                            results.append(worker_track)
                             if worker_track._diff_descriptions:
-                                modified_files[str(futures[future])] = (
+                                report.modified_files[str(futures[future])] = (
                                     worker_track._diff_descriptions
                                 )
+                        else:
+                            report.failed_files += 1
                         progress.advance(task)
 
                     if fetch_replaygain:
@@ -466,10 +478,9 @@ def normalize_library(
                     raise
                 resume_workers(pause_stop_event)
                 executor.shutdown(wait=True, cancel_futures=True)
-                partial_report = NormalizeReport(results, modified_files=modified_files)
-                raise InterruptedOperationError(partial_report) from None
+                raise InterruptedOperationError(report) from None
 
-    return NormalizeReport(results, modified_files=modified_files)
+    return report
 
 
 def _record_persisted_album(
@@ -525,15 +536,12 @@ def process_track_lyrics(
     duration: float | None = None,
     existing_lyrics: str | None = None,
     musixmatch_token: str | None = None,
+    conflicts: dict[str, str] | None = None,
 ) -> tuple[str | None, str | None]:
-    """
-    Fetches, cleans, and saves track lyrics to an accompanying .lrc file.
-    Supports smart quality upgrade:
-      - Enhanced (quality 3, word-synced): Maximum quality, skip network query unless force=True.
-      - Line-synced (quality 2): Queries online to attempt upgrade to Enhanced (quality 3).
-      - Plain text (quality 1): Queries online to attempt upgrade to Synced or Enhanced (quality 2/3).
-      - Missing (quality 0): Queries online for any available lyrics.
-    Returns (lyrics_text, quality_tag) or (None, None).
+    """Validate and upgrade sidecar/embedded lyrics without lowering sync quality.
+
+    Enhanced lyrics skip lookup unless forced. Return (text, quality), where
+    quality is existing, plain, synced or enhanced; (None, None) means unavailable.
     """
     lrc_path = file_path.with_suffix(".lrc")
     resolved_duration = (
@@ -571,6 +579,7 @@ def process_track_lyrics(
         existing_content = None
         current_quality = 0
 
+    restore_embedded_sidecar = False
     embedded_quality = get_lyrics_quality(existing_lyrics)
     if existing_lyrics and (
         not lyrics_identity_matches(existing_lyrics, artist, title)
@@ -590,8 +599,51 @@ def process_track_lyrics(
     ):
         current_quality = embedded_quality
         existing_content = existing_lyrics
-        if existing_content and not dry_run:
-            atomic_write_bytes(lrc_path, existing_content.encode("utf-8"))
+        restore_embedded_sidecar = bool(existing_content)
+
+    other_version_bodies: list[str] = []
+    if "remix" in title.casefold() and any(
+        token in artist.casefold() for token in (" & ", " feat", " ft.", ";")
+    ):
+        base_title = normalize_str(
+            clean_title(
+                re.sub(
+                    r"\s*[\(\[][^\)\]]*\bremix\b[^\)\]]*[\)\]]",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                )
+            )
+        )
+        for sibling in find_audio_files(file_path.parent, recursive=False):
+            if sibling == file_path:
+                continue
+            try:
+                original = metadata_module.read_track_metadata(sibling)
+            except (OSError, ValueError, MutagenError):
+                continue
+            if normalize_str(
+                clean_title(original.title)
+            ) == base_title and normalize_str(original.artist) != normalize_str(artist):
+                body = lyrics_word_body(original.lyrics or original.synced_lyrics or "")
+                if len(body) >= 200:
+                    other_version_bodies.append(body)
+    if existing_content and any(
+        fuzz.ratio(lyrics_word_body(existing_content), body) >= 98
+        for body in other_version_bodies
+    ):
+        LOG.warning(
+            f"Existing lyrics for {escape(file_path.name)} duplicate a differently credited original; reuse withheld."
+        )
+        if conflicts is not None:
+            conflicts["lyrics"] = (
+                "Lyrics duplicate a differently credited original; remix verification required."
+            )
+        existing_content = None
+        current_quality = 0
+
+    if restore_embedded_sidecar and existing_content and not dry_run:
+        atomic_write_bytes(lrc_path, existing_content.encode("utf-8"))
 
     if not force and current_quality >= 3 and existing_content:
         return existing_content, "existing"
@@ -636,6 +688,19 @@ def process_track_lyrics(
             f"Fetched lyrics require review for {escape(file_path.name)}: "
             "returned headers conflict with the requested recording."
         )
+        lyrics_text = None
+
+    if lyrics_text and any(
+        fuzz.ratio(lyrics_word_body(lyrics_text), body) >= 98
+        for body in other_version_bodies
+    ):
+        LOG.warning(
+            f"Fetched lyrics for {escape(file_path.name)} duplicate a differently credited original; import withheld."
+        )
+        if conflicts is not None:
+            conflicts["lyrics"] = (
+                "Fetched lyrics duplicate a differently credited original; remix verification required."
+            )
         lyrics_text = None
 
     if not lyrics_text:

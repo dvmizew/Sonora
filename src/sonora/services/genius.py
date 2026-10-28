@@ -11,15 +11,43 @@ from sonora.core.text import clean_disambiguation, normalize_str
 from sonora.core.titles import clean_title, score_artist_title_match
 
 
-def score_genius_song_match(artist: str, title: str, song: dict[str, object]) -> float:
+def score_genius_song_match(
+    artist: str,
+    title: str,
+    song: dict[str, object],
+    *,
+    album: str | None = None,
+) -> float:
     """Validate title and complete collaboration credits regardless of billing order."""
     candidate_title = str(song.get("title") or "")
     if normalize_str(clean_title(title)) != normalize_str(clean_title(candidate_title)):
         return 0.0
+    structural_title = normalize_str(clean_title(title)) in {
+        "intro",
+        "introduction",
+        "outro",
+        "interlude",
+    }
+    if structural_title and not album:
+        return 0.0
+    if album:
+        candidate_album = str(song.get("album") or "")
+        if candidate_album:
+            if normalize_str(clean_title(album)) != normalize_str(
+                clean_title(candidate_album)
+            ):
+                return 0.0
+        elif structural_title:
+            # Structural titles recur across one artist's releases.
+            return 0.0
     expected_artists = {
         normalize_str(name) for name in extract_featured_artist_tokens(artist)
     }
     candidate_artist = str(song.get("artist") or "")
+    if structural_title and not expected_artists.intersection(
+        normalize_str(name) for name in extract_featured_artist_tokens(candidate_artist)
+    ):
+        return 0.0
     if len(expected_artists) > 1:
         credited_artists = {
             normalize_str(name)
@@ -31,10 +59,10 @@ def score_genius_song_match(artist: str, title: str, song: dict[str, object]) ->
             return 0.0
         candidate_artist = artist
     return score_artist_title_match(
-        normalize_str(artist),
-        normalize_str(title),
-        normalize_str(candidate_artist),
-        normalize_str(candidate_title),
+        artist,
+        title,
+        candidate_artist,
+        candidate_title,
     )
 
 
@@ -78,7 +106,7 @@ def _parse_genius_song(song_genius_payload: dict[str, object]) -> dict[str, obje
     featured_names = [
         clean_disambiguation(str(featured["name"]))
         for featured in featured_list
-        if isinstance(featured, dict) and featured.get("name")
+        if featured.get("name")
     ]
 
     producer_list = require_api_records(
@@ -87,7 +115,7 @@ def _parse_genius_song(song_genius_payload: dict[str, object]) -> dict[str, obje
     producer_names = [
         clean_disambiguation(str(producer["name"]))
         for producer in producer_list
-        if isinstance(producer, dict) and producer.get("name")
+        if producer.get("name")
     ]
 
     writer_list = require_api_records(
@@ -96,10 +124,18 @@ def _parse_genius_song(song_genius_payload: dict[str, object]) -> dict[str, obje
     writer_names = [
         clean_disambiguation(str(writer["name"]))
         for writer in writer_list
-        if isinstance(writer, dict) and writer.get("name")
+        if writer.get("name")
     ]
 
     release_date = song_genius_payload.get("release_date")
+    album_payload = song_genius_payload.get("album")
+    album_name = (
+        require_api_object(album_payload, "Genius song album").get("name")
+        if album_payload is not None
+        else None
+    )
+    if album_name is not None and not isinstance(album_name, str):
+        raise TypeError("Genius album name must be text")
 
     result = {
         "artist": " & ".join(credited_names),
@@ -110,6 +146,7 @@ def _parse_genius_song(song_genius_payload: dict[str, object]) -> dict[str, obje
         "producers": ", ".join(producer_names) if producer_names else None,
         "writers": ", ".join(writer_names) if writer_names else None,
         "release_date": release_date,
+        "album": album_name,
     }
     return result
 
@@ -172,19 +209,26 @@ def lookup_genius_song_details(
 
 @coalesce_lookup
 def fetch_genius_song_details(
-    artist: str, title: str, api_token: str | None = None
+    artist: str,
+    title: str,
+    api_token: str | None = None,
+    *,
+    album: str | None = None,
 ) -> dict[str, object] | None:
     if not api_token or not artist or not title:
         return None
 
     cleaned_title = clean_title(title)
     normalized_title = normalize_str(cleaned_title)
-    cache_key = f"genius_song:v7:{normalize_str(artist)}:{normalize_str(title)}"
+    cache_key = (
+        f"genius_song:v8:{normalize_str(artist)}:{normalize_str(title)}:"
+        f"{normalize_str(album or '')}"
+    )
     cached = get_cached_api(cache_key)
     if cached == "":
         return None
     if isinstance(cached, dict):
-        cached_score = score_genius_song_match(artist, title, cached)
+        cached_score = score_genius_song_match(artist, title, cached, album=album)
         if (
             cached_score <= 0
             or cached_score < get_config().genius_match_threshold
@@ -253,27 +297,36 @@ def fetch_genius_song_details(
         ranked_hits = sorted(
             scored_hits.values(), key=lambda ranked_hit: ranked_hit[0], reverse=True
         )
-        if len(ranked_hits) > 1 and ranked_hits[0][0] == ranked_hits[1][0]:
+        tied = len(ranked_hits) > 1 and ranked_hits[0][0] == ranked_hits[1][0]
+        if tied and not album:
             set_cached_api(cache_key, None)
             return None
-        _, best_hit = ranked_hits[0]
-
-        api_path = best_hit.get("api_path")
-        if not isinstance(api_path, str) or not api_path.startswith("/songs/"):
+        accepted: list[tuple[float, dict[str, object]]] = []
+        incomplete_details = False
+        for _, hit in ranked_hits if album else ranked_hits[:1]:
+            api_path = hit.get("api_path")
+            if not isinstance(api_path, str) or not api_path.startswith("/songs/"):
+                continue
+            song_id = api_path.removeprefix("/songs/")
+            result = lookup_genius_song_details(song_id, api_token)
+            if result is None:
+                incomplete_details = True
+                continue
+            detail_score = score_genius_song_match(artist, title, result, album=album)
+            if (
+                detail_score > 0
+                and detail_score >= get_config().genius_match_threshold
+                and (not tied or bool(result.get("album")))
+            ):
+                accepted.append((detail_score, result))
+        if incomplete_details:
+            # An unavailable candidate could be the matching release or a tie.
             return None
-
-        song_id = str(api_path).removeprefix("/songs/")
-        result = lookup_genius_song_details(song_id, api_token)
-        if result is None:
+        accepted.sort(key=lambda candidate: candidate[0], reverse=True)
+        if not accepted or (len(accepted) > 1 and accepted[0][0] == accepted[1][0]):
+            set_cached_api(cache_key, None)
             return None
-        detail_score = score_genius_song_match(artist, title, result)
-        if (
-            detail_score <= 0
-            or detail_score < get_config().genius_match_threshold
-            or normalize_str(clean_title(str(result["title"]))) != normalized_title
-        ):
-            return None
-
+        _, result = accepted[0]
         set_cached_api(cache_key, result)
         return result
 

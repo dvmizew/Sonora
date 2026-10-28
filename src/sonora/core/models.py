@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Literal
 
@@ -12,10 +12,11 @@ MetadataSource = Literal[
     "TheAudioDB",
     "Shazam",
     "AcoustID",
+    "Tidal",
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class TrackInfo:
     """Represents a single audio track and its associated metadata."""
 
@@ -96,6 +97,9 @@ class TrackInfo:
     _advisory_needs_normalization: bool = field(
         default=False, repr=False, compare=False
     )
+    _numbering_needs_normalization: bool = field(
+        default=False, repr=False, compare=False
+    )
     _diff_descriptions: list[str] = field(
         default_factory=list, repr=False, compare=False
     )
@@ -112,8 +116,12 @@ class TrackInfo:
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""
         track_dict: dict[str, object] = {
-            k: v for k, v in asdict(self).items() if not k.startswith("_")
+            attribute.name: getattr(self, attribute.name)
+            for attribute in fields(self)
+            if not attribute.name.startswith("_")
         }
+        track_dict["metadata_sources"] = dict(self.metadata_sources)
+        track_dict["metadata_conflicts"] = dict(self.metadata_conflicts)
         track_dict["file_path"] = str(self.file_path)
         track_dict["file_name"] = self.file_path.name
         if not track_dict.get("album_artist"):
@@ -147,6 +155,7 @@ class RenameReport:
     files_renamed: int = 0
     folders_renamed: int = 0
     lrc_synced: int = 0
+    playlists_updated: int = 0
     unchanged_files: int = 0
     failed_files: int = 0
 
@@ -155,12 +164,9 @@ class RenameReport:
 class NormalizeReport:
     """Tracks scanned and changes produced by offline normalization."""
 
-    tracks: list[TrackInfo] = field(default_factory=list)
+    total_scanned: int = 0
+    failed_files: int = 0
     modified_files: dict[str, list[str]] = field(default_factory=dict)
-
-    @property
-    def total_scanned(self) -> int:
-        return len(self.tracks)
 
     @property
     def total_modified(self) -> int:
@@ -168,4 +174,4 @@ class NormalizeReport:
 
     @property
     def total_unchanged(self) -> int:
-        return max(0, len(self.tracks) - len(self.modified_files))
+        return max(0, self.total_scanned - self.failed_files - self.total_modified)

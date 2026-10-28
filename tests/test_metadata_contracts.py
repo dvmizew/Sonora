@@ -11,6 +11,7 @@ from mutagen.mp4 import MP4
 from sonora.audio import metadata
 from sonora.core.models import NormalizeReport, TrackInfo
 from sonora.modules.backup import backup_library_tags, restore_library_tags
+from sonora.modules.metadata_consensus import apply_metadata_mapping
 from sonora.modules.track_processing import normalize_single_track
 from tests.fixtures import image_bytes
 from tests.regression_support import AudioRegressionTestCase
@@ -18,6 +19,53 @@ from tests.support import IsolatedTestCase
 
 
 class TestMetadataContracts(IsolatedTestCase):
+    def test_provider_album_capitalization_preserves_consistent_local_spelling(
+        self,
+    ) -> None:
+        track = TrackInfo(Path("recording.flac"), album="Un Film De Oscar")
+        apply_metadata_mapping(
+            track, {"album": "Un film de oscar"}, {"album": "album"}, force=True
+        )
+        self.assertEqual(track.album, "Un Film De Oscar")
+        apply_metadata_mapping(
+            track,
+            {"album": "Un Film De Oscar (Deluxe)"},
+            {"album": "album"},
+            force=True,
+        )
+        self.assertEqual(track.album, "Un Film De Oscar (Deluxe)")
+
+    def test_report_export_owns_provenance_and_excludes_internal_changes(self) -> None:
+        track = TrackInfo(
+            Path("recording.flac"),
+            metadata_sources={"title": "MusicBrainz"},
+            _diff_descriptions=["changed"],
+        )
+        exported = track.to_dict()
+        sources = exported["metadata_sources"]
+        assert isinstance(sources, dict)
+        sources.clear()
+        self.assertEqual(track.metadata_sources, {"title": "MusicBrainz"})
+        self.assertNotIn("_diff_descriptions", exported)
+        self.assertEqual(exported["file_path"], "recording.flac")
+
+    def test_failed_atomic_commit_keeps_pending_advisory_normalization(self) -> None:
+        path = self.test_directory / "recording.flac"
+        path.write_bytes(b"original audio")
+        recording = TrackInfo(path, _advisory_needs_normalization=True)
+        song = MagicMock(spec=taglib.File)
+        song.tags = {}
+        song.save.return_value = []
+        with (
+            patch("taglib.File") as open_audio,
+            patch.object(Path, "replace", side_effect=OSError("disk full")),
+            self.assertRaisesRegex(OSError, "disk full"),
+        ):
+            open_audio.return_value.__enter__.return_value = song
+            metadata.write_track_metadata(recording)
+        self.assertTrue(recording._advisory_needs_normalization)
+        self.assertEqual(path.read_bytes(), b"original audio")
+
     def test_track_copy_owns_provenance_and_change_collections(self) -> None:
         original = TrackInfo(
             Path("recording.flac"),
@@ -37,15 +85,16 @@ class TestMetadataContracts(IsolatedTestCase):
         empty.copy().metadata_conflicts["title"] = "Review required"
         self.assertEqual(empty.metadata_conflicts, {})
 
-    def test_normalization_report_counts_use_its_only_track_collection(self) -> None:
+    def test_normalization_report_counts_include_failures(self) -> None:
         report = NormalizeReport()
         self.assertEqual((report.total_scanned, report.total_unchanged), (0, 0))
-        report.tracks.append(TrackInfo(Path("recording.flac")))
+        report.total_scanned += 1
         self.assertEqual((report.total_scanned, report.total_unchanged), (1, 1))
         report.modified_files["recording.flac"] = ["Title normalized"]
         self.assertEqual((report.total_modified, report.total_unchanged), (1, 0))
-        report.tracks.clear()
-        self.assertEqual(report.total_scanned, 0)
+        report.total_scanned += 1
+        report.failed_files += 1
+        self.assertEqual((report.total_scanned, report.total_unchanged), (2, 0))
 
     def test_embedded_dimensions_and_explicit_feature_tags_need_no_fallback(
         self,
@@ -370,6 +419,17 @@ class TestMetadataContracts(IsolatedTestCase):
 
 
 class TestAdvisoryPersistence(AudioRegressionTestCase):
+    def test_tag_write_invalidates_only_the_changed_file(self) -> None:
+        first = self.audio("first.flac")
+        second = self.audio("second.flac")
+        metadata.read_track_metadata(first)
+        metadata.read_track_metadata(second)
+        self.assertEqual(metadata.get_metadata_cache_size(), 2)
+        metadata.write_track_metadata(TrackInfo(first, title="Changed"))
+        self.assertEqual(metadata.get_metadata_cache_size(), 1)
+        with patch("taglib.File", side_effect=AssertionError("unrelated cache miss")):
+            self.assertEqual(metadata.read_track_metadata(second).file_path, second)
+
     def test_clean_native_tags_are_removed_without_force_and_dry_run_is_read_only(
         self,
     ) -> None:

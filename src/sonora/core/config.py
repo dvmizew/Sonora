@@ -6,11 +6,11 @@ import math
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeVar
 
 from dotenv import load_dotenv
 from rich.markup import escape
@@ -41,142 +41,100 @@ def _default_policy() -> Mapping[str, Any]:
     )
 
 
+T = TypeVar("T")
+
+
+def _policy_default(name: str, convert: Callable[[Any], T]) -> T:
+    return field(default_factory=lambda: convert(_default_policy()[name]))
+
+
 @dataclass(frozen=True)
 class SonoraConfig:
     """Immutable, typed Sonora application configuration with XDG and environment support."""
 
-    artist_match_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["artist_match_threshold"])
+    artist_match_threshold: float = _policy_default("artist_match_threshold", float)
+    featured_artist_duplicate_threshold: float = _policy_default(
+        "featured_artist_duplicate_threshold", float
     )
-    featured_artist_duplicate_threshold: float = field(
-        default_factory=lambda: float(
-            _default_policy()["featured_artist_duplicate_threshold"]
-        )
+    group_member_match_threshold: float = _policy_default(
+        "group_member_match_threshold", float
     )
-    group_member_match_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["group_member_match_threshold"])
+    album_match_threshold: float = _policy_default("album_match_threshold", float)
+    genius_match_threshold: float = _policy_default("genius_match_threshold", float)
+    title_match_threshold: float = _policy_default("title_match_threshold", float)
+    short_title_match_threshold: float = _policy_default(
+        "short_title_match_threshold", float
     )
-    album_match_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["album_match_threshold"])
+    short_title_length: int = _policy_default("short_title_length", int)
+    artist_similarity_threshold: float = _policy_default(
+        "artist_similarity_threshold", float
     )
-    genius_match_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["genius_match_threshold"])
+    remix_match_threshold: float = _policy_default("remix_match_threshold", float)
+    version_equivalence_penalty: float = _policy_default(
+        "version_equivalence_penalty", float
     )
-    title_match_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["title_match_threshold"])
+    version_mismatch_penalty: float = _policy_default("version_mismatch_penalty", float)
+    remix_modifier_mismatch_penalty: float = _policy_default(
+        "remix_modifier_mismatch_penalty", float
     )
-    short_title_match_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["short_title_match_threshold"])
+    title_score_weight: float = _policy_default("title_score_weight", float)
+    single_duration_tolerance_seconds: float = _policy_default(
+        "single_duration_tolerance_seconds", float
     )
-    short_title_length: int = field(
-        default_factory=lambda: int(_default_policy()["short_title_length"])
+    single_identifier_title_threshold: float = _policy_default(
+        "single_identifier_title_threshold", float
     )
-    artist_similarity_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["artist_similarity_threshold"])
+    allow_unverified_lyrics: bool = _policy_default("allow_unverified_lyrics", bool)
+    import_genius_descriptions: bool = False
+    acoustid_match_margin: float = _policy_default("acoustid_match_margin", float)
+    acoustid_confidence_threshold: float = _policy_default(
+        "acoustid_confidence_threshold", float
     )
-    remix_match_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["remix_match_threshold"])
-    )
-    version_equivalence_penalty: float = field(
-        default_factory=lambda: float(_default_policy()["version_equivalence_penalty"])
-    )
-    version_mismatch_penalty: float = field(
-        default_factory=lambda: float(_default_policy()["version_mismatch_penalty"])
-    )
-    remix_modifier_mismatch_penalty: float = field(
-        default_factory=lambda: float(
-            _default_policy()["remix_modifier_mismatch_penalty"]
-        )
-    )
-    title_score_weight: float = field(
-        default_factory=lambda: float(_default_policy()["title_score_weight"])
-    )
-    single_duration_tolerance_seconds: float = field(
-        default_factory=lambda: float(
-            _default_policy()["single_duration_tolerance_seconds"]
-        )
-    )
-    single_identifier_title_threshold: float = field(
-        default_factory=lambda: float(
-            _default_policy()["single_identifier_title_threshold"]
-        )
-    )
-    allow_unverified_lyrics: bool = field(
-        default_factory=lambda: bool(_default_policy()["allow_unverified_lyrics"])
-    )
-    acoustid_match_margin: float = field(
-        default_factory=lambda: float(_default_policy()["acoustid_match_margin"])
-    )
-    acoustid_confidence_threshold: float = field(
-        default_factory=lambda: float(
-            _default_policy()["acoustid_confidence_threshold"]
-        )
-    )
-    key_confidence_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["key_confidence_threshold"])
-    )
-    bpm_search_min: float = field(
-        default_factory=lambda: float(_default_policy()["bpm_search_min"])
-    )
-    bpm_search_max: float = field(
-        default_factory=lambda: float(_default_policy()["bpm_search_max"])
-    )
+    key_confidence_threshold: float = _policy_default("key_confidence_threshold", float)
+    bpm_search_min: float = _policy_default("bpm_search_min", float)
+    bpm_search_max: float = _policy_default("bpm_search_max", float)
     bpm_octave_min: float | None = None
     bpm_octave_max: float | None = None
 
-    artist_credit_match_threshold: float = field(
-        default_factory=lambda: float(
-            _default_policy()["artist_credit_match_threshold"]
-        )
+    artist_credit_match_threshold: float = _policy_default(
+        "artist_credit_match_threshold", float
     )
-    related_artist_match_threshold: float = field(
-        default_factory=lambda: float(
-            _default_policy()["related_artist_match_threshold"]
-        )
+    related_artist_match_threshold: float = _policy_default(
+        "related_artist_match_threshold", float
     )
-    related_album_match_threshold: float = field(
-        default_factory=lambda: float(
-            _default_policy()["related_album_match_threshold"]
-        )
+    related_album_match_threshold: float = _policy_default(
+        "related_album_match_threshold", float
     )
-    album_token_match_threshold: float = field(
-        default_factory=lambda: float(_default_policy()["album_token_match_threshold"])
+    album_token_match_threshold: float = _policy_default(
+        "album_token_match_threshold", float
     )
-    catalog_candidate_rank_threshold: float = field(
-        default_factory=lambda: float(
-            _default_policy()["catalog_candidate_rank_threshold"]
-        )
+    catalog_candidate_rank_threshold: float = _policy_default(
+        "catalog_candidate_rank_threshold", float
     )
-    album_candidate_rank_threshold: float = field(
-        default_factory=lambda: float(
-            _default_policy()["album_candidate_rank_threshold"]
-        )
+    album_candidate_rank_threshold: float = _policy_default(
+        "album_candidate_rank_threshold", float
     )
 
-    disc_folder_patterns: tuple[str, ...] = field(
-        default_factory=lambda: tuple(_default_policy()["disc_folder_patterns"])
+    disc_folder_patterns: tuple[str, ...] = _policy_default(
+        "disc_folder_patterns", tuple
     )
-    generic_containers: frozenset[str] = field(
-        default_factory=lambda: frozenset(_default_policy()["generic_containers"])
+    generic_containers: frozenset[str] = _policy_default(
+        "generic_containers", frozenset
     )
-    codec_rip_keywords: frozenset[str] = field(
-        default_factory=lambda: frozenset(_default_policy()["codec_rip_keywords"])
+    codec_rip_keywords: frozenset[str] = _policy_default(
+        "codec_rip_keywords", frozenset
     )
-    featuring_conjunctions: tuple[str, ...] = field(
-        default_factory=lambda: tuple(_default_policy()["featuring_conjunctions"])
+    featuring_conjunctions: tuple[str, ...] = _policy_default(
+        "featuring_conjunctions", tuple
     )
-    noise_genres: frozenset[str] = field(
-        default_factory=lambda: frozenset(_default_policy()["noise_genres"])
-    )
-    outlier_genres: frozenset[str] = field(
-        default_factory=lambda: frozenset(_default_policy()["outlier_genres"])
-    )
-    genre_aliases: tuple[tuple[str, str], ...] = field(
-        default_factory=lambda: tuple(_default_policy()["genre_aliases"].items())
+    noise_genres: frozenset[str] = _policy_default("noise_genres", frozenset)
+    outlier_genres: frozenset[str] = _policy_default("outlier_genres", frozenset)
+    genre_aliases: tuple[tuple[str, str], ...] = _policy_default(
+        "genre_aliases", lambda aliases: tuple(aliases.items())
     )
 
-    known_group_artists: frozenset[str] = field(
-        default_factory=lambda: frozenset(_default_policy()["known_group_artists"])
+    known_group_artists: frozenset[str] = _policy_default(
+        "known_group_artists", frozenset
     )
 
     discogs_token: str | None = None
@@ -362,10 +320,11 @@ def get_config() -> SonoraConfig:
 
     kwargs: dict[str, Any] = {}
 
-    if "allow_unverified_lyrics" in raw_data:
-        if not isinstance(raw_data["allow_unverified_lyrics"], bool):
-            raise TypeError("allow_unverified_lyrics must be a boolean")
-        kwargs["allow_unverified_lyrics"] = raw_data["allow_unverified_lyrics"]
+    for policy_name in ("allow_unverified_lyrics", "import_genius_descriptions"):
+        if policy_name in raw_data:
+            if not isinstance(raw_data[policy_name], bool):
+                raise TypeError(f"{policy_name} must be a boolean")
+            kwargs[policy_name] = raw_data[policy_name]
 
     for policy_name in (
         "artist_match_threshold",

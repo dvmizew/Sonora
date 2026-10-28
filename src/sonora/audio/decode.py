@@ -22,10 +22,8 @@ def load_audio(
     try:
         with soundfile.SoundFile(str(file_path)) as sf:
             sample_rate = int(sf.samplerate)
-            if offset_seconds > 0 and sf.frames > int(
-                sample_rate * (offset_seconds + 2.0)
-            ):
-                sf.seek(int(sample_rate * offset_seconds))
+            if offset_seconds > 0:
+                sf.seek(min(int(sample_rate * offset_seconds), sf.frames))
             frames = (
                 int(sample_rate * max_seconds)
                 if (max_seconds and max_seconds > 0)

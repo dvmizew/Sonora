@@ -1,5 +1,4 @@
 import re
-from collections.abc import Callable
 
 from rapidfuzz import fuzz
 
@@ -32,9 +31,6 @@ _PROD_BRACKET_PATTERN = re.compile(
 
 def normalize_track_metadata(
     track_info: TrackInfo,
-    *,
-    artist_resolver: Callable[[str | None], str] | None = None,
-    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> TrackInfo:
     """
     Apply canonical, deterministic normalization to all metadata fields of a TrackInfo object.
@@ -60,39 +56,31 @@ def normalize_track_metadata(
         clean_base, title_feats = extract_title_features(
             track_info.title,
             primary_artist=track_info.artist,
-            group_classifier=group_classifier,
         )
         if title_feats:
             track_info.featured_artists = normalize_featured_artists(
                 [track_info.featured_artists, *title_feats],
                 primary_artist=track_info.artist,
-                group_classifier=group_classifier,
             )
         track_info.title = clean_unicode_punct(clean_base)
 
     if track_info.artist:
         track_info.artist = strip_corrupt_brackets(track_info.artist)
-        base_artist, extracted_features = extract_artist_features(
-            track_info.artist, group_classifier=group_classifier
-        )
+        base_artist, extracted_features = extract_artist_features(track_info.artist)
         if base_artist:
             track_info.artist = base_artist
         if extracted_features:
             track_info.featured_artists = normalize_featured_artists(
                 [track_info.featured_artists, *extracted_features],
                 primary_artist=track_info.artist,
-                group_classifier=group_classifier,
             )
         track_info.artist = clean_disambiguation(track_info.artist)
-        if artist_resolver is not None:
-            track_info.artist = artist_resolver(track_info.artist)
         track_info.artist = clean_unicode_punct(track_info.artist)
 
     if track_info.featured_artists:
         track_info.featured_artists = normalize_featured_artists(
             track_info.featured_artists,
             primary_artist=track_info.artist,
-            group_classifier=group_classifier,
         )
 
     if track_info.album:
@@ -100,8 +88,6 @@ def normalize_track_metadata(
 
     if track_info.album_artist:
         track_info.album_artist = clean_disambiguation(track_info.album_artist)
-        if artist_resolver is not None:
-            track_info.album_artist = artist_resolver(track_info.album_artist)
         track_info.album_artist = clean_unicode_punct(track_info.album_artist)
 
     if (
@@ -131,46 +117,40 @@ def normalize_track_metadata(
         track_info.track_number = 1
         track_info.total_tracks = 1
 
-    if track_info.artist_sort and track_info.artist:
-        sort_norm = normalize_str(track_info.artist_sort)
-        art_candidates = [normalize_str(track_info.artist)]
-        primary_artist_val = get_primary_artist(track_info.artist)
-        art_candidates.append(normalize_str(primary_artist_val))
+    for sort_field, artist in (
+        ("artist_sort", track_info.artist),
+        ("album_artist_sort", track_info.album_artist or track_info.artist or ""),
+    ):
+        sort_name = getattr(track_info, sort_field)
+        if not sort_name or not artist:
+            continue
+        normalized_sort = normalize_str(sort_name)
+        artist_candidates = [
+            normalize_str(artist),
+            normalize_str(get_primary_artist(artist)),
+        ]
         sort_score = max(
             (
                 max(
-                    fuzz.ratio(sort_norm, cand),
-                    fuzz.token_sort_ratio(sort_norm, cand),
-                    fuzz.token_set_ratio(sort_norm, cand),
+                    fuzz.ratio(normalized_sort, candidate),
+                    fuzz.token_sort_ratio(normalized_sort, candidate),
+                    fuzz.token_set_ratio(normalized_sort, candidate),
                 )
-                for cand in art_candidates
-                if cand
+                for candidate in artist_candidates
+                if candidate
             ),
             default=0.0,
         )
         if sort_score < get_config().artist_similarity_threshold:
-            track_info.artist_sort = None
+            setattr(track_info, sort_field, None)
 
-    cmp_sort_art = track_info.album_artist or track_info.artist or ""
-    if track_info.album_artist_sort and cmp_sort_art:
-        sort_norm = normalize_str(track_info.album_artist_sort)
-        art_candidates = [normalize_str(cmp_sort_art)]
-        primary_album_art = get_primary_artist(cmp_sort_art)
-        art_candidates.append(normalize_str(primary_album_art))
-        sort_score = max(
-            (
-                max(
-                    fuzz.ratio(sort_norm, cand),
-                    fuzz.token_sort_ratio(sort_norm, cand),
-                    fuzz.token_set_ratio(sort_norm, cand),
-                )
-                for cand in art_candidates
-                if cand
-            ),
-            default=0.0,
-        )
-        if sort_score < get_config().artist_similarity_threshold:
-            track_info.album_artist_sort = None
+    for field in ("mood", "style"):
+        value = getattr(track_info, field)
+        if value and (
+            not any(character.isalnum() for character in value)
+            or value.strip().casefold() in {"unknown", "n/a", "none", "null"}
+        ):
+            setattr(track_info, field, None)
 
     track_info.genre = normalize_genre(track_info.genre)
     track_info.date = normalize_date(track_info.date)

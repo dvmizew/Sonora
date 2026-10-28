@@ -23,7 +23,14 @@ def atomic_audio_edit(audio_path: Path) -> Iterator[Path]:
         shutil.copy2(audio_path, staging_path)
         yield staging_path
         current_stat = audio_path.stat()
-        if (current_stat.st_mtime_ns, current_stat.st_size) != (
+        if (
+            current_stat.st_dev,
+            current_stat.st_ino,
+            current_stat.st_mtime_ns,
+            current_stat.st_size,
+        ) != (
+            original_stat.st_dev,
+            original_stat.st_ino,
             original_stat.st_mtime_ns,
             original_stat.st_size,
         ):
@@ -48,6 +55,8 @@ def atomic_write_file(destination: Path) -> Iterator[IO[bytes]]:
             yield output
             output.flush()
             os.fsync(output.fileno())
+        if destination.exists():
+            shutil.copymode(destination, staging_path)
         staging_path.replace(destination)
     finally:
         staging_path.unlink(missing_ok=True)

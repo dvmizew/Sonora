@@ -37,6 +37,7 @@ from sonora.core.text import (
     preserve_unicode_repertoire,
 )
 from sonora.core.titles import (
+    _credited_feature_artists,
     clean_title,
     extract_title_features,
     score_artist_title_match,
@@ -148,6 +149,7 @@ class TestConfigurationFiles(IsolatedTestCase):
 
     def test_invalid_scalar_policies_do_not_silently_use_defaults(self) -> None:
         invalid_settings: tuple[dict[str, object], ...] = (
+            {"import_genius_descriptions": "true"},
             {"title_match_threshold": True},
             {"title_match_threshold": "not a number"},
             {"short_title_length": 8.5},
@@ -166,6 +168,25 @@ class TestConfigurationFiles(IsolatedTestCase):
                 self.assertRaises((TypeError, ValueError)),
             ):
                 config.get_config()
+
+    def test_config_changes_invalidate_cached_feature_credits(self) -> None:
+        with patch.object(
+            config, "_discover_config_file", return_value=Path("config.json")
+        ):
+            for groups, expected in (
+                ([], frozenset({"lyra"})),
+                (["Primary feat Lyra"], frozenset()),
+            ):
+                with patch.object(
+                    config,
+                    "_parse_config_data",
+                    return_value={"known_group_artists": groups},
+                ):
+                    config.clear_config_cache()
+                    self.assertEqual(
+                        _credited_feature_artists("Primary feat Lyra", "Recording"),
+                        expected,
+                    )
 
     def test_optional_octave_policy_and_environment_credentials(self) -> None:
         values = {

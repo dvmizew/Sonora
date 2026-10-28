@@ -2,6 +2,7 @@ import re
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum, auto
+from itertools import pairwise
 from pathlib import Path
 
 import orjson
@@ -20,6 +21,7 @@ from sonora.core.artists import (
     is_single_group_artist,
 )
 from sonora.core.audio_files import find_audio_files
+from sonora.core.cache import api_cache_session, get_cached_api
 from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import get_config
 from sonora.core.constants import (
@@ -41,7 +43,7 @@ from sonora.core.sidecars import (
     is_lyrics_duration_valid,
     lyrics_identity_matches,
 )
-from sonora.core.text import is_valid_uuid, normalize_genre, normalize_str
+from sonora.core.text import is_valid_uuid, normalize_genre, normalize_str, safe_float
 from sonora.core.titles import (
     _is_corrupt_bracket,
     clean_title,
@@ -102,6 +104,47 @@ def check_file(
 
         try:
             audio_flac = FLAC(str(file_path))
+            raw_tags = getattr(audio_flac, "tags", None) or {}
+            for canonical, alias in (
+                ("date", "year"),
+                ("originaldate", "originalyear"),
+            ):
+                date_value = str((raw_tags.get(canonical) or [""])[0])
+                year_value = str((raw_tags.get(alias) or [""])[0])
+                if (
+                    re.fullmatch(r"\d{4}", date_value[:4])
+                    and re.fullmatch(r"\d{4}", year_value[:4])
+                    and date_value[:4] != year_value[:4]
+                ):
+                    issues.append(
+                        f"Conflicting date aliases: {canonical.upper()}={date_value} and "
+                        f"{alias.upper()}={year_value}; verify the release date."
+                    )
+            for snapshot in raw_tags.get("tidal_data", []):
+                try:
+                    payload = orjson.loads(snapshot)
+                except orjson.JSONDecodeError:
+                    issues.append(
+                        "Embedded TIDAL_DATA contains invalid JSON; provider snapshot requires review."
+                    )
+                    continue
+                expected_duration = (
+                    safe_float(payload.get("duration"))
+                    if isinstance(payload, dict)
+                    else None
+                )
+                if (
+                    expected_duration is not None
+                    and expected_duration > 0
+                    and (
+                        abs(expected_duration - audio_flac.info.length)
+                        > get_config().single_duration_tolerance_seconds
+                    )
+                ):
+                    issues.append(
+                        f"Embedded TIDAL_DATA duration {expected_duration:g}s conflicts with "
+                        f"audio duration {audio_flac.info.length:.3f}s; provider snapshot may describe another recording."
+                    )
             for index, picture in enumerate(audio_flac.pictures):
                 if len(picture.data) == 0:
                     categories.add(_IssueCategory.CORRUPT)
@@ -152,10 +195,98 @@ def check_file(
             (track.track_number, track.total_tracks, "TRACKNUMBER", "TRACKTOTAL"),
             (track.disc_number, track.total_discs, "DISCNUMBER", "DISCTOTAL"),
         ):
-            if position is not None and total is not None and position > total:
+            if position is not None and position <= 0:
+                issues.append(
+                    f"Invalid {position_label} {position}; positions start at 1."
+                )
+            if total is not None and total <= 0:
+                issues.append(
+                    f"Invalid {total_label} {total}; totals must be positive."
+                )
+            elif position is not None and total is not None and position > total:
                 issues.append(
                     f"{position_label} {position} exceeds {total_label} {total}; verify the release edition."
                 )
+
+        with api_cache_session():
+            for provider, identifier, cache_key in (
+                (
+                    "MusicBrainz",
+                    track.musicbrainz_trackid,
+                    f"mb_rec_details:v2:{track.musicbrainz_trackid}",
+                ),
+                (
+                    "Deezer ISRC",
+                    track.isrc,
+                    f"deezer_isrc:v2:{(track.isrc or '').strip().upper()}",
+                ),
+                (
+                    "iTunes",
+                    track.itunes_trackid,
+                    f"itunes_lookup:v1:{track.itunes_trackid}",
+                ),
+            ):
+                if not identifier:
+                    continue
+                candidate = get_cached_api(cache_key)
+                if not isinstance(candidate, dict):
+                    continue
+                if provider == "iTunes":
+                    results = candidate.get("results")
+                    if not isinstance(results, list):
+                        continue
+                    matches = [
+                        result
+                        for result in results
+                        if isinstance(result, dict)
+                        and str(result.get("trackId")) == str(identifier)
+                    ]
+                    if len(matches) != 1:
+                        continue
+                    result = matches[0]
+                    duration_ms = safe_float(result.get("trackTimeMillis"))
+                    candidate = {
+                        "artist": result.get("artistName"),
+                        "title": result.get("trackName"),
+                        "duration": duration_ms / 1000
+                        if duration_ms is not None and duration_ms > 0
+                        else None,
+                    }
+                artist = str(candidate.get("artist") or "")
+                title = str(candidate.get("title") or "")
+                if not artist or not title:
+                    continue
+                expected_artist = track.artist
+                if not recording_identity_matches(
+                    expected_artist, track.title, artist, title
+                ):
+                    expected_alias = get_cached_api(
+                        f"canonical_artist:v2:{normalize_str(expected_artist)}"
+                    )
+                    candidate_alias = get_cached_api(
+                        f"canonical_artist:v2:{normalize_str(artist)}"
+                    )
+                    if isinstance(expected_alias, str) and expected_alias.strip():
+                        expected_artist = expected_alias
+                    if isinstance(candidate_alias, str) and candidate_alias.strip():
+                        artist = candidate_alias
+                if not recording_identity_matches(
+                    expected_artist, track.title, artist, title
+                ):
+                    issues.append(
+                        f"Cached {provider} identifier {identifier} resolves to '{artist} - {title}', conflicting with ARTIST or TITLE; verify recording identity."
+                    )
+                elif not recording_identity_matches(
+                    expected_artist,
+                    track.title,
+                    artist,
+                    title,
+                    expected_duration=track.duration,
+                    candidate_duration=safe_float(candidate.get("duration")),
+                ):
+                    issues.append(
+                        f"Audio duration {track.duration}s conflicts with cached {provider} duration {candidate.get('duration')}s for identifier {identifier}; verify recording version or incomplete audio."
+                    )
 
         if track.initial_key and key_to_camelot(track.initial_key) is None:
             issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
@@ -199,6 +330,18 @@ def check_file(
         if filename_track_num is None:
             issues.append(
                 f"Filename does not start with track number: '{file_path.name}'"
+            )
+        elif (
+            track.track_number is not None
+            and filename_track_num != track.track_number
+            and not (
+                filename_track_num == 1
+                and is_in_singles_hierarchy(file_path)
+                and len(find_audio_files(file_path.parent, recursive=False)) <= 1
+            )
+        ):
+            issues.append(
+                f"Filename track number {filename_track_num} differs from TRACKNUMBER {track.track_number}."
             )
 
         _, artist_feats = extract_artist_features(track.artist)
@@ -745,12 +888,26 @@ def check_library(
             for disc_idx, track_idx in tracks_found:
                 discs[disc_idx].add(track_idx)
             for disc_idx, track_nums in discs.items():
+                totals = {
+                    track.total_tracks
+                    for _, track in tracks_in_folder
+                    if (track.disc_number or 1) == disc_idx
+                }
+                if len(totals) == 1 and None not in totals:
+                    total = next(iter(totals))
+                    if total is not None and total >= max(track_nums):
+                        track_nums = track_nums | {total + 1}
+                positions = sorted(
+                    {0, *(number for number in track_nums if number > 0)}
+                )
                 missing = [
-                    i for i in range(1, max(track_nums) + 1) if i not in track_nums
+                    str(left + 1) if right == left + 2 else f"{left + 1}-{right - 1}"
+                    for left, right in pairwise(positions)
+                    if right > left + 1
                 ]
                 if missing:
                     folder_issues.append(
-                        f"Missing track numbers in sequence for Disc {disc_idx}: {missing}"
+                        f"Missing track numbers in sequence for Disc {disc_idx}: [{', '.join(missing)}]"
                     )
 
         if folder_issues:

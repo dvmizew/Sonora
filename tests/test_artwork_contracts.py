@@ -213,9 +213,8 @@ class TestArtworkContracts(IsolatedTestCase):
                 art.process_album_cover_art(self.test_directory, "Primary", "Record")
             )
             path.write_bytes(b"corrupt artwork")
-            self.assertEqual(
+            self.assertIsNone(
                 art.process_album_cover_art(self.test_directory, "Primary", "Record"),
-                path,
             )
         with patch.object(
             art, "_fetch_candidate_artwork", return_value=(image_bytes(), (600, 600))
@@ -243,7 +242,7 @@ class TestArtworkContracts(IsolatedTestCase):
                 patch.object(art, "_fetch_candidate_artwork", return_value=None),
                 patch.object(art, "fetch_fanart_album", return_value=payload),
                 patch.object(
-                    art, "download_fanart_image_bytes", return_value=b"disc artwork"
+                    art, "download_fanart_image_bytes", return_value=image_bytes()
                 ),
             ):
                 art.process_album_cover_art(
@@ -292,16 +291,18 @@ class TestArtworkContracts(IsolatedTestCase):
             ),
             patch.object(art, "fetch_fanart_artist", return_value=assets),
             patch.object(
-                art, "download_fanart_image_bytes", side_effect=lambda url: url.encode()
+                art,
+                "download_fanart_image_bytes",
+                side_effect=lambda url: image_bytes(),
             ),
             patch.object(art, "fetch_artist_images") as fallback,
         ):
             art.process_artist_artwork(self.test_directory, "Primary", MBID)
         fallback.assert_not_called()
         for filename, expected in (
-            ("logo.png", b"logo"),
-            ("fanart.jpg", b"background"),
-            ("artist.jpg", b"thumb"),
+            ("logo.png", image_bytes()),
+            ("fanart.jpg", image_bytes()),
+            ("artist.jpg", image_bytes()),
         ):
             self.assertEqual((self.test_directory / filename).read_bytes(), expected)
 
@@ -315,17 +316,21 @@ class TestArtworkContracts(IsolatedTestCase):
                 "fetch_fanart_artist",
                 return_value=fanart.FanartArtistArtwork(banner_urls=("banner",)),
             ),
-            patch.object(art, "download_fanart_image_bytes", return_value=b"banner"),
+            patch.object(
+                art, "download_fanart_image_bytes", return_value=image_bytes()
+            ),
             patch.object(
                 art,
                 "fetch_artist_images",
-                return_value=(b"thumbnail", b"fallback banner"),
+                return_value=(image_bytes(), image_bytes()),
             ),
         ):
             art.process_artist_artwork(self.test_directory, "Primary", MBID)
-        self.assertEqual((self.test_directory / "banner.jpg").read_bytes(), b"banner")
         self.assertEqual(
-            (self.test_directory / "artist.jpg").read_bytes(), b"thumbnail"
+            (self.test_directory / "banner.jpg").read_bytes(), image_bytes()
+        )
+        self.assertEqual(
+            (self.test_directory / "artist.jpg").read_bytes(), image_bytes()
         )
 
     def test_artist_artwork_io_failures_and_read_only_directory(self) -> None:
@@ -341,9 +346,9 @@ class TestArtworkContracts(IsolatedTestCase):
             art.process_artist_artwork(self.test_directory, "Primary")
         with (
             patch.object(
-                art, "fetch_artist_images", return_value=(b"portrait", b"banner")
+                art, "fetch_artist_images", return_value=(image_bytes(), image_bytes())
             ),
-            patch.object(Path, "write_bytes", side_effect=OSError("disk full")),
+            patch("sonora.core.files.os.fsync", side_effect=OSError("disk full")),
         ):
             art.process_artist_artwork(self.test_directory, "Primary")
         self.assertEqual(list(self.test_directory.iterdir()), [])
@@ -366,10 +371,14 @@ class TestArtworkContracts(IsolatedTestCase):
                 "fetch_fanart_label",
                 return_value=fanart.FanartLabelArtwork(label_urls=("logo",)),
             ),
-            patch.object(art, "download_fanart_image_bytes", return_value=b"logo"),
+            patch.object(
+                art, "download_fanart_image_bytes", return_value=image_bytes()
+            ),
         ):
             art.process_label_artwork(self.test_directory, MBID)
-        self.assertEqual((self.test_directory / "label.png").read_bytes(), b"logo")
+        self.assertEqual(
+            (self.test_directory / "label.png").read_bytes(), image_bytes()
+        )
         with (
             patch.object(
                 art, "get_config", return_value=SonoraConfig(fanart_api_key="fixture")

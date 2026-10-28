@@ -8,11 +8,7 @@ import httpx
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.artists import (
     _load_user_overrides,
-    is_artist_group_candidate,
     normalize_artist_name,
-)
-from sonora.core.artists import (
-    is_single_group_artist as is_known_group_artist,
 )
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.coordination import coalesce_lookup
@@ -22,7 +18,6 @@ from sonora.core.text import (
     clean_disambiguation,
     clean_unicode_punct,
     normalize_str,
-    safe_int,
 )
 from sonora.services import musicbrainz
 
@@ -199,44 +194,3 @@ def resolve_artist_name(raw_name: str | None) -> str:
     normalized_artist = clean_unicode_punct(clean_name)
     set_cached_api(cache_key, normalized_artist)
     return normalized_artist
-
-
-@coalesce_lookup
-def is_single_group_artist(raw_name: str | None) -> bool:
-    """Validate an otherwise unknown group entity using MusicBrainz search."""
-    if is_known_group_artist(raw_name):
-        return True
-    if raw_name is None or not is_artist_group_candidate(raw_name):
-        return False
-    clean_name = raw_name.strip()
-    normalized = normalize_str(clean_name)
-
-    cache_key = f"is_group_entity:{normalized}"
-    cached = get_cached_api(cache_key)
-    if isinstance(cached, bool):
-        return cached
-
-    query_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", clean_name).strip()
-
-    try:
-        artist_list = musicbrainz.search_musicbrainz_artists(
-            query=f'artist:"{query_name}"', limit=5
-        )
-        for artist in artist_list:
-            name_match = normalize_str(artist.get("name")) == normalized
-            score = safe_int(artist.get("ext:score")) or 0
-            artist_type = artist.get("type")
-            if name_match and (score >= 90 or artist_type == "Group"):
-                canonical_name = clean_unicode_punct(
-                    str(artist.get("name", "")).strip()
-                )
-                set_cached_api(f"canonical_artist:v2:{normalized}", canonical_name)
-                set_cached_api(cache_key, True)
-                return True
-        set_cached_api(cache_key, False)
-        return False
-    except (
-        httpx.HTTPError,
-        OSError,
-    ):
-        return False

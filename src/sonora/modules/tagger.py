@@ -39,6 +39,7 @@ from sonora.core.text import (
     normalize_genre,
     normalize_str,
     preserve_unicode_repertoire,
+    safe_int,
 )
 from sonora.modules.catalog_enrichment import (
     _NETWORK_EXCEPTIONS,
@@ -83,6 +84,7 @@ class _AlbumMetadataContext:
     discogs_release: dict[str, Any] | None = None
     deezer_details: dict[str, Any] | None = None
     itunes_details: dict[str, Any] | None = None
+    itunes_layout_verified: bool = False
     cuesheet_content: str | None = None
     cover_path: Path | None = None
     sample_artist: str | None = None
@@ -121,6 +123,30 @@ def _heal_and_align_album_track(
         or track_info.track_number != resolved_pos
     ):
         track_info.track_number = resolved_pos
+
+    if album_context.itunes_layout_verified and album_context.itunes_details:
+        positions = album_context.itunes_details.get("tracks_by_disc_and_position", {})
+        disc = track_info.disc_number or 1
+        recording = positions.get((disc, track_info.track_number))
+        if recording and _recording_matches_track_identity(track_info, recording):
+            medium_positions = {
+                position[1] for position in positions if position[0] == disc
+            }
+            medium_count = len(medium_positions)
+            if medium_positions == set(range(1, medium_count + 1)) and (
+                force
+                or not track_info.total_tracks
+                or (track_info.track_number or 0) > track_info.total_tracks
+            ):
+                track_info.total_tracks = medium_count
+                track_info.metadata_sources["total_tracks"] = "iTunes"
+                if not track_info.total_discs:
+                    track_info.total_discs = max(position[0] for position in positions)
+                    track_info.metadata_sources["total_discs"] = "iTunes"
+                if track_info.metadata_conflicts.get("album_sequence", "").startswith(
+                    "Stored numbering totals conflict"
+                ) and (track_info.disc_number or 1) <= (track_info.total_discs or 1):
+                    track_info.metadata_conflicts.pop("album_sequence", None)
 
     if (
         album_context.sample_artist
@@ -264,7 +290,7 @@ def _run_metadata_enrichment_pipeline(
             has_album_context=has_album_context,
             force=force,
         ),
-        partial(_enrich_genius, genius_api_token=genius_api_token, force=force),
+        partial(_enrich_genius, genius_api_token=genius_api_token),
         partial(_enrich_theaudiodb, force=force),
     ]
     if provider_executor is None:
@@ -481,6 +507,18 @@ def _release_matches_album_tracks(
     }
     if len(indexed_recordings) != len(audio_files):
         return False
+    declared_count = safe_int(release.get("total_tracks", release.get("nb_tracks")))
+    if declared_count is not None and declared_count != len(indexed_recordings):
+        return False
+    if any(
+        len(position) != 2
+        or any(
+            not isinstance(number, int) or isinstance(number, bool) or number < 1
+            for number in position
+        )
+        for position in indexed_recordings
+    ):
+        return False
     for audio_path in audio_files:
         track = metadata_module.read_track_metadata(audio_path)
         if _compatible_release_layout(track, release) is None:
@@ -600,6 +638,10 @@ def _resolve_album_metadata_context(
         album_context.itunes_details = itunes_service.fetch_itunes_album_details(
             sample_artist, sample_album, expected_track_count=len(audio_files)
         )
+        if album_context.itunes_details:
+            album_context.itunes_layout_verified = _release_matches_album_tracks(
+                album_context.itunes_details, audio_files
+            )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Pre-fetching Apple album metadata failed: {error}")
 

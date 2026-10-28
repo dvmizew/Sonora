@@ -4,9 +4,11 @@ from unittest.mock import MagicMock, patch
 from sonora.core.artists import (
     extract_featured_artist_tokens,
     get_primary_artist,
+    is_single_group_artist,
     normalize_featured_artists,
 )
 from sonora.core.audio_files import group_files_by_parent
+from sonora.core.config import SonoraConfig
 from sonora.core.library_paths import (
     extract_disc_number_from_folder,
     group_files_by_album_root,
@@ -31,8 +33,6 @@ from sonora.core.titles import (
     extract_title_features,
     score_artist_title_match,
 )
-from sonora.services import artist_resolution
-from sonora.services.artist_resolution import is_single_group_artist
 from tests.support import IsolatedTestCase
 
 
@@ -150,6 +150,48 @@ class TestCoreUtils(IsolatedTestCase):
             "Solo (Wideboys remix)",
         )
         self.assertEqual(clean_title(""), "")
+
+    def test_edition_markers_do_not_strip_remixer_names(self) -> None:
+        for version in (
+            "Monoir Remix",
+            "Monoir Remix Radio Edit",
+            "Monolink Remix",
+            "Stereophonics Remix",
+        ):
+            title = f"I Loved You ({version})"
+            with self.subTest(version=version):
+                self.assertEqual(clean_title(title), title)
+        self.assertEqual(clean_title("Song (Mono Version)"), "Song")
+        self.assertEqual(clean_title("Song (Stereo Mix)"), "Song")
+
+    def test_identical_recording_titles_ignore_remaster_capitalization(self) -> None:
+        self.assertGreater(
+            score_artist_title_match(
+                "Creed",
+                "What If (remastered 2024)",
+                "Creed",
+                "What If (Remastered 2024)",
+            ),
+            0,
+        )
+
+    def test_dotted_initialisms_match_without_merging_unrelated_artist_names(
+        self,
+    ) -> None:
+        for artist, candidate in (
+            ("C.T.C.", "CTC"),
+            ("CTC", "C.T.C."),
+            ("M.G.L.", "MGL"),
+        ):
+            with self.subTest(artist=artist, candidate=candidate):
+                self.assertGreater(
+                    score_artist_title_match(artist, "Intro", candidate, "Intro"), 0
+                )
+        for artist, candidate in (("C.T.C.", "CTL"),):
+            with self.subTest(artist=artist, candidate=candidate):
+                self.assertEqual(
+                    score_artist_title_match(artist, "Intro", candidate, "Intro"), 0
+                )
 
     def test_extract_title_features(self) -> None:
         clean_t, feats = extract_title_features("Rockstar (feat. 21 Savage)")
@@ -588,102 +630,36 @@ class TestCoreUtils(IsolatedTestCase):
             90.0,
         )
 
-    @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
-    def test_is_single_group_artist(self, mock_search: MagicMock) -> None:
-        mock_search.return_value = [
-            {
-                "name": "Above & Beyond",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertTrue(is_single_group_artist("Above & Beyond"))
-        mock_search.return_value = [
-            {"name": "Drake", "type": "Person", "ext:score": "80"}
-        ]
-        self.assertFalse(is_single_group_artist("Drake & 21 Savage"))
-        self.assertFalse(is_single_group_artist("SingleArtist"))
-        self.assertFalse(is_single_group_artist(""))
-        self.assertFalse(is_single_group_artist(None))
+    def test_is_single_group_artist(self) -> None:
+        with patch(
+            "sonora.core.artists.get_config",
+            return_value=SonoraConfig(
+                known_group_artists=frozenset({"Above & Beyond"})
+            ),
+        ):
+            self.assertTrue(is_single_group_artist("Above & Beyond"))
+            self.assertFalse(is_single_group_artist("Drake & 21 Savage"))
+            self.assertFalse(is_single_group_artist("SingleArtist"))
+            self.assertFalse(is_single_group_artist(""))
+            self.assertFalse(is_single_group_artist(None))
 
-    @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
-    def test_get_primary_artist(self, mock_search: MagicMock) -> None:
-        mock_search.return_value = [
-            {
-                "name": "Above & Beyond",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertEqual(
-            get_primary_artist(
-                "Above & Beyond",
-                artist_resolver=artist_resolution.resolve_artist_name,
-                group_classifier=artist_resolution.is_single_group_artist,
-            ),
-            "Above & Beyond",
-        )
-        mock_search.return_value = [
-            {
-                "name": "Alan & Kepa",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertEqual(
-            get_primary_artist(
-                "Alan & Kepa",
-                artist_resolver=artist_resolution.resolve_artist_name,
-                group_classifier=artist_resolution.is_single_group_artist,
-            ),
-            "Alan & Kepa",
-        )
-        mock_search.return_value = [
-            {
-                "name": "Play & Win",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertEqual(
-            get_primary_artist(
-                "Play & Win",
-                artist_resolver=artist_resolution.resolve_artist_name,
-                group_classifier=artist_resolution.is_single_group_artist,
-            ),
-            "Play & Win",
-        )
-        self.assertEqual(
-            get_primary_artist(
-                "Play&Win",
-                artist_resolver=artist_resolution.resolve_artist_name,
-                group_classifier=artist_resolution.is_single_group_artist,
-            ),
-            "Play & Win",
-        )
-        mock_search.return_value = [
-            {
-                "name": "Simon & Garfunkel",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertEqual(
-            get_primary_artist(
-                "Simon & Garfunkel",
-                artist_resolver=artist_resolution.resolve_artist_name,
-                group_classifier=artist_resolution.is_single_group_artist,
-            ),
-            "Simon & Garfunkel",
-        )
-        mock_search.return_value = []
-        self.assertEqual(
-            get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
-        )
-        self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
-        self.assertEqual(get_primary_artist("Samurai & El Nino"), "Samurai")
-        self.assertEqual(get_primary_artist(""), "Unknown")
-        self.assertEqual(get_primary_artist(None), "Unknown")
+    def test_get_primary_artist(self) -> None:
+        groups = {"Above & Beyond", "Alan & Kepa", "Play & Win", "Simon & Garfunkel"}
+        with patch(
+            "sonora.core.artists.get_config",
+            return_value=SonoraConfig(known_group_artists=frozenset(groups)),
+        ):
+            for group in groups:
+                with self.subTest(group=group):
+                    self.assertEqual(get_primary_artist(group), group)
+            self.assertEqual(get_primary_artist("Play&Win"), "Play & Win")
+            self.assertEqual(
+                get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
+            )
+            self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
+            self.assertEqual(get_primary_artist("Samurai & El Nino"), "Samurai")
+            self.assertEqual(get_primary_artist(""), "Unknown")
+            self.assertEqual(get_primary_artist(None), "Unknown")
 
     def test_group_files_by_parent(self) -> None:
         f1 = Path("/tmp/album1/01.flac")

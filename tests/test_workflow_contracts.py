@@ -138,12 +138,10 @@ class TestTrackProcessingContracts(IsolatedTestCase):
                     side_effect=lambda name: name,
                 ) as resolve,
             ):
-                normalized = normalization.normalize_track_metadata(
-                    recording, artist_resolver=resolve
-                )
+                normalized = normalization.normalize_track_metadata(recording)
             self.assertIs(normalized, recording)
             self.assertEqual(normalized.artist, artist)
-            self.assertEqual(resolve.call_count, 2 if artist else 0)
+            resolve.assert_not_called()
             self.assertIsNone(normalized.producers)
         self.assertEqual(normalized.featured_artists, "Guest")
 
@@ -232,8 +230,10 @@ class TestTrackProcessingContracts(IsolatedTestCase):
         with patch.object(
             track_processing, "normalize_single_track", return_value=None
         ):
+            report = track_processing.normalize_library(self.test_directory)
             self.assertEqual(
-                track_processing.normalize_library(self.test_directory).total_scanned, 0
+                (report.total_scanned, report.failed_files, report.total_unchanged),
+                (1, 1, 0),
             )
         with (
             patch.object(

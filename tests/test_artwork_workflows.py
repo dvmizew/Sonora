@@ -6,6 +6,7 @@ from sonora.audio.art import (
     process_label_artwork,
 )
 from sonora.services.theaudiodb import fetch_artist_images
+from tests.fixtures import image_bytes
 from tests.module_support import ModuleTestCase
 
 
@@ -25,7 +26,7 @@ class TestArtworkWorkflows(ModuleTestCase):
         }
         mock_image_response = MagicMock()
         mock_image_response.status_code = 200
-        mock_image_response.content = b"fakeimage"
+        mock_image_response.content = image_bytes()
 
         mock_get.side_effect = [
             mock_response,
@@ -37,8 +38,8 @@ class TestArtworkWorkflows(ModuleTestCase):
         ]
 
         thumbnail_bytes, banner_bytes = fetch_artist_images("21 Savage")
-        self.assertEqual(thumbnail_bytes, b"fakeimage")
-        self.assertEqual(banner_bytes, b"fakeimage")
+        self.assertEqual(thumbnail_bytes, image_bytes())
+        self.assertEqual(banner_bytes, image_bytes())
 
         artist_folder = self.tmp_path / "21 Savage" / "Album"
         artist_folder.mkdir(parents=True, exist_ok=True)
@@ -58,7 +59,7 @@ class TestArtworkWorkflows(ModuleTestCase):
         mock_fetch.return_value = MagicMock(
             label_urls=("https://assets.fanart.tv/label.png",)
         )
-        mock_download.return_value = b"LABEL_PNG_BYTES"
+        mock_download.return_value = image_bytes()
 
         with patch("sonora.audio.art.get_config") as mock_cfg:
             mock_cfg.return_value = MagicMock(fanart_api_key="valid_key")
@@ -67,7 +68,7 @@ class TestArtworkWorkflows(ModuleTestCase):
             )
             label_file = album_dir / "label.png"
             self.assertTrue(label_file.exists())
-            self.assertEqual(label_file.read_bytes(), b"LABEL_PNG_BYTES")
+            self.assertEqual(label_file.read_bytes(), image_bytes())
 
             # Calling again skips if already exists
             mock_fetch.reset_mock()

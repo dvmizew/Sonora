@@ -11,6 +11,42 @@ from tests.service_support import ServiceResponseTestCase
 
 class TestDiscogsResponses(ServiceResponseTestCase):
     @patch("sonora.services.discogs.SESSION.get")
+    def test_album_and_track_credits_preserve_order_roles_and_deduplication(
+        self, mock_get: MagicMock
+    ) -> None:
+        credits = [
+            {"name": "First Producer (2)", "role": "Producer"},
+            {"name": "Second Producer", "role": "Produced By"},
+            {"name": "First Producer (2)", "role": "Producer"},
+            {"name": "Mixer", "role": "Remix"},
+            {"name": "Writer", "role": "Written-By"},
+            {"name": "Writer", "role": "Music By"},
+            {"name": "Ignored"},
+        ]
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "extraartists": [
+                *credits,
+                {"name": "Scoped Writer", "role": "Words By", "tracks": "2"},
+            ],
+            "tracklist": [
+                {"position": "1", "title": "First", "extraartists": credits},
+                {"position": "2", "title": "Second", "extraartists": credits},
+            ],
+        }
+        mock_get.return_value = response
+        details = fetch_discogs_release_details(1)
+        self.assertIsNotNone(details)
+        assert details is not None
+        for scope in (details, details["track_credits"]["1"]):
+            self.assertEqual(scope["producers"], "First Producer, Second Producer")
+            self.assertEqual(scope["remixer"], "Mixer")
+            self.assertEqual(scope["composer"], "Writer")
+        self.assertEqual(
+            details["track_credits"]["2"]["composer"], "Writer, Scoped Writer"
+        )
+
+    @patch("sonora.services.discogs.SESSION.get")
     def test_release_credits_respect_documented_track_scopes(
         self, mock_get: MagicMock
     ) -> None:

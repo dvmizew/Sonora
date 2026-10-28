@@ -219,7 +219,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
     def test_registered_groups_and_featured_subtokens_are_preserved(self) -> None:
         policy = SonoraConfig(known_group_artists=frozenset({"Alpha & Beta"}))
         with patch("sonora.core.artists.get_config", return_value=policy):
-            self.assertTrue(artist_resolution.is_single_group_artist("Alpha & Beta"))
+            self.assertTrue(artists.is_single_group_artist("Alpha & Beta"))
             self.assertEqual(
                 artists.extract_artist_features("Alpha & Beta"), ("Alpha & Beta", [])
             )
@@ -232,26 +232,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         self.assertEqual(artists.extract_featured_artist_tokens([None, " "]), [])
         self.assertEqual(artists.extract_artist_features(None), ("", []))
         self.assertFalse(artists.is_artist_acronym(None))
-        self.assertFalse(artist_resolution.is_single_group_artist("!!!"))
-        for candidate, expected in (
-            ({"name": "Alpha & Beta", "type": "Group"}, True),
-            ({"name": "Alpha & Beta", "ext:score": "95"}, True),
-            ({"name": "Other", "type": "Group"}, False),
-        ):
-            artists.is_single_group_artist.cache_clear()
-            with (
-                self.subTest(candidate=candidate),
-                patch.object(artist_resolution, "get_cached_api", return_value=None),
-                patch.object(
-                    musicbrainz, "search_musicbrainz_artists", return_value=[candidate]
-                ),
-            ):
-                self.assertEqual(
-                    artist_resolution.is_single_group_artist("Alpha & Beta"), expected
-                )
-        artists.is_single_group_artist.cache_clear()
-        with patch.object(artist_resolution, "get_cached_api", return_value=True):
-            self.assertTrue(artist_resolution.is_single_group_artist("Alpha & Beta"))
+        self.assertFalse(artists.is_single_group_artist("!!!"))
 
     def test_artist_provider_failures_preserve_clean_input(self) -> None:
         with (
@@ -264,7 +245,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
             patch.object(SESSION, "get", side_effect=OSError("offline")),
         ):
             self.assertEqual(artist_resolution.resolve_artist_name("Singer"), "Singer")
-            self.assertFalse(artist_resolution.is_single_group_artist("Alpha & Beta"))
+            self.assertFalse(artists.is_single_group_artist("Alpha & Beta"))
 
 
 class TestAlbumIdentityContracts(IsolatedTestCase):
@@ -388,7 +369,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
             )
         with self.assertRaisesRegex(TypeError, "JSON object"):
             enrichment._extract_release_recording(
-                recording, {"tracks_by_mbid": {MBID: []}}, None, False
+                recording, {"tracks_by_mbid": {MBID: []}}, None
             )
 
     def test_verified_track_id_and_existing_date_do_not_trigger_reassignment(
@@ -397,9 +378,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self.recording.musicbrainz_trackid = MBID
         self.recording.date = "2019"
         with patch.object(musicbrainz, "fetch_track_mbid") as fetch:
-            enrichment._resolve_musicbrainz_track_id(
-                self.recording, None, None, None, False
-            )
+            enrichment._resolve_musicbrainz_track_id(self.recording, None, None)
         fetch.assert_not_called()
         with patch.object(
             musicbrainz,
@@ -551,23 +530,16 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self,
     ) -> None:
         self.recording.track_number = 3
-        release = {"title": "Record"}
         enrichment._resolve_musicbrainz_track_id(
-            self.recording, {(1, 3): MBID}, release, self.details, False
+            self.recording, {(1, 3): MBID}, self.details
         )
         self.assertEqual(self.recording.musicbrainz_trackid, MBID)
         self.recording.musicbrainz_trackid = None
         enrichment._resolve_musicbrainz_track_id(
-            self.recording,
-            {(1, 3): MBID},
-            release,
-            {"title": "Unrelated", "artist": "Wrong"},
-            False,
+            self.recording, {(1, 3): MBID}, {"title": "Unrelated", "artist": "Wrong"}
         )
         self.assertIsNone(self.recording.musicbrainz_trackid)
-        enrichment._resolve_musicbrainz_track_id(
-            self.recording, {(1, 3): MBID}, None, None, False
-        )
+        enrichment._resolve_musicbrainz_track_id(self.recording, {(1, 3): MBID}, None)
         self.assertIsNone(self.recording.musicbrainz_trackid)
 
     def test_recording_extraction_prefers_mbid_and_rejects_unrelated_titles(
@@ -576,7 +548,7 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
         self.recording.musicbrainz_trackid = MBID
         self.assertEqual(
             enrichment._extract_release_recording(
-                self.recording, {"tracks_by_mbid": {MBID: self.details}}, None, False
+                self.recording, {"tracks_by_mbid": {MBID: self.details}}, None
             ),
             self.details,
         )
@@ -585,12 +557,11 @@ class TestMusicBrainzEnrichmentContracts(IsolatedTestCase):
                 self.recording,
                 {"title": "Record"},
                 {"title": "Other", "artist": "Wrong"},
-                False,
             )
         )
         self.assertIsNone(
             enrichment._extract_release_recording(
-                self.recording, {"title": "Record"}, None, False
+                self.recording, {"title": "Record"}, None
             )
         )
 

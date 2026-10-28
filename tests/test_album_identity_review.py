@@ -186,7 +186,7 @@ class TestAlbumIdentityReview(IsolatedTestCase):
                     track_number=1,
                 )
                 musicbrainz_enrichment._resolve_musicbrainz_track_id(
-                    track, {(1, 1): recording_id}, None, candidate, False
+                    track, {(1, 1): recording_id}, candidate
                 )
                 self.assertEqual(track.musicbrainz_trackid, expected)
 

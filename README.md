@@ -136,6 +136,7 @@ short_title_length = 8
 acoustid_confidence_threshold = 0.8
 acoustid_match_margin = 0.02
 allow_unverified_lyrics = false
+import_genius_descriptions = false
 key_confidence_threshold = 0.2
 bpm_search_min = 60.0
 bpm_search_max = 200.0
@@ -145,6 +146,8 @@ enable_shazam = true
 ```
 
 Title matching retains strict scores above 85, or above 95 for titles shorter than eight characters; configuration can strengthen these safeguards. Exact normalized matches remain eligible. BPM estimates are no longer automatically doubled or halved into a preferred tempo range. Set both `bpm_octave_min` and `bpm_octave_max` to opt into octave adjustment; the interval must span at least one octave. Other application policies and structural patterns are listed in [`defaults.json`](src/sonora/defaults.json).
+
+Genius descriptions are community prose and can contain unrelated or vandalized text. They are not copied into comments by default; set `import_genius_descriptions = true` to opt in. Existing comments are preserved. Catalog agreement alone never clears an existing Explicit advisory, because providers may agree on a different clean edition.
 
 Independent enrichment providers receive separate copies of one resolved recording identity. Their proposals merge in a fixed order: conflicting recording identities or ISRCs prevent tag and asset writes, and conflicting individual fields preserve existing values. JSON reports include `metadata_conflicts` keyed by the disputed field. Tracks with unresolved conflicts are not recorded as complete. Provider agreement is evidence, not a correctness guarantee.
 
@@ -225,6 +228,17 @@ sonora tag /path/to/music --json tag_report.json
 ### `sonora check`
 
 Checks audio files for corruption, missing tags, bracket clutter in titles, and fake lossless audio.
+
+Stored MusicBrainz, ISRC and iTunes identifiers are compared with available cached
+recording responses. Conflicting artists, titles and durations are reported for
+review without fetching online or rewriting tags. Missing cache evidence cannot
+verify an identity. The check also reports invalid positions, filename/track-number
+differences, and missing trailing positions when a disc's stored totals agree.
+
+The command exits with status `1` when corrupt audio is found, `130` when interrupted,
+and `0` after a completed check without corruption. Optional metadata warnings remain
+available in the JSON report. Zero or negative BPM tags are treated as unknown and
+can be recalculated with `sonora bpm` without `--force`.
 
 ```bash
 # Basic library check

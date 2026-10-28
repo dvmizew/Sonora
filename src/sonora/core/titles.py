@@ -1,5 +1,4 @@
 import re
-from collections.abc import Callable
 from functools import lru_cache
 
 import ftfy
@@ -50,30 +49,28 @@ def _parse_roman_numeral(token: str) -> int | None:
     return total if 1 <= total <= 50 else None
 
 
-_WORD_NUMBERS = [
-    "one",
-    "two",
-    "three",
-    "four",
-    "five",
-    "six",
-    "seven",
-    "eight",
-    "nine",
-    "ten",
-    "eleven",
-    "twelve",
-    "thirteen",
-    "fourteen",
-    "fifteen",
-    "sixteen",
-    "seventeen",
-    "eighteen",
-    "nineteen",
-    "twenty",
-]
-
-_WORD_NUMBER_MAP: dict[str, int] = {w: i for i, w in enumerate(_WORD_NUMBERS, 1)}
+_WORD_NUMBER_MAP: dict[str, int] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
 
 
 def extract_series_number(text: str | None) -> int | None:
@@ -117,7 +114,7 @@ _METADATA_FILTER = MetadataFilter(
 )
 
 _TITLE_EDITION_PATTERN = re.compile(
-    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd|album\s+version|clean\s+version|explicit\s+version|parody|official\s+(?:music\s+)?video|official\s+audio).*?[\)\]\}]",
+    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd|album\s+version|clean\s+version|explicit\s+version|parody|official\s+(?:music\s+)?video|official\s+audio)\b.*?[\)\]\}]",
     re.IGNORECASE,
 )
 
@@ -126,12 +123,12 @@ _UNBRACKETED_FEAT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_DOTTED_INITIALISM_PATTERN = re.compile(r"(?:[a-z]\.){2,}[a-z]?\.?", re.IGNORECASE)
+
 
 def extract_title_features(
     title: str | None,
     primary_artist: str | None = None,
-    *,
-    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> tuple[str, list[str]]:
     """
     Extract featuring artists from a track title and return (clean_title, list_of_featured_artists).
@@ -139,7 +136,7 @@ def extract_title_features(
     """
     if not title:
         return ("", [])
-    fixed_title = clean_unicode_punct(ftfy.fix_text(str(title)))
+    fixed_title = clean_unicode_punct(title)
     deduped_title = get_duplicate_feat_pattern().sub("", fixed_title)
     clean_base, bracket_feats, _, _ = extract_balanced_features(deduped_title)
 
@@ -158,7 +155,6 @@ def extract_title_features(
     featured_tokens = extract_featured_artist_tokens(
         all_raw_feats,
         primary_artist=primary_artist,
-        group_classifier=group_classifier,
     )
     return cleaned_title, featured_tokens
 
@@ -172,22 +168,8 @@ def clean_title(title: str | None) -> str:
     return clean_t
 
 
-_VERSION_OR_REMIX_KEYWORDS = frozenset(
-    {
-        "remix",
-        "extended",
-        "rework",
-        "edit",
-        "mix",
-        "live",
-        "acoustic",
-        "instrumental",
-        "version",
-        "demo",
-        "sped up",
-        "slowed",
-        "freestyle",
-    }
+_VERSION_OR_REMIX_PATTERN = re.compile(
+    r"\b(remix|extended|rework|edit|mix|live|acoustic|instrumental|version|demo|sped up|slowed|freestyle)(?:s|es|ed|ing)?\b"
 )
 
 _ALBUM_VERSION_PATTERN = re.compile(
@@ -208,11 +190,14 @@ def extract_version_modifier(title: str) -> str | None:
 
 
 def is_version_or_remix(text: str) -> bool:
-    text_lower = text.lower()
-    return any(keyword in text_lower for keyword in _VERSION_OR_REMIX_KEYWORDS)
+    return _VERSION_OR_REMIX_PATTERN.search(normalize_str(text)) is not None
 
 
 _BRACKET_PATTERN = re.compile(r"[\(\[\{][^\(\)\[\]\{\}]+[\)\]\}]")
+_PRODUCTION_CREDIT_PATTERN = re.compile(
+    r"\s+(?:prod\.|produced\s+by)\s+[^()[\]]+$", re.IGNORECASE
+)
+_CLOCK_PUNCTUATION_PATTERN = re.compile(r"(?<!\d)(\d{1,2})[:\"]([0-5]\d)(?!\d)")
 
 
 def extract_bracket_tokens(text: str) -> list[tuple[str, set[str]]]:
@@ -263,6 +248,24 @@ def strip_corrupt_brackets(text: str) -> str:
 
 def _title_identity_score(query_title: str, candidate_title: str) -> float:
     config = get_config()
+    # Production credits describe contributors, not a distinct recording version.
+    query_title = _PRODUCTION_CREDIT_PATTERN.sub("", query_title)
+    candidate_title = _PRODUCTION_CREDIT_PATTERN.sub("", candidate_title)
+    # Clock-style punctuation is often removed from filenames. Restrict this to
+    # minutes with two digits; decimal and numbered-version boundaries remain.
+    clock_punctuation = bool(
+        _CLOCK_PUNCTUATION_PATTERN.search(query_title)
+        or _CLOCK_PUNCTUATION_PATTERN.search(candidate_title)
+    )
+    query_title = _CLOCK_PUNCTUATION_PATTERN.sub(r"\1\2", query_title)
+    candidate_title = _CLOCK_PUNCTUATION_PATTERN.sub(r"\1\2", candidate_title)
+    if clock_punctuation and re.findall(r"\d+", query_title) != re.findall(
+        r"\d+", candidate_title
+    ):
+        return 0.0
+    normalized_title = normalize_str(query_title)
+    if normalized_title and normalized_title == normalize_str(candidate_title):
+        return 100.0
     query_title_clean = clean_title(query_title).lower()
     candidate_title_clean = clean_title(candidate_title).lower()
 
@@ -359,10 +362,14 @@ def _title_identity_score(query_title: str, candidate_title: str) -> float:
             if max(mod_ratio, mod_sort) < config.remix_match_threshold:
                 title_score -= config.remix_modifier_mismatch_penalty
         else:
-            for kw in _VERSION_OR_REMIX_KEYWORDS:
-                if (kw in query_title_clean) != (kw in candidate_title_clean):
-                    title_score -= config.version_mismatch_penalty
-                    break
+            query_versions = set(
+                _VERSION_OR_REMIX_PATTERN.findall(normalize_str(query_title_clean))
+            )
+            candidate_versions = set(
+                _VERSION_OR_REMIX_PATTERN.findall(normalize_str(candidate_title_clean))
+            )
+            if query_versions != candidate_versions:
+                title_score -= config.version_mismatch_penalty
 
     title_score = max(0.0, min(100.0, title_score))
 
@@ -406,12 +413,34 @@ def score_artist_title_match(
 
     title_score = _title_identity_score(query_title, candidate_title)
 
+    min_title_len = min(len(query_title_clean), len(candidate_title_clean))
+    title_thresh = (
+        config.short_title_match_threshold
+        if min_title_len < config.short_title_length
+        else config.title_match_threshold
+    )
+    if title_score < 100 and (
+        title_score <= title_thresh or title_score < config.artist_match_threshold
+    ):
+        return 0.0
+
     if query_artist_clean:
         if not candidate_artist_clean:
             artist_score = 50.0
-        elif query_artist_clean == candidate_artist_clean or (
-            normalized_query_artist
-            and normalized_query_artist == normalized_candidate_artist
+        elif (
+            query_artist_clean == candidate_artist_clean
+            or (
+                normalized_query_artist
+                and normalized_query_artist == normalized_candidate_artist
+            )
+            or (
+                (
+                    _DOTTED_INITIALISM_PATTERN.fullmatch(query_artist_clean)
+                    or _DOTTED_INITIALISM_PATTERN.fullmatch(candidate_artist_clean)
+                )
+                and query_artist_clean.replace(".", "")
+                == candidate_artist_clean.replace(".", "")
+            )
         ):
             artist_score = 100.0
         else:
@@ -445,24 +474,9 @@ def score_artist_title_match(
                         )
                         artist_score = max(core_ratio, core_sort)
 
-        min_title_len = min(len(query_title_clean), len(candidate_title_clean))
-        title_thresh = (
-            config.short_title_match_threshold
-            if min_title_len < config.short_title_length
-            else config.title_match_threshold
-        )
-        if (
-            title_score < 100
-            and (
-                title_score <= title_thresh
-                or title_score < config.artist_match_threshold
-            )
-        ) or (
-            artist_score < 100
-            and (
-                artist_score <= config.title_match_threshold
-                or artist_score < config.artist_match_threshold
-            )
+        if artist_score < 100 and (
+            artist_score <= config.title_match_threshold
+            or artist_score < config.artist_match_threshold
         ):
             return 0.0
 
@@ -470,16 +484,6 @@ def score_artist_title_match(
             artist_score * (1 - config.title_score_weight)
         )
 
-    min_title_len = min(len(query_title_clean), len(candidate_title_clean))
-    title_thresh = (
-        config.short_title_match_threshold
-        if min_title_len < config.short_title_length
-        else config.title_match_threshold
-    )
-    if title_score < 100 and (
-        title_score <= title_thresh or title_score < config.artist_match_threshold
-    ):
-        return 0.0
     return float(title_score)
 
 
@@ -514,3 +518,4 @@ def recording_identity_matches(
 def clear_title_cache() -> None:
     """Invalidate title results derived from configured feature delimiters."""
     clean_title.cache_clear()
+    _credited_feature_artists.cache_clear()

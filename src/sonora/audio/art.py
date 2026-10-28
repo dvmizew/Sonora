@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import httpx
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from rapidfuzz import fuzz
 from rich.markup import escape
 
@@ -29,20 +29,63 @@ from sonora.services.musicbrainz import fetch_cover_art_archive_url
 from sonora.services.theaudiodb import fetch_artist_images
 
 
+def _valid_image(source: Path | bytes) -> bool:
+    try:
+        with Image.open(
+            io.BytesIO(source) if isinstance(source, bytes) else source
+        ) as image:
+            image.load()
+        return True
+    except OSError:
+        return False
+
+
+def _save_image(destination: Path, payload: bytes | None) -> bool:
+    if not payload or not _valid_image(payload):
+        return False
+    atomic_write_bytes(destination, payload)
+    return True
+
+
+def _repair_artist_image_copies(
+    folder: Path, artist_dir: Path, *, dry_run: bool
+) -> None:
+    for filenames in (
+        ("artist.jpg", "artist.png", "folder.jpg"),
+        ("banner.jpg", "banner.png", "fanart.jpg"),
+        ("logo.png",),
+    ):
+        replacement = next(
+            (
+                artist_dir / name
+                for name in filenames
+                if _valid_image(artist_dir / name)
+            ),
+            None,
+        )
+        if replacement is None:
+            continue
+        for name in filenames:
+            # An album's folder.jpg is its cover, not the artist portrait.
+            if name == "folder.jpg" and folder.resolve() != artist_dir.resolve():
+                continue
+            target = folder / name
+            if target.is_file() and not _valid_image(target):
+                if dry_run:
+                    LOG.detail(f"[DRY-RUN] Would replace invalid artwork: {target}")
+                else:
+                    atomic_write_bytes(target, replacement.read_bytes())
+
+
 def _fetch_candidate_artwork(
     artist: str,
     album: str,
     musicbrainz_album_id: str | None = None,
 ) -> tuple[bytes, tuple[int, int]] | None:
-    """
-    Downloads cover art across authoritative sources in preference order:
-    1. MusicBrainz Cover Art Archive (CAA)
-    2. iTunes Search API (1400x1400+)
-    3. Deezer API (1000x1000)
+    """Try Cover Art Archive, iTunes and Deezer in order.
 
-    If an earlier source returns a low-resolution image (< 500x500), queries subsequent
-    sources to obtain a high-resolution candidate, falling back to the best low-resolution
-    image if no high-resolution asset is available.
+    Return the first image meeting the minimum dimensions, or the largest valid
+    fallback when every source returns smaller artwork.
     """
     providers: list[tuple[str, Callable[[], str | None]]] = []
     if musicbrainz_album_id:
@@ -67,12 +110,11 @@ def _fetch_candidate_artwork(
             response.raise_for_status()
             image_bytes = response.content
 
-            candidate_dim: tuple[int, int] | None = None
             try:
                 with Image.open(io.BytesIO(image_bytes)) as img:
                     img.load()
                     candidate_dim = img.size
-            except (OSError, UnidentifiedImageError):
+            except OSError:
                 continue
 
             if (
@@ -112,12 +154,10 @@ def process_album_cover_art(
     target_dir = get_album_root_directory(folder_path)
     cover_image_path = target_dir / "cover.jpg"
     is_low_res = False
-    existing_bytes: bytes | None = None
     existing_dim: tuple[int, int] | None = None
     if cover_image_path.exists() and cover_image_path.stat().st_size > 0:
         try:
-            existing_bytes = cover_image_path.read_bytes()
-            with Image.open(io.BytesIO(existing_bytes)) as cur_img:
+            with Image.open(cover_image_path) as cur_img:
                 cur_img.load()
                 existing_dim = cur_img.size
                 if (
@@ -125,7 +165,7 @@ def process_album_cover_art(
                     or cur_img.height < MIN_COVER_ART_DIMENSION
                 ):
                     is_low_res = True
-        except (OSError, UnidentifiedImageError):
+        except OSError:
             is_low_res = True
 
     artwork_already_present = (
@@ -140,7 +180,7 @@ def process_album_cover_art(
             LOG.debug(
                 f"Target album directory is read-only, skipping cover download: {target_dir}"
             )
-            return cover_image_path if cover_image_path.exists() else None
+            return cover_image_path if _valid_image(cover_image_path) else None
 
         artwork_result = _fetch_candidate_artwork(
             artist=artist,
@@ -175,20 +215,19 @@ def process_album_cover_art(
 
     if musicbrainz_releasegroup_id and get_config().fanart_api_key:
         cdart_path = target_dir / "cdart.png"
-        if not cdart_path.exists() and not dry_run:
+        if not _valid_image(cdart_path) and not dry_run:
             try:
                 fanart_album = fetch_fanart_album(musicbrainz_releasegroup_id)
                 if fanart_album and fanart_album.cdart_urls:
                     cdart_bytes = download_fanart_image_bytes(
                         fanart_album.cdart_urls[0]
                     )
-                    if cdart_bytes:
-                        cdart_path.write_bytes(cdart_bytes)
+                    if _save_image(cdart_path, cdart_bytes):
                         LOG.detail("   ∟ 💿 Downloaded CD disc art -> cdart.png")
             except (httpx.HTTPError, OSError) as error:
                 LOG.debug(f"CD art download failed: {error}")
 
-    if cover_image_path.exists() and cover_image_path.stat().st_size > 0:
+    if _valid_image(cover_image_path):
         return cover_image_path
     return None
 
@@ -248,14 +287,14 @@ def process_artist_artwork(
         return
 
     has_artist_image = any(
-        (artist_dir / filename).exists()
+        _valid_image(artist_dir / filename)
         for filename in ["artist.jpg", "artist.png", "folder.jpg"]
     )
     has_banner_image = any(
-        (artist_dir / filename).exists()
+        _valid_image(artist_dir / filename)
         for filename in ["banner.jpg", "banner.png", "fanart.jpg"]
     )
-    has_logo_image = (artist_dir / "logo.png").exists()
+    has_logo_image = _valid_image(artist_dir / "logo.png")
 
     if artist_mbid and get_config().fanart_api_key and not dry_run:
         try:
@@ -263,8 +302,7 @@ def process_artist_artwork(
             if fanart_artist:
                 if not has_logo_image and fanart_artist.logo_urls:
                     logo_bytes = download_fanart_image_bytes(fanart_artist.logo_urls[0])
-                    if logo_bytes:
-                        (artist_dir / "logo.png").write_bytes(logo_bytes)
+                    if _save_image(artist_dir / "logo.png", logo_bytes):
                         LOG.detail(
                             f"   ∟ 💎 Downloaded artist logo: {escape(artist_name)} -> logo.png"
                         )
@@ -272,8 +310,7 @@ def process_artist_artwork(
                     bg_bytes = download_fanart_image_bytes(
                         fanart_artist.background_urls[0]
                     )
-                    if bg_bytes:
-                        (artist_dir / "fanart.jpg").write_bytes(bg_bytes)
+                    if _save_image(artist_dir / "fanart.jpg", bg_bytes):
                         has_banner_image = True
                         LOG.detail(
                             f"   ∟ 🎨 Downloaded artist fanart: {escape(artist_name)} -> fanart.jpg"
@@ -282,8 +319,7 @@ def process_artist_artwork(
                     thumb_bytes = download_fanart_image_bytes(
                         fanart_artist.thumb_urls[0]
                     )
-                    if thumb_bytes:
-                        (artist_dir / "artist.jpg").write_bytes(thumb_bytes)
+                    if _save_image(artist_dir / "artist.jpg", thumb_bytes):
                         has_artist_image = True
                         LOG.detail(
                             f"   ∟ 👤 Downloaded artist thumbnail: {escape(artist_name)} -> artist.jpg"
@@ -292,8 +328,7 @@ def process_artist_artwork(
                     banner_bytes = download_fanart_image_bytes(
                         fanart_artist.banner_urls[0]
                     )
-                    if banner_bytes:
-                        (artist_dir / "banner.jpg").write_bytes(banner_bytes)
+                    if _save_image(artist_dir / "banner.jpg", banner_bytes):
                         has_banner_image = True
                         LOG.detail(
                             f"   ∟ 🎨 Downloaded artist banner: {escape(artist_name)} -> banner.jpg"
@@ -302,6 +337,7 @@ def process_artist_artwork(
             LOG.debug(f"Fanart artist fetch failed: {error}")
 
     if has_artist_image and has_banner_image:
+        _repair_artist_image_copies(folder_path, artist_dir, dry_run=dry_run)
         return
 
     try:
@@ -310,25 +346,27 @@ def process_artist_artwork(
         )
     except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Failed to fetch artist artwork for {artist_name}: {error}")
+        _repair_artist_image_copies(folder_path, artist_dir, dry_run=dry_run)
         return
 
     if thumbnail_bytes and not has_artist_image and not dry_run:
         try:
-            (artist_dir / "artist.jpg").write_bytes(thumbnail_bytes)
-            LOG.detail(
-                f"   ∟ 👤 Downloaded artist avatar: {escape(artist_name)} -> artist.jpg"
-            )
+            if _save_image(artist_dir / "artist.jpg", thumbnail_bytes):
+                LOG.detail(
+                    f"   ∟ 👤 Downloaded artist avatar: {escape(artist_name)} -> artist.jpg"
+                )
         except OSError as error:
             LOG.debug(f"Failed to write artist avatar image: {error}")
 
     if banner_bytes and not has_banner_image and not dry_run:
         try:
-            (artist_dir / "banner.jpg").write_bytes(banner_bytes)
-            LOG.detail(
-                f"   ∟ 🎨 Downloaded artist banner: {escape(artist_name)} -> banner.jpg"
-            )
+            if _save_image(artist_dir / "banner.jpg", banner_bytes):
+                LOG.detail(
+                    f"   ∟ 🎨 Downloaded artist banner: {escape(artist_name)} -> banner.jpg"
+                )
         except OSError as error:
             LOG.debug(f"Failed to write artist banner image: {error}")
+    _repair_artist_image_copies(folder_path, artist_dir, dry_run=dry_run)
 
 
 def process_label_artwork(
@@ -342,15 +380,14 @@ def process_label_artwork(
         return
 
     label_path = folder_path / "label.png"
-    if label_path.exists() or not os.access(folder_path, os.W_OK):
+    if _valid_image(label_path) or not os.access(folder_path, os.W_OK):
         return
 
     try:
         fanart_label = fetch_fanart_label(label_mbid)
         if fanart_label and fanart_label.label_urls:
             logo_bytes = download_fanart_image_bytes(fanart_label.label_urls[0])
-            if logo_bytes:
-                label_path.write_bytes(logo_bytes)
+            if _save_image(label_path, logo_bytes):
                 name_display = escape(label_name) if label_name else "Record Label"
                 LOG.detail(
                     f"   ∟ 🏷️  Downloaded label logo: {name_display} -> label.png"

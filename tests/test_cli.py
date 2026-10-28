@@ -59,6 +59,32 @@ class TestCLIInterface(IsolatedTestCase):
                 )
             )
 
+    def test_verbose_service_list_renders_with_credentials(self) -> None:
+        from io import StringIO
+
+        from rich.console import Console
+
+        output = StringIO()
+        with (
+            patch("sonora.cli.library.tag_album_folder", return_value=[]),
+            patch("sonora.core.logger.CONSOLE", Console(file=output)),
+        ):
+            self.assertEqual(
+                main(
+                    [
+                        "tag",
+                        str(self.temporary_path),
+                        "--dry-run",
+                        "--verbose",
+                        "--lastfm-key",
+                        "test-key",
+                    ]
+                ),
+                0,
+            )
+        self.assertIn("Active services:", output.getvalue())
+        self.assertIn("Last.fm", output.getvalue())
+
     def test_verbose_resets_after_command_failure(self) -> None:
         from sonora.core.logger import LOG
 
@@ -246,7 +272,7 @@ class TestCLIInterface(IsolatedTestCase):
     def test_handle_normalize_subcommand(self) -> None:
         with patch("sonora.cli.library.normalize_library") as mock_normalize:
             mock_normalize.return_value = NormalizeReport(
-                [TrackInfo(file_path=Path("song.flac"))],
+                total_scanned=1,
                 modified_files={"song.flac": ["artist: 'Old' -> 'New'"]},
             )
             json_output = self.temporary_path / "normalize_report.json"
@@ -266,7 +292,7 @@ class TestCLIInterface(IsolatedTestCase):
 
     def test_handle_normalize_subcommand_no_dsp(self) -> None:
         with patch("sonora.cli.library.normalize_library") as mock_normalize:
-            mock_normalize.return_value = NormalizeReport([])
+            mock_normalize.return_value = NormalizeReport()
             exit_code = main(["normalize", str(self.temporary_path), "--no-dsp"])
             self.assertEqual(exit_code, 0)
             mock_normalize.assert_called_once_with(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from stat import S_ISREG
 from typing import Any
@@ -176,19 +176,5 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
         lyrics=lyrics_text,
     )
 
-    set_cached_api(
-        cache_key,
-        {
-            "title": result.title,
-            "artist": result.artist,
-            "album": result.album,
-            "genre": result.genre,
-            "apple_music_id": result.apple_music_id,
-            "isrc": result.isrc,
-            "cover_art_url": result.cover_art_url,
-            "release_date": result.release_date,
-            "label": result.label,
-            "lyrics": result.lyrics,
-        },
-    )
+    set_cached_api(cache_key, asdict(result))
     return result

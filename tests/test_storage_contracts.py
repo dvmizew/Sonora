@@ -1,6 +1,8 @@
 import errno
+import os
 import shutil
 import sqlite3
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -20,7 +22,11 @@ from sonora.core.cache import (
     set_cached_api,
 )
 from sonora.core.cache_storage import CacheDecodeError, MetadataDisk
-from sonora.core.files import atomic_write_bytes, move_file_exclusively
+from sonora.core.files import (
+    atomic_audio_edit,
+    atomic_write_bytes,
+    move_file_exclusively,
+)
 from sonora.core.state import LibraryStateVault
 from tests.support import IsolatedTestCase
 
@@ -75,6 +81,32 @@ class TestConcurrentLibraryStateContracts(IsolatedTestCase):
 
 
 class TestAtomicFileContracts(IsolatedTestCase):
+    def test_atomic_replacement_preserves_existing_permissions(self) -> None:
+        destination = self.test_directory / "lyrics.lrc"
+        destination.write_bytes(b"old")
+        destination.chmod(0o640)
+        atomic_write_bytes(destination, b"new")
+        self.assertEqual(destination.read_bytes(), b"new")
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o640)
+
+    def test_audio_replacement_with_same_size_and_timestamp_is_not_overwritten(
+        self,
+    ) -> None:
+        destination = self.test_directory / "recording.flac"
+        destination.write_bytes(b"old audio")
+        before = destination.stat()
+        replacement = self.test_directory / "replacement.flac"
+        replacement.write_bytes(b"new audio")
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with (
+            self.assertRaisesRegex(OSError, "changed during tagging"),
+            atomic_audio_edit(destination) as staging,
+        ):
+            staging.write_bytes(b"tagged audio")
+            replacement.replace(destination)
+        self.assertEqual(destination.read_bytes(), b"new audio")
+        self.assertEqual(list(self.test_directory.glob(".recording.*")), [])
+
     def test_sync_failure_keeps_original_and_removes_staging_file(self) -> None:
         destination = self.test_directory / "lyrics.lrc"
         destination.write_bytes(b"original lyrics")

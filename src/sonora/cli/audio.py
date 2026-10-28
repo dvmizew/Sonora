@@ -1,9 +1,9 @@
 import dataclasses
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from rich.markup import escape
 
@@ -89,8 +89,60 @@ def _run_parallel_audio_task(
     return results, interrupted
 
 
+def _report_audio_measurements(
+    path: Path,
+    results: Sequence[tuple[Path, float | str | None, bool]],
+    metric: Literal["bpm", "key"],
+    dry_run: bool,
+    json_report: Path | None,
+) -> None:
+    title, action, report_label = (
+        ("BPM", "calculated", "bpm")
+        if metric == "bpm"
+        else ("Musical Key", "detected", "musical key")
+    )
+    computed = sum(
+        1 for _, value, measured in results if measured and value is not None
+    )
+    skipped = len(results) - computed
+    label = "BPM Calculated" if metric == "bpm" else "Key Detected"
+    LOG.summary_table(
+        f"{title} Summary",
+        [
+            ("Total Files Scanned", str(len(results)), None),
+            (
+                f"{label} (preview)" if dry_run else f"{label} & Tagged",
+                str(computed),
+                "green" if computed else "white",
+            ),
+            ("Already Tagged / Skipped", str(skipped), None),
+        ],
+    )
+    if json_report:
+        report_data = {
+            "summary": {
+                "target_directory": str(path.resolve()),
+                "total_scanned": len(results),
+                "dry_run": dry_run,
+                f"{metric}_{action}": computed,
+                f"{metric}_tagged": 0 if dry_run else computed,
+                "skipped": skipped,
+            },
+            "details": [
+                {
+                    "file": str(audio_path),
+                    metric: value,
+                    action: measured,
+                    "modified": measured and value is not None and not dry_run,
+                }
+                for audio_path, value, measured in results
+            ],
+        }
+        _write_json_report(json_report, report_data, report_label)
+
+
 def _process_bpm_file(
-    audio_path: Path, force: bool, dry_run: bool, musixmatch_token: str | None = None
+    audio_path: Path, force: bool, dry_run: bool
 ) -> tuple[Path, float | None, bool]:
     wait_if_paused()
     try:
@@ -124,50 +176,12 @@ def bpm(
     if not results and not interrupted:
         return 0
 
-    computed = sum(
-        1
-        for _, bpm_value, was_calculated in results
-        if was_calculated and bpm_value is not None
-    )
-    skipped = len(results) - computed
-    summary_rows = [
-        ("Total Files Scanned", str(len(results)), None),
-        (
-            "BPM Calculated (preview)" if dry_run else "BPM Calculated & Tagged",
-            str(computed),
-            "green" if computed else "white",
-        ),
-        ("Already Tagged / Skipped", str(skipped), None),
-    ]
-    LOG.summary_table("BPM Summary", summary_rows)
-    if json_report:
-        report_data = {
-            "summary": {
-                "target_directory": str(path.resolve()),
-                "total_scanned": len(results),
-                "dry_run": dry_run,
-                "bpm_calculated": computed,
-                "bpm_tagged": 0 if dry_run else computed,
-                "skipped": skipped,
-            },
-            "details": [
-                {
-                    "file": str(audio_path),
-                    "bpm": bpm_value,
-                    "calculated": was_calculated,
-                    "modified": was_calculated
-                    and bpm_value is not None
-                    and not dry_run,
-                }
-                for audio_path, bpm_value, was_calculated in results
-            ],
-        }
-        _write_json_report(json_report, report_data, "bpm")
+    _report_audio_measurements(path, results, "bpm", dry_run, json_report)
     return 130 if interrupted else 0
 
 
 def _process_key_file(
-    audio_path: Path, force: bool, dry_run: bool, musixmatch_token: str | None = None
+    audio_path: Path, force: bool, dry_run: bool
 ) -> tuple[Path, str | None, bool]:
     wait_if_paused()
     try:
@@ -207,45 +221,7 @@ def key(
     if not results and not interrupted:
         return 0
 
-    computed = sum(
-        1
-        for _, musical_key, was_detected in results
-        if was_detected and musical_key is not None
-    )
-    skipped = len(results) - computed
-    summary_rows = [
-        ("Total Files Scanned", str(len(results)), None),
-        (
-            "Key Detected (preview)" if dry_run else "Key Detected & Tagged",
-            str(computed),
-            "green" if computed else "white",
-        ),
-        ("Already Tagged / Skipped", str(skipped), None),
-    ]
-    LOG.summary_table("Musical Key Summary", summary_rows)
-    if json_report:
-        report_data = {
-            "summary": {
-                "target_directory": str(path.resolve()),
-                "total_scanned": len(results),
-                "dry_run": dry_run,
-                "key_detected": computed,
-                "key_tagged": 0 if dry_run else computed,
-                "skipped": skipped,
-            },
-            "details": [
-                {
-                    "file": str(audio_path),
-                    "key": musical_key,
-                    "detected": was_detected,
-                    "modified": was_detected
-                    and musical_key is not None
-                    and not dry_run,
-                }
-                for audio_path, musical_key, was_detected in results
-            ],
-        }
-        _write_json_report(json_report, report_data, "musical key")
+    _report_audio_measurements(path, results, "key", dry_run, json_report)
     return 130 if interrupted else 0
 
 

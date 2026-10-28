@@ -139,9 +139,16 @@ def _score_musicbrainz_candidate(
     disambig = str(release.get("disambiguation") or "").strip().lower()
     edition_tokens = set(normalize_str(disambig).split())
     if (
-        expected_advisory == "Explicit"
-        and {"clean", "cleaned"}.intersection(edition_tokens)
+        {"clean", "cleaned", "censored"}.intersection(edition_tokens)
         and "explicit" not in edition_tokens
+        and "uncensored" not in edition_tokens
+        and (
+            expected_advisory == "Explicit"
+            or not any(
+                marker in album.casefold()
+                for marker in ("(clean)", "(clean version)", "(censored)")
+            )
+        )
     ):
         return 0.0
 
@@ -196,16 +203,24 @@ def search_musicbrainz_release(
         return None
 
     count_suffix = f":{expected_track_count}" if expected_track_count else ""
-    cache_key = f"mb_release:v4:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}:{expected_advisory or ''}"
+    cache_key = f"mb_release:v5:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}:{expected_advisory or ''}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
     if cached == "":
         return None
 
-    best_score = 0.0
-    candidate_scores: dict[str, float] = {}
-    target_release: dict[str, object] | None = None
+    candidates: dict[str, tuple[float, dict[str, object]]] = {}
+
+    def consider(release: dict[str, object]) -> None:
+        release_id = str(release.get("id") or "")
+        score = _score_musicbrainz_candidate(
+            release, artist, album, expected_track_count, expected_advisory
+        )
+        if release_id and score >= get_config().catalog_candidate_rank_threshold:
+            previous = candidates.get(release_id)
+            if previous is None or score > previous[0]:
+                candidates[release_id] = score, release
 
     # Batch strategy: Check artist discography cache first
     discography = fetch_artist_discography(artist)
@@ -216,17 +231,7 @@ def search_musicbrainz_release(
         if release_title == album_lower or (
             album_lower in release_title and len(album_lower) >= 4
         ):
-            candidate_score = _score_musicbrainz_candidate(
-                release, artist, album, expected_track_count, expected_advisory
-            )
-            if candidate_score >= get_config().catalog_candidate_rank_threshold:
-                candidate_scores[str(release.get("id") or "")] = candidate_score
-            if (
-                candidate_score > best_score
-                and candidate_score >= get_config().catalog_candidate_rank_threshold
-            ):
-                best_score = candidate_score
-                target_release = release
+            consider(release)
 
     try:
         result = _call_musicbrainz(
@@ -239,21 +244,11 @@ def search_musicbrainz_release(
             musicbrainz_payload.get("release-list", []), "MusicBrainz releases"
         )
         for release in releases:
-            candidate_score = _score_musicbrainz_candidate(
-                release, artist, album, expected_track_count, expected_advisory
-            )
-            if candidate_score >= get_config().catalog_candidate_rank_threshold:
-                candidate_scores[str(release.get("id") or "")] = candidate_score
-            if (
-                candidate_score > best_score
-                and candidate_score >= get_config().catalog_candidate_rank_threshold
-            ):
-                best_score = candidate_score
-                target_release = release
+            consider(release)
 
         cleaned_album = clean_title(album)
         if (
-            (target_release is None or best_score < 100.0)
+            max((score for score, _ in candidates.values()), default=0.0) < 100.0
             and cleaned_album
             and normalize_str(cleaned_album) != normalize_str(album)
         ):
@@ -271,19 +266,11 @@ def search_musicbrainz_release(
                 "MusicBrainz alternative releases",
             )
             for release in alt_releases:
-                candidate_score = _score_musicbrainz_candidate(
-                    release, artist, album, expected_track_count, expected_advisory
-                )
-                if candidate_score >= get_config().catalog_candidate_rank_threshold:
-                    candidate_scores[str(release.get("id") or "")] = candidate_score
-                if (
-                    candidate_score > best_score
-                    and candidate_score >= get_config().catalog_candidate_rank_threshold
-                ):
-                    best_score = candidate_score
-                    target_release = release
+                consider(release)
 
-        if sum(score == best_score for score in candidate_scores.values()) > 1:
+        ranked = sorted(candidates.values(), key=lambda entry: entry[0], reverse=True)
+        target_release = ranked[0][1] if ranked else None
+        if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
             LOG.detail(
                 f"Ambiguous MusicBrainz release for {escape(artist)} - {escape(album)}; no edition selected"
             )

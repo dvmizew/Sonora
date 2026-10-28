@@ -417,23 +417,95 @@ def _enrich_discogs(
         if isinstance(genres_val, list) and genres_val and not track_info.genre:
             track_info.genre = normalize_genre(str(genres_val[0])) or track_info.genre
 
-        discogs_rel_map = {
-            "id": "discogs_release_id",
-            "artist_id": "discogs_artist_id",
-            "country": "release_country",
-            "label": "label",
-            "catalog_number": "catalog_number",
-            "barcode": "barcode",
-            "media": "media",
-            "composer": "composer",
-            "producers": "producers",
-            "remixer": "remixer",
-        }
-        if not track_info.date or (
-            force and not is_valid_uuid(track_info.musicbrainz_albumid)
+        selectors = [
+            (str(track_info.discogs_release_id or ""), str(release.get("id") or "")),
+            (
+                normalize_str(track_info.barcode or "")
+                .replace(" ", "")
+                .replace("-", "")
+                .lstrip("0"),
+                normalize_str(str(release.get("barcode") or ""))
+                .replace(" ", "")
+                .replace("-", "")
+                .lstrip("0"),
+            ),
+            (
+                normalize_str(track_info.catalog_number or ""),
+                normalize_str(str(release.get("catalog_number") or "")),
+            ),
+        ]
+        comparisons = [
+            local == candidate for local, candidate in selectors if local and candidate
+        ]
+        format_families = (
+            {"cd", "hdcd", "cdr"},
+            {"vinyl", "lp"},
+            {"cassette"},
+            {"file", "digital", "flac", "aac", "mp3"},
+        )
+        local_format = next(
+            (
+                i
+                for i, names in enumerate(format_families)
+                if names.intersection(normalize_str(track_info.media or "").split())
+            ),
+            None,
+        )
+        candidate_format = next(
+            (
+                i
+                for i, names in enumerate(format_families)
+                if names.intersection(
+                    normalize_str(str(release.get("media") or "")).split()
+                )
+            ),
+            None,
+        )
+        edition_verified = (
+            bool(comparisons)
+            and all(comparisons)
+            and (
+                local_format is None
+                or candidate_format is None
+                or local_format == candidate_format
+            )
+        )
+        discogs_rel_map = {"artist_id": "discogs_artist_id"}
+        if edition_verified:
+            discogs_rel_map.update(
+                {
+                    "id": "discogs_release_id",
+                    "country": "release_country",
+                    "label": "label",
+                    "catalog_number": "catalog_number",
+                    "barcode": "barcode",
+                    "media": "media",
+                    "composer": "composer",
+                    "producers": "producers",
+                    "remixer": "remixer",
+                }
+            )
+            if not track_info.date or (
+                force and not is_valid_uuid(track_info.musicbrainz_albumid)
+            ):
+                discogs_rel_map["released"] = "date"
+                discogs_rel_map["year"] = "date"
+        elif comparisons and (
+            not all(comparisons)
+            or (
+                local_format is not None
+                and candidate_format is not None
+                and local_format != candidate_format
+            )
         ):
-            discogs_rel_map["released"] = "date"
-            discogs_rel_map["year"] = "date"
+            track_info.metadata_conflicts["discogs_release_id"] = (
+                "Discogs release identifiers or medium disagree with local evidence; "
+                "release identifiers, dates and pressing metadata withheld."
+            )
+        else:
+            LOG.detail(
+                "Discogs release edition unverified; pressing metadata withheld."
+            )
         has_authoritative_mb = is_valid_uuid(
             track_info.musicbrainz_trackid
         ) or is_valid_uuid(track_info.musicbrainz_albumid)
@@ -540,15 +612,21 @@ def _enrich_deezer(
             else None
         )
         if album:
-            deezer_album_map = {
-                "genre": "genre",
-                "label": "label",
-                "barcode": "barcode",
-            }
-            if not track_info.date or (
-                force and not is_valid_uuid(track_info.musicbrainz_albumid)
-            ):
-                deezer_album_map["release_date"] = "date"
+            deezer_album_map = {"genre": "genre"}
+            same_album = _is_generic(track_info.album, "album") or (
+                normalize_str(track_info.album)
+                == normalize_str(str(album.get("title") or ""))
+            )
+            if same_album:
+                deezer_album_map["label"] = "label"
+                if not track_info.date or (
+                    force and not is_valid_uuid(track_info.musicbrainz_albumid)
+                ):
+                    deezer_album_map["release_date"] = "date"
+            if track_info.barcode and str(album.get("barcode") or "").lstrip(
+                "0"
+            ) == track_info.barcode.lstrip("0"):
+                deezer_album_map["barcode"] = "barcode"
             apply_metadata_mapping(
                 track_info,
                 album,
@@ -560,6 +638,11 @@ def _enrich_deezer(
                 album_deezer_details is not None
                 and not is_valid_uuid(track_info.musicbrainz_albumid)
                 and album.get("title")
+                and (
+                    _is_generic(track_info.album, "album")
+                    or normalize_str(track_info.album)
+                    == normalize_str(str(album["title"]))
+                )
                 and (
                     force
                     or not track_info.album
@@ -573,6 +656,7 @@ def _enrich_deezer(
 
         track: dict[str, Any] | None = None
         track_is_from_album = False
+        conflicting_isrc = False
         if album:
             track, track_is_from_album = _find_track_in_album_mapping(
                 album.get("tracks_by_title"),
@@ -597,6 +681,7 @@ def _enrich_deezer(
             ):
                 track = candidate
             elif candidate:
+                conflicting_isrc = True
                 track_info.metadata_conflicts["isrc"] = (
                     "Stored ISRC resolves to a conflicting Deezer recording; "
                     "existing value requires independent verification."
@@ -605,14 +690,45 @@ def _enrich_deezer(
                     f"Rejected conflicting Deezer ISRC result for {escape(track_info.file_path.name)}"
                 )
 
-        if not track and (not track_info.isrc or not track_info.producers or force):
+        if not track and (
+            not track_info.isrc or not track_info.producers or force or conflicting_isrc
+        ):
             track = deezer_service.fetch_deezer_track_details(
                 track_info.artist,
                 track_info.title,
                 duration=track_info.duration,
             )
 
-        if not track:
+        if track and conflicting_isrc:
+            candidate_isrc = str(track.get("isrc") or "").strip().upper()
+            candidate_duration = safe_float(track.get("duration"))
+            if (
+                candidate_isrc
+                and candidate_isrc != str(track_info.isrc or "").strip().upper()
+                and track_info.duration is not None
+                and candidate_duration is not None
+                and abs(track_info.duration - candidate_duration)
+                <= get_config().single_duration_tolerance_seconds
+                and score_artist_title_match(
+                    track_info.artist,
+                    track_info.title,
+                    str(track.get("artist") or ""),
+                    str(track.get("title") or ""),
+                )
+                == 100
+            ):
+                track_info.isrc = candidate_isrc
+                track_info.metadata_sources["isrc"] = "Deezer"
+                track_info.metadata_conflicts.pop("isrc", None)
+
+        if not track or not _catalog_recording_matches_track(
+            track,
+            track_info.title,
+            track_info.artist,
+            track_info.isrc,
+            None,
+            track_info.duration,
+        ):
             return
 
         sequence_album = _compatible_release_layout(track_info, album_deezer_details)
@@ -684,16 +800,21 @@ def _enrich_deezer(
         )
 
 
-def _enrich_genius(
-    track_info: TrackInfo,
-    genius_api_token: str | None,
-    force: bool = False,
-) -> None:
+def _enrich_genius(track_info: TrackInfo, genius_api_token: str | None) -> None:
     if not genius_api_token:
         return
+    credited_artist = track_info.artist
+    featured_artists = extract_featured_artist_tokens(
+        track_info.featured_artists, primary_artist=track_info.artist
+    )
+    if featured_artists:
+        credited_artist = f"{credited_artist} feat. {', '.join(featured_artists)}"
     try:
         genius_details = genius_service.fetch_genius_song_details(
-            track_info.artist, track_info.title, api_token=genius_api_token
+            credited_artist,
+            track_info.title,
+            api_token=genius_api_token,
+            album=track_info.album,
         )
         if not genius_details:
             if not track_info.genius_song_id:
@@ -722,7 +843,7 @@ def _enrich_genius(
                 )
             )
             validated_score = genius_service.score_genius_song_match(
-                track_info.artist, track_info.title, stored_song
+                credited_artist, track_info.title, stored_song, album=track_info.album
             )
             if identity_score <= 0 and validated_score <= 0:
                 track_info.genius_song_id = None
@@ -741,6 +862,33 @@ def _enrich_genius(
                 )
                 return
             genius_details = stored_song
+        previous_genius_id = track_info.genius_song_id
+        replacement_genius_id = genius_details.get("genius_song_id")
+        if (
+            previous_genius_id
+            and replacement_genius_id
+            and str(replacement_genius_id) != previous_genius_id
+        ):
+            # A repaired identifier does not repair legacy fields retained by
+            # the non-destructive merge. Their original provenance may be lost.
+            for field_name, provider_field in (
+                ("comment", "description"),
+                ("composer", "writers"),
+                ("lyricist", "writers"),
+                ("producers", "producers"),
+                ("featured_artists", "featured_artists"),
+            ):
+                existing = getattr(track_info, field_name)
+                if (
+                    existing
+                    and existing != genius_details.get(provider_field)
+                    and track_info.metadata_sources.get(field_name) in (None, "Genius")
+                ):
+                    track_info.metadata_conflicts.setdefault(
+                        field_name,
+                        "Genius identifier changed; existing metadata may belong "
+                        "to the previous song and requires review. Value preserved.",
+                    )
         apply_metadata_mapping(
             track_info,
             genius_details,
@@ -750,10 +898,11 @@ def _enrich_genius(
         )
         genius_map = {
             "writers": "composer",
-            "description": "comment",
             "featured_artists": "featured_artists",
             "producers": "producers",
         }
+        if get_config().import_genius_descriptions:
+            genius_map["description"] = "comment"
         if not track_info.date:
             genius_map["release_date"] = "date"
         apply_metadata_mapping(

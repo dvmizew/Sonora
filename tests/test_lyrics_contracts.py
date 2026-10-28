@@ -12,6 +12,7 @@ from sonora.core import sidecars
 from sonora.core.config import get_config
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
+from sonora.core.models import TrackInfo
 from sonora.modules import track_processing
 from sonora.services import lyrics
 from tests.support import IsolatedTestCase
@@ -21,6 +22,58 @@ ENHANCED = "[00:01.00] <00:01.00> First <00:01.50> line"
 
 
 class TestLyricsTokenContracts(IsolatedTestCase):
+    def test_lrclib_failure_does_not_block_explicitly_enabled_fallback(self) -> None:
+        for fallback in (SYNCED, None):
+            with (
+                self.subTest(fallback=fallback),
+                patch.object(lyrics, "_query_lrclib", side_effect=OSError("offline")),
+                patch.object(
+                    lyrics.syncedlyrics, "search", return_value=fallback
+                ) as search,
+                patch.object(lyrics._LYRICS_LIMITER, "wait"),
+            ):
+                if fallback:
+                    self.assertEqual(
+                        lyrics._query_syncedlyrics(
+                            "Primary - Recording",
+                            False,
+                            False,
+                            False,
+                            ["Lrclib", "Genius"],
+                            None,
+                        ),
+                        fallback,
+                    )
+                else:
+                    with self.assertRaises(OSError):
+                        lyrics._query_syncedlyrics(
+                            "Primary - Recording",
+                            False,
+                            False,
+                            False,
+                            ["Lrclib", "Genius"],
+                            None,
+                        )
+                self.assertEqual(search.call_args.kwargs["providers"], ["Genius"])
+
+    def test_authenticated_fallback_miss_does_not_hide_lrclib_failure(self) -> None:
+        with (
+            patch.object(lyrics, "_query_lrclib", side_effect=OSError("offline")),
+            patch.object(lyrics, "_query_authenticated_musixmatch", return_value=None),
+            patch.object(lyrics.syncedlyrics, "search") as search,
+            self.assertRaises(OSError),
+        ):
+            lyrics._query_syncedlyrics(
+                "Primary - Recording",
+                False,
+                False,
+                False,
+                ["Lrclib", "Musixmatch"],
+                None,
+                musixmatch_token="fixture-token",
+            )
+        search.assert_not_called()
+
     def test_raw_and_exported_tokens_parse_without_writing_sdk_state(self) -> None:
         tokens = (
             " fixture-token ",
@@ -345,8 +398,17 @@ class TestLyricsParsingContracts(IsolatedTestCase):
         with (
             patch.object(lyrics._LRCLIB_LIMITER, "wait"),
             patch.object(SESSION, "get", side_effect=OSError("offline")),
+            self.assertRaisesRegex(OSError, "offline"),
         ):
-            self.assertIsNone(lyrics._query_lrclib("Primary - Recording"))
+            lyrics._query_lrclib("Primary - Recording")
+        with (
+            patch.object(lyrics, "get_cached_api", return_value=None),
+            patch.object(lyrics, "set_cached_api") as cache,
+            patch.object(lyrics, "_query_lrclib", side_effect=OSError("offline")),
+            self.assertRaisesRegex(RuntimeError, "offline"),
+        ):
+            lyrics.fetch_synced_lyrics("Primary", "Recording")
+        cache.assert_not_called()
         with (
             patch.object(lyrics, "get_cached_api", return_value=""),
             patch.object(lyrics, "_query_syncedlyrics") as query,
@@ -672,6 +734,81 @@ class TestExistingLyricsValidation(IsolatedTestCase):
         self.audio_path = self.test_directory / "recording.flac"
         self.audio_path.touch()
         self.lrc_path = self.audio_path.with_suffix(".lrc")
+
+    def test_collaboration_remix_cannot_import_original_versions_lyrics(self) -> None:
+        original_body = (
+            "The original singer performs the original verse and chorus. " * 12
+        )
+        different_body = (
+            "A guest performs a new verse with different words and meaning. " * 12
+        )
+        remix = self.audio_path.with_name("Song (Remix).flac")
+        remix.touch()
+        for force in (False, True):
+            for candidate, accepted in (
+                (original_body + "!", False),
+                (different_body, True),
+            ):
+                sidecar = remix.with_suffix(".lrc")
+                sidecar.unlink(missing_ok=True)
+                conflicts = {}
+                with (
+                    self.subTest(force=force, accepted=accepted),
+                    patch.object(lyrics, "fetch_synced_lyrics", return_value=candidate),
+                    patch.object(
+                        track_processing.metadata_module,
+                        "read_track_metadata",
+                        return_value=TrackInfo(
+                            self.audio_path,
+                            artist="Primary",
+                            title="Song",
+                            lyrics=original_body,
+                        ),
+                    ),
+                ):
+                    text, _quality = track_processing.process_track_lyrics(
+                        remix,
+                        "Primary & Guest",
+                        "Song (Remix)",
+                        duration=100,
+                        force=force,
+                        conflicts=conflicts,
+                    )
+                self.assertEqual(text is not None, accepted)
+                self.assertEqual(sidecar.exists(), accepted)
+                self.assertEqual("lyrics" in conflicts, not accepted)
+
+    def test_duplicate_original_body_is_not_copied_from_embedding_to_remix_sidecar(
+        self,
+    ) -> None:
+        body = "The original singer performs this entire original verse. " * 12
+        remix = self.audio_path.with_name("Song (Remix).flac")
+        remix.touch()
+        conflicts = {}
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=None),
+            patch.object(
+                track_processing.metadata_module,
+                "read_track_metadata",
+                return_value=TrackInfo(
+                    self.audio_path,
+                    artist="Primary",
+                    title="Song",
+                    lyrics=body,
+                ),
+            ),
+        ):
+            result = track_processing.process_track_lyrics(
+                remix,
+                "Primary & Guest",
+                "Song (Remix)",
+                duration=100,
+                existing_lyrics=body,
+                conflicts=conflicts,
+            )
+        self.assertEqual(result, (None, None))
+        self.assertFalse(remix.with_suffix(".lrc").exists())
+        self.assertIn("lyrics", conflicts)
 
     def test_conflicting_plain_synced_and_enhanced_lyrics_are_preserved_but_not_reused(
         self,

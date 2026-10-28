@@ -21,6 +21,32 @@ from tests.support import IsolatedTestCase
 
 
 class TestMetadataIdentityRegressions(AudioRegressionTestCase):
+    def test_date_write_removes_stale_year_and_reconciles_original_year(self) -> None:
+        path = self.audio("01 - Recording.flac")
+        with taglib.File(str(path)) as song:
+            song.tags.update(
+                {
+                    "ARTIST": ["Primary"],
+                    "TITLE": ["Recording"],
+                    "ALBUM": ["Record"],
+                    "DATE": ["2009"],
+                    "YEAR": ["2018"],
+                    "ORIGINALDATE": ["2007"],
+                    "ORIGINALYEAR": ["2008"],
+                    "COMMENT": ["Preserve this comment"],
+                }
+            )
+            song.save()
+        track = read_track_metadata(path)
+        self.assertEqual(track.date, "2009")
+        write_track_metadata(track)
+        with taglib.File(str(path)) as song:
+            self.assertEqual(song.tags["DATE"], ["2009"])
+            self.assertNotIn("YEAR", song.tags)
+            self.assertEqual(song.tags["ORIGINALDATE"], ["2007"])
+            self.assertEqual(song.tags["ORIGINALYEAR"], ["2007"])
+            self.assertEqual(song.tags["COMMENT"], ["Preserve this comment"])
+
     def test_same_title_different_artist_is_shielded(self) -> None:
         audio_path = self.root / "01 - Intro.flac"
         unrelated = TrackInfo(

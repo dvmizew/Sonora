@@ -16,17 +16,22 @@ from sonora.core.config import get_config, get_disambiguation_pattern
 
 
 def safe_int(value: object) -> int | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
     numeric_text = str(value).split("/")[0].strip()
-    return int(numeric_text) if numeric_text.isdigit() else None
+    if not numeric_text.isdecimal():
+        return None
+    try:
+        return int(numeric_text)
+    except ValueError:
+        return None
 
 
 def safe_int_pair(value: object) -> tuple[int | None, int | None]:
     """Safely parse paired numeric values (e.g. '1/2', '01/12', 1) into (current, total)."""
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None, None
     if isinstance(value, int):
         return value, None
@@ -42,15 +47,16 @@ def safe_int_pair(value: object) -> tuple[int | None, int | None]:
 
 
 def safe_float(value: object) -> float | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return float(value) if math.isfinite(value) else None
-    numeric_text = str(value).replace(" dB", "").strip()
     try:
-        parsed_float = float(numeric_text)
+        parsed_float = float(
+            value
+            if isinstance(value, (int, float))
+            else str(value).replace(" dB", "").strip()
+        )
         return parsed_float if math.isfinite(parsed_float) else None
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 

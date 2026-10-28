@@ -162,10 +162,10 @@ class TestLibraryCommandContracts(IsolatedTestCase):
     def test_normalize_results_and_partial_reports_preserve_counts(
         self,
     ) -> None:
-        recording = TrackInfo(self.test_directory / "recording.flac")
         for outcome in (
-            NormalizeReport([recording]),
-            InterruptedOperationError(NormalizeReport([recording])),
+            NormalizeReport(total_scanned=1),
+            NormalizeReport(total_scanned=1, failed_files=1),
+            InterruptedOperationError(NormalizeReport(total_scanned=1)),
             InterruptedOperationError(None),
         ):
             with (
@@ -189,7 +189,9 @@ class TestLibraryCommandContracts(IsolatedTestCase):
                             "--no-dsp",
                         ]
                     ),
-                    130 if isinstance(outcome, BaseException) else 0,
+                    130
+                    if isinstance(outcome, BaseException)
+                    else int(bool(outcome.failed_files)),
                 )
             report = json.loads(report_path.read_text())
             self.assertEqual(

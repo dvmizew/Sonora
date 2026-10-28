@@ -5,7 +5,11 @@ from typing import Any
 
 from sonora.core.config import SonoraConfig
 from sonora.core.models import TrackInfo
-from sonora.core.titles import recording_identity_matches, score_artist_title_match
+from sonora.core.titles import (
+    is_version_or_remix,
+    recording_identity_matches,
+    score_artist_title_match,
+)
 from sonora.modules import matching
 from sonora.modules.matching import _recording_matches_track_identity
 from tests.support import IsolatedTestCase
@@ -205,6 +209,7 @@ class TestAlbumPositionBoundaries(IsolatedTestCase):
         )
         self.assertEqual(recording.disc_number, 2)
         recording.musicbrainz_trackid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        recording.disc_number = None
         self.assertEqual(
             matching._resolve_album_track_position(
                 recording,
@@ -551,6 +556,24 @@ class TestRecordingIdentityNormalization(IsolatedTestCase):
             score_artist_title_match("El Nino", "Păcat", "Someone Else", "Pacat"),
             0,
         )
+
+    def test_version_words_do_not_match_fragments_of_unrelated_titles(self) -> None:
+        for title, accented in (("Olive", "Olivé"), ("Demolition", "Démolition")):
+            with self.subTest(title=title):
+                self.assertFalse(is_version_or_remix(title))
+                self.assertEqual(
+                    score_artist_title_match("Alpha", title, "Alpha", accented), 100
+                )
+        for version in (
+            "Live",
+            "Remixes",
+            "Remixed",
+            "Extended Mix",
+            "Sped-Up",
+            "Acoustic",
+        ):
+            with self.subTest(version=version):
+                self.assertTrue(is_version_or_remix(version))
 
     def test_version_remix_and_series_guards_survive_canonical_equivalence(
         self,

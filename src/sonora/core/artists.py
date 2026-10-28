@@ -1,6 +1,6 @@
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 
@@ -64,13 +64,13 @@ def normalize_artist_name(raw_name: str | None) -> str:
     clean_name = clean_unicode_punct(clean_disambiguation(str(raw_name).strip()))
     normalized = normalize_str(clean_name)
     if not normalized:
-        return clean_unicode_punct(clean_name)
+        return clean_name
 
     user_overrides = _load_user_overrides()
     if normalized in user_overrides:
         return clean_unicode_punct(user_overrides[normalized])
 
-    return clean_unicode_punct(clean_name)
+    return clean_name
 
 
 def is_artist_group_candidate(raw_name: str | None) -> bool:
@@ -101,9 +101,6 @@ def is_single_group_artist(raw_name: str | None) -> bool:
 
 def get_primary_artist(
     artist_name: str | None,
-    *,
-    artist_resolver: Callable[[str | None], str] | None = None,
-    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> str:
     """
     Extract primary artist from raw artist string by resolving aliases and stripping
@@ -115,14 +112,12 @@ def get_primary_artist(
 
     raw_artist_name = str(artist_name).strip()
     formatted_artist_name = re.sub(r"\s*([&+,/])\s*", r" \1 ", raw_artist_name).strip()
-    if (group_classifier or is_single_group_artist)(raw_artist_name):
-        return sanitize_name(
-            (artist_resolver or normalize_artist_name)(formatted_artist_name)
-        )
+    if is_single_group_artist(raw_artist_name):
+        return sanitize_name(normalize_artist_name(formatted_artist_name))
 
     parts = get_artist_split_pattern().split(raw_artist_name, maxsplit=1)
     primary = parts[0].strip()
-    return sanitize_name((artist_resolver or normalize_artist_name)(primary))
+    return sanitize_name(normalize_artist_name(primary))
 
 
 def extract_balanced_features(
@@ -175,7 +170,6 @@ def extract_balanced_features(
 
 def _split_artist_credits(
     featured_artists_input: str | Sequence[str | None],
-    group_classifier: Callable[[str | None], bool],
 ) -> list[str]:
     raw_credits: list[str] = (
         [featured_artists_input]
@@ -191,7 +185,7 @@ def _split_artist_credits(
         cleaned_chunk = clean_unicode_punct(raw_chunk).strip()
         if not cleaned_chunk:
             continue
-        if group_classifier(cleaned_chunk):
+        if is_single_group_artist(cleaned_chunk):
             tokens.append(cleaned_chunk)
             continue
 
@@ -200,7 +194,7 @@ def _split_artist_credits(
             part_strip = part.strip()
             if not part_strip:
                 continue
-            if group_classifier(part_strip):
+            if is_single_group_artist(part_strip):
                 tokens.append(part_strip)
             else:
                 for subpart in feat_pattern.split(part_strip):
@@ -214,8 +208,6 @@ def _split_artist_credits(
 def extract_featured_artist_tokens(
     featured_artists_input: str | Sequence[str | None] | None,
     primary_artist: str | None = None,
-    *,
-    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> list[str]:
     """
     Extract, normalize and deduplicate featured artists into a canonical list of individual artist names.
@@ -229,9 +221,7 @@ def extract_featured_artist_tokens(
         return []
 
     policy = get_config()
-    tokens = _split_artist_credits(
-        featured_artists_input, group_classifier or is_single_group_artist
-    )
+    tokens = _split_artist_credits(featured_artists_input)
     unique_artists: list[str] = []
     artist_indexes: dict[str, int] = {}
     normalized_primary_artist = (
@@ -299,7 +289,7 @@ def extract_featured_artist_tokens(
     registered_groups = [
         artist_token
         for artist_token in unique_artists
-        if (group_classifier or is_single_group_artist)(artist_token)
+        if is_single_group_artist(artist_token)
     ]
     if registered_groups:
         feat_token_pattern = get_feat_tokens_pattern()
@@ -333,8 +323,6 @@ def extract_featured_artist_tokens(
 def normalize_featured_artists(
     featured_artists_input: str | Sequence[str | None] | None,
     primary_artist: str | None = None,
-    *,
-    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> str | None:
     """
     Format normalized featured artists as a canonical comma-separated string,
@@ -343,7 +331,6 @@ def normalize_featured_artists(
     tokens = extract_featured_artist_tokens(
         featured_artists_input,
         primary_artist=primary_artist,
-        group_classifier=group_classifier,
     )
     return ", ".join(tokens) if tokens else None
 
@@ -353,8 +340,6 @@ _FEAT_ARTIST_PATTERN = re.compile(rf"\s+(?:{FEAT_KEYWORDS})\.?\s*(.+)$", re.IGNO
 
 def extract_artist_features(
     artist_name: str | None,
-    *,
-    group_classifier: Callable[[str | None], bool] | None = None,
 ) -> tuple[str, list[str]]:
     """
     Extract featuring artists embedded within an artist tag, returning (base_artist, featured_artists_list).
@@ -364,7 +349,7 @@ def extract_artist_features(
     if not artist_name:
         return ("", [])
     raw_artist = ftfy.fix_text(str(artist_name)).strip()
-    if (group_classifier or is_single_group_artist)(raw_artist):
+    if is_single_group_artist(raw_artist):
         return (raw_artist, [])
 
     feat_match = _FEAT_ARTIST_PATTERN.search(raw_artist)
@@ -374,7 +359,7 @@ def extract_artist_features(
     base_artist = raw_artist[: feat_match.start()].strip()
     raw_featured = feat_match.group(1).strip()
     featured_tokens = extract_featured_artist_tokens(
-        raw_featured, primary_artist=base_artist, group_classifier=group_classifier
+        raw_featured, primary_artist=base_artist
     )
     return (base_artist, featured_tokens)
 

@@ -264,15 +264,9 @@ def clear_cache(
     purge: bool = False,
     dry_run: bool = False,
 ) -> ClearResult:
-    """
-    Clear cache layers following official DiskCache, SQLite, and memory cache protocols.
+    """Clear selected caches, preserving library state unless explicitly requested.
 
-    :param clear_api: Clear diskcache API metadata.
-    :param clear_state: Clear SQLite library state tracking database.
-    :param clear_memory: Clear in-memory metadata and utility caches.
-    :param purge: If True, unlink database and shard files entirely from disk.
-    :param dry_run: If True, simulate operations and calculate reclaimable space without modifying disk.
-    :return: ClearResult dataclass containing execution details.
+    Dry runs report reclaimable space; purge removes the selected database files.
     """
     cache_dir = get_cache_dir()
     api_cache_dir = get_api_cache_dir()

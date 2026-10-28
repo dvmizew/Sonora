@@ -10,13 +10,13 @@ from sonora.audio.metadata import read_track_metadata, write_track_metadata
 from sonora.core.http import SESSION, RetryTransport, _retry_delay
 from sonora.core.models import MetadataSource, TrackInfo
 from sonora.core.titles import recording_identity_matches, score_artist_title_match
-from sonora.modules import catalog_enrichment, tagger
+from sonora.modules import catalog_enrichment, musicbrainz_enrichment, tagger
 from sonora.modules.metadata_consensus import (
     build_provider_proposal,
     collect_provider_proposal,
     merge_provider_proposals,
 )
-from sonora.services import acoustid, deezer, genius, itunes, theaudiodb
+from sonora.services import acoustid, deezer, genius, itunes, musicbrainz, theaudiodb
 from sonora.services.itunes import _parse_itunes_track
 from tests.regression_support import AudioRegressionTestCase
 from tests.support import IsolatedTestCase
@@ -45,6 +45,80 @@ class Stream(httpx.SyncByteStream):
 
 
 class TestProviderIdentityRegressions(AudioRegressionTestCase):
+    def test_acoustid_recording_duration_must_agree_with_local_audio(self) -> None:
+        # The audit found same-title community links to a different edit or song.
+        for duration, accepted in ((164.0, False), (177.0, True)):
+            with self.subTest(duration=duration):
+                track = TrackInfo(
+                    self.audio("malli.flac"),
+                    artist="Anxhelo Koci",
+                    title="Malli",
+                    duration=177.333,
+                )
+                with (
+                    patch.object(
+                        acoustid, "lookup_acoustid", return_value=RECORDING_MBID
+                    ),
+                    patch.object(
+                        musicbrainz,
+                        "fetch_musicbrainz_recording_details",
+                        return_value={
+                            "artist": "Anxhelo Koci",
+                            "title": "Malli",
+                            "duration": duration,
+                        },
+                    ),
+                ):
+                    musicbrainz_enrichment._enrich_acoustid(
+                        track, track.file_path, "fixture"
+                    )
+                self.assertEqual(
+                    track.musicbrainz_trackid, RECORDING_MBID if accepted else None
+                )
+
+    def test_deezer_search_cannot_enrich_conflicting_recording(self) -> None:
+        for candidate in (
+            {
+                "artist": "Christina Aguilera",
+                "title": "Beautiful Days",
+                "duration": 227.87,
+            },
+            {
+                "artist": "Nick Kamarera & Deepside Deejays",
+                "title": "Beautiful Days",
+                "duration": 210.0,
+            },
+            {
+                "artist": "Nick Kamarera & Deepside Deejays",
+                "title": "Secret Ride",
+                "duration": 227.87,
+            },
+        ):
+            with self.subTest(candidate=candidate):
+                track = TrackInfo(
+                    self.audio("beautiful-days.flac"),
+                    artist="Nick Kamarera & Deepside Deejays",
+                    title="Beautiful Days",
+                    duration=227.87,
+                    advisory="Explicit",
+                )
+                with patch.object(
+                    deezer,
+                    "fetch_deezer_track_details",
+                    return_value={
+                        **candidate,
+                        "isrc": "USAAA2400001",
+                        "composer": "Wrong Writer",
+                        "explicit_lyrics": False,
+                    },
+                ):
+                    catalog_enrichment._enrich_deezer(
+                        track, None, has_album_context=True, force=True
+                    )
+                self.assertIsNone(track.isrc)
+                self.assertIsNone(track.composer)
+                self.assertEqual(track.advisory, "Explicit")
+
     def test_generic_album_version_label_does_not_create_a_false_isrc_conflict(
         self,
     ) -> None:
@@ -162,7 +236,8 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 ]
             ],
         )
-        self.assertIsNone(agreed.advisory)
+        self.assertEqual(agreed.advisory, "Explicit")
+        self.assertIn("advisory", agreed.metadata_conflicts)
 
     def test_retries_close_discarded_streams(self) -> None:
         streams = [Stream(), Stream(), Stream()]
@@ -1154,11 +1229,11 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     accepted,
                 )
 
-    def test_explicit_rating_requires_independent_agreement_to_remove(self) -> None:
+    def test_catalog_agreement_cannot_remove_local_explicit_rating(self) -> None:
         scenarios: tuple[tuple[tuple[MetadataSource, ...], bool, str | None], ...] = (
             (("Deezer",), False, "Explicit"),
             (("iTunes",), False, "Explicit"),
-            (("Deezer", "iTunes"), False, None),
+            (("Deezer", "iTunes"), False, "Explicit"),
             (("Deezer", "iTunes"), True, "Explicit"),
             ((), False, "Explicit"),
         )

@@ -25,7 +25,7 @@ def find_companion_lyrics(
     results: list[Path] = []
     for ext in COMPANION_LYRICS_EXTS:
         candidate = parent / f"{stem}{ext}"
-        if candidate.exists() and candidate.is_file():
+        if candidate.is_file():
             results.append(candidate)
 
     if not results and track_number is not None and parent.is_dir():
@@ -72,7 +72,7 @@ def relocate_companion_artwork(
     for art_name in ALBUM_COVER_NAMES:
         source_art = source_dir / art_name
         target_art = target_dir / art_name
-        if source_art.exists() and source_art.is_file() and not target_art.exists():
+        if source_art.is_file() and not target_art.exists():
             if not dry_run:
                 try:
                     shutil.move(str(source_art), str(target_art))
@@ -285,16 +285,15 @@ def extract_max_timestamp(lyrics_text: str | None) -> float | None:
     """Extract the maximum timestamp in seconds from LRC lyrics text."""
     if not lyrics_text:
         return None
-    timestamps: list[float] = []
+    maximum: float | None = None
     for match in _LYRICS_EXTRACT_TS_REGEX.finditer(lyrics_text):
-        minutes = int(match.group(1))
-        seconds = int(match.group(2))
-        fraction_str = match.group(3)
-        total_seconds = minutes * 60.0 + seconds
-        if fraction_str:
-            total_seconds += float(f"0.{fraction_str}")
-        timestamps.append(total_seconds)
-    return max(timestamps) if timestamps else None
+        minutes, seconds, fraction = match.groups()
+        timestamp = int(minutes) * 60.0 + int(seconds)
+        if fraction:
+            timestamp += float(f"0.{fraction}")
+        if maximum is None or timestamp > maximum:
+            maximum = timestamp
+    return maximum
 
 
 def is_lyrics_duration_valid(

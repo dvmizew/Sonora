@@ -4,10 +4,22 @@ from unittest.mock import patch
 
 from sonora.core import audio_files, library_paths, sidecars
 from sonora.core.config import SonoraConfig
+from sonora.core.text import safe_float, safe_int, safe_int_pair
 from tests.support import IsolatedTestCase
 
 
 class TestUtilityFileContracts(IsolatedTestCase):
+    def test_numeric_tags_reject_booleans_nondecimal_digits_and_overflow(self) -> None:
+        for value in (None, True, False, "²", "not a number"):
+            with self.subTest(value=value):
+                self.assertIsNone(safe_int(value))
+                self.assertEqual(safe_int_pair(value), (None, None))
+                self.assertIsNone(safe_float(value))
+        self.assertIsNone(safe_float(10**1000))
+        self.assertEqual(safe_int("٣"), 3)
+        self.assertEqual(safe_int_pair("03/12"), (3, 12))
+        self.assertEqual(safe_float("-7.5 dB"), -7.5)
+
     def test_configured_disc_folders_without_numbers_have_no_invented_index(
         self,
     ) -> None:

@@ -134,7 +134,7 @@ def tag(
         active_keys.append("[bold green]Fanart.tv[/]")
 
     if active_keys:
-        LOG.detail(f"Active services:[/] {', '.join(active_keys)}")
+        LOG.detail(f"Active services: {', '.join(active_keys)}")
     else:
         LOG.detail("Using services without API credentials")
 
@@ -325,7 +325,7 @@ def check(
 
     if interrupted:
         return 130
-    return 0
+    return 1 if check_report.corrupt_files else 0
 
 
 def rename(
@@ -370,6 +370,11 @@ def rename(
     renaming_summary_rows = [
         ("Total Files Scanned", str(report.total_files), None),
         (
+            "Playlists Would Update" if dry_run else "Playlists Updated",
+            str(report.playlists_updated),
+            None,
+        ),
+        (
             "Files Failed",
             str(report.failed_files),
             "red" if report.failed_files else None,
@@ -405,6 +410,7 @@ def rename(
                     "files_renamed": report.files_renamed,
                     "folders_renamed": report.folders_renamed,
                     "lrc_synced": report.lrc_synced,
+                    "playlists_updated": report.playlists_updated,
                     "unchanged_files": report.unchanged_files,
                     "failed_files": report.failed_files,
                 },
@@ -439,6 +445,7 @@ def organize(
     interrupted = False
     organized_count = 0
     failures: list[str] = []
+    updated_playlists: list[Path] = []
     try:
         organized_count = organize_library_singles(
             path,
@@ -446,6 +453,7 @@ def organize(
             dry_run=dry_run,
             max_threads=threads,
             failures=failures,
+            updated_playlists=updated_playlists,
         )
     except (KeyboardInterrupt, RuntimeError) as exc:
         if not is_interruption(exc):
@@ -472,6 +480,11 @@ def organize(
 
     organization_summary_rows = [
         ("Source Directory", str(path.resolve()), None),
+        (
+            "Playlists Would Update" if dry_run else "Playlists Updated",
+            str(len(updated_playlists)),
+            None,
+        ),
         ("Target Directory", str(destination_directory.resolve()), None),
         (
             "Single Tracks Would Move" if dry_run else "Single Tracks Organized",
@@ -492,6 +505,7 @@ def organize(
                 "target_singles_path": str(destination_directory.resolve()),
                 "summary": {
                     "single_tracks_organized": organized_count,
+                    "playlists_updated": len(updated_playlists),
                     "failed_files": failures,
                 },
             },
@@ -632,7 +646,7 @@ def normalize(
         fetch_key = False
         fetch_replaygain = False
     interrupted = False
-    report = NormalizeReport([])
+    report = NormalizeReport()
     try:
         report = normalize_library(
             path,
@@ -660,11 +674,12 @@ def normalize(
     total_unchanged = report.total_unchanged
 
     if not interrupted:
-        LOG.success(
+        log_result = LOG.warning if report.failed_files else LOG.success
+        log_result(
             f"Normalization preview: {total_modified} tracks would be updated, "
-            f"{total_unchanged} already normalized ({total_scanned} total)."
+            f"{total_unchanged} already normalized ({total_scanned} total, {report.failed_files} failed)."
             if dry_run
-            else f"Normalization completed: {total_modified} modified, {total_unchanged} already normalized ({total_scanned} total)."
+            else f"Normalization completed: {total_modified} modified, {total_unchanged} already normalized ({total_scanned} total, {report.failed_files} failed)."
         )
     else:
         LOG.warning(
@@ -684,6 +699,11 @@ def normalize(
             str(total_unchanged),
             "dim" if total_unchanged else "white",
         ),
+        (
+            "Failed Files",
+            str(report.failed_files),
+            "red" if report.failed_files else "white",
+        ),
         ("BPM Included", "Yes" if fetch_bpm else "No", None),
         ("Musical Key Included", "Yes" if fetch_key else "No", None),
         ("ReplayGain Included", "Yes" if fetch_replaygain else "No", None),
@@ -697,6 +717,7 @@ def normalize(
                 "total_scanned": total_scanned,
                 "total_modified": total_modified,
                 "total_unchanged": total_unchanged,
+                "failed_files": report.failed_files,
                 "bpm_included": bool(fetch_bpm),
                 "key_included": bool(fetch_key),
                 "replaygain_included": bool(fetch_replaygain),
@@ -707,4 +728,4 @@ def normalize(
 
     if interrupted:
         return 130
-    return 0
+    return 1 if report.failed_files else 0

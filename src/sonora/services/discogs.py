@@ -58,6 +58,28 @@ def _discogs_credit_positions(scope: str, positions: list[str]) -> set[str]:
     return selected_positions
 
 
+def _add_discogs_credit(
+    credit: dict[str, Any],
+    producers: list[str],
+    remixers: list[str],
+    composers: list[str],
+) -> None:
+    name = clean_disambiguation(str(credit["name"]))
+    role = str(credit["role"]).lower()
+    if ("producer" in role or "produced by" in role) and name not in producers:
+        producers.append(name)
+    elif "remix" in role and name not in remixers:
+        remixers.append(name)
+    elif (
+        any(
+            keyword in role
+            for keyword in ("written", "composer", "music by", "words by")
+        )
+        and name not in composers
+    ):
+        composers.append(name)
+
+
 @coalesce_lookup
 def fetch_discogs_release_details(
     release_id: int | str, user_token: str | None = None
@@ -86,12 +108,7 @@ def fetch_discogs_release_details(
             discogs_payload.get("artists", []), "Discogs artists"
         )
         artist_id = (
-            str(artists[0].get("id"))
-            if isinstance(artists, list)
-            and artists
-            and isinstance(artists[0], dict)
-            and artists[0].get("id")
-            else None
+            str(artists[0].get("id")) if artists and artists[0].get("id") else None
         )
 
         labels = require_api_records(
@@ -99,7 +116,7 @@ def fetch_discogs_release_details(
         )
         label_name = None
         catalog_number = None
-        if isinstance(labels, list) and labels and isinstance(labels[0], dict):
+        if labels:
             label_name = str(labels[0].get("name")) if labels[0].get("name") else None
             catalog_number = (
                 str(labels[0].get("catno"))
@@ -112,7 +129,7 @@ def fetch_discogs_release_details(
             discogs_payload.get("identifiers", []), "Discogs identifiers"
         )
         for identifier in identifiers:
-            if isinstance(identifier, dict) and identifier.get("type") == "Barcode":
+            if identifier.get("type") == "Barcode":
                 raw_barcode = (
                     str(identifier.get("value", "")).replace(" ", "").replace("-", "")
                 )
@@ -154,11 +171,7 @@ def fetch_discogs_release_details(
             discogs_payload.get("extraartists", []), "Discogs extraartists"
         )
         for extra_artist in extra_artists:
-            if (
-                isinstance(extra_artist, dict)
-                and extra_artist.get("name")
-                and extra_artist.get("role")
-            ):
+            if extra_artist.get("name") and extra_artist.get("role"):
                 track_scope = str(extra_artist.get("tracks") or "").strip()
                 if track_scope:
                     for position in _discogs_credit_positions(
@@ -166,27 +179,7 @@ def fetch_discogs_release_details(
                     ):
                         scoped_credits.setdefault(position, []).append(extra_artist)
                     continue
-                name = clean_disambiguation(str(extra_artist["name"]))
-                role = str(extra_artist["role"]).lower()
-                if (
-                    "producer" in role or "produced by" in role
-                ) and name not in producers:
-                    producers.append(name)
-                elif "remix" in role and name not in remixers:
-                    remixers.append(name)
-                elif (
-                    any(
-                        credit_keyword in role
-                        for credit_keyword in (
-                            "written",
-                            "composer",
-                            "music by",
-                            "words by",
-                        )
-                    )
-                    and name not in composers
-                ):
-                    composers.append(name)
+                _add_discogs_credit(extra_artist, producers, remixers, composers)
 
         track_credits: dict[str, dict[str, str]] = {}
         repeated_titles: set[str] = set()
@@ -204,38 +197,13 @@ def fetch_discogs_release_details(
                 *scoped_credits.get(position, []),
             ]
             for track_extra_artist in track_extra_artists:
-                if (
-                    isinstance(track_extra_artist, dict)
-                    and track_extra_artist.get("name")
-                    and track_extra_artist.get("role")
-                ):
-                    track_artist_name = clean_disambiguation(
-                        str(track_extra_artist["name"])
+                if track_extra_artist.get("name") and track_extra_artist.get("role"):
+                    _add_discogs_credit(
+                        track_extra_artist,
+                        track_producers,
+                        track_remixers,
+                        track_composers,
                     )
-                    track_artist_role = str(track_extra_artist["role"]).lower()
-                    if (
-                        "producer" in track_artist_role
-                        or "produced by" in track_artist_role
-                    ) and track_artist_name not in track_producers:
-                        track_producers.append(track_artist_name)
-                    elif (
-                        "remix" in track_artist_role
-                        and track_artist_name not in track_remixers
-                    ):
-                        track_remixers.append(track_artist_name)
-                    elif (
-                        any(
-                            credit_keyword in track_artist_role
-                            for credit_keyword in (
-                                "written",
-                                "composer",
-                                "music by",
-                                "words by",
-                            )
-                        )
-                        and track_artist_name not in track_composers
-                    ):
-                        track_composers.append(track_artist_name)
             credits_dict: dict[str, str] = {"title": track_title}
             if track_producers:
                 credits_dict["producers"] = ", ".join(track_producers)

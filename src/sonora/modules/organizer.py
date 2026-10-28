@@ -29,6 +29,7 @@ from sonora.core.logger import (
     wait_if_paused,
 )
 from sonora.core.models import TrackInfo
+from sonora.core.playlists import update_local_playlists
 from sonora.core.sidecars import (
     find_companion_lyrics,
     relocate_companion_artwork,
@@ -388,6 +389,7 @@ def organize_library_singles(
     dry_run: bool = False,
     max_threads: int = 4,
     failures: list[str] | None = None,
+    updated_playlists: list[Path] | None = None,
 ) -> int:
     """Move standalone tracks into release folders at the selected destination."""
     if not source_dir.exists():
@@ -405,6 +407,7 @@ def organize_library_singles(
     folder_files = group_files_by_parent(all_audio_files)
     deduplicator = SingleDeduplicator()
     singles_to_process: list[tuple[Path, TrackInfo]] = []
+    playlist_renames: dict[Path, Path] = {}
 
     with create_progress() as progress:
         task_scan = progress.add_task(
@@ -530,6 +533,7 @@ def organize_library_singles(
                             f"[DRY-RUN] Would move {escape(path.name)} -> {escape(str(target_file))}"
                         )
 
+                    playlist_renames[path] = target_file
                     relocate_companion_lyrics(path, target_file, dry_run=dry_run)
                     deduplicator.register(track_info, target_file)
                     moved_count += 1
@@ -545,6 +549,13 @@ def organize_library_singles(
             if not is_interruption(exc):
                 raise
             raise InterruptedOperationError(moved_count) from None
+
+    for folder in {path.parent for path in playlist_renames}:
+        changed_playlists = update_local_playlists(
+            folder, playlist_renames, dry_run=dry_run
+        )
+        if updated_playlists is not None:
+            updated_playlists.extend(changed_playlists)
 
     if removed_dupes > 0:
         LOG.detail(f"🗑️ Removed {removed_dupes} duplicate single(s).")

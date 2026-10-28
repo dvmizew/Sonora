@@ -168,7 +168,6 @@ def fetch_itunes_track_metadata(
     """
     Fetch comprehensive track metadata from iTunes Search API.
     """
-    results: list[dict[str, object]] = []
     if track_id:
         try:
             candidate = lookup_itunes_track(track_id)
@@ -184,8 +183,7 @@ def fetch_itunes_track_metadata(
             candidate_duration=safe_float(candidate.get("duration")),
         ):
             return candidate
-    if not results:
-        results = search_itunes(artist=artist, term=title, entity="song")
+    results = search_itunes(artist=artist, term=title, entity="song")
 
     candidates: dict[str, tuple[float, dict[str, object]]] = {}
     for result in results:

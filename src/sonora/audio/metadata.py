@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import threading
 from pathlib import Path
@@ -33,6 +34,7 @@ from sonora.core.text import (
     safe_int,
     safe_int_pair,
 )
+from sonora.core.titles import recording_identity_matches
 
 _METADATA_CACHE: dict[tuple[str, int, int], TrackInfo] = {}
 _METADATA_CACHE_LOCK = threading.RLock()
@@ -160,16 +162,10 @@ def _read_audio_encoding(file_path: Path) -> tuple[bool, int | None]:
         is_lossless = True
 
     bits_per_sample: int | None = None
-    if file_ext == ".flac":
+    if file_ext in {".flac", ".wav"}:
         try:
-            flac_info = FLAC(file_path).info
-            bits_per_sample = safe_int(getattr(flac_info, "bits_per_sample", None))
-        except (MutagenError, OSError):
-            pass
-    elif file_ext == ".wav":
-        try:
-            wav_info = WAVE(file_path).info
-            bits_per_sample = safe_int(getattr(wav_info, "bits_per_sample", None))
+            audio = FLAC(file_path) if file_ext == ".flac" else WAVE(file_path)
+            bits_per_sample = safe_int(getattr(audio.info, "bits_per_sample", None))
         except (MutagenError, OSError):
             pass
 
@@ -193,6 +189,31 @@ def _featured_artists_from_tags(
     if not extra_artists:
         return None
     return normalize_featured_artists(extra_artists, primary_artist=primary_artist)
+
+
+def _read_numbering_total(
+    tags: dict[str, list[str]],
+    position: int | None,
+    inline_total: int | None,
+    total_keys: tuple[str, str],
+) -> tuple[int | None, bool, bool]:
+    """Reconcile stored totals without inventing a release count or position."""
+    totals = [
+        value
+        for value in (
+            *(safe_int(_get_tag(tags, key)) for key in total_keys),
+            inline_total,
+        )
+        if value is not None and value > 0
+    ]
+    if not totals:
+        return None, False, False
+    valid = {total for total in totals if position is None or total >= position}
+    if len(valid) != 1:
+        # Aliases are redundant representations, not independent edition evidence.
+        return totals[0], False, True
+    selected = next(iter(valid))
+    return selected, len(set(totals)) > 1, False
 
 
 def read_track_metadata(file_path: Path) -> TrackInfo:
@@ -239,20 +260,28 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             disc_num_tag = _get_tag(tags, "DISCNUMBER", "TPOS", "DISC")
             disc_number, disc_total_fallback = safe_int_pair(disc_num_tag)
 
-            raw_total_tracks = _get_tag(tags, "TRACKTOTAL", "TOTALTRACKS")
-            total_tracks = safe_int(raw_total_tracks) or track_total_fallback
+            total_tracks, track_totals_need_normalization, track_totals_conflict = (
+                _read_numbering_total(
+                    tags,
+                    track_number,
+                    track_total_fallback,
+                    ("TRACKTOTAL", "TOTALTRACKS"),
+                )
+            )
+            total_discs, disc_totals_need_normalization, disc_totals_conflict = (
+                _read_numbering_total(
+                    tags, disc_number, disc_total_fallback, ("DISCTOTAL", "TOTALDISCS")
+                )
+            )
 
-            raw_total_discs = _get_tag(tags, "DISCTOTAL", "TOTALDISCS")
-            total_discs = safe_int(raw_total_discs) or disc_total_fallback
-
-            # Deduce disc and track numbers from folder structure or filename when missing or default
-            if (disc_number is None or disc_number == 1) and file_path.parent:
+            # Filename and folder numbers fill absent tags; explicit disc 1 is evidence too.
+            if disc_number is None and file_path.parent:
                 folder_disc = extract_disc_number_from_folder(file_path.parent.name)
                 if folder_disc is not None:
                     disc_number = folder_disc
 
             fn_disc, fn_track, _ = parse_track_filename(file_path.name)
-            if fn_disc is not None and (disc_number is None or disc_number == 1):
+            if fn_disc is not None and disc_number is None:
                 disc_number = fn_disc
             if track_number is None and fn_track is not None:
                 track_number = fn_track
@@ -263,6 +292,8 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 total_discs = disc_number
 
             bpm = safe_float(_get_tag(tags, "BPM", "TBPM", "WM/BEATSPERMINUTE"))
+            if bpm is not None and bpm <= 0:
+                bpm = None
             raw_rating = _get_tag(tags, "RATING", "POPM")
             rating = safe_float(raw_rating)
 
@@ -313,6 +344,41 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 field: _get_tag(tags, *tag_keys)
                 for field, tag_keys in _TAG_SCHEMA.items()
             }
+            tidal_payload = None
+            try:
+                value = _get_tag(tags, "TIDAL_DATA")
+                payload = json.loads(value) if value else None
+                if isinstance(payload, dict):
+                    provider_artist = payload.get("artist")
+                    if isinstance(provider_artist, dict):
+                        provider_artist = provider_artist.get("name")
+                    provider_album = payload.get("album")
+                    if isinstance(provider_album, dict):
+                        provider_album = provider_album.get("title")
+                    version = str(payload.get("version") or "").strip()
+                    edition_text = normalize_str(f"{title} {album}")
+                    if (
+                        (
+                            not provider_album
+                            or normalize_str(str(provider_album))
+                            == normalize_str(album)
+                        )
+                        and (not version or normalize_str(version) in edition_text)
+                        and recording_identity_matches(
+                            artist,
+                            title,
+                            str(provider_artist or ""),
+                            str(payload.get("title") or ""),
+                            expected_duration=(
+                                float(song.length) if song.length is not None else None
+                            ),
+                            candidate_duration=safe_float(payload.get("duration")),
+                        )
+                        and payload.get("isrc")
+                    ):
+                        tidal_payload = payload
+            except (TypeError, ValueError):
+                pass
             if not mapped_fields.get("featured_artists"):
                 additional_features = _featured_artists_from_tags(tags, artist)
                 if additional_features:
@@ -325,6 +391,17 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             track_info = TrackInfo(
                 file_path=file_path,
                 _advisory_needs_normalization=advisory_needs_normalization,
+                _numbering_needs_normalization=(
+                    track_totals_need_normalization or disc_totals_need_normalization
+                ),
+                metadata_conflicts={
+                    "album_sequence": (
+                        "Stored numbering totals conflict with each other or the position; "
+                        "release verification required."
+                    )
+                }
+                if track_totals_conflict or disc_totals_conflict
+                else {},
                 artist=artist,
                 title=title,
                 album=album,
@@ -353,9 +430,12 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 art_height=art_height,
                 **mapped_fields,
             )
+            if tidal_payload:
+                track_info.isrc = str(tidal_payload["isrc"]).strip().upper()
+                track_info.metadata_sources["isrc"] = "Tidal"
             with _METADATA_CACHE_LOCK:
-                if len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
-                    _METADATA_CACHE.clear()
+                if _METADATA_CACHE and len(_METADATA_CACHE) >= _MAX_METADATA_CACHE_SIZE:
+                    _METADATA_CACHE.pop(next(iter(_METADATA_CACHE)))
                 _METADATA_CACHE[cache_key] = track_info.copy()
             return track_info
     except FileNotFoundError:
@@ -423,45 +503,42 @@ def _write_artist_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> Non
 def _write_numbering_and_dates(
     tags: dict[str, list[str]], track_info: TrackInfo
 ) -> None:
-    total_tracks_str = str(track_info.total_tracks) if track_info.total_tracks else None
-    if track_info.track_number is not None:
-        tags["TRACKNUMBER"] = [
-            f"{track_info.track_number}/{total_tracks_str}"
-            if total_tracks_str
-            else str(track_info.track_number)
-        ]
-    else:
-        tags.pop("TRACKNUMBER", None)
-
-    if total_tracks_str:
-        tags["TRACKTOTAL"] = [total_tracks_str]
-        tags["TOTALTRACKS"] = [total_tracks_str]
-    else:
-        tags.pop("TRACKTOTAL", None)
-        tags.pop("TOTALTRACKS", None)
-
-    total_discs_str = str(track_info.total_discs) if track_info.total_discs else None
-    if track_info.disc_number is not None:
-        tags["DISCNUMBER"] = [
-            f"{track_info.disc_number}/{total_discs_str}"
-            if total_discs_str
-            else str(track_info.disc_number)
-        ]
-    else:
-        tags.pop("DISCNUMBER", None)
-
-    if total_discs_str:
-        tags["DISCTOTAL"] = [total_discs_str]
-        tags["TOTALDISCS"] = [total_discs_str]
-    else:
-        tags.pop("DISCTOTAL", None)
-        tags.pop("TOTALDISCS", None)
+    for name, number_tag, total_tag, total_alias in (
+        ("track", "TRACKNUMBER", "TRACKTOTAL", "TOTALTRACKS"),
+        ("disc", "DISCNUMBER", "DISCTOTAL", "TOTALDISCS"),
+    ):
+        number = getattr(track_info, f"{name}_number")
+        total = getattr(track_info, f"total_{name}s")
+        stored_number, stored_inline_total = safe_int_pair(_get_tag(tags, number_tag))
+        stored_total, _, unresolved = _read_numbering_total(
+            tags, stored_number, stored_inline_total, (total_tag, total_alias)
+        )
+        if (
+            unresolved
+            and number == stored_number
+            and total == stored_total
+            and not any(
+                key in track_info.metadata_sources
+                for key in (f"{name}_number", f"total_{name}s")
+            )
+        ):
+            # An unrelated tag update must not discard conflicting release evidence.
+            continue
+        if number is None:
+            tags.pop(number_tag, None)
+        else:
+            tags[number_tag] = [f"{number}/{total}" if total else str(number)]
+        for key in (total_tag, total_alias):
+            if total:
+                tags[key] = [str(total)]
+            else:
+                tags.pop(key, None)
 
     if track_info.date:
         tags["DATE"] = [track_info.date]
     else:
         tags.pop("DATE", None)
-        tags.pop("YEAR", None)
+    tags.pop("YEAR", None)
 
     if track_info.original_date:
         tags["ORIGINALDATE"] = [track_info.original_date]
@@ -479,8 +556,9 @@ def _write_numbering_and_dates(
 def _write_audio_properties_tags(
     tags: dict[str, list[str]], track_info: TrackInfo
 ) -> None:
-    if track_info.bpm is not None:
-        tags["BPM"] = [f"{track_info.bpm:.1f}"]
+    bpm = safe_float(track_info.bpm)
+    if bpm is not None and bpm > 0:
+        tags["BPM"] = [f"{bpm:.1f}"]
     else:
         tags.pop("BPM", None)
 
@@ -515,38 +593,30 @@ def _write_audio_properties_tags(
 def _write_schema_tags(tags: dict[str, list[str]], track_info: TrackInfo) -> None:
     for field, tag_keys in _TAG_SCHEMA.items():
         tag_value = getattr(track_info, field, None)
-        canonical_key = tag_keys[0]
-        if tag_value:
-            if field in _UUID_FIELDS and not is_valid_uuid(
-                tag_value, allow_multivalue=True
-            ):
-                for k in tag_keys:
-                    tags.pop(k, None)
-                continue
-            if field == "advisory":
-                if normalize_advisory(str(tag_value)):
-                    tags["ITUNESADVISORY"] = ["1"]
-                    tags["ADVISORY"] = ["Explicit"]
-                else:
-                    tags.pop("ITUNESADVISORY", None)
-                    tags.pop("ADVISORY", None)
-                continue
-            if field == "disc_subtitle":
-                for k in tag_keys:
-                    tags[k] = [str(tag_value)]
-                continue
-            if field == "lyrics":
-                tags["LYRICS"] = [str(tag_value)]
-                tags["UNSYNCEDLYRICS"] = [str(tag_value)]
-                continue
-            tags[canonical_key] = [str(tag_value)]
-            for alias_key in tag_keys[1:]:
-                tags.pop(alias_key, None)
+        if not tag_value or (
+            field in _UUID_FIELDS
+            and not is_valid_uuid(tag_value, allow_multivalue=True)
+        ):
+            for key in tag_keys:
+                tags.pop(key, None)
+            continue
+        if field == "advisory":
+            if normalize_advisory(str(tag_value)):
+                tags["ITUNESADVISORY"] = ["1"]
+                tags["ADVISORY"] = ["Explicit"]
+            else:
+                tags.pop("ITUNESADVISORY", None)
+                tags.pop("ADVISORY", None)
+        elif field == "disc_subtitle":
+            for key in tag_keys:
+                tags[key] = [str(tag_value)]
+        elif field == "lyrics":
+            tags["LYRICS"] = [str(tag_value)]
+            tags["UNSYNCEDLYRICS"] = [str(tag_value)]
         else:
-            for k in tag_keys:
-                tags.pop(k, None)
-            if field == "lyrics":
-                tags.pop("UNSYNCEDLYRICS", None)
+            tags[tag_keys[0]] = [str(tag_value)]
+            for alias in tag_keys[1:]:
+                tags.pop(alias, None)
 
 
 def _preserve_unchanged_multivalues(
@@ -667,8 +737,9 @@ def write_track_metadata(
                     )
             if track_info.file_path.suffix.lower() in {".m4a", ".mp4"}:
                 _write_mp4_advisory(staging_path, track_info.advisory)
-            track_info._advisory_needs_normalization = False
-            clear_metadata_cache()
+        track_info._advisory_needs_normalization = False
+        track_info._numbering_needs_normalization = False
+        clear_metadata_cache(track_info.file_path)
     except FileNotFoundError:
         raise
     except (OSError, ValueError, MutagenError) as error:
@@ -677,12 +748,18 @@ def write_track_metadata(
         ) from error
 
 
-def clear_metadata_cache() -> int:
-    """Clear the in-memory metadata cache and return the number of entries cleared."""
+def clear_metadata_cache(file_path: Path | None = None) -> int:
+    """Invalidate one file, or the entire cache, and return the entry count removed."""
     with _METADATA_CACHE_LOCK:
-        count = len(_METADATA_CACHE)
-        _METADATA_CACHE.clear()
-        return count
+        if file_path is None:
+            count = len(_METADATA_CACHE)
+            _METADATA_CACHE.clear()
+            return count
+        resolved = str(file_path.resolve())
+        keys = [key for key in _METADATA_CACHE if key[0] == resolved]
+        for key in keys:
+            del _METADATA_CACHE[key]
+        return len(keys)
 
 
 def get_metadata_cache_size() -> int:

@@ -37,6 +37,21 @@ def credited_recording() -> dict[str, Any]:
 
 
 class TestMusicBrainzCatalogContracts(IsolatedTestCase):
+    def test_weaker_duplicate_result_cannot_hide_a_tied_release(self) -> None:
+        other = {**self.release, "id": OTHER_MBID}
+        weaker = {**self.release, "status": "Bootleg"}
+        with (
+            patch.object(service, "get_cached_api", return_value=None),
+            patch.object(service, "set_cached_api"),
+            patch.object(
+                service, "fetch_artist_discography", return_value=[self.release, other]
+            ),
+            patch.object(
+                service, "_call_musicbrainz", return_value={"release-list": [weaker]}
+            ),
+        ):
+            self.assertIsNone(service.search_musicbrainz_release("Primary", "Record"))
+
     def test_explicit_release_search_excludes_clean_candidates_and_separates_cache(
         self,
     ) -> None:
@@ -172,7 +187,7 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
             ({}, 10, 165),
             ({}, 9, 120),
             ({}, 5, 65),
-            ({"disambiguation": "clean"}, None, 120),
+            ({"disambiguation": "clean"}, None, 0),
             ({"disambiguation": "karaoke"}, None, 60),
             ({"disambiguation": "instrumental"}, None, 60),
             ({"status": "Bootleg"}, None, 90),

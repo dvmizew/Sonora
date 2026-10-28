@@ -1,6 +1,6 @@
 import dataclasses
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import httpx
 
@@ -430,18 +430,21 @@ class TestProviderConflictHandling(IsolatedTestCase):
 
 
 class TestOfflineArtistNormalization(IsolatedTestCase):
-    def test_normalization_preserves_classified_groups_in_artist_and_title(
+    def test_normalization_preserves_configured_groups_in_artist_and_title(
         self,
     ) -> None:
-        classifier = Mock(side_effect=lambda name: name == "Example & Partners")
+        policy = SonoraConfig(known_group_artists=frozenset({"Example & Partners"}))
         for artist, title in (
             ("Primary feat. Example & Partners", "Recording"),
             ("Primary", "Recording (feat. Example & Partners)"),
             ("Primary", "Recording feat. Example & Partners"),
         ):
-            with self.subTest(artist=artist, title=title):
+            with (
+                self.subTest(artist=artist, title=title),
+                patch.object(artists, "get_config", return_value=policy),
+            ):
                 recording = TrackInfo(Path("song.flac"), artist=artist, title=title)
-                normalize_track_metadata(recording, group_classifier=classifier)
+                normalize_track_metadata(recording)
                 self.assertEqual(recording.artist, "Primary")
                 self.assertEqual(recording.title, "Recording")
                 self.assertEqual(recording.featured_artists, "Example & Partners")
@@ -482,27 +485,13 @@ class TestOfflineArtistNormalization(IsolatedTestCase):
                 self.assertFalse(artists.is_single_group_artist("Example & Partners"))
                 cache_lookup.assert_not_called()
 
-    def test_explicit_group_classifier_preserves_registered_group(self) -> None:
-        classifier = Mock(return_value=True)
-        self.assertEqual(
-            artists.get_primary_artist(
-                "Example & Partners", group_classifier=classifier
-            ),
-            "Example & Partners",
-        )
-        classifier.assert_called_once()
-        classifier.return_value = False
-        self.assertEqual(
-            artists.get_primary_artist(
-                "Example & Partners", group_classifier=classifier
-            ),
-            "Example",
-        )
-        classifier.reset_mock()
-        self.assertEqual(
-            artists.get_primary_artist(None, group_classifier=classifier), "Unknown"
-        )
-        classifier.assert_not_called()
+    def test_configured_groups_preserve_primary_artist(self) -> None:
+        policy = SonoraConfig(known_group_artists=frozenset({"Example & Partners"}))
+        with patch.object(artists, "get_config", return_value=policy):
+            self.assertEqual(
+                artists.get_primary_artist("Example & Partners"), "Example & Partners"
+            )
+            self.assertEqual(artists.get_primary_artist(None), "Unknown")
 
     def test_local_aliases_work_without_online_artist_resolution(self) -> None:
         with (
@@ -518,23 +507,12 @@ class TestOfflineArtistNormalization(IsolatedTestCase):
             self.assertEqual(artists.normalize_artist_name("Other Name"), "Other Name")
             cache_lookup.assert_not_called()
 
-    def test_normalization_uses_artist_resolver_only_when_injected(self) -> None:
-        resolver = Mock(return_value="Stage")
-        offline_track = TrackInfo(
+    def test_normalization_does_not_resolve_identity_online(self) -> None:
+        recording = TrackInfo(
             Path("song.flac"), artist="Legal Name", album_artist="Legal Name"
         )
-        normalize_track_metadata(offline_track)
-        self.assertEqual(offline_track.artist, "Legal Name")
-        self.assertEqual(offline_track.album_artist, "Legal Name")
-        resolver.assert_not_called()
-        online_track = TrackInfo(
-            Path("song.flac"), artist="Legal Name", album_artist="Legal Name"
-        )
-        normalize_track_metadata(online_track, artist_resolver=resolver)
-        self.assertEqual(online_track.artist, "Stage")
-        self.assertEqual(online_track.album_artist, "Stage")
-        self.assertEqual(resolver.call_count, 2)
-        resolver.reset_mock()
-        empty_track = TrackInfo(Path("song.flac"), artist="", album_artist=None)
-        normalize_track_metadata(empty_track, artist_resolver=resolver)
+        with patch.object(artist_resolution, "resolve_artist_name") as resolver:
+            normalize_track_metadata(recording)
+        self.assertEqual(recording.artist, "Legal Name")
+        self.assertEqual(recording.album_artist, "Legal Name")
         resolver.assert_not_called()
