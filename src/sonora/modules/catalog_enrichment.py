@@ -699,28 +699,6 @@ def _enrich_deezer(
                 duration=track_info.duration,
             )
 
-        if track and conflicting_isrc:
-            candidate_isrc = str(track.get("isrc") or "").strip().upper()
-            candidate_duration = safe_float(track.get("duration"))
-            if (
-                candidate_isrc
-                and candidate_isrc != str(track_info.isrc or "").strip().upper()
-                and track_info.duration is not None
-                and candidate_duration is not None
-                and abs(track_info.duration - candidate_duration)
-                <= get_config().single_duration_tolerance_seconds
-                and score_artist_title_match(
-                    track_info.artist,
-                    track_info.title,
-                    str(track.get("artist") or ""),
-                    str(track.get("title") or ""),
-                )
-                == 100
-            ):
-                track_info.isrc = candidate_isrc
-                track_info.metadata_sources["isrc"] = "Deezer"
-                track_info.metadata_conflicts.pop("isrc", None)
-
         if not track or not _catalog_recording_matches_track(
             track,
             track_info.title,

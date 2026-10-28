@@ -255,7 +255,7 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         catalog._enrich_deezer(recording, album, has_album_context=True, force=True)
         self.assertEqual(recording.total_tracks, 10)
 
-    def test_deezer_replaces_conflicting_isrc_only_for_exact_duration_match(
+    def test_deezer_preserves_conflicting_isrc_even_for_exact_duration_match(
         self,
     ) -> None:
         recording = TrackInfo(
@@ -296,9 +296,9 @@ class TestCatalogEnrichmentContracts(IsolatedTestCase):
         lookup.assert_called_once_with(
             "Cheyanne & Ex Habit", "i lied - sped up", duration=147.698
         )
-        self.assertEqual(recording.isrc, "UKZGC2506040")
-        self.assertEqual(recording.metadata_sources["isrc"], "Deezer")
-        self.assertNotIn("isrc", recording.metadata_conflicts)
+        self.assertEqual(recording.isrc, "UKZGC2506039")
+        self.assertNotIn("isrc", recording.metadata_sources)
+        self.assertIn("isrc", recording.metadata_conflicts)
 
     def test_deezer_keeps_conflicting_isrc_when_search_result_is_not_exact(
         self,

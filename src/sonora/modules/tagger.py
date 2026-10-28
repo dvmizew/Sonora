@@ -117,11 +117,7 @@ def _heal_and_align_album_track(
         album_itunes_details=album_context.itunes_details,
         album_track_mbids=album_context.track_mbids,
     )
-    if resolved_pos is not None and (
-        force
-        or track_info.track_number is None
-        or track_info.track_number != resolved_pos
-    ):
+    if resolved_pos is not None and (force or track_info.track_number is None):
         track_info.track_number = resolved_pos
 
     if album_context.itunes_layout_verified and album_context.itunes_details:
