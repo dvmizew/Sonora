@@ -231,6 +231,63 @@ class TestLibraryCommandContracts(IsolatedTestCase):
 
 
 class TestAudioCommandFailureContracts(IsolatedTestCase):
+    def test_lyrics_cleanup_continues_when_provider_fails(self) -> None:
+        path = self.test_directory / "recording.flac"
+        dirty = "Hello world\n42Embed"
+        path.with_suffix(".lrc").write_text(dirty)
+        track = TrackInfo(path, artist="Artist", title="Song", lyrics=dirty)
+        details = {}
+        with (
+            patch.object(audio, "read_track_metadata", return_value=track),
+            patch.object(audio, "get_audio_duration", return_value=100),
+            patch(
+                "sonora.services.lyrics.fetch_synced_lyrics",
+                side_effect=OSError("offline"),
+            ),
+            patch.object(audio, "write_track_metadata") as write,
+        ):
+            self.assertEqual(
+                audio._process_lyrics_file(path, False, False, file_details=details),
+                (path, "Hello world", "cleaned"),
+            )
+        self.assertEqual(path.with_suffix(".lrc").read_text(), "Hello world")
+        self.assertEqual(write.call_args.args[0].lyrics, "Hello world")
+        self.assertEqual(write.call_args.kwargs, {"lyrics_only": True})
+        self.assertEqual(details[path]["lookup_status"], "failed")
+        self.assertEqual(details[path]["action"], "cleanup")
+
+    def test_deferred_lookup_is_reported_as_incomplete_not_unavailable(self) -> None:
+        path = self.test_directory / "recording.flac"
+        path.touch()
+        report = self.test_directory / "lyrics.json"
+
+        def deferred(*args, **kwargs):
+            kwargs["details"].update(
+                lookup_status="deferred", reason="Provider unavailable for this run."
+            )
+
+        with (
+            patch.object(
+                audio,
+                "read_track_metadata",
+                return_value=TrackInfo(path, artist="Artist", title="Song"),
+            ),
+            patch.object(audio, "get_audio_duration", return_value=100),
+            patch("sonora.services.lyrics.fetch_synced_lyrics", side_effect=deferred),
+            patch.object(audio, "write_track_metadata") as write,
+        ):
+            self.assertEqual(
+                audio.lyrics(self.test_directory, dry_run=True, json_report=report), 1
+            )
+        payload = json.loads(report.read_text())
+        self.assertTrue(payload["incomplete"])
+        self.assertEqual(payload["lookup_deferred"], 1)
+        self.assertEqual(payload["unavailable"], 0)
+        self.assertEqual(payload["details"][0]["file"], str(path.resolve()))
+        self.assertEqual(payload["details"][0]["status"], "deferred")
+        write.assert_not_called()
+        self.assertFalse(path.with_suffix(".lrc").exists())
+
     def test_replaygain_skipped_albums_and_programming_errors_are_distinct(
         self,
     ) -> None:
@@ -319,7 +376,7 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
         ):
             self.assertEqual(
                 audio._process_lyrics_file(path, True, False),
-                (path, "Plain lyrics", "plain"),
+                (path, None, "failed"),
             )
         warning.assert_called_once()
 

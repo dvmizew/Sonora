@@ -24,7 +24,15 @@ def coalesce_lookup(lookup: Callable[_P, _Result]) -> Callable[_P, _Result]:
         bound = signature.bind(*arguments, **keywords)
         bound.apply_defaults()
         request_identity = repr(
-            (lookup.__module__, lookup.__qualname__, bound.arguments)
+            (
+                lookup.__module__,
+                lookup.__qualname__,
+                {
+                    name: value
+                    for name, value in bound.arguments.items()
+                    if name not in {"details", "lookup_state"}
+                },
+            )
         )
         request_digest = hashlib.sha256(request_identity.encode("utf-8")).hexdigest()
         directory = get_cache_dir() / "coordination" / "lookups"
@@ -36,7 +44,9 @@ def coalesce_lookup(lookup: Callable[_P, _Result]) -> Callable[_P, _Result]:
     return coordinated
 
 
-def wait_for_provider(provider: str, interval: float) -> float:
+def wait_for_provider(
+    provider: str, interval: float, *, defer_seconds: float | None = None
+) -> float:
     """Pace actual dispatch across processes, including delayed worker wakeups."""
     directory = get_cache_dir() / "coordination"
     directory.mkdir(parents=True, exist_ok=True)
@@ -54,6 +64,13 @@ def wait_for_provider(provider: str, interval: float) -> float:
             "SELECT next_request FROM provider_slots WHERE provider = ?",
             (provider,),
         ).fetchone()
+        if defer_seconds is not None:
+            with connection:
+                connection.execute(
+                    "INSERT INTO provider_slots VALUES (?, ?) ON CONFLICT(provider) DO UPDATE SET next_request = MAX(next_request, excluded.next_request)",
+                    (provider, time.time() + defer_seconds),
+                )
+            return 0.0
         delay = max(0.0, float(existing[0]) - time.time()) if existing else 0.0
         if delay > 0:
             time.sleep(delay)

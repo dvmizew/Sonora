@@ -1,7 +1,10 @@
 import html
+import math
 import re
 import shutil
+import unicodedata
 from collections.abc import Sequence
+from functools import lru_cache
 from pathlib import Path
 
 import ftfy
@@ -113,10 +116,10 @@ def relocate_companion_lyrics(
 
 
 _LYRICS_TIMESTAMP_REGEX = re.compile(
-    r"^(?:\[\d{1,2}:\d{2}(?:[\.:]\d{2,3})?(?:[+-]\d+)?\]|<\d{1,2}:\d{2}(?:[\.:]\d{2,3})?>)\s*(.*)$"
+    r"^(?:\[\d{1,3}:[0-5]\d(?:[\.:]\d{1,6})?(?:[+-]\d+)?\]|<\d{1,3}:[0-5]\d(?:[\.:]\d{1,6})?>)+\s*(.*)$"
 )
 _LYRICS_EXTRACT_TS_REGEX = re.compile(
-    r"[\[<](\d{1,3}):([0-5]\d)(?:[\.:](\d{2,3}))?[\]>]"
+    r"(?:(\[)|<)(\d{1,3}):([0-5]\d)(?:[\.:](\d{1,6}))?(?(1)\]|>)"
 )
 _LYRICS_JUNK_PATTERNS = [
     re.compile(r"^\d+\s*(?:Contributor|Translation|Embed)s?$", re.IGNORECASE),
@@ -124,18 +127,15 @@ _LYRICS_JUNK_PATTERNS = [
     re.compile(r"^Read More$", re.IGNORECASE),
     re.compile(r"^See .* Live(?:Get tickets.*)?$", re.IGNORECASE),
     re.compile(
-        r"^\[?(?:Produced|Written|Arranged|Composed|Mastered|Mixed|Recorded|Engineered)\b.*\]?$",
+        r"^\[?(?:Produced|Written|Arranged|Composed|Mastered|Mixed|Recorded|Engineered)\s+by\b.*\]?$",
         re.IGNORECASE,
     ),
     re.compile(
         r"^\[?(?:Producer|Writer|Composer|Arranger|Engineer|Mixer|Release Date|Recording Date|Studio|Label)s?\s*:.*\]?$",
         re.IGNORECASE,
     ),
-    re.compile(r"^\[?(?:re|ve|by|length|offset)\s*:.*\]?$", re.IGNORECASE),
-    re.compile(r".*megalobiz.*", re.IGNORECASE),
+    re.compile(r"^가사\s*제작\s*:\s*\S+.*$", re.IGNORECASE),
     re.compile(r"^(?:作词|作曲|编曲|制作人)\s*:.*$", re.IGNORECASE),
-    re.compile(r"^This song is called\b.*$", re.IGNORECASE),
-    re.compile(r"^\[?Instrumental\]?$", re.IGNORECASE),
     re.compile(r"^Lyrics (?:powered|licensed|provided) by.*$", re.IGNORECASE),
     re.compile(r"^Paroles de la chanson .* par .*$", re.IGNORECASE),
     re.compile(r"^Commercial use is strictly forbidden.*$", re.IGNORECASE),
@@ -145,9 +145,8 @@ _LYRICS_JUNK_PATTERNS = [
         r"^(?:Synced|Created|Uploaded|Encoded|Downloaded|LRC)\s*(?:by|from|using|with|via|:)\s+.*$",
         re.IGNORECASE,
     ),
-    re.compile(r"<!--.*?-->", re.IGNORECASE),
 ]
-_LYRICS_EMBED_END_REGEX = re.compile(r"\d*\s*Embed\s*$", re.IGNORECASE)
+_LYRICS_EMBED_END_REGEX = re.compile(r"(?:\d+\s*Embed|^\s*Embed)\s*$", re.IGNORECASE)
 _LRC_METADATA_HEADER_PATTERN = re.compile(
     r"\[(ar|ti|al|au|by|re|ve|length|offset)\s*:([^\]\r\n]*)\]", re.IGNORECASE
 )
@@ -204,14 +203,24 @@ def lyrics_identity_matches(
     return True
 
 
+@lru_cache(maxsize=512)
 def lyrics_word_body(lyrics_text: str) -> str:
     lyric_lines = []
     for line in lyrics_text.splitlines():
         header_line = line.lstrip("\ufeff \t")
         if _LRC_METADATA_HEADER_PATTERN.match(header_line):
             line = _LRC_METADATA_HEADER_PATTERN.sub("", header_line)
-        lyric_lines.append(_LYRICS_EXTRACT_TS_REGEX.sub("", line))
-    return normalize_str("\n".join(lyric_lines))
+        line = _LYRICS_EXTRACT_TS_REGEX.sub("", line)
+        if re.fullmatch(
+            r"\s*\[(?:intro|outro|verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|hook|refrain|interlude|instrumental|solo|break|drop)(?:\s+\d+)?(?:\s*:\s*[^\]]+)?\]\s*",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+        lyric_lines.append(line)
+    text = unicodedata.normalize("NFC", "\n".join(lyric_lines)).casefold()
+    text = re.sub(r"(?<=\w)['’ʼ`](?=\w)", "", text)
+    return " ".join(re.sub(r"[^\w\s]|_", " ", text).split())
 
 
 def repair_lyrics_headers(lyrics_text: str, artist: str, title: str) -> str:
@@ -231,19 +240,42 @@ def repair_lyrics_headers(lyrics_text: str, artist: str, title: str) -> str:
     return "".join(repaired_lines)
 
 
+@lru_cache(maxsize=512)
 def clean_lyrics_text(text: str | None) -> str | None:
-    """
-    Strips web scraping artifacts (Genius, Musixmatch, AZLyrics, LRCLIB, Megalobiz junk)
-    and unescapes HTML entities while preserving timestamped LRC lines ([mm:ss.xx] and <mm:ss.xx>).
-    """
+    """Remove scrape artifacts while preserving lyric words and LRC timing metadata."""
     if text is None:
         return None
     if not text.strip():
         return ""
 
     decoded = html.unescape(ftfy.fix_text(str(text)))
+    decoded = re.sub(
+        r"<(script|style|noscript|head)\b[^>]*>.*?</\1\s*>",
+        "",
+        decoded,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    decoded = re.sub(
+        r"<!--.*?-->|<!DOCTYPE\b[^>]*>",
+        "",
+        decoded,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    decoded = re.sub(
+        r"<br\s*/?>|</?(?:p|div|li|h[1-6])\b[^>]*>",
+        "\n",
+        decoded,
+        flags=re.IGNORECASE,
+    )
+    decoded = re.sub(
+        r"</?(?:a|b|span|em|strong|i|u|html|body)\b[^>]*>",
+        "",
+        decoded,
+        flags=re.IGNORECASE,
+    )
     lines = decoded.splitlines()
     cleaned: list[str] = []
+    has_lyric_content = False
 
     for line in lines:
         stripped_line = line.strip()
@@ -257,7 +289,7 @@ def clean_lyrics_text(text: str | None) -> str | None:
             timestamp_match.group(1).strip() if timestamp_match else stripped_line
         )
 
-        if timestamp_match and not content_to_check:
+        if timestamp_match and not content_to_check and not has_lyric_content:
             continue
 
         if any(
@@ -267,6 +299,8 @@ def clean_lyrics_text(text: str | None) -> str | None:
             continue
 
         cleaned.append(stripped_line)
+        if content_to_check and not _LRC_METADATA_HEADER_PATTERN.match(stripped_line):
+            has_lyric_content = True
 
     while cleaned and (
         _LYRICS_EMBED_END_REGEX.search(cleaned[-1]) or cleaned[-1] == ""
@@ -286,13 +320,16 @@ def extract_max_timestamp(lyrics_text: str | None) -> float | None:
     if not lyrics_text:
         return None
     maximum: float | None = None
-    for match in _LYRICS_EXTRACT_TS_REGEX.finditer(lyrics_text):
-        minutes, seconds, fraction = match.groups()
-        timestamp = int(minutes) * 60.0 + int(seconds)
-        if fraction:
-            timestamp += float(f"0.{fraction}")
-        if maximum is None or timestamp > maximum:
-            maximum = timestamp
+    for line in lyrics_text.splitlines():
+        if _LRC_METADATA_HEADER_PATTERN.match(line.lstrip("\ufeff \t")):
+            line = _LRC_METADATA_HEADER_PATTERN.sub("", line)
+        for match in _LYRICS_EXTRACT_TS_REGEX.finditer(line):
+            _, minutes, seconds, fraction = match.groups()
+            timestamp = int(minutes) * 60.0 + int(seconds)
+            if fraction:
+                timestamp += float(f"0.{fraction}")
+            if maximum is None or timestamp > maximum:
+                maximum = timestamp
     return maximum
 
 
@@ -305,12 +342,35 @@ def is_lyrics_duration_valid(
     Validates that lyrics timestamps do not significantly exceed audio duration.
     Prevents cross-song collisions (e.g. short tracks matching longer songs).
     """
-    if not lyrics_text or audio_duration is None or audio_duration <= 0:
+    if not lyrics_text:
         return True
+    if any(
+        _LYRICS_EXTRACT_TS_REGEX.fullmatch(match.group()) is None
+        for match in re.finditer(
+            r"[\[<]\d{1,3}:\d{2}(?:[\.:]\d{1,6})?[\]>]", lyrics_text
+        )
+    ):
+        return False
+    for line in lyrics_text.splitlines():
+        # Repeated line timestamps are valid; only inline word marks must increase.
+        if "<" not in line:
+            continue
+        timestamps = [
+            int(match[2]) * 60 + int(match[3]) + float(f"0.{match[4] or '0'}")
+            for match in _LYRICS_EXTRACT_TS_REGEX.finditer(line)
+        ]
+        if timestamps != sorted(timestamps):
+            return False
+    if audio_duration is None or audio_duration <= 0:
+        return True
+    if not math.isfinite(audio_duration):
+        return False
     max_timestamp = extract_max_timestamp(lyrics_text)
     if max_timestamp is None:
         return True
-    return max_timestamp <= (audio_duration + tolerance_seconds)
+    offsets = re.findall(r"(?im)^\s*\[offset\s*:\s*([+-]?\d+)\s*\]", lyrics_text)
+    offset = int(offsets[-1]) / 1000.0 if offsets else 0.0
+    return max_timestamp - offset <= audio_duration + tolerance_seconds
 
 
 def get_lyrics_quality(lyrics_text: str | None) -> int:
@@ -325,22 +385,13 @@ def get_lyrics_quality(lyrics_text: str | None) -> int:
     if not cleaned:
         return 0
 
-    non_header_lines = [
-        line.strip()
-        for line in cleaned.splitlines()
-        if line.strip()
-        and not re.match(
-            r"^\[(?:ar|ti|al|by|re|ve|length|offset):",
-            line.strip(),
-            re.IGNORECASE,
-        )
-    ]
-    if not non_header_lines:
+    body = lyrics_word_body(cleaned)
+    if not body or body == "instrumental":
         return 0
 
-    if re.search(r"<\d{1,2}:\d{2}[\.:]\d{2,3}>", cleaned):
+    if re.search(r"<\d{1,3}:[0-5]\d(?:[\.:]\d{1,6})?>", cleaned):
         return 3
-    if re.search(r"^\[\d{1,3}:[0-5]\d(?:[\.:]\d{2,3})?\]", cleaned, re.MULTILINE):
+    if re.search(r"^\[\d{1,3}:[0-5]\d(?:[\.:]\d{1,6})?\]", cleaned, re.MULTILINE):
         return 2
     return 1
 

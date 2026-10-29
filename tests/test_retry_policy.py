@@ -5,6 +5,82 @@ from tests.support import IsolatedTestCase
 
 
 class TestNetworkRetries(IsolatedTestCase):
+    def test_lrclib_workers_send_requests_sequentially(self) -> None:
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        import httpx
+
+        from sonora.core.http import _HOST_LIMITERS, RetryTransport
+
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+
+        def send(request: httpx.Request) -> httpx.Response:
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.01)
+            with lock:
+                active -= 1
+            return httpx.Response(200, request=request)
+
+        with (
+            RetryTransport() as transport,
+            patch.object(_HOST_LIMITERS["lrclib.net"], "wait"),
+            patch.object(httpx.HTTPTransport, "handle_request", side_effect=send),
+            ThreadPoolExecutor(max_workers=4) as pool,
+        ):
+            responses = list(pool.map(transport.handle_request, [request] * 4))
+        self.assertEqual([response.status_code for response in responses], [200] * 4)
+        self.assertEqual(maximum, 1)
+        self.assertGreaterEqual(_HOST_LIMITERS["lrclib.net"].interval, 1.0)
+
+    def test_provider_cooldown_is_shared_and_cannot_be_shortened(self) -> None:
+        from sonora.core.coordination import wait_for_provider
+
+        with (
+            patch(
+                "sonora.core.coordination.get_cache_dir",
+                return_value=self.test_directory,
+            ),
+            patch("sonora.core.coordination.time.time", return_value=100.0),
+            patch("sonora.core.coordination.time.sleep") as sleep,
+        ):
+            wait_for_provider("lrclib.net", 0, defer_seconds=30)
+            wait_for_provider("lrclib.net", 0, defer_seconds=1)
+            sleep.assert_not_called()
+            self.assertEqual(wait_for_provider("lrclib.net", 0.25), 30)
+            sleep.assert_called_once_with(30)
+
+    def test_final_rate_limit_response_sets_shared_cooldown(self) -> None:
+        import httpx
+
+        from sonora.core.http import _HOST_LIMITERS, RetryTransport
+
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+        response = httpx.Response(429, headers={"Retry-After": "30"}, request=request)
+        transport = RetryTransport(max_retries=1)
+        RateLimiter.set_disabled(False)
+        try:
+            with (
+                patch.object(_HOST_LIMITERS["lrclib.net"], "wait"),
+                patch.object(
+                    httpx.HTTPTransport, "handle_request", return_value=response
+                ),
+                patch("sonora.core.http.wait_for_provider") as defer,
+                patch("sonora.core.http.random.uniform", return_value=3.0),
+            ):
+                self.assertIs(transport.handle_request(request), response)
+                defer.assert_called_once_with("lrclib.net", 0, defer_seconds=33)
+        finally:
+            transport.close()
+            RateLimiter.set_disabled(True)
+
     def test_retry_network_call_success_on_first_try(self) -> None:
         from sonora.core.retry import retry_network_call
 

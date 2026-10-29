@@ -1,5 +1,7 @@
 import atexit
+import random
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -18,6 +20,7 @@ from sonora.core.constants import (
     RATE_LIMIT_THEAUDIODB,
     USER_AGENT,
 )
+from sonora.core.coordination import wait_for_provider
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
 
@@ -77,48 +80,54 @@ class RetryTransport(httpx.HTTPTransport):
         self.backoff_factor = backoff_factor
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        attempt = 0
-        while True:
-            try:
-                limiter = _HOST_LIMITERS.get(request.url.host)
-                if limiter is not None:
-                    interval = (
-                        RATE_LIMIT_DISCOGS_UNAUTHENTICATED
-                        if request.url.host == "api.discogs.com"
-                        and "Authorization" not in request.headers
-                        else None
-                    )
-                    limiter.wait(interval)
-                response = super().handle_request(request)
-                if (
-                    response.status_code in (429, 502, 503, 504)
-                    and attempt < self.max_retries - 1
-                ):
-                    delay = _retry_delay(
-                        response.headers.get("Retry-After"),
-                        self.backoff_factor * (2**attempt),
-                    )
-                    if delay > 60.0:
-                        return response
-                    response.close()
+        limiter = _HOST_LIMITERS.get(request.url.host)
+        with (
+            limiter.lock
+            if limiter is not None and request.url.host == "lrclib.net"
+            else nullcontext()
+        ):
+            attempt = 0
+            while True:
+                try:
+                    if limiter is not None:
+                        interval = (
+                            RATE_LIMIT_DISCOGS_UNAUTHENTICATED
+                            if request.url.host == "api.discogs.com"
+                            and "Authorization" not in request.headers
+                            else None
+                        )
+                        limiter.wait(interval)
+                    response = super().handle_request(request)
+                    if response.status_code in (429, 502, 503, 504):
+                        delay = _retry_delay(
+                            response.headers.get("Retry-After"),
+                            self.backoff_factor * (2**attempt),
+                        )
+                        if request.url.host == "lrclib.net":
+                            delay += random.uniform(0.0, delay * 0.3)
+                        if limiter is not None and not limiter._disabled:
+                            wait_for_provider(request.url.host, 0, defer_seconds=delay)
+                        if delay > 60.0 or attempt >= self.max_retries - 1:
+                            return response
+                        response.close()
+                        LOG.debug(
+                            f"HTTP {response.status_code} for {request.url.host}. "
+                            f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
+                        )
+                        time.sleep(delay)
+                        attempt += 1
+                        continue
+                    return response
+                except (httpx.TransportError, OSError) as exc:
+                    if attempt >= self.max_retries - 1:
+                        raise
+                    delay = self.backoff_factor * (2**attempt)
                     LOG.debug(
-                        f"HTTP {response.status_code} for {request.url.host}. "
+                        f"HTTP transport error ({type(exc).__name__}) for {request.url.host}. "
                         f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
                     )
                     time.sleep(delay)
                     attempt += 1
-                    continue
-                return response
-            except (httpx.TransportError, OSError) as exc:
-                if attempt >= self.max_retries - 1:
-                    raise
-                delay = self.backoff_factor * (2**attempt)
-                LOG.debug(
-                    f"HTTP transport error ({type(exc).__name__}) for {request.url.host}. "
-                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
-                )
-                time.sleep(delay)
-                attempt += 1
 
 
 SESSION = httpx.Client(

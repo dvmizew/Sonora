@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import urllib.parse
+from contextlib import nullcontext
 from typing import Any
 
 import httpx
@@ -22,6 +23,7 @@ from sonora.core.sidecars import (
     clean_lyrics_text,
     get_lyrics_quality,
     is_lyrics_duration_valid,
+    lyrics_identity_matches,
 )
 from sonora.core.text import normalize_str
 from sonora.core.titles import clean_title, score_artist_title_match
@@ -85,7 +87,7 @@ def _query_authenticated_musixmatch(
         )
     except (OSError, ValueError) as error:
         LOG.debug(f"Musixmatch lyrics request failed: {error}")
-        return None
+        raise
     finally:
         client.session.close()
 
@@ -96,6 +98,7 @@ def _query_lrclib(
     synced_only: bool = False,
     album_name: str | None = None,
     duration: float | None = None,
+    details: dict[str, Any] | None = None,
 ) -> str | None:
     if " - " not in query_str:
         return None
@@ -109,7 +112,7 @@ def _query_lrclib(
         if album_name:
             params["album_name"] = album_name
         if duration is not None:
-            params["duration"] = int(duration)
+            params["duration"] = duration
         response = SESSION.get(
             "https://lrclib.net/api/get",
             params=params,
@@ -121,6 +124,8 @@ def _query_lrclib(
                 response.raise_for_status()
             return None
         lyrics_payload = require_api_object(response.json(), "LRCLIB lyrics response")
+        if lyrics_payload.get("instrumental") is True:
+            return None
 
         synced_lyrics = lyrics_payload.get("syncedLyrics")
         plain_lyrics = lyrics_payload.get("plainLyrics")
@@ -150,6 +155,17 @@ def _query_lrclib(
             > get_config().single_duration_tolerance_seconds
         ):
             return None
+        if album_name:
+            provider_album = lyrics_payload.get("albumName")
+            if not isinstance(provider_album, str) or normalize_str(
+                provider_album
+            ) != normalize_str(album_name):
+                return None
+
+        if details is not None:
+            details["source"] = details["lookup_source"] = "LRCLIB"
+            if isinstance(lyrics_payload.get("id"), int):
+                details["record_id"] = lyrics_payload["id"]
 
         if synced_lyrics and not plain_only:
             cleaned_synced = clean_lyrics_text(synced_lyrics.strip())
@@ -173,9 +189,10 @@ def _query_syncedlyrics(
     album_name: str | None = None,
     duration: float | None = None,
     musixmatch_token: str | None = None,
+    details: dict[str, Any] | None = None,
 ) -> str | None:
     checked_lrclib = (not providers or "Lrclib" in providers) and not lang
-    lrclib_error: Exception | None = None
+    provider_error: Exception | None = None
     if checked_lrclib:
         try:
             lrclib_result = _query_lrclib(
@@ -184,15 +201,16 @@ def _query_syncedlyrics(
                 synced_only=synced_only,
                 album_name=album_name,
                 duration=duration,
+                **({"details": details} if details is not None else {}),
             )
             if lrclib_result:
                 return lrclib_result
         except (httpx.HTTPError, OSError) as error:
-            lrclib_error = error
+            provider_error = error
 
     if not providers and not get_config().allow_unverified_lyrics:
-        if lrclib_error:
-            raise lrclib_error
+        if provider_error:
+            raise provider_error
         return None
     LOG.warning(
         "Using an explicitly enabled lyrics source without returned recording identity"
@@ -213,8 +231,8 @@ def _query_syncedlyrics(
             if provider != "Lrclib"
         ]
         if not fallback_providers:
-            if lrclib_error:
-                raise lrclib_error
+            if provider_error:
+                raise provider_error
             return None
         kwargs["providers"] = fallback_providers
     elif providers is not None:
@@ -231,19 +249,29 @@ def _query_syncedlyrics(
     ]
     result: str | None = None
     if musixmatch_token and "Musixmatch" in selected_providers:
-        result = _query_authenticated_musixmatch(
-            query_str, musixmatch_token, plain_only, synced_only, enhanced, lang
-        )
+        try:
+            result = _query_authenticated_musixmatch(
+                query_str, musixmatch_token, plain_only, synced_only, enhanced, lang
+            )
+        except (httpx.HTTPError, OSError, ValueError) as error:
+            provider_error = error
+        if result is not None and details is not None:
+            details["source"] = details["lookup_source"] = "Musixmatch"
         kwargs["providers"] = [
             provider for provider in selected_providers if provider != "Musixmatch"
         ]
         if lang and result is None:
+            if provider_error:
+                raise provider_error
             return None
     if result is None and not kwargs.get("providers") and musixmatch_token:
-        if lrclib_error:
-            raise lrclib_error
+        if provider_error:
+            raise provider_error
         return None
     if result is None:
+        if details is not None:
+            details["source"] = details["lookup_source"] = "syncedlyrics"
+            details["providers"] = kwargs.get("providers", selected_providers)
         result = retry_network_call(
             lambda: syncedlyrics.search(query_str, **kwargs),
             max_retries=2,
@@ -259,8 +287,8 @@ def _query_syncedlyrics(
         cleaned_lyrics = clean_lyrics_text(result.strip())
         if cleaned_lyrics and is_lyrics_duration_valid(cleaned_lyrics, duration):
             return cleaned_lyrics
-    if lrclib_error:
-        raise lrclib_error
+    if provider_error:
+        raise provider_error
     return None
 
 
@@ -277,6 +305,8 @@ def fetch_synced_lyrics(
     album_name: str | None = None,
     duration: float | None = None,
     musixmatch_token: str | None = None,
+    details: dict[str, Any] | None = None,
+    lookup_state: dict[str, Any] | None = None,
 ) -> str | None:
     """
     Search and fetch LRC lyrics for a track using syncedlyrics.
@@ -301,79 +331,148 @@ def fetch_synced_lyrics(
         ],
         ensure_ascii=False,
     )
-    cache_key = f"lyrics:v8:{get_config().allow_unverified_lyrics}:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}:{constraints}"
+    cache_key = f"lyrics:v9:{get_config().allow_unverified_lyrics}:{normalize_str(artist)}:{normalize_str(title)}:{isrc or ''}:{constraints}"
+    lookup_details = details if details is not None else {}
     cached = get_cached_api(cache_key)
-    if isinstance(cached, str):
-        cached_quality = get_lyrics_quality(cached)
-        if not cached:
+    cached_text = cached.get("text") if isinstance(cached, dict) else cached
+    if isinstance(cached_text, str):
+        if not cached_text:
+            lookup_details.update(
+                cache_hit=True,
+                lookup_status="unavailable",
+                source="cache",
+                lookup_source="cache",
+            )
             return None
+        cached_text = clean_lyrics_text(cached_text)
+        cached_quality = get_lyrics_quality(cached_text)
         if (
-            is_lyrics_duration_valid(cached, duration)
+            cached_quality > 0
+            and lyrics_identity_matches(cached_text, artist, title)
+            and is_lyrics_duration_valid(cached_text, duration)
             and (not synced_only or cached_quality >= 2)
             and (not plain_only or cached_quality == 1)
-            and (not enhanced or cached_quality >= 3)
         ):
-            return cached
+            lookup_details.update(cache_hit=True, lookup_status="cache", source="cache")
+            if isinstance(cached, dict):
+                lookup_details.update(
+                    {
+                        key: cached[key]
+                        for key in ("source", "record_id", "providers")
+                        if key in cached
+                    }
+                )
+            lookup_details["lookup_source"] = lookup_details["source"]
+            return cached_text
 
-    search_args = (plain_only, synced_only, enhanced, providers, lang)
-
-    last_exception: Exception | None = None
-    lyrics_content = None
-
-    default_query = f"{artist.lower()} - {title.lower()}".strip()
-    try:
-        lyrics_content = _query_syncedlyrics(
-            default_query,
-            *search_args,
-            album_name=album_name,
-            duration=duration,
-            musixmatch_token=token,
-        )
-    except (
-        httpx.HTTPError,
-        OSError,
-        ValueError,
-        RuntimeError,
-        TimeoutError,
-    ) as error:
-        last_exception = error
-
-    if not lyrics_content and ("(" in title or "[" in title or "feat" in title.lower()):
-        cleaned_track_title = clean_title(title)
-        primary_artist = get_primary_artist(artist)
-        if (
-            score_artist_title_match(artist, title, primary_artist, cleaned_track_title)
-            <= 0
-        ):
-            if last_exception:
-                raise last_exception
-            return None
-        query = f"{primary_artist} - {cleaned_track_title}".strip()
-        try:
-            lyrics_content = _query_syncedlyrics(
-                query,
-                *search_args,
-                album_name=album_name,
-                duration=duration,
-                musixmatch_token=token,
+    with lookup_state["lock"] if lookup_state is not None else nullcontext():
+        if lookup_state is not None and lookup_state["suspended"]:
+            lookup_details.update(
+                cache_hit=False,
+                lookup_status="deferred",
+                lookup_reason="Network lookups suspended after repeated provider failures; retry in a later run",
             )
-        except (
-            httpx.HTTPError,
-            OSError,
-            ValueError,
-            RuntimeError,
-            TimeoutError,
-        ) as error:
-            last_exception = error
+            return None
+        queries = [f"{artist.lower()} - {title.lower()}".strip()]
+        if "(" in title or "[" in title or "feat" in title.lower():
+            cleaned_track_title = clean_title(title)
+            primary_artist = get_primary_artist(artist)
+            if (
+                score_artist_title_match(
+                    artist, title, primary_artist, cleaned_track_title
+                )
+                > 0
+            ):
+                alternative = f"{primary_artist} - {cleaned_track_title}".strip()
+                if alternative != queries[0]:
+                    queries.append(alternative)
+        last_exception: Exception | None = None
+        lyrics_content = None
+        for query in queries:
+            try:
+                lyrics_content = _query_syncedlyrics(
+                    query,
+                    plain_only,
+                    synced_only,
+                    enhanced,
+                    providers,
+                    lang,
+                    album_name=album_name,
+                    duration=duration,
+                    musixmatch_token=token,
+                    details=lookup_details,
+                )
+            except (
+                httpx.HTTPError,
+                OSError,
+                ValueError,
+                RuntimeError,
+                TimeoutError,
+            ) as error:
+                last_exception = error
+            if lyrics_content or last_exception is not None:
+                break
 
-    if lyrics_content:
-        set_cached_api(cache_key, lyrics_content)
-        return lyrics_content
+        if lyrics_content and not lyrics_identity_matches(
+            lyrics_content, artist, title
+        ):
+            lyrics_content = None
 
-    if last_exception:
-        raise RuntimeError(
-            f"Lyrics fetch failed for '{title}': {last_exception}"
-        ) from last_exception
+        if lyrics_content:
+            if lookup_state is not None:
+                lookup_state["failures"] = 0
+            lookup_details.update(cache_hit=False, lookup_status="found")
+            set_cached_api(
+                cache_key,
+                {
+                    "text": lyrics_content,
+                    **{
+                        key: lookup_details[key]
+                        for key in ("source", "record_id", "providers")
+                        if key in lookup_details
+                    },
+                },
+            )
+            return lyrics_content
 
-    set_cached_api(cache_key, "")
-    return None
+        if last_exception:
+            transient = isinstance(
+                last_exception, (httpx.TransportError, OSError, TimeoutError)
+            ) or (
+                isinstance(last_exception, httpx.HTTPStatusError)
+                and (
+                    last_exception.response.status_code == 429
+                    or last_exception.response.status_code >= 500
+                )
+            )
+            lookup_details.update(
+                cache_hit=False,
+                lookup_status="failed",
+                lookup_reason=(
+                    f"Lyrics provider returned HTTP {last_exception.response.status_code}"
+                    if isinstance(last_exception, httpx.HTTPStatusError)
+                    else str(last_exception)
+                ),
+            )
+            if transient and lookup_state is not None:
+                lookup_state["failures"] += 1
+                if lookup_state["failures"] >= 3:
+                    lookup_state["suspended"] = True
+                    LOG.warning(
+                        "Lyrics provider keeps failing; network lookups are suspended for this run. Cached and local lyrics remain available."
+                    )
+            elif lookup_state is not None:
+                lookup_state["failures"] = 0
+            if isinstance(last_exception, httpx.HTTPStatusError):
+                raise RuntimeError(
+                    f"Lyrics provider returned HTTP {last_exception.response.status_code}; try again later"
+                ) from last_exception
+            raise RuntimeError(
+                f"Lyrics fetch failed for '{title}': {last_exception}"
+            ) from last_exception
+
+        if lookup_state is not None:
+            lookup_state["failures"] = 0
+        lookup_details.update(cache_hit=False, lookup_status="unavailable")
+        set_cached_api(cache_key, "")
+        return None

@@ -401,10 +401,15 @@ conflicts remain visible in the final summary; uncertain fields are preserved.
 
 ### `sonora lyrics`
 
-Fetches and saves synchronized `.lrc` lyrics files and embedded lyrics from syncedlyrics providers.
+Fetches lyrics, upgrades plain text when a matching synchronized version is available, and cleans existing LRC files. Recognized web markup and footer debris are removed while timing markers, LRC metadata and lyric words are preserved.
+
+The command reports conflicting lyrics for review instead of silently replacing different words. It preserves existing synchronized lyrics when only a lower-quality result is available. Matching provider metadata does not independently prove that every lyric word or timestamp is correct.
+
+Verified cached results are reused, including plain or line-synced results from an earlier enhanced-lyrics lookup. After three consecutive temporary provider failures, network lookups stop for that run; local cleanup and valid cached results continue. The JSON report includes each file's source, proposed action and review reason, and marks incomplete lookups separately from unavailable lyrics. An incomplete run exits with status `1` and can be retried later.
 
 ```bash
 sonora lyrics /path/to/music
+sonora lyrics /path/to/music --dry-run --json lyrics-preview.json
 sonora lyrics /path/to/music --force
 ```
 
@@ -412,6 +417,8 @@ sonora lyrics /path/to/music --force
 - `path`: Directory containing audio files (required).
 - `-t, --threads N`: Number of parallel threads (default: `4`).
 - `--force`: Refetch lyrics even if `.lrc` file already exists.
+- `--dry-run`: Preview cleanup and replacements without changing audio or LRC files.
+- `--json PATH`: Save changes, review cases and failures to a report.
 - `--musixmatch-token TOKEN`: Musixmatch user token for enhanced synced lyrics.
 
 ---

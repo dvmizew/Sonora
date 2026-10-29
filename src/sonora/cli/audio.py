@@ -1,9 +1,10 @@
 import dataclasses
 import functools
+import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 
 from rich.markup import escape
 
@@ -28,6 +29,7 @@ from sonora.core.audio_files import find_audio_files
 from sonora.core.cache import api_cache_session
 from sonora.core.cancellation import is_interruption
 from sonora.core.config import get_config
+from sonora.core.files import atomic_write_bytes
 from sonora.core.library_paths import group_files_by_album_root
 from sonora.core.logger import (
     LOG,
@@ -304,37 +306,81 @@ def replaygain(
 
 @api_cache_session()
 def _process_lyrics_file(
-    audio_path: Path, force: bool, dry_run: bool, musixmatch_token: str | None = None
+    audio_path: Path,
+    force: bool,
+    dry_run: bool,
+    musixmatch_token: str | None = None,
+    lookup_state: dict[str, Any] | None = None,
+    file_details: dict[Path, dict[str, Any]] | None = None,
 ) -> tuple[Path, str | None, str | None]:
     wait_if_paused()
+    embedded_written = False
+    details: dict[str, Any] = {
+        "file": str(audio_path.resolve()),
+        "action": "unchanged",
+        "source": None,
+        "cache_hit": False,
+        "lookup_status": "not_needed",
+        "changes": {"embedded": False, "sidecar": False},
+    }
+    if file_details is not None:
+        file_details[audio_path] = details
     try:
         track_info = read_track_metadata(audio_path)
         audio_duration = get_audio_duration(audio_path)
-
+        lrc_path = audio_path.with_suffix(".lrc")
+        previous_sidecar = lrc_path.read_bytes() if lrc_path.exists() else None
+        conflicts: dict[str, str] = {}
         lyrics_text, tag_type = process_track_lyrics(
             audio_path,
             track_info.artist,
             track_info.title,
             force=force,
-            dry_run=dry_run,
+            dry_run=True,
             isrc=track_info.isrc,
             album_name=track_info.album,
             duration=audio_duration,
             existing_lyrics=track_info.lyrics,
+            conflicts=conflicts,
             musixmatch_token=musixmatch_token,
+            details=details,
+            lookup_state=lookup_state,
         )
-        if lyrics_text and not dry_run:
-            try:
-                updated = dataclasses.replace(track_info, lyrics=lyrics_text)
-                write_track_metadata(updated)
-            except OSError as write_err:
-                LOG.warning(
-                    f"Failed to embed lyrics for {escape(str(audio_path))}: {escape(str(write_err))}"
-                )
+        if "lyrics" in conflicts:
+            details["action"] = "review"
+            details.setdefault("reason", conflicts["lyrics"])
+            return audio_path, None, "review"
+        if lyrics_text and tag_type != "review":
+            payload = lyrics_text.encode("utf-8")
+            if lyrics_text == track_info.lyrics and payload == previous_sidecar:
+                details["action"] = "unchanged"
+                return audio_path, lyrics_text, "existing"
+            if tag_type == "existing":
+                tag_type = "restored"
+            details["changes"] = {
+                "embedded": lyrics_text != track_info.lyrics,
+                "sidecar": payload != previous_sidecar,
+            }
+            if tag_type == "restored":
+                details["action"] = "restore"
+            if not dry_run:
+                if lyrics_text != track_info.lyrics:
+                    updated = dataclasses.replace(track_info, lyrics=lyrics_text)
+                    write_track_metadata(updated, lyrics_only=True)
+                    embedded_written = True
+                if payload != previous_sidecar:
+                    atomic_write_bytes(lrc_path, payload)
+        if not lyrics_text and details["lookup_status"] == "deferred":
+            tag_type = "deferred"
         return audio_path, lyrics_text, tag_type
     except OSError as error:
-        LOG.debug(f"Lyrics error for {audio_path}: {error}")
-        return audio_path, None, None
+        details.update(
+            action="partial" if embedded_written else "failed", reason=str(error)
+        )
+        LOG.warning(
+            f"Cannot save lyrics for {escape(str(audio_path))}: {escape(str(error))}"
+        )
+        return audio_path, None, "partial" if embedded_written else "failed"
 
 
 def lyrics(
@@ -349,8 +395,19 @@ def lyrics(
     Fetch and save synchronized lyrics (.lrc) files and embedded lyrics.
     """
     token = parse_musixmatch_token(musixmatch_token or get_config().musixmatch_token)
+    lookup_state: dict[str, Any] = {
+        "lock": threading.Lock(),
+        "failures": 0,
+        "suspended": False,
+    }
+    file_details: dict[Path, dict[str, Any]] = {}
     worker = functools.partial(
-        _process_lyrics_file, force=force, dry_run=dry_run, musixmatch_token=token
+        _process_lyrics_file,
+        force=force,
+        dry_run=dry_run,
+        musixmatch_token=token,
+        lookup_state=lookup_state,
+        file_details=file_details,
     )
     results, interrupted = _run_parallel_audio_task(
         path, "Fetching synchronized lyrics", worker, threads
@@ -361,12 +418,32 @@ def lyrics(
     saved_count = sum(
         1
         for _, content, lyrics_status in results
-        if lyrics_status != "existing" and content
+        if lyrics_status in {"plain", "synced", "enhanced", "cleaned", "restored"}
+        and content
     )
     skipped_count = sum(
         1 for _, _, lyrics_status in results if lyrics_status == "existing"
     )
-    missing_count = len(results) - saved_count - skipped_count
+    review_count = sum(status == "review" for _, _, status in results)
+    failed_count = sum(status in {"failed", "partial"} for _, _, status in results)
+    deferred_count = sum(status == "deferred" for _, _, status in results)
+    lookup_failed_count = sum(
+        detail.get("lookup_status") == "failed" for detail in file_details.values()
+    )
+    lookup_deferred_count = sum(
+        detail.get("lookup_status") == "deferred" for detail in file_details.values()
+    )
+    incomplete = bool(
+        interrupted or failed_count or lookup_failed_count or lookup_deferred_count
+    )
+    missing_count = (
+        len(results)
+        - saved_count
+        - skipped_count
+        - review_count
+        - failed_count
+        - deferred_count
+    )
 
     summary_rows = [
         ("Total Files Scanned", str(len(results)), None),
@@ -376,9 +453,30 @@ def lyrics(
             "green" if saved_count else "white",
         ),
         ("Already Had Lyrics", str(skipped_count), None),
+        (
+            "Provider Lookups Failed",
+            str(lookup_failed_count),
+            "yellow" if lookup_failed_count else None,
+        ),
+        (
+            "Provider Lookups Deferred",
+            str(lookup_deferred_count),
+            "yellow" if lookup_deferred_count else None,
+        ),
+        ("Lyrics Need Review", str(review_count), "yellow" if review_count else None),
+        (
+            "Lyrics Write / Lookup Failures",
+            str(failed_count),
+            "red" if failed_count else None,
+        ),
         ("Lyrics Unavailable", str(missing_count), "yellow" if missing_count else None),
     ]
     LOG.summary_table("Lyrics Summary", summary_rows)
+    if incomplete:
+        LOG.warning(
+            "Lyrics lookup is incomplete. Existing lyrics were preserved; "
+            "local cleanup and cached results were processed. Retry later."
+        )
 
     if json_report:
         report_data = {
@@ -388,11 +486,21 @@ def lyrics(
             "would_update": saved_count if dry_run else 0,
             "already_had": skipped_count,
             "unavailable": missing_count,
+            "needs_review": review_count,
+            "failed": failed_count,
+            "lookup_failed": lookup_failed_count,
+            "lookup_deferred": lookup_deferred_count,
+            "incomplete": incomplete,
             "details": [
-                {"file": str(audio_path), "status": lyrics_status}
-                for audio_path, _, lyrics_status in results
+                {
+                    **file_details.get(audio_path, {"file": str(audio_path.resolve())}),
+                    "status": lyrics_status,
+                }
+                for audio_path, _, lyrics_status in sorted(
+                    results, key=lambda result: str(result[0])
+                )
             ],
         }
         _write_json_report(json_report, report_data, "lyrics")
 
-    return 130 if interrupted else 0
+    return 130 if interrupted else (1 if failed_count or incomplete else 0)

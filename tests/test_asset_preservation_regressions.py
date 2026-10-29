@@ -25,6 +25,90 @@ from tests.regression_support import AudioRegressionTestCase
 
 
 class TestAssetPreservationRegressions(AudioRegressionTestCase):
+    def test_timing_upgrade_requires_all_existing_words_to_agree(self) -> None:
+        original = "\n".join(
+            f"Line {number} has ordinary words" for number in range(80)
+        )
+        for replacement in (
+            original.replace(
+                "Line 40 has ordinary words", "Line 40 has different words"
+            ),
+            original + "\nAn extra verse was not in the existing lyrics",
+        ):
+            audio_path = self.audio("comparison.wav")
+            sidecar = audio_path.with_suffix(".lrc")
+            sidecar.write_text(original)
+            returned = "[00:00.10]" + replacement
+            conflicts: dict[str, str] = {}
+            details: dict = {}
+            with patch.object(lyrics, "fetch_synced_lyrics", return_value=returned):
+                text, status = track_processing_module.process_track_lyrics(
+                    audio_path,
+                    "Alpha",
+                    "Song",
+                    duration=10.0,
+                    conflicts=conflicts,
+                    details=details,
+                )
+            self.assertEqual((text, status), (original, "existing"))
+            self.assertEqual(sidecar.read_text(), original)
+            self.assertIn("disagree", conflicts["lyrics"])
+            self.assertEqual(details["action"], "review")
+
+    def test_sidecar_and_embedded_word_disagreement_is_not_a_timing_upgrade(
+        self,
+    ) -> None:
+        audio_path = self.audio("two-sources.wav")
+        sidecar = audio_path.with_suffix(".lrc")
+        original = "The original lyric words"
+        sidecar.write_text(original)
+        conflicts: dict[str, str] = {}
+        with patch.object(lyrics, "fetch_synced_lyrics", return_value=None):
+            text, status = track_processing_module.process_track_lyrics(
+                audio_path,
+                "Alpha",
+                "Song",
+                duration=10,
+                existing_lyrics="[00:00.10]<00:00.10>Other lyric words",
+                conflicts=conflicts,
+            )
+        self.assertEqual((text, status), (original, "existing"))
+        self.assertEqual(sidecar.read_text(), original)
+        self.assertIn("Sidecar and embedded", conflicts["lyrics"])
+
+    def test_punctuation_case_and_stanza_labels_allow_matching_timing_upgrade(
+        self,
+    ) -> None:
+        audio_path = self.audio("matching.wav")
+        sidecar = audio_path.with_suffix(".lrc")
+        sidecar.write_text("[Verse 1]\nHello, world!\n[Chorus: Alpha]\nStay with me.")
+        returned = "[00:00.10]HELLO WORLD\n[00:00.20]stay with me"
+        conflicts: dict[str, str] = {}
+        with patch.object(lyrics, "fetch_synced_lyrics", return_value=returned):
+            text, status = track_processing_module.process_track_lyrics(
+                audio_path, "Alpha", "Song", duration=10, conflicts=conflicts
+            )
+        self.assertEqual((text, status), (returned, "synced"))
+        self.assertEqual(sidecar.read_text(), returned)
+        self.assertEqual(conflicts, {})
+
+    def test_word_disagreement_is_reported_even_if_returned_timing_is_lower_quality(
+        self,
+    ) -> None:
+        audio_path = self.audio("downgrade.wav")
+        sidecar = audio_path.with_suffix(".lrc")
+        original = "[00:00.10]Keep the original words"
+        sidecar.write_text(original)
+        conflicts: dict[str, str] = {}
+        with patch.object(
+            lyrics, "fetch_synced_lyrics", return_value="Other words entirely"
+        ):
+            text, status = track_processing_module.process_track_lyrics(
+                audio_path, "Alpha", "Song", duration=10, conflicts=conflicts
+            )
+        self.assertEqual((text, status), (original, "existing"))
+        self.assertIn("disagree", conflicts["lyrics"])
+
     def test_no_art_disables_final_asset_stage(self) -> None:
         track = TrackInfo(self.root / "track.flac")
         with (

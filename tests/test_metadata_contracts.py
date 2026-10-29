@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -419,6 +420,64 @@ class TestMetadataContracts(IsolatedTestCase):
 
 
 class TestAdvisoryPersistence(AudioRegressionTestCase):
+    def test_lyrics_only_write_preserves_every_other_raw_tag(self) -> None:
+        path = self.audio("lyrics.flac")
+        with taglib.File(str(path)) as recording:
+            recording.tags.update(
+                {
+                    "ARTIST": ["Artist feat. Guest"],
+                    "BPM": ["123.456"],
+                    "TOTALTRACKS": ["99"],
+                    "CUSTOM": ["Keep"],
+                }
+            )
+            recording.save()
+        with taglib.File(str(path)) as recording:
+            before = dict(recording.tags)
+        track = metadata.read_track_metadata(path)
+        track.lyrics = "[00:00.00] Correct words"
+        metadata.write_track_metadata(track, lyrics_only=True)
+        with taglib.File(str(path)) as recording:
+            after = dict(recording.tags)
+        self.assertEqual(
+            {k: v for k, v in after.items() if k not in {"LYRICS", "UNSYNCEDLYRICS"}},
+            before,
+        )
+        self.assertEqual(after["LYRICS"], [track.lyrics])
+
+    def test_embedded_catalog_isrc_respects_explicit_edition(self) -> None:
+        path = self.audio("edition.flac")
+        metadata.write_track_metadata(
+            TrackInfo(
+                path,
+                artist="Artist",
+                title="Song",
+                album="Album",
+                advisory="Explicit",
+                isrc="USABC2100001",
+            )
+        )
+        for explicit, expected in ((False, "USABC2100001"), (True, "USABC2100002")):
+            with self.subTest(explicit=explicit):
+                with taglib.File(str(path)) as recording:
+                    recording.tags["TIDAL_DATA"] = [
+                        json.dumps(
+                            {
+                                "artist": {"name": "Artist"},
+                                "title": "Song",
+                                "album": {"title": "Album"},
+                                "duration": 1,
+                                "explicit": explicit,
+                                "isrc": "USABC2100002",
+                            }
+                        )
+                    ]
+                    recording.save()
+                metadata.clear_metadata_cache()
+                result = metadata.read_track_metadata(path)
+                self.assertEqual(result.isrc, expected)
+                self.assertEqual(result.advisory, "Explicit")
+
     def test_tag_write_invalidates_only_the_changed_file(self) -> None:
         first = self.audio("first.flac")
         second = self.audio("second.flac")

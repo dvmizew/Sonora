@@ -344,6 +344,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 field: _get_tag(tags, *tag_keys)
                 for field, tag_keys in _TAG_SCHEMA.items()
             }
+            advisory, advisory_needs_normalization = _read_advisory(file_path, tags)
             tidal_payload = None
             try:
                 value = _get_tag(tags, "TIDAL_DATA")
@@ -364,6 +365,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                             == normalize_str(album)
                         )
                         and (not version or normalize_str(version) in edition_text)
+                        and not (
+                            advisory == "Explicit" and payload.get("explicit") is False
+                        )
                         and recording_identity_matches(
                             artist,
                             title,
@@ -383,7 +387,6 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 additional_features = _featured_artists_from_tags(tags, artist)
                 if additional_features:
                     mapped_fields["featured_artists"] = additional_features
-            advisory, advisory_needs_normalization = _read_advisory(file_path, tags)
             mapped_fields["advisory"] = advisory
 
             is_lossless, bits_per_sample = _read_audio_encoding(file_path)
@@ -672,7 +675,10 @@ def _preserve_unchanged_multivalues(
 
 
 def write_track_metadata(
-    track_info: TrackInfo, cover_art_path: Path | None = None
+    track_info: TrackInfo,
+    cover_art_path: Path | None = None,
+    *,
+    lyrics_only: bool = False,
 ) -> None:
     if not track_info.file_path.exists():
         raise FileNotFoundError(f"File not found: {track_info.file_path}")
@@ -694,7 +700,19 @@ def write_track_metadata(
                         song.tags.pop(key, None)
                 _preserve_unchanged_multivalues(original_tags, song.tags)
 
-                if cover_art_path and cover_art_path.exists():
+                if lyrics_only:
+                    lyrics_tags = {
+                        key: song.tags[key]
+                        for key in _TAG_SCHEMA["lyrics"]
+                        if key in song.tags
+                    }
+                    song.tags.clear()
+                    song.tags.update(original_tags)
+                    for key in _TAG_SCHEMA["lyrics"]:
+                        song.tags.pop(key, None)
+                    song.tags.update(lyrics_tags)
+
+                if not lyrics_only and cover_art_path and cover_art_path.exists():
                     cover_bytes = cover_art_path.read_bytes()
                     with Image.open(io.BytesIO(cover_bytes)) as cover_image:
                         cover_image.load()
@@ -735,10 +753,14 @@ def write_track_metadata(
                     raise OSError(
                         f"Unsupported tags for {track_info.file_path}: {', '.join(unsaved)}"
                     )
-            if track_info.file_path.suffix.lower() in {".m4a", ".mp4"}:
+            if not lyrics_only and track_info.file_path.suffix.lower() in {
+                ".m4a",
+                ".mp4",
+            }:
                 _write_mp4_advisory(staging_path, track_info.advisory)
-        track_info._advisory_needs_normalization = False
-        track_info._numbering_needs_normalization = False
+        if not lyrics_only:
+            track_info._advisory_needs_normalization = False
+            track_info._numbering_needs_normalization = False
         clear_metadata_cache(track_info.file_path)
     except FileNotFoundError:
         raise

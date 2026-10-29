@@ -174,26 +174,14 @@ class TestLyricsTokenContracts(IsolatedTestCase):
             ):
                 client = client_class.return_value
                 client.get_lrc.side_effect = failure
-                if isinstance(failure, TypeError):
-                    with self.assertRaises(TypeError):
-                        lyrics._query_authenticated_musixmatch(
-                            "Alpha - Recording",
-                            "fixture-token",
-                            False,
-                            False,
-                            False,
-                            None,
-                        )
-                else:
-                    self.assertIsNone(
-                        lyrics._query_authenticated_musixmatch(
-                            "Alpha - Recording",
-                            "fixture-token",
-                            False,
-                            False,
-                            False,
-                            None,
-                        )
+                with self.assertRaises(type(failure)):
+                    lyrics._query_authenticated_musixmatch(
+                        "Alpha - Recording",
+                        "fixture-token",
+                        False,
+                        False,
+                        False,
+                        None,
                     )
                 client.session.close.assert_called_once_with()
 
@@ -365,6 +353,95 @@ class TestLyricsParsingContracts(IsolatedTestCase):
         )
         self.assertEqual(sidecars.clean_lyrics_text("First line\nEmbed"), "First line")
 
+    def test_lrclib_checks_album_and_instrumental_status(self) -> None:
+        for album, instrumental, accepted in (
+            ("Record", False, True),
+            ("record", False, True),
+            ("Record (Live)", False, False),
+            ("Another Record", False, False),
+            (None, False, False),
+            ("Record", True, False),
+        ):
+            with (
+                self.subTest(album=album, instrumental=instrumental),
+                patch.object(lyrics._LRCLIB_LIMITER, "wait"),
+                patch.object(
+                    SESSION,
+                    "get",
+                    return_value=httpx.Response(
+                        200,
+                        json={
+                            "artistName": "Primary",
+                            "trackName": "Recording",
+                            "albumName": album,
+                            "duration": 100,
+                            "instrumental": instrumental,
+                            "plainLyrics": "Song words",
+                        },
+                    ),
+                ),
+            ):
+                result = lyrics._query_lrclib(
+                    "Primary - Recording", album_name="Record", duration=100
+                )
+            self.assertEqual(result is not None, accepted)
+
+    def test_cached_lyrics_with_wrong_headers_are_refetched(self) -> None:
+        for header in ("[ar:Other Artist]", "[ti:Different Song]"):
+            with (
+                self.subTest(header=header),
+                patch.object(
+                    lyrics, "get_cached_api", return_value=f"{header}\n{SYNCED}"
+                ),
+                patch.object(
+                    lyrics, "_query_syncedlyrics", return_value=SYNCED
+                ) as query,
+                patch.object(lyrics, "set_cached_api"),
+            ):
+                self.assertEqual(
+                    lyrics.fetch_synced_lyrics("Primary", "Recording", duration=100),
+                    SYNCED,
+                )
+                query.assert_called_once()
+
+    def test_lrclib_request_preserves_fractional_duration(self) -> None:
+        with (
+            patch.object(lyrics._LRCLIB_LIMITER, "wait"),
+            patch.object(
+                SESSION,
+                "get",
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "artistName": "Primary",
+                        "trackName": "Recording",
+                        "duration": 102.8,
+                        "plainLyrics": "Song words",
+                    },
+                ),
+            ) as request,
+        ):
+            self.assertEqual(
+                lyrics._query_lrclib("Primary - Recording", duration=100.9),
+                "Song words",
+            )
+        self.assertEqual(request.call_args.kwargs["params"]["duration"], 100.9)
+
+    def test_fetched_lyrics_with_conflicting_headers_are_not_cached(self) -> None:
+        with (
+            patch.object(lyrics, "get_cached_api", return_value=None),
+            patch.object(
+                lyrics,
+                "_query_syncedlyrics",
+                return_value=f"[ti:Different Song]\n{SYNCED}",
+            ),
+            patch.object(lyrics, "set_cached_api") as cache,
+        ):
+            self.assertIsNone(
+                lyrics.fetch_synced_lyrics("Primary", "Recording", duration=100)
+            )
+        self.assertEqual(cache.call_args.args[1], "")
+
     def test_lrclib_requires_matching_title_and_known_duration(self) -> None:
         for title, duration, accepted in (
             ("Original Story", 100, True),
@@ -464,6 +541,7 @@ class TestLyricsParsingContracts(IsolatedTestCase):
                 payload = {
                     "artistName": "Primary",
                     "trackName": "Recording",
+                    "albumName": "Record",
                     "duration": 100,
                     **payload,
                 }
@@ -558,7 +636,7 @@ class TestLyricsParsingContracts(IsolatedTestCase):
             ("", {}, None),
             ("Plain", {"synced_only": True}, SYNCED),
             (SYNCED, {"plain_only": True}, "Plain"),
-            (SYNCED, {"enhanced": True}, ENHANCED),
+            (SYNCED, {"enhanced": True}, SYNCED),
             ("[09:00] Wrong", {"duration": 100}, SYNCED),
         )
         for cached, options, expected in cases:
@@ -573,7 +651,9 @@ class TestLyricsParsingContracts(IsolatedTestCase):
                     lyrics.fetch_synced_lyrics("Primary", "Recording", **options),
                     expected,
                 )
-            self.assertEqual(query.call_count, 0 if not cached else 1)
+            self.assertEqual(
+                query.call_count, 0 if not cached or options.get("enhanced") else 1
+            )
 
     def test_alternative_query_failure_is_reported_with_original_cause(self) -> None:
         failure = OSError("provider offline")
@@ -587,6 +667,162 @@ class TestLyricsParsingContracts(IsolatedTestCase):
             lyrics.fetch_synced_lyrics("Primary", "Recording (feat. Guest)")
         self.assertIs(raised.exception.__cause__, failure)
         self.assertEqual(query.call_count, 2)
+
+
+class TestLyricsLookupState(IsolatedTestCase):
+    def test_line_synced_result_is_reused_for_the_same_enhanced_request(self) -> None:
+        details: dict[str, Any] = {}
+        with (
+            patch.object(lyrics, "_query_syncedlyrics", return_value=SYNCED) as query,
+        ):
+            self.assertEqual(
+                lyrics.fetch_synced_lyrics("Primary", "Recording", enhanced=True),
+                SYNCED,
+            )
+            self.assertEqual(
+                lyrics.fetch_synced_lyrics(
+                    "Primary", "Recording", enhanced=True, details=details
+                ),
+                SYNCED,
+            )
+        query.assert_called_once()
+        self.assertTrue(details["cache_hit"])
+        self.assertEqual(details["lookup_status"], "cache")
+
+    def test_cache_preserves_lrclib_source_and_record_id(self) -> None:
+        details: dict[str, Any] = {}
+        with (
+            patch.object(lyrics._LRCLIB_LIMITER, "wait"),
+            patch.object(
+                SESSION,
+                "get",
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "id": 123,
+                        "artistName": "Primary",
+                        "trackName": "Recording",
+                        "albumName": "Record",
+                        "duration": 100,
+                        "syncedLyrics": SYNCED,
+                    },
+                ),
+            ) as request,
+        ):
+            self.assertEqual(
+                lyrics.fetch_synced_lyrics(
+                    "Primary",
+                    "Recording",
+                    album_name="Record",
+                    duration=100,
+                    details=details,
+                ),
+                SYNCED,
+            )
+            self.assertEqual(details["lookup_status"], "found")
+            details.clear()
+            self.assertEqual(
+                lyrics.fetch_synced_lyrics(
+                    "Primary",
+                    "Recording",
+                    album_name="Record",
+                    duration=100,
+                    details=details,
+                ),
+                SYNCED,
+            )
+        request.assert_called_once()
+        self.assertEqual(details["source"], "LRCLIB")
+        self.assertEqual(details["lookup_source"], "LRCLIB")
+        self.assertEqual(details["record_id"], 123)
+        self.assertTrue(details["cache_hit"])
+
+    def test_repeated_failures_suspend_network_but_do_not_cache_misses(self) -> None:
+        import threading
+
+        state: dict[str, Any] = {
+            "lock": threading.Lock(),
+            "failures": 0,
+            "suspended": False,
+        }
+        details: dict[str, Any] = {}
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+        error = httpx.HTTPStatusError(
+            "overloaded", request=request, response=httpx.Response(503, request=request)
+        )
+        details["reason"] = "Local lyric headers conflict with the recording."
+        with (
+            patch.object(lyrics, "_query_syncedlyrics", side_effect=error) as query,
+            patch.object(lyrics, "set_cached_api") as cache,
+            patch.object(lyrics.LOG, "warning") as warning,
+        ):
+            for index in range(3):
+                with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
+                    lyrics.fetch_synced_lyrics(
+                        "Primary", str(index), lookup_state=state, details=details
+                    )
+            self.assertIsNone(
+                lyrics.fetch_synced_lyrics(
+                    "Primary", "Deferred", lookup_state=state, details=details
+                )
+            )
+        self.assertTrue(state["suspended"])
+        self.assertEqual(details["lookup_status"], "deferred")
+        self.assertEqual(
+            details["reason"], "Local lyric headers conflict with the recording."
+        )
+        self.assertIn("suspended", details["lookup_reason"])
+        self.assertEqual(query.call_count, 3)
+        cache.assert_not_called()
+        warning.assert_called_once()
+        with (
+            patch.object(lyrics, "get_cached_api", return_value=SYNCED),
+            patch.object(lyrics, "_query_syncedlyrics") as query,
+        ):
+            self.assertEqual(
+                lyrics.fetch_synced_lyrics(
+                    "Primary", "Cached", lookup_state=state, details=details
+                ),
+                SYNCED,
+            )
+        query.assert_not_called()
+        self.assertEqual(details["lookup_status"], "cache")
+
+    def test_definitive_miss_resets_consecutive_failure_count(self) -> None:
+        import threading
+
+        state: dict[str, Any] = {
+            "lock": threading.Lock(),
+            "failures": 2,
+            "suspended": False,
+        }
+        details: dict[str, Any] = {}
+        with patch.object(lyrics, "_query_syncedlyrics", return_value=None):
+            self.assertIsNone(
+                lyrics.fetch_synced_lyrics(
+                    "Primary", "Recording", lookup_state=state, details=details
+                )
+            )
+        self.assertEqual(state["failures"], 0)
+        self.assertEqual(details["lookup_status"], "unavailable")
+
+    def test_authenticated_transport_failure_is_not_cached_as_a_miss(self) -> None:
+        with (
+            patch.object(
+                lyrics,
+                "_query_authenticated_musixmatch",
+                side_effect=OSError("offline"),
+            ),
+            patch.object(lyrics, "set_cached_api") as cache,
+            self.assertRaisesRegex(RuntimeError, "offline"),
+        ):
+            lyrics.fetch_synced_lyrics(
+                "Primary",
+                "Recording",
+                providers=["Musixmatch"],
+                musixmatch_token="fixture-token",
+            )
+        cache.assert_not_called()
 
 
 class TestLocalLyricsContracts(IsolatedTestCase):
@@ -734,6 +970,45 @@ class TestExistingLyricsValidation(IsolatedTestCase):
         self.audio_path = self.test_directory / "recording.flac"
         self.audio_path.touch()
         self.lrc_path = self.audio_path.with_suffix(".lrc")
+
+    def test_existing_enhanced_lyrics_are_cleaned_without_lookup(self) -> None:
+        self.lrc_path.write_text(
+            "[offset:100]\n[00:01.00]<00:01.00> Words\n"
+            "<script>tracking()</script>\nYou might also like\n42Embed"
+        )
+        with patch.object(lyrics, "fetch_synced_lyrics") as lookup:
+            text, status = track_processing.process_track_lyrics(
+                self.audio_path, "Alpha", "Recording", duration=100
+            )
+        lookup.assert_not_called()
+        self.assertEqual(status, "cleaned")
+        self.assertIn("[offset:100]", text)
+        self.assertIn("<00:01.00> Words", text)
+        self.assertNotIn("tracking", text)
+        self.assertEqual(self.lrc_path.read_text(), text)
+
+    def test_same_artist_different_song_body_requires_review(self) -> None:
+        body = "A complete verse with enough distinctive words to compare. " * 12
+        self.lrc_path.write_text(body)
+        sibling = self.audio_path.with_name("different.flac")
+        sibling.touch()
+        conflicts = {}
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=body),
+            patch.object(
+                track_processing.metadata_module,
+                "read_track_metadata",
+                return_value=TrackInfo(
+                    sibling, artist="Alpha", title="Different", lyrics=body
+                ),
+            ),
+        ):
+            text, _ = track_processing.process_track_lyrics(
+                self.audio_path, "Alpha", "Recording", duration=100, conflicts=conflicts
+            )
+        self.assertIsNone(text)
+        self.assertIn("lyrics", conflicts)
+        self.assertEqual(self.lrc_path.read_text(), body)
 
     def test_collaboration_remix_cannot_import_original_versions_lyrics(self) -> None:
         original_body = (
@@ -925,14 +1200,22 @@ class TestExistingLyricsValidation(IsolatedTestCase):
     def test_invalid_utf8_is_not_decoded_by_dropping_bytes(self) -> None:
         payload = b"[ar:Alpha]\n[ti:Recording]\n[00:01]caf\xe9"
         self.lrc_path.write_bytes(payload)
-        with patch.object(lyrics, "fetch_synced_lyrics", return_value=None):
+        conflicts = {}
+        with patch.object(lyrics, "fetch_synced_lyrics", return_value=None) as lookup:
             self.assertEqual(
                 track_processing.process_track_lyrics(
-                    self.audio_path, "Alpha", "Recording", duration=100
+                    self.audio_path,
+                    "Alpha",
+                    "Recording",
+                    duration=100,
+                    conflicts=conflicts,
                 ),
-                (None, None),
+                (None, "review"),
             )
         self.assertEqual(self.lrc_path.read_bytes(), payload)
+
+        self.assertIn("UTF-8", conflicts["lyrics"])
+        lookup.assert_not_called()
 
 
 class TestLyricsHeaderRepair(IsolatedTestCase):
