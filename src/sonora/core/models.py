@@ -1,8 +1,22 @@
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
+from typing import Literal
+
+MetadataSource = Literal[
+    "MusicBrainz",
+    "Discogs",
+    "iTunes",
+    "Deezer",
+    "Last.fm",
+    "Genius",
+    "TheAudioDB",
+    "Shazam",
+    "AcoustID",
+    "Tidal",
+]
 
 
-@dataclass
+@dataclass(slots=True)
 class TrackInfo:
     """Represents a single audio track and its associated metadata."""
 
@@ -78,15 +92,36 @@ class TrackInfo:
     art_width: int | None = None
     art_height: int | None = None
     is_alien: bool = False
+    metadata_sources: dict[str, MetadataSource] = field(default_factory=dict)
+    metadata_conflicts: dict[str, str] = field(default_factory=dict)
+    _advisory_needs_normalization: bool = field(
+        default=False, repr=False, compare=False
+    )
+    _numbering_needs_normalization: bool = field(
+        default=False, repr=False, compare=False
+    )
     _diff_descriptions: list[str] = field(
         default_factory=list, repr=False, compare=False
     )
 
+    def copy(self) -> "TrackInfo":
+        """Copy a track without sharing mutable provenance or proposed changes."""
+        return replace(
+            self,
+            metadata_sources=dict(self.metadata_sources),
+            metadata_conflicts=dict(self.metadata_conflicts),
+            _diff_descriptions=list(self._diff_descriptions),
+        )
+
     def to_dict(self) -> dict[str, object]:
         """Convert metadata attributes to a complete dictionary representation."""
         track_dict: dict[str, object] = {
-            k: v for k, v in asdict(self).items() if not k.startswith("_")
+            attribute.name: getattr(self, attribute.name)
+            for attribute in fields(self)
+            if not attribute.name.startswith("_")
         }
+        track_dict["metadata_sources"] = dict(self.metadata_sources)
+        track_dict["metadata_conflicts"] = dict(self.metadata_conflicts)
         track_dict["file_path"] = str(self.file_path)
         track_dict["file_name"] = self.file_path.name
         if not track_dict.get("album_artist"):
@@ -102,6 +137,13 @@ class CheckReport:
     corrupt_files: int = 0
     missing_metadata: int = 0
     missing_lrc: int = 0
+
+    @property
+    def files_with_issues(self) -> int:
+        from sonora.core.constants import SUPPORTED_EXTS
+
+        return sum(Path(path).suffix.lower() in SUPPORTED_EXTS for path in self.issues)
+
     issues: dict[str, list[str]] = field(default_factory=dict)
 
 
@@ -113,24 +155,18 @@ class RenameReport:
     files_renamed: int = 0
     folders_renamed: int = 0
     lrc_synced: int = 0
+    playlists_updated: int = 0
     unchanged_files: int = 0
+    failed_files: int = 0
 
 
-class NormalizeReport(list[TrackInfo]):
-    """Represents the results of library normalization, preserving list semantics for callers."""
+@dataclass
+class NormalizeReport:
+    """Tracks scanned and changes produced by offline normalization."""
 
-    def __init__(
-        self,
-        tracks: list[TrackInfo],
-        modified_files: dict[str, list[str]] | None = None,
-    ) -> None:
-        super().__init__(tracks)
-        self.tracks = tracks
-        self.modified_files: dict[str, list[str]] = modified_files or {}
-
-    @property
-    def total_scanned(self) -> int:
-        return len(self.tracks)
+    total_scanned: int = 0
+    failed_files: int = 0
+    modified_files: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def total_modified(self) -> int:
@@ -138,4 +174,4 @@ class NormalizeReport(list[TrackInfo]):
 
     @property
     def total_unchanged(self) -> int:
-        return max(0, len(self.tracks) - len(self.modified_files))
+        return max(0, self.total_scanned - self.failed_files - self.total_modified)

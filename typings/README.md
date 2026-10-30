@@ -1,0 +1,5 @@
+These stubs declare the public package-root exports present in Mutagen 1.47.0 and shazamio-core 1.2.0. Their implementation already imports these names, but does not declare those imports as exports in the form strict type checkers require. The stubs mirror those imports with explicit re-exports; they do not replace the underlying class signatures or runtime implementation.
+
+Source: [Mutagen package root](https://github.com/quodlibet/mutagen/blob/release-1.47.0/mutagen/__init__.py) and [shazamio-core package root](https://github.com/shazamio/shazamio-core). Remove these files when upstream explicitly declares its public exports. Verify them when updating either dependency.
+
+DiskCache stubs describe the documented 5.6.3 storage extension and the cache methods used by Sonora, including their shared `Disk` class identity and warning-return types. They supply missing annotations for subclassing the public serializer interface without runtime wrappers or diagnostic suppressions. See [DiskCache API contracts](https://grantjenks.com/docs/diskcache/api.html) and its [5.6.3 implementation](https://github.com/grantjenks/python-diskcache/blob/v5.6.3/diskcache/core.py).

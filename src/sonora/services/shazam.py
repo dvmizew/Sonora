@@ -1,21 +1,35 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import hashlib
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
+import aiohttp
+from shazamio import Shazam
+from shazamio.exceptions import (
+    BadContentType,
+    BadParseData,
+    BadResponseStatus,
+    FailedDecodeJson,
+)
+from shazamio_core import SignatureError
+
+from sonora.core.api_payloads import (
+    require_api_object,
+    require_api_records,
+    require_api_strings,
+)
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.constants import RATE_LIMIT_SHAZAM
+from sonora.core.coordination import coalesce_lookup
 from sonora.core.logger import LOG
-from sonora.core.utils import RateLimiter
+from sonora.core.rate_limit import RateLimiter
 
 _SHAZAM_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_SHAZAM)
-
-import aiohttp
-from shazamio.exceptions import BadParseData, FailedDecodeJson
-from shazamio_core.shazamio_core import SignatureError
 
 
 @dataclass(frozen=True)
@@ -35,41 +49,45 @@ class ShazamTrackInfo:
 async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
     """Execute asynchronous acoustic recognition against the Shazam API."""
     try:
-        from shazamio import Shazam
-
-        shazam_client = Shazam()
-        raw_result = await shazam_client.recognize(str(file_path.resolve()))
-        return raw_result if isinstance(raw_result, dict) else None
+        async with Shazam() as shazam_client:
+            raw_result = await asyncio.wait_for(
+                shazam_client.recognize(file_path.resolve()), timeout=30.0
+            )
+        return require_api_object(raw_result, "Shazam recognition response")
     except (
-        ImportError,
         aiohttp.ClientError,
         OSError,
-        ValueError,
-        RuntimeError,
         SignatureError,
         BadParseData,
+        BadContentType,
+        BadResponseStatus,
         FailedDecodeJson,
+        asyncio.TimeoutError,
     ) as error:
         LOG.debug(f"Shazam recognition error for {file_path.name}: {error}")
         return None
 
 
+@coalesce_lookup
 def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
     """
     Recognize an audio track via acoustic fingerprinting against the Shazam catalog.
     Returns ShazamTrackInfo with title, artist, album, genre, label, lyrics, and artwork URL or None if unmatched.
     """
-    if not file_path.is_file() or file_path.stat().st_size == 0:
-        return None
-
     if not get_config().enable_shazam:
         return None
 
     try:
-        stat = file_path.stat()
-        cache_key = f"shazam:{file_path.name}:{stat.st_size}:{stat.st_mtime_ns}"
-    except OSError:
-        cache_key = f"shazam:{file_path.name}"
+        audio_stat = file_path.stat()
+        if not S_ISREG(audio_stat.st_mode) or audio_stat.st_size == 0:
+            return None
+        path_digest = hashlib.sha256(str(file_path.resolve()).encode()).hexdigest()
+        cache_key = (
+            f"shazam:v2:{path_digest}:{audio_stat.st_size}:{audio_stat.st_mtime_ns}"
+        )
+    except OSError as error:
+        LOG.debug(f"Cannot inspect audio for recognition: {file_path.name}: {error}")
+        return None
 
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
@@ -91,72 +109,58 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
     if not raw_payload:
         return None
 
-    track = raw_payload.get("track")
-    if not isinstance(track, dict):
+    track_payload = raw_payload.get("track")
+    if track_payload is None:
         return None
+    track = require_api_object(track_payload, "Shazam track")
 
     title = track.get("title")
     artist = track.get("subtitle")
-    if not title or not artist:
-        return None
+    if (
+        not isinstance(title, str)
+        or not title.strip()
+        or not isinstance(artist, str)
+        or not artist.strip()
+    ):
+        raise TypeError("Shazam track must contain nonempty title and subtitle strings")
 
     album_title: str | None = None
     release_date: str | None = None
     label_name: str | None = None
     lyrics_text: str | None = None
 
-    sections = track.get("sections")
-    if isinstance(sections, list):
-        for sec in sections:
-            if isinstance(sec, dict):
-                sec_type = sec.get("type")
-                if sec_type == "SONG":
-                    metadata = sec.get("metadata")
-                    if isinstance(metadata, list):
-                        for meta in metadata:
-                            if isinstance(meta, dict):
-                                meta_title = str(meta.get("title", "")).lower()
-                                if meta_title == "album":
-                                    album_title = meta.get("text")
-                                elif meta_title in ("released", "release date"):
-                                    release_date = meta.get("text")
-                                elif meta_title in ("label", "record label"):
-                                    label_name = meta.get("text")
-                elif sec_type == "LYRICS":
-                    lines = sec.get("text")
-                    if isinstance(lines, list):
-                        valid_lines = [
-                            str(line).strip()
-                            for line in lines
-                            if isinstance(line, str) and line.strip()
-                        ]
-                        if valid_lines:
-                            lyrics_text = "\n".join(valid_lines)
+    sections = require_api_records(track.get("sections", []), "Shazam track sections")
+    for section in sections:
+        if section.get("type") == "SONG":
+            credits = require_api_records(
+                section.get("metadata", []), "Shazam song metadata"
+            )
+            for credit in credits:
+                credit_title = str(credit.get("title", "")).lower()
+                if credit_title == "album":
+                    album_title = credit.get("text")
+                elif credit_title in ("released", "release date"):
+                    release_date = credit.get("text")
+                elif credit_title in ("label", "record label"):
+                    label_name = credit.get("text")
+        elif section.get("type") == "LYRICS":
+            lyric_lines = require_api_strings(section.get("text", []), "Shazam lyrics")
+            lyrics_text = (
+                "\n".join(line.strip() for line in lyric_lines if line.strip()) or None
+            )
 
-    genre_name: str | None = None
-    shazam_genres_payload = track.get("genres")
-    if isinstance(shazam_genres_payload, dict):
-        genre_name = shazam_genres_payload.get("primary")
-
-    shazam_images_payload = track.get("images")
-    cover_art_url: str | None = None
-    if isinstance(shazam_images_payload, dict):
-        cover_art_url = shazam_images_payload.get(
-            "coverarthq"
-        ) or shazam_images_payload.get("coverart")
+    genres = require_api_object(track.get("genres", {}), "Shazam genres")
+    genre_name = genres.get("primary")
+    images = require_api_object(track.get("images", {}), "Shazam images")
+    cover_art_url = images.get("coverarthq") or images.get("coverart")
 
     apple_id: str | None = None
-    hub = track.get("hub")
-    if isinstance(hub, dict):
-        actions = hub.get("actions")
-        if isinstance(actions, list):
-            for action in actions:
-                if isinstance(action, dict) and action.get("id"):
-                    apple_id = str(action["id"])
-                    break
-    if not apple_id and track.get("key"):
-        apple_id = str(track["key"])
-
+    hub = require_api_object(track.get("hub", {}), "Shazam track hub")
+    actions = require_api_records(hub.get("actions", []), "Shazam hub actions")
+    for action in actions:
+        if action.get("type") == "applemusicplay" and action.get("id"):
+            apple_id = str(action["id"])
+            break
     isrc: str | None = track.get("isrc")
 
     result = ShazamTrackInfo(
@@ -169,22 +173,8 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
         cover_art_url=str(cover_art_url).strip() if cover_art_url else None,
         release_date=str(release_date).strip() if release_date else None,
         label=str(label_name).strip() if label_name else None,
-        lyrics=result_lyrics if (result_lyrics := lyrics_text) else None,
+        lyrics=lyrics_text,
     )
 
-    set_cached_api(
-        cache_key,
-        {
-            "title": result.title,
-            "artist": result.artist,
-            "album": result.album,
-            "genre": result.genre,
-            "apple_music_id": result.apple_music_id,
-            "isrc": result.isrc,
-            "cover_art_url": result.cover_art_url,
-            "release_date": result.release_date,
-            "label": result.label,
-            "lyrics": result.lyrics,
-        },
-    )
+    set_cached_api(cache_key, asdict(result))
     return result

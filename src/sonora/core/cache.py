@@ -4,18 +4,38 @@ import shutil
 import sqlite3
 import threading
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 import diskcache
 
+from sonora.core.cache_storage import CacheDecodeError, MetadataDisk
 from sonora.core.constants import DIRS
 from sonora.core.logger import LOG
 
 DEFAULT_API_TTL_SECONDS: int = 2419200  # 28 days
-_CACHE_INSTANCE: Any = None
+NEGATIVE_API_TTL_SECONDS: int = 1800  # Retry confirmed catalog misses after 30 minutes.
+API_CACHE_MISS = ""
+_CACHE_INSTANCE: diskcache.Cache | None = None
 _CACHE_LOCK = threading.RLock()
 _IGNORE_CACHE = False
+_WORKER_CACHE: ContextVar[diskcache.Cache | None] = ContextVar(
+    "api_worker_cache", default=None
+)
+
+
+def clear_normalization_cache() -> None:
+    """Reset offline artist and metadata normalization caches."""
+    from sonora.core.artists import clear_artist_cache
+    from sonora.core.text import clear_text_cache
+    from sonora.core.titles import clear_title_cache
+
+    clear_artist_cache()
+    clear_text_cache()
+    clear_title_cache()
 
 
 def get_cache_dir() -> Path:
@@ -28,7 +48,7 @@ def get_cache_dir() -> Path:
 
 def get_api_cache_dir() -> Path:
     """Return dedicated directory for diskcache API cache files."""
-    return get_cache_dir() / "api"
+    return get_cache_dir() / "api-msgpack-v1"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -93,34 +113,51 @@ def set_ignore_cache(ignore: bool) -> None:
     _IGNORE_CACHE = ignore
 
 
-def get_cache() -> Any:
+def _open_api_cache(api_cache_dir: Path) -> diskcache.Cache | None:
+    try:
+        api_cache_dir.mkdir(parents=True, exist_ok=True)
+        return diskcache.Cache(str(api_cache_dir), timeout=10, disk=MetadataDisk)
+    except (OSError, sqlite3.Error) as error:
+        LOG.debug(f"Cache initialization failed: {error}")
+        return None
+
+
+@contextmanager
+def api_cache_session() -> Iterator[None]:
+    """Own each worker's cache connections without closing the main thread's cache."""
+    if (
+        threading.current_thread() is threading.main_thread()
+        or _WORKER_CACHE.get() is not None
+    ):
+        yield
+        return
+    worker_cache = _open_api_cache(get_api_cache_dir())
+    token = _WORKER_CACHE.set(worker_cache)
+    try:
+        if worker_cache is None:
+            yield
+        else:
+            with worker_cache:
+                yield
+    finally:
+        _WORKER_CACHE.reset(token)
+
+
+def get_cache() -> diskcache.Cache | None:
     global _CACHE_INSTANCE
+    if threading.current_thread() is not threading.main_thread():
+        return _WORKER_CACHE.get()
     api_cache_dir = get_api_cache_dir()
-    if _CACHE_INSTANCE is not None and getattr(
-        _CACHE_INSTANCE, "directory", None
-    ) != str(api_cache_dir):
+    if _CACHE_INSTANCE is not None and _CACHE_INSTANCE.directory != str(api_cache_dir):
         close_cache()
 
     if _CACHE_INSTANCE is None:
         with _CACHE_LOCK:
-            if _CACHE_INSTANCE is None:
-                try:
-                    api_cache_dir.mkdir(parents=True, exist_ok=True)
-                    _CACHE_INSTANCE = diskcache.Cache(
-                        str(api_cache_dir),
-                        timeout=10,
-                    )
-                except (
-                    OSError,
-                    ValueError,
-                    RuntimeError,
-                    sqlite3.Error,
-                ) as error:
-                    LOG.debug(f"Cache initialization failed: {error}")
-                    _CACHE_INSTANCE = None
+            _CACHE_INSTANCE = _open_api_cache(api_cache_dir)
     return _CACHE_INSTANCE
 
 
+@api_cache_session()
 def get_cached_api(key: str) -> Any | None:
     if _IGNORE_CACHE:
         return None
@@ -131,31 +168,30 @@ def get_cached_api(key: str) -> Any | None:
             return cache.get(key)
         except (
             OSError,
-            ValueError,
-            RuntimeError,
             sqlite3.Error,
-            diskcache.core.pickle.PickleError,
-            EOFError,
+            CacheDecodeError,
             diskcache.Timeout,
         ) as error:
             LOG.debug(f"Cache fetch failed for key '{key}': {error}")
     return None
 
 
+@api_cache_session()
 def set_cached_api(
     key: str, value: Any, expire_seconds: int = DEFAULT_API_TTL_SECONDS
 ) -> None:
     """Store value into disk cache with expiration (default 28 days)."""
     if value is None:
-        return
+        value = API_CACHE_MISS
+        expire_seconds = min(expire_seconds, NEGATIVE_API_TTL_SECONDS)
+    elif not value or (isinstance(value, dict) and value.get("results") == []):
+        expire_seconds = min(expire_seconds, NEGATIVE_API_TTL_SECONDS)
     cache = get_cache()
     if cache is not None:
         try:
             cache.set(key, value, expire=expire_seconds)
         except (
             OSError,
-            ValueError,
-            RuntimeError,
             sqlite3.Error,
             diskcache.Timeout,
         ) as error:
@@ -164,10 +200,10 @@ def set_cached_api(
 
 def _get_api_cache_size(api_cache_dir: Path) -> int:
     """Calculate total size of API cache files on disk (in bytes)."""
-    if not api_cache_dir.exists():
-        return 0
     total = 0
     try:
+        if not api_cache_dir.exists():
+            return 0
         if api_cache_dir.is_file():
             return api_cache_dir.stat().st_size
         for entry in api_cache_dir.rglob("*"):
@@ -192,31 +228,16 @@ def get_cache_stats() -> CacheStats:
         api_cache_dir.exists() and (api_cache_dir / "cache.db").exists()
     ):
         cache = get_cache()
-        if cache is not None:
-            try:
-                api_entries = len(cache)
-            except (
-                OSError,
-                ValueError,
-                RuntimeError,
-                sqlite3.Error,
-                diskcache.Timeout,
-            ) as error:
-                LOG.debug(f"Failed to get cache length: {error}")
+        if cache is None:
+            raise OSError(f"Cannot read API cache statistics: {api_cache_dir}")
+        try:
+            api_entries = len(cache)
+        except (OSError, sqlite3.Error, diskcache.Timeout) as error:
+            raise OSError(f"Cannot count API cache entries: {api_cache_dir}") from error
 
-    from sonora.core.state import (
-        _STATE_INSTANCE,
-        _get_default_db_path,
-        get_library_state,
-    )
+    from sonora.core.state import get_state_storage_stats
 
-    state_entries = 0
-    state_size = 0
-    default_state_path = _get_default_db_path()
-    if _STATE_INSTANCE is not None or default_state_path.exists():
-        library_state = get_library_state()
-        state_entries = library_state.get_state_count()
-        state_size = library_state.get_state_size()
+    state_entries, state_size = get_state_storage_stats()
 
     from sonora.audio.metadata import get_metadata_cache_size
 
@@ -240,15 +261,9 @@ def clear_cache(
     purge: bool = False,
     dry_run: bool = False,
 ) -> ClearResult:
-    """
-    Clear cache layers following official DiskCache, SQLite, and memory cache protocols.
+    """Clear selected caches, preserving library state unless explicitly requested.
 
-    :param clear_api: Clear diskcache API metadata.
-    :param clear_state: Clear SQLite library state tracking database.
-    :param clear_memory: Clear in-memory metadata and utility caches.
-    :param purge: If True, unlink database and shard files entirely from disk.
-    :param dry_run: If True, simulate operations and calculate reclaimable space without modifying disk.
-    :return: ClearResult dataclass containing execution details.
+    Dry runs report reclaimable space; purge removes the selected database files.
     """
     cache_dir = get_cache_dir()
     api_cache_dir = get_api_cache_dir()
@@ -284,54 +299,30 @@ def clear_cache(
     if clear_api:
         api_bytes_before = _get_api_cache_size(api_cache_dir)
         cache = get_cache()
-        if cache is not None:
-            try:
-                api_entries_cleared = len(cache)
-            except (
-                OSError,
-                ValueError,
-                RuntimeError,
-                sqlite3.Error,
-                diskcache.Timeout,
-            ) as error:
-                LOG.debug(f"Failed to read cache entries before clearing: {error}")
+        if cache is None:
+            raise OSError(f"Cannot open API cache for clearing: {api_cache_dir}")
 
         if purge:
+            api_entries_cleared = len(cache)
             close_cache()
             if api_cache_dir.exists():
-                try:
-                    shutil.rmtree(api_cache_dir, ignore_errors=True)
-                except OSError as error:
-                    LOG.debug(f"Failed to purge API cache directory: {error}")
+                shutil.rmtree(api_cache_dir)
         else:
-            if cache is not None:
-                try:
-                    with _CACHE_LOCK:
-                        cache.clear(retry=True)
-                        with warnings.catch_warnings(action="always"):
-                            cache.check(fix=True, retry=True)
-                except (
-                    OSError,
-                    ValueError,
-                    RuntimeError,
-                    sqlite3.Error,
-                    diskcache.Timeout,
-                ) as error:
-                    LOG.debug(f"Cache clear/check failed: {error}")
+            api_entries_cleared = cache.clear(retry=True)
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                cache.check(fix=True, retry=True)
 
             db_path = api_cache_dir / "cache.db"
             if db_path.exists():
+                close_cache()
+                conn = sqlite3.connect(str(db_path), timeout=30.0)
                 try:
-                    close_cache()
-                    conn = sqlite3.connect(str(db_path), timeout=30.0)
-                    try:
-                        conn.isolation_level = None
-                        conn.execute("VACUUM;")
-                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-                    finally:
-                        conn.close()
-                except (sqlite3.Error, OSError) as error:
-                    LOG.debug(f"Failed to vacuum API cache DB: {error}")
+                    conn.isolation_level = None
+                    conn.execute("VACUUM;")
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                finally:
+                    conn.close()
 
         api_bytes_after = _get_api_cache_size(api_cache_dir)
         api_bytes_freed = max(0, api_bytes_before - api_bytes_after)
@@ -340,24 +331,20 @@ def clear_cache(
         from sonora.core.state import get_library_state, reset_library_state
 
         library_state = get_library_state()
-        state_entries_cleared = library_state.get_state_count()
         state_bytes_before = library_state.get_state_size()
 
-        library_state.clear_state(purge=purge)
+        state_entries_cleared = library_state.clear_state(purge=purge)
+        state_bytes_after = library_state.get_state_size()
         if purge:
             reset_library_state()
-            state_bytes_after = 0
-        else:
-            state_bytes_after = library_state.get_state_size()
 
         state_bytes_freed = max(0, state_bytes_before - state_bytes_after)
 
     if clear_memory:
         from sonora.audio.metadata import clear_metadata_cache
-        from sonora.core.utils import clear_utils_cache
 
         memory_metadata_cleared = clear_metadata_cache()
-        clear_utils_cache()
+        clear_normalization_cache()
 
     return ClearResult(
         cache_dir=cache_dir,
@@ -381,8 +368,6 @@ def close_cache() -> None:
                 _CACHE_INSTANCE.close()
             except (
                 OSError,
-                ValueError,
-                RuntimeError,
                 sqlite3.Error,
                 diskcache.Timeout,
             ) as error:

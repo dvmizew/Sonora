@@ -2,17 +2,12 @@
 Unit and integration tests for Musical Key and Camelot wheel tonality detection.
 """
 
-import sys
 import tempfile
+import unittest
 import wave
 from pathlib import Path
 
 import numpy as np
-
-# Guarantee src/ is in sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-import unittest
 
 from sonora.audio.key import (
     calculate_chroma,
@@ -23,7 +18,8 @@ from sonora.audio.key import (
     key_to_camelot,
 )
 from sonora.audio.metadata import read_track_metadata
-from sonora.modules.tagger import normalize_library, normalize_single_track
+from sonora.modules.track_processing import normalize_library, normalize_single_track
+from tests.support import IsolatedTestCase
 
 
 def create_chord_wav(
@@ -48,7 +44,7 @@ def create_chord_wav(
     return dest_path
 
 
-class TestMusicalKey(unittest.TestCase):
+class TestMusicalKey(IsolatedTestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp_dir.name)
@@ -126,11 +122,11 @@ class TestMusicalKey(unittest.TestCase):
 
         details = detect_key_details(c_chord_path)
         self.assertIsNotNone(details)
-        if details:
-            key_name, camelot, conf = details
-            self.assertEqual(key_name, "C")
-            self.assertEqual(camelot, "8B")
-            self.assertGreater(conf, 0.5)
+        assert details is not None
+        key_name, camelot, conf = details
+        self.assertEqual(key_name, "C")
+        self.assertEqual(camelot, "8B")
+        self.assertGreater(conf, 0.5)
 
         detected_key = detect_musical_key(c_chord_path)
         self.assertEqual(detected_key, "C")
@@ -142,11 +138,11 @@ class TestMusicalKey(unittest.TestCase):
 
         details = detect_key_details(am_chord_path)
         self.assertIsNotNone(details)
-        if details:
-            key_name, camelot, conf = details
-            self.assertEqual(key_name, "Am")
-            self.assertEqual(camelot, "8A")
-            self.assertGreater(conf, 0.5)
+        assert details is not None
+        key_name, camelot, conf = details
+        self.assertEqual(key_name, "Am")
+        self.assertEqual(camelot, "8A")
+        self.assertGreater(conf, 0.5)
 
     def test_empty_and_silent_audio(self) -> None:
         silent_audio = np.zeros(22050 * 2, dtype=np.float32)
@@ -169,7 +165,6 @@ class TestMusicalKey(unittest.TestCase):
             detect_musical_key(bogus)
 
     def test_normalize_single_track_with_key(self) -> None:
-        # Create C major audio file
         c_chord_path = self.tmp_path / "c_chord.wav"
         create_chord_wav(c_chord_path, [261.63, 329.63, 392.00])
 
@@ -191,8 +186,10 @@ class TestMusicalKey(unittest.TestCase):
         create_chord_wav(album_dir / "01 - Song.wav", [261.63, 329.63, 392.00])
 
         results = normalize_library(album_dir, fetch_key=True)
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].initial_key, "C")
+        self.assertEqual(results.total_scanned, 1)
+        self.assertEqual(
+            read_track_metadata(album_dir / "01 - Song.wav").initial_key, "C"
+        )
 
 
 if __name__ == "__main__":

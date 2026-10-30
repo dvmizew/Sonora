@@ -44,6 +44,7 @@ sonora_report.json
 .coverage
 .coverage.*
 htmlcov/
+coverage.xml
 
 # Environments
 .venv
@@ -69,3 +70,6 @@ sonora_cache/
 /.music_metadata_cache
 
 GEMINI.md
+.codex/
+graphify-out/
+AGENTS.md

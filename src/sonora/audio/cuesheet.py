@@ -12,11 +12,19 @@ def read_cuesheet_content(cue_path: Path) -> str | None:
         return None
     try:
         raw_bytes = cue_path.read_bytes()
-        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        for encoding in ("utf-8-sig", "cp1252"):
             try:
                 return ftfy.fix_text(raw_bytes.decode(encoding))
             except UnicodeDecodeError:
                 continue
-        return ftfy.fix_text(raw_bytes.decode("utf-8", errors="replace"))
+        return ftfy.fix_text(raw_bytes.decode("latin-1"))
     except OSError:
         return None
+
+
+def find_companion_cuesheet(folder: Path) -> Path | None:
+    """Find the primary .cue sheet file in a directory if present."""
+    if not folder.is_dir():
+        return None
+    cue_files = sorted(folder.glob("*.cue"))
+    return cue_files[0] if cue_files else None

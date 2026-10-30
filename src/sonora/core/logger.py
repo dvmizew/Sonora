@@ -1,11 +1,12 @@
 import contextlib
-import logging
+import re
 import select
 import sys
 import threading
 from collections.abc import Callable, Generator, Sequence
 
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -19,24 +20,10 @@ from rich.progress import (
 from rich.table import Table
 from rich.theme import Theme
 
-for logger_name in [
-    "syncedlyrics",
-    "Musixmatch",
-    "Lrclib",
-    "NetEase",
-    "Megalobiz",
-    "Genius",
-    "urllib3",
-    "httpx",
-]:
-    external_logger = logging.getLogger(logger_name)
-    external_logger.setLevel(logging.CRITICAL)
-    external_logger.propagate = False
-
 _THEME = Theme(
     {"info": "cyan", "warning": "yellow", "error": "red", "success": "green bold"}
 )
-CONSOLE = Console(theme=_THEME, force_terminal=True)
+CONSOLE = Console(theme=_THEME)
 _LOG_LOCK = threading.RLock()
 
 
@@ -56,10 +43,6 @@ class SonoraLogger:
                 for message in messages:
                     CONSOLE.print(message, highlight=False)
 
-    def force_info(self, message: str) -> None:
-        with _LOG_LOCK:
-            CONSOLE.print(message, highlight=False)
-
     def _log_message(self, message: str) -> None:
         if hasattr(self.local, "buffer"):
             self.local.buffer.append(message)
@@ -68,10 +51,15 @@ class SonoraLogger:
                 CONSOLE.print(message, highlight=False)
 
     def info(self, message: str) -> None:
-        if message.startswith(("   ∟", "✨", "📁", "🎧")):
+        if message.startswith(("   ∟", "", "", "")):
             self._log_message(message)
         else:
             self._log_message(f"[info]INFO:[/info] {message}")
+
+    def detail(self, message: str) -> None:
+        """Show per-file decisions only when explicitly requested."""
+        if self.verbose:
+            self.info(message)
 
     def success(self, message: str) -> None:
         self._log_message(f"[success]SUCCESS:[/success] {message}")
@@ -81,7 +69,12 @@ class SonoraLogger:
 
     def debug(self, message: str) -> None:
         if self.verbose:
-            self._log_message(f"[dim]DEBUG:[/dim] {message}")
+            redacted = re.sub(
+                r"(?i)((?:api[_-]?key|client[_-]?key|user[_-]?token|token)=)[^&\s]+",
+                r"\1<redacted>",
+                message,
+            )
+            self._log_message(f"[dim]DEBUG:[/dim] {escape(redacted)}")
 
     def error(self, message: str) -> None:
         self._log_message(f"[error]ERROR:[/error] {message}")
@@ -122,6 +115,13 @@ _PAUSE_EVENT = threading.Event()
 _PAUSE_EVENT.set()
 
 
+def resume_workers(stop_listener: threading.Event | None = None) -> None:
+    """Release paused workers before the main thread joins an interrupted executor."""
+    if stop_listener is not None:
+        stop_listener.set()
+    _PAUSE_EVENT.set()
+
+
 def wait_if_paused(poll_interval: float = 0.2) -> None:
     """Block calling thread safely until resumed."""
     while not _PAUSE_EVENT.wait(timeout=poll_interval):
@@ -134,17 +134,16 @@ def interactive_pause_listener(
     task_id: TaskID | None = None,
     on_pause: Callable[[], None] | None = None,
     on_resume: Callable[[], None] | None = None,
-) -> Generator[None, None, None]:
+) -> Generator[threading.Event, None, None]:
     """
     Listen for Space or 'p' / 'P' in background cbreak mode to pause/resume.
     Safely adjusts Rich Progress timers and displays pause state.
     """
-    if not sys.stdin.isatty():
-        yield
-        return
-
     _PAUSE_EVENT.set()
     stop_event = threading.Event()
+    if not sys.stdin.isatty():
+        yield stop_event
+        return
     pause_start_time: float | None = None
     original_description: str | None = None
 
@@ -152,7 +151,9 @@ def interactive_pause_listener(
         nonlocal pause_start_time, original_description
         if progress is not None and task_id is not None:
             pause_start_time = progress.get_time()
-            progress_task = progress._tasks.get(task_id)
+            progress_task = next(
+                (task for task in progress.tasks if task.id == task_id), None
+            )
             if progress_task:
                 original_description = progress_task.description
             progress.stop_task(task_id)
@@ -167,7 +168,9 @@ def interactive_pause_listener(
         if progress is not None and task_id is not None:
             if pause_start_time is not None:
                 pause_duration = progress.get_time() - pause_start_time
-                progress_task = progress._tasks.get(task_id)
+                progress_task = next(
+                    (task for task in progress.tasks if task.id == task_id), None
+                )
                 if progress_task and progress_task.start_time is not None:
                     progress_task.start_time += pause_duration
                 if progress_task:
@@ -224,6 +227,7 @@ def interactive_pause_listener(
                             else:
                                 break
         finally:
+            _PAUSE_EVENT.set()
             with contextlib.suppress(OSError, getattr(termios, "error", OSError)):
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, orig_term)
 
@@ -232,7 +236,7 @@ def interactive_pause_listener(
     )
     listener.start()
     try:
-        yield
+        yield stop_event
     finally:
         stop_event.set()
         _PAUSE_EVENT.set()

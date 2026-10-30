@@ -24,10 +24,10 @@ def verify_flac_checksum(file_path: Path) -> bool:
         )
         return result.returncode == 0
     except FileNotFoundError as error:
-        raise RuntimeError(
+        raise OSError(
             f"STRICT check failed: '{FLAC_CMD}' binary not found on system path."
         ) from error
     except (subprocess.SubprocessError, OSError) as error:
-        raise RuntimeError(
+        raise OSError(
             f"Checksum verification failed for {file_path}: {error}"
         ) from error
