@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from sonora.core.models import TrackInfo
 from sonora.modules import musicbrainz_metadata
-from sonora.services import artist_resolution, musicbrainz
+from sonora.services import acoustid, artist_resolution, musicbrainz
 from tests.support import IsolatedTestCase
 
 RECORDING_ID = "11111111-1111-4111-8111-111111111111"
@@ -64,7 +64,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
         )
         with (
             patch.object(
-                musicbrainz_metadata.acoustid_service,
+                acoustid,
                 "lookup_acoustid",
                 return_value=RECORDING_ID,
             ),
@@ -151,9 +151,7 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
         ):
             with self.subTest(title=title):
                 self.assertEqual(
-                    musicbrainz_metadata._validate_mb_release_title(
-                        title, track.album
-                    ),
+                    musicbrainz_metadata._validate_mb_release_title(title, track.album),
                     expected,
                 )
 
@@ -350,7 +348,9 @@ class TestReleaseIdentitySafety(IsolatedTestCase):
         self.assertIsNone(track.musicbrainz_albumid)
         self.assertEqual(track.musicbrainz_releasegroupid, RELEASE_GROUP_ID)
         self.assertNotIn("musicbrainz_albumid", track.metadata_sources)
-        self.assertEqual(track.metadata_sources["musicbrainz_releasegroupid"], "MusicBrainz")
+        self.assertEqual(
+            track.metadata_sources["musicbrainz_releasegroupid"], "MusicBrainz"
+        )
         self.assertIn("musicbrainz_albumid", track.metadata_conflicts)
 
     def test_membership_failure_preserves_verified_recording_even_without_force(

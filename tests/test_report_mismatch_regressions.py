@@ -91,9 +91,7 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
             patch.object(musicbrainz, "fetch_track_mbid", return_value=MBID) as search,
         ):
             self.assertIsNone(
-                musicbrainz_metadata._fetch_standalone_recording(
-                    recording, force=True
-                )
+                musicbrainz_metadata._fetch_standalone_recording(recording, force=True)
             )
         self.assertEqual(fetch.call_count, 2)
         search.assert_called_once_with("Alpha", "Original Song")

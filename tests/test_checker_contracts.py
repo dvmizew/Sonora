@@ -33,7 +33,7 @@ class TestCheckerContracts(IsolatedTestCase):
                     ),
                 ),
             ):
-                categories = set()
+                categories: set[checker._IssueCategory] = set()
                 issues = checker.check_file(
                     path, track_metadata=self.recording, categories=categories
                 )

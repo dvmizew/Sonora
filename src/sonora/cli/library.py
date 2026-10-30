@@ -538,9 +538,7 @@ def backup(
     except (KeyboardInterrupt, RuntimeError) as exc:
         if not is_interruption(exc):
             raise
-        LOG.warning(
-            "\n[bold yellow]INTERRUPTED[/] - Backup stopped by user (Ctrl+C)."
-        )
+        LOG.warning("\n[bold yellow]INTERRUPTED[/] - Backup stopped by user (Ctrl+C).")
         return 130
 
     LOG.success(f"Backup created at: [bold]{escape(str(backup_path))}[/bold]")

@@ -196,7 +196,9 @@ class TestArtistResolutionContracts(IsolatedTestCase):
             ):
                 self.assertEqual(artist_resolution.resolve_artist_name(query), expected)
 
-    def test_cached_corrupt_expansions_and_branding_preserve_existing_names(self) -> None:
+    def test_cached_corrupt_expansions_and_branding_preserve_existing_names(
+        self,
+    ) -> None:
         for query, cached, expected in (
             ("primary", "PRIMARY", "primary"),
             ("Alias", "Alias Ensemble", "Alias"),
@@ -488,18 +490,12 @@ class TestMusicBrainzMetadataContracts(IsolatedTestCase):
             "isrc": "USAAA2100001",
             "isrcs": ["USAAA2100001", "USAAA2100002"],
         }
-        self.assertTrue(
-            mb_metadata._fill_missing_title(self.recording, candidate)
-        )
+        self.assertTrue(mb_metadata._fill_missing_title(self.recording, candidate))
         self.assertEqual(self.recording.title, "Recording")
-        self.assertFalse(
-            mb_metadata._fill_missing_title(self.recording, candidate)
-        )
+        self.assertFalse(mb_metadata._fill_missing_title(self.recording, candidate))
         self.recording.title = "Unrelated"
         self.recording.isrc = "USAAA2100003"
-        self.assertFalse(
-            mb_metadata._fill_missing_title(self.recording, candidate)
-        )
+        self.assertFalse(mb_metadata._fill_missing_title(self.recording, candidate))
         self.assertEqual(self.recording.title, "Unrelated")
 
     def test_existing_mbid_skips_fingerprinting_without_force(self) -> None:
@@ -764,7 +760,9 @@ class TestMusicBrainzMetadataContracts(IsolatedTestCase):
         self.recording.musicbrainz_albumid = MBID
         self.recording.album = "Unknown Album"
         self.recording.track_number = 3
-        mb_metadata._apply_mb_release_metadata(self.recording, MBID, release, force=True)
+        mb_metadata._apply_mb_release_metadata(
+            self.recording, MBID, release, force=True
+        )
         self.assertEqual(
             (
                 self.recording.album,
@@ -784,7 +782,9 @@ class TestMusicBrainzMetadataContracts(IsolatedTestCase):
         )
         self.recording.track_number = 12
         self.recording.total_tracks = None
-        mb_metadata._apply_mb_release_metadata(self.recording, MBID, release, force=True)
+        mb_metadata._apply_mb_release_metadata(
+            self.recording, MBID, release, force=True
+        )
         self.assertIsNone(self.recording.total_tracks)
 
     def test_recording_metadata_updates_missing_identity_and_preserves_disc_totals(

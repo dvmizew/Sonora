@@ -482,7 +482,9 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
             catalog._update_genius(recording, "fixture")
         self.assertEqual((recording.date, recording.lyricist), ("2020", "Verified"))
 
-    def test_theaudiodb_existing_rating_and_genre_survive_metadata_updates(self) -> None:
+    def test_theaudiodb_existing_rating_and_genre_survive_metadata_updates(
+        self,
+    ) -> None:
         recording = dataclasses.replace(self.recording, genre="Rock", rating=8.5)
         with patch.object(
             theaudiodb_service,
@@ -765,7 +767,8 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
                         Path("Song.flac"),
                         artist="Primary",
                         album="Album",
-                        **identifiers,
+                        barcode=identifiers.get("barcode"),
+                        discogs_release_id=identifiers.get("discogs_release_id"),
                     )
                     catalog._update_discogs(track, "fixture", release, force=force)
                     self.assertEqual(track.style, "House")

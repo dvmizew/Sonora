@@ -461,8 +461,7 @@ def rename_directory_files(
                         ):
                             album_artist, album_title = ranked_album_credits[0][0]
                         elif (
-                            len({album_title for _, album_title in album_counts})
-                            == 1
+                            len({album_title for _, album_title in album_counts}) == 1
                             and sum(album_counts.values()) > len(files) / 2
                         ):
                             album_artist, album_title = (

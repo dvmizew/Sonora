@@ -145,7 +145,9 @@ class TestTrackProcessingContracts(IsolatedTestCase):
             self.assertIsNone(normalized.producers)
         self.assertEqual(normalized.featured_artists, "Guest")
 
-    def test_dsp_metadata_updates_accepts_results_and_handles_decode_failures(self) -> None:
+    def test_dsp_metadata_updates_accepts_results_and_handles_decode_failures(
+        self,
+    ) -> None:
         with patch.object(bpm, "calculate_bpm", return_value=123.4):
             track_processing._update_bpm(self.recording, self.path, True)
         self.assertEqual(self.recording.bpm, 123.4)
@@ -174,7 +176,9 @@ class TestTrackProcessingContracts(IsolatedTestCase):
             self.assertEqual(self.recording.initial_key, "Am")
             self.assertEqual(self.recording.bpm, 123.4)
 
-    def test_lyric_metadata_updates_logs_existing_forced_and_missing_assets(self) -> None:
+    def test_lyric_metadata_updates_logs_existing_forced_and_missing_assets(
+        self,
+    ) -> None:
         for existing, force in ((False, False), (True, False), (True, True)):
             if existing:
                 self.path.with_suffix(".lrc").write_text("[00:01] Existing")

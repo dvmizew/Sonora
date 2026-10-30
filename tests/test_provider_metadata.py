@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sonora.core.config import SonoraConfig
-from sonora.core.models import TrackInfo
+from sonora.core.models import MetadataSource, TrackInfo
 from sonora.modules import catalog_metadata as catalog
 from sonora.modules.metadata_merge import (
     MetadataProposal,
@@ -43,14 +43,22 @@ class TestProviderMetadata(IsolatedTestCase):
                 self.assertEqual(recording.itunes_trackid, expected)
 
     def test_provider_aliases_preserve_existing_credits(self) -> None:
-        for sources in (("Genius",), ("Genius", "Deezer"), ("Deezer", "Genius")):
+        cases: tuple[tuple[MetadataSource, ...], ...] = (
+            ("Genius",),
+            ("Genius", "Deezer"),
+            ("Deezer", "Genius"),
+        )
+        for sources in cases:
             with self.subTest(sources=sources):
                 recording = TrackInfo(Path("song.flac"), featured_artists="Guest")
                 merge_provider_proposals(
                     recording,
-                    [MetadataProposal(
-                        {"featured_artists": ("Guest, Guest Alias", source)}, {}
-                    ) for source in sources],
+                    [
+                        MetadataProposal(
+                            {"featured_artists": ("Guest, Guest Alias", source)}, {}
+                        )
+                        for source in sources
+                    ],
                 )
                 self.assertEqual(recording.featured_artists, "Guest")
                 self.assertIn("featured_artists", recording.metadata_conflicts)
@@ -61,8 +69,12 @@ class TestProviderMetadata(IsolatedTestCase):
             ("Tyga feat. Game", "The Game, Mario"),
         ):
             with self.subTest(artist=artist):
-                recording = TrackInfo(Path("song.flac"), artist=artist,
-                                      title="Song", featured_artists=credits)
+                recording = TrackInfo(
+                    Path("song.flac"),
+                    artist=artist,
+                    title="Song",
+                    featured_artists=credits,
+                )
                 normalize_track_metadata(recording)
                 self.assertEqual(recording.artist, "Tyga")
                 self.assertEqual(recording.featured_artists, credits)

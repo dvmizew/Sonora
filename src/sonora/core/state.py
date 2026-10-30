@@ -272,7 +272,9 @@ class LibraryStateVault:
         except FileNotFoundError:
             return 0
         except (sqlite3.Error, OSError) as error:
-            raise OSError(f"Cannot count library state entries: {self.db_path}") from error
+            raise OSError(
+                f"Cannot count library state entries: {self.db_path}"
+            ) from error
 
     def get_state_size(self) -> int:
         """Return total disk size of the library state database including WAL files."""

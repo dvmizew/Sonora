@@ -377,7 +377,9 @@ class TestCacheStatsAndResult(IsolatedTestCase):
             for cache in (None, unreadable_cache):
                 with (
                     self.subTest(cache=cache),
-                    patch("sonora.core.cache.get_api_cache_dir", return_value=cache_path),
+                    patch(
+                        "sonora.core.cache.get_api_cache_dir", return_value=cache_path
+                    ),
                     patch("sonora.core.cache.get_cache", return_value=cache),
                     self.assertRaisesRegex(OSError, "API cache"),
                 ):

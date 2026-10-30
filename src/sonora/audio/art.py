@@ -389,8 +389,6 @@ def process_label_artwork(
             logo_bytes = download_fanart_image_bytes(fanart_label.label_urls[0])
             if _save_image(label_path, logo_bytes):
                 name_display = escape(label_name) if label_name else "Record Label"
-                LOG.detail(
-                    f"   ∟ Downloaded label logo: {name_display} -> label.png"
-                )
+                LOG.detail(f"   ∟ Downloaded label logo: {name_display} -> label.png")
     except (httpx.HTTPError, OSError) as error:
         LOG.debug(f"Record label logo download failed for {label_mbid}: {error}")

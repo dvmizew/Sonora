@@ -257,7 +257,9 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         self.assertEqual({recording.file_path for recording in results}, set(paths))
         self.assertEqual(tag.call_count, 2)
 
-    def test_up_to_date_album_skips_metadata_updates_and_preserves_results(self) -> None:
+    def test_up_to_date_album_skips_metadata_updates_and_preserves_results(
+        self,
+    ) -> None:
         self.recording.file_path.touch()
         with (
             patch.object(LibraryStateVault, "filter_outdated_tracks", return_value=[]),

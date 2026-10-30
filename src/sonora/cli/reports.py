@@ -105,7 +105,11 @@ def _emit_tag_summary_and_report(
         "advisory": "Parental Advisory",
     }
     tag_summary_rows: list[tuple[str, str, str | None]] = [
-        ("Total Tracks Previewed" if dry_run else "Total Tracks Processed", str(total_tracks), None),
+        (
+            "Total Tracks Previewed" if dry_run else "Total Tracks Processed",
+            str(total_tracks),
+            None,
+        ),
         *(
             (
                 label,

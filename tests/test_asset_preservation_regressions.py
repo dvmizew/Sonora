@@ -40,7 +40,7 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
             sidecar.write_text(original)
             returned = "[00:00.10]" + replacement
             conflicts: dict[str, str] = {}
-            details: dict = {}
+            details: dict[str, object] = {}
             with patch.object(lyrics, "fetch_synced_lyrics", return_value=returned):
                 text, status = track_processing_module.process_track_lyrics(
                     audio_path,

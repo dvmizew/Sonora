@@ -131,7 +131,9 @@ class TestPerformanceSafety(IsolatedTestCase):
         metadata_merge.merge_provider_proposals(original, [])
         self.assertEqual(original.genre, "Original")
 
-    def test_foreign_identity_and_conflicting_isrc_withhold_metadata_updates(self) -> None:
+    def test_foreign_identity_and_conflicting_isrc_withhold_metadata_updates(
+        self,
+    ) -> None:
         original = TrackInfo(
             Path("recording.flac"),
             artist="Alpha",

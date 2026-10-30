@@ -73,8 +73,9 @@ class TestNetworkRetries(IsolatedTestCase):
                     httpx.HTTPTransport, "handle_request", return_value=response
                 ),
                 patch("sonora.core.http.wait_for_provider") as defer,
-                patch("sonora.core.http.random.uniform", return_value=3.0),
+                patch("sonora.core.http.SystemRandom") as random,
             ):
+                random.return_value.uniform.return_value = 3.0
                 self.assertIs(transport.handle_request(request), response)
                 defer.assert_called_once_with("lrclib.net", 0, defer_seconds=33)
         finally:

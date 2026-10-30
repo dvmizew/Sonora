@@ -7,7 +7,9 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+import syncedlyrics
 
+from sonora.audio import metadata as metadata_module
 from sonora.core import sidecars
 from sonora.core.config import get_config
 from sonora.core.http import SESSION
@@ -27,9 +29,7 @@ class TestLyricsTokenContracts(IsolatedTestCase):
             with (
                 self.subTest(fallback=fallback),
                 patch.object(lyrics, "_query_lrclib", side_effect=OSError("offline")),
-                patch.object(
-                    lyrics.syncedlyrics, "search", return_value=fallback
-                ) as search,
+                patch.object(syncedlyrics, "search", return_value=fallback) as search,
                 patch.object(lyrics._LYRICS_LIMITER, "wait"),
             ):
                 if fallback:
@@ -60,7 +60,7 @@ class TestLyricsTokenContracts(IsolatedTestCase):
         with (
             patch.object(lyrics, "_query_lrclib", side_effect=OSError("offline")),
             patch.object(lyrics, "_query_authenticated_musixmatch", return_value=None),
-            patch.object(lyrics.syncedlyrics, "search") as search,
+            patch.object(syncedlyrics, "search") as search,
             self.assertRaises(OSError),
         ):
             lyrics._query_syncedlyrics(
@@ -754,7 +754,7 @@ class TestLyricsLookupState(IsolatedTestCase):
         with (
             patch.object(lyrics, "_query_syncedlyrics", side_effect=error) as query,
             patch.object(lyrics, "set_cached_api") as cache,
-            patch.object(lyrics.LOG, "warning") as warning,
+            patch.object(LOG, "warning") as warning,
         ):
             for index in range(3):
                 with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
@@ -982,6 +982,7 @@ class TestExistingLyricsValidation(IsolatedTestCase):
             )
         lookup.assert_not_called()
         self.assertEqual(status, "cleaned")
+        assert text is not None
         self.assertIn("[offset:100]", text)
         self.assertIn("<00:01.00> Words", text)
         self.assertNotIn("tracking", text)
@@ -992,11 +993,11 @@ class TestExistingLyricsValidation(IsolatedTestCase):
         self.lrc_path.write_text(body)
         sibling = self.audio_path.with_name("different.flac")
         sibling.touch()
-        conflicts = {}
+        conflicts: dict[str, str] = {}
         with (
             patch.object(lyrics, "fetch_synced_lyrics", return_value=body),
             patch.object(
-                track_processing.metadata_module,
+                metadata_module,
                 "read_track_metadata",
                 return_value=TrackInfo(
                     sibling, artist="Alpha", title="Different", lyrics=body
@@ -1026,12 +1027,12 @@ class TestExistingLyricsValidation(IsolatedTestCase):
             ):
                 sidecar = remix.with_suffix(".lrc")
                 sidecar.unlink(missing_ok=True)
-                conflicts = {}
+                conflicts: dict[str, str] = {}
                 with (
                     self.subTest(force=force, accepted=accepted),
                     patch.object(lyrics, "fetch_synced_lyrics", return_value=candidate),
                     patch.object(
-                        track_processing.metadata_module,
+                        metadata_module,
                         "read_track_metadata",
                         return_value=TrackInfo(
                             self.audio_path,
@@ -1059,11 +1060,11 @@ class TestExistingLyricsValidation(IsolatedTestCase):
         body = "The original singer performs this entire original verse. " * 12
         remix = self.audio_path.with_name("Song (Remix).flac")
         remix.touch()
-        conflicts = {}
+        conflicts: dict[str, str] = {}
         with (
             patch.object(lyrics, "fetch_synced_lyrics", return_value=None),
             patch.object(
-                track_processing.metadata_module,
+                metadata_module,
                 "read_track_metadata",
                 return_value=TrackInfo(
                     self.audio_path,
@@ -1200,7 +1201,7 @@ class TestExistingLyricsValidation(IsolatedTestCase):
     def test_invalid_utf8_is_not_decoded_by_dropping_bytes(self) -> None:
         payload = b"[ar:Alpha]\n[ti:Recording]\n[00:01]caf\xe9"
         self.lrc_path.write_bytes(payload)
-        conflicts = {}
+        conflicts: dict[str, str] = {}
         with patch.object(lyrics, "fetch_synced_lyrics", return_value=None) as lookup:
             self.assertEqual(
                 track_processing.process_track_lyrics(

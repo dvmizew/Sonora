@@ -236,7 +236,7 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
         dirty = "Hello world\n42Embed"
         path.with_suffix(".lrc").write_text(dirty)
         track = TrackInfo(path, artist="Artist", title="Song", lyrics=dirty)
-        details = {}
+        details: dict[Path, dict[str, object]] = {}
         with (
             patch.object(audio, "read_track_metadata", return_value=track),
             patch.object(audio, "get_audio_duration", return_value=100),
@@ -261,8 +261,10 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
         path.touch()
         report = self.test_directory / "lyrics.json"
 
-        def deferred(*args, **kwargs):
-            kwargs["details"].update(
+        def deferred(
+            *args: object, details: dict[str, object], **kwargs: object
+        ) -> None:
+            details.update(
                 lookup_status="deferred", reason="Provider unavailable for this run."
             )
 

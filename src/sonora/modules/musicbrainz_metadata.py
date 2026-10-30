@@ -838,9 +838,7 @@ def _update_musicbrainz(
         )
         if _release_edition_conflicts(track_info, candidate_rec):
             return
-        title_updated = _fill_missing_title(
-            track_info, candidate_rec
-        )
+        title_updated = _fill_missing_title(track_info, candidate_rec)
 
         _resolve_musicbrainz_track_id(track_info, album_track_mbids, candidate_rec)
         if "musicbrainz_albumid" in track_info.metadata_conflicts:

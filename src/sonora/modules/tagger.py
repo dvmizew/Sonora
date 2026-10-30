@@ -142,9 +142,8 @@ def _apply_album_metadata(
                 ) and (track_info.disc_number or 1) <= (track_info.total_discs or 1):
                     track_info.metadata_conflicts.pop("album_sequence", None)
 
-    if (
-        album_context.sample_artist
-        and not _is_generic(album_context.sample_artist, "artist")
+    if album_context.sample_artist and not _is_generic(
+        album_context.sample_artist, "artist"
     ):
         if not track_info.album_artist or force:
             track_info.album_artist = preserve_unicode_repertoire(

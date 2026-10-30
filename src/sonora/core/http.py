@@ -1,9 +1,9 @@
 import atexit
-import random
 import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from random import SystemRandom
 from typing import Any
 
 import httpx
@@ -104,7 +104,7 @@ class RetryTransport(httpx.HTTPTransport):
                             self.backoff_factor * (2**attempt),
                         )
                         if request.url.host == "lrclib.net":
-                            delay += random.uniform(0.0, delay * 0.3)
+                            delay += SystemRandom().uniform(0.0, delay * 0.3)
                         if limiter is not None and not limiter._disabled:
                             wait_for_provider(request.url.host, 0, defer_seconds=delay)
                         if delay > 60.0 or attempt >= self.max_retries - 1:
