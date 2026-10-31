@@ -445,17 +445,18 @@ class TestCheckingWorkflows(ModuleTestCase):
         mock_spectral.return_value = (
             True,
             0.0001,
-            "Brickwall spectral cutoff detected at ~16-18kHz (likely upscaled 128-192kbps MP3 fake lossless)",
+            "Sharp spectral cutoff near 16.0 kHz; source quality requires review.",
         )
 
         report = check_library(self.tmp_path, check_spectral=True)
         self.assertTrue(
             any(
-                "fake lossless" in issue.lower()
+                "source quality requires review" in issue.lower()
                 for issues in report.issues.values()
                 for issue in issues
             )
         )
+        self.assertEqual(report.corrupt_files, 0)
         mock_spectral.assert_called_once()
 
     def test_is_valid_uuid_multivalue(self) -> None:

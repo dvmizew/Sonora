@@ -617,7 +617,8 @@ def process_track_lyrics(
     ):
         LOG.warning(
             f"Embedded lyrics require review for {escape(file_path.name)}: "
-            "recording identity conflicts with local evidence; reuse withheld."
+            "headers, timestamps, or recording identity conflict with local evidence; "
+            "reuse withheld."
         )
         embedded_quality = 0
         review_required = True
@@ -647,6 +648,26 @@ def process_track_lyrics(
         current_quality = embedded_quality
         existing_content = existing_lyrics
         existing_source = "embedded"
+
+    if any(
+        re.search(
+            r"[\[(]\s*instrumental\s*[\])]|\binstrumentals\s*$",
+            value,
+            re.IGNORECASE,
+        )
+        for value in (title, album_name or "")
+    ):
+        if details is not None:
+            details.update(lookup_status="not_needed", action="unchanged")
+        if current_quality > 0 or review_required:
+            reason = "Lyrics are present on an instrumental recording; review required."
+            if conflicts is not None:
+                conflicts["lyrics"] = reason
+            if details is not None:
+                details.update(action="review", reason=reason)
+            LOG.warning(f"{escape(file_path.name)}: {reason}")
+            return None, "review"
+        return None, None
 
     other_song_bodies: list[str] = []
     version_pattern = (
@@ -721,7 +742,7 @@ def process_track_lyrics(
         return None, "failed" if lookup_failed else None
 
     if not force and (
-        source_disagreement or (current_quality >= 3 and existing_content)
+        source_disagreement or (current_quality >= 2 and existing_content)
     ):
         return keep_existing()
 
@@ -847,7 +868,7 @@ def process_track_lyrics(
                     lyrics_text = repaired_lyrics
                     new_quality = get_lyrics_quality(lyrics_text)
 
-    if not force and existing_content:
+    if existing_content and (not force or new_quality < current_quality):
         old_body = lyrics_word_body(existing_content)
         new_body = lyrics_word_body(lyrics_text)
         if old_body and old_body != new_body:
@@ -871,6 +892,8 @@ def process_track_lyrics(
     if not force and current_quality > 0 and new_quality <= current_quality:
         return keep_existing()
 
+    if conflicts is not None:
+        conflicts.pop("lyrics", None)
     if not dry_run:
         atomic_write_bytes(lrc_path, lyrics_text.encode("utf-8"))
 

@@ -352,6 +352,19 @@ def _fetch_standalone_recording(
             track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
         return fetched_rec
 
+    if (
+        not duration_matches
+        and not has_missing_identity
+        and recording_identity_matches(
+            expected_artist, track_info.title, rec_artist, rec_title
+        )
+    ):
+        track_info.metadata_conflicts["musicbrainz_trackid"] = (
+            "MusicBrainz recording duration differs from audio; stored identifier "
+            "preserved pending recording-version or audio-length verification."
+        )
+        return None
+
     LOG.debug(
         f"Discarding mismatched pre-existing MBID {escape(str(track_info.musicbrainz_trackid))} "
         f"('{escape(str(rec_artist))} - {escape(str(rec_title))}') "
@@ -710,6 +723,12 @@ def _apply_mb_release_metadata(
         return
 
     release_recordings = mb_rel.get("tracks_by_mbid")
+    if (
+        isinstance(release_recordings, dict)
+        and track_info.musicbrainz_trackid in release_recordings
+        and "musicbrainz_trackid" in track_info.metadata_conflicts
+    ):
+        return
     if (
         isinstance(release_recordings, dict)
         and not _is_generic(track_info.artist, "artist")

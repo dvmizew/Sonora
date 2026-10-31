@@ -518,7 +518,8 @@ class TestAudioEngine(IsolatedTestCase):
         self.assertGreaterEqual(cutoff_khz, 14.5)
         self.assertLessEqual(cutoff_khz, 16.5)
         assert description is not None
-        self.assertIn("128kbps", description)
+        self.assertIn("Source quality requires review", description)
+        self.assertNotIn("kbps", description)
 
     def test_detect_fake_lossless_nonexistent_file(self) -> None:
         with self.assertRaises(FileNotFoundError):

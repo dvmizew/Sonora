@@ -489,7 +489,9 @@ class TestCheckerContracts(IsolatedTestCase):
             issues,
         )
         self.assertIn("Corrupt 0-byte picture block at index 0.", issues)
-        self.assertIn("Possible fake lossless (spectral cutoff below 16kHz).", issues)
+        self.assertIn(
+            "Spectral cutoff below 16 kHz; source quality requires review.", issues
+        )
         with (
             patch.object(
                 checker, "verify_flac_checksum", side_effect=OSError("flac unavailable")
@@ -705,17 +707,18 @@ class TestCheckerIssueCategories(IsolatedTestCase):
             track_number=1,
         )
 
-    def test_empty_artwork_and_lyrics_count_corrupt_files_without_parsing_messages(
+    def test_asset_and_spectral_warnings_do_not_count_as_audio_corruption(
         self,
     ) -> None:
         audio_path = self.test_directory / "01 - Recording.flac"
         audio_path.touch()
         lyrics_path = audio_path.with_suffix(".lrc")
-        for picture_bytes, lyrics_text, expected_corrupt in (
-            (b"", "[00:01.00]Words", 1),
-            (b"picture", "", 1),
-            (b"picture", "[00:01.00]Words", 0),
-            (b"", "", 1),
+        for picture_bytes, lyrics_text, checksum_valid in (
+            (b"", "[00:01.00]Words", True),
+            (b"picture", "", True),
+            (b"picture", "[00:01.00]Words", True),
+            (b"", "", True),
+            (b"picture", "[00:01.00]Words", False),
         ):
             lyrics_path.write_text(lyrics_text)
             with (
@@ -724,7 +727,14 @@ class TestCheckerIssueCategories(IsolatedTestCase):
                 patch.object(
                     checker, "read_track_metadata", return_value=self.recording
                 ),
-                patch.object(checker, "verify_flac_checksum", return_value=True),
+                patch.object(
+                    checker, "verify_flac_checksum", return_value=checksum_valid
+                ),
+                patch.object(
+                    checker,
+                    "detect_fake_lossless",
+                    return_value=(True, 16, "Source quality requires review."),
+                ),
                 patch.object(
                     checker,
                     "FLAC",
@@ -733,12 +743,25 @@ class TestCheckerIssueCategories(IsolatedTestCase):
                     ),
                 ),
             ):
-                report = checker.check_library(self.test_directory)
-            self.assertEqual(report.corrupt_files, expected_corrupt)
+                report = checker.check_library(self.test_directory, check_spectral=True)
+            self.assertEqual(report.corrupt_files, int(not checksum_valid))
+            self.assertIn(
+                "Source quality requires review.", report.issues[str(audio_path)]
+            )
             self.assertEqual(report.missing_lrc, 0)
 
     def test_missing_lyrics_are_distinct_from_corruption(self) -> None:
-        with patch.object(checker, "read_track_metadata", return_value=self.recording):
-            report = checker.check_library(self.test_directory)
-        self.assertEqual(report.missing_lrc, 1)
-        self.assertEqual(report.corrupt_files, 0)
+        for title, album, missing in (
+            ("Recording", "Album", 1),
+            ("Recording (Instrumental)", "Album", 0),
+            ("Recording", "Album Instrumentals", 0),
+            ("Instrumental Love", "Album", 1),
+        ):
+            track = dataclasses.replace(self.recording, title=title, album=album)
+            with (
+                self.subTest(title=title, album=album),
+                patch.object(checker, "read_track_metadata", return_value=track),
+            ):
+                report = checker.check_library(self.test_directory)
+            self.assertEqual(report.missing_lrc, missing)
+            self.assertEqual(report.corrupt_files, 0)

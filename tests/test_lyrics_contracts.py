@@ -831,22 +831,27 @@ class TestLocalLyricsContracts(IsolatedTestCase):
         self.audio_path.touch()
         self.lrc_path = self.audio_path.with_suffix(".lrc")
 
-    def test_embedded_enhanced_lyrics_restore_missing_companion_without_network(
+    def test_embedded_synchronized_lyrics_restore_companion_without_network(
         self,
     ) -> None:
-        with patch.object(lyrics, "fetch_synced_lyrics") as search:
-            self.assertEqual(
-                track_processing.process_track_lyrics(
-                    self.audio_path,
-                    "Primary",
-                    "Recording",
-                    duration=100,
-                    existing_lyrics=ENHANCED,
-                ),
-                (ENHANCED, "existing"),
-            )
-        search.assert_not_called()
-        self.assertEqual(self.lrc_path.read_text(), ENHANCED)
+        for content in (SYNCED, ENHANCED):
+            self.lrc_path.unlink(missing_ok=True)
+            with (
+                self.subTest(content=content),
+                patch.object(lyrics, "fetch_synced_lyrics") as search,
+            ):
+                self.assertEqual(
+                    track_processing.process_track_lyrics(
+                        self.audio_path,
+                        "Primary",
+                        "Recording",
+                        duration=100,
+                        existing_lyrics=content,
+                    ),
+                    (content, "existing"),
+                )
+            search.assert_not_called()
+            self.assertEqual(self.lrc_path.read_text(), content)
 
     def test_dry_run_can_restore_lyrics_without_writing_companion(self) -> None:
         result = track_processing.process_track_lyrics(
@@ -935,6 +940,23 @@ class TestLyricsHeaderIdentity(IsolatedTestCase):
 
     def test_conflicting_artist_title_and_duplicate_headers_are_rejected(self) -> None:
         for content in (
+            "Wrong Song Lyrics\nWords",
+            '[Versuri "Wrong Song"]\nWords',
+            "[Versuri „Wrong Song”]\nWords",
+            "[Versurile piesei „Wrong Song” cu Alpha]\nWords",
+            "[Versuri pentru „Wrong Song” cu Alpha]\nWords",
+            "[Versuri pentru „Wrong Song“ cu Alpha]\nWords",
+            '[Paroles de  "Wrong Song"]\nWords',
+        ):
+            self.assertFalse(
+                sidecars.lyrics_identity_matches(content, "Alpha", "Recording")
+            )
+        self.assertTrue(
+            sidecars.lyrics_identity_matches(
+                "Recording Lyrics\nWords", "Alpha", "Recording"
+            )
+        )
+        for content in (
             "[ar:Another performer]\n[ti:Recording]\nWords",
             "[ar:Alpha]\n[ti:Unrelated song]\nWords",
             "[ar:Alpha]\n[ti:Recording]\n[ti:Unrelated song]\nWords",
@@ -970,6 +992,39 @@ class TestExistingLyricsValidation(IsolatedTestCase):
         self.audio_path = self.test_directory / "recording.flac"
         self.audio_path.touch()
         self.lrc_path = self.audio_path.with_suffix(".lrc")
+
+    def test_instrumentals_never_import_vocal_lyrics(self) -> None:
+        for title, album in (
+            ("Recording (Instrumental)", "Record"),
+            ("Recording", "Record Instrumentals"),
+        ):
+            for force in (False, True):
+                for existing in (False, True):
+                    self.lrc_path.unlink(missing_ok=True)
+                    if existing:
+                        self.lrc_path.write_text("[00:01.00] Vocal words")
+                    conflicts: dict[str, str] = {}
+                    with (
+                        self.subTest(title=title, force=force, existing=existing),
+                        patch.object(lyrics, "fetch_synced_lyrics") as lookup,
+                    ):
+                        text, status = track_processing.process_track_lyrics(
+                            self.audio_path,
+                            "Alpha",
+                            title,
+                            album_name=album,
+                            duration=100,
+                            force=force,
+                            conflicts=conflicts,
+                        )
+                    lookup.assert_not_called()
+                    self.assertIsNone(text)
+                    self.assertEqual(status, "review" if existing else None)
+                    self.assertEqual("lyrics" in conflicts, existing)
+                    if existing:
+                        self.assertEqual(
+                            self.lrc_path.read_text(), "[00:01.00] Vocal words"
+                        )
 
     def test_existing_enhanced_lyrics_are_cleaned_without_lookup(self) -> None:
         self.lrc_path.write_text(
@@ -1010,6 +1065,28 @@ class TestExistingLyricsValidation(IsolatedTestCase):
         self.assertIsNone(text)
         self.assertIn("lyrics", conflicts)
         self.assertEqual(self.lrc_path.read_text(), body)
+
+        replacement = "Distinct words for the verified recording. " * 12
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=replacement),
+            patch.object(
+                metadata_module,
+                "read_track_metadata",
+                return_value=TrackInfo(
+                    sibling, artist="Alpha", title="Different", lyrics=body
+                ),
+            ),
+        ):
+            text, _ = track_processing.process_track_lyrics(
+                self.audio_path,
+                "Alpha",
+                "Recording",
+                duration=100,
+                conflicts=conflicts,
+                force=True,
+            )
+        self.assertEqual(text, replacement.strip())
+        self.assertNotIn("lyrics", conflicts)
 
     def test_collaboration_remix_cannot_import_original_versions_lyrics(self) -> None:
         original_body = (

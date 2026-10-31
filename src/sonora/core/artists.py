@@ -224,9 +224,14 @@ def extract_featured_artist_tokens(
     tokens = _split_artist_credits(featured_artists_input)
     unique_artists: list[str] = []
     artist_indexes: dict[str, int] = {}
-    normalized_primary_artist = (
-        normalize_str(primary_artist) if primary_artist else None
-    )
+    primary_credit = primary_artist or ""
+    if not is_single_group_artist(primary_credit):
+        primary_credit = _FEAT_ARTIST_PATTERN.split(primary_credit, maxsplit=1)[0]
+    normalized_primary_artists = {
+        normalize_str(name)
+        for name in [primary_credit, *_split_artist_credits(primary_credit)]
+        if name
+    }
     user_overrides = _load_user_overrides()
 
     for artist_token in tokens:
@@ -256,10 +261,11 @@ def extract_featured_artist_tokens(
         }:
             continue
 
-        if normalized_primary_artist and (
-            normalized_artist == normalized_primary_artist
-            or fuzz.ratio(normalized_artist, normalized_primary_artist)
+        if any(
+            normalized_artist == primary_name
+            or fuzz.ratio(normalized_artist, primary_name)
             >= policy.featured_artist_duplicate_threshold
+            for primary_name in normalized_primary_artists
         ):
             continue
 

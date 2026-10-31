@@ -13,6 +13,54 @@ RELEASE_GROUP_ID = "44444444-4444-4444-8444-444444444444"
 
 
 class TestReleaseIdentitySafety(IsolatedTestCase):
+    def test_duration_disagreement_preserves_matching_stored_recording_and_release(
+        self,
+    ) -> None:
+        for force in (False, True):
+            track = TrackInfo(
+                Path("song.flac"),
+                artist="Performer",
+                title="Song (Instrumental)",
+                album="Album Instrumentals",
+                album_artist="Performer",
+                duration=192.4,
+                musicbrainz_trackid=RECORDING_ID,
+                musicbrainz_albumid=RELEASE_ID,
+            )
+            recording = {
+                "artist": "Performer",
+                "title": "Song (Instrumental)",
+                "duration": 189,
+            }
+            release = {
+                "title": "Album Instrumentals",
+                "album_artist": "Performer",
+                "label": "Unverified label",
+                "tracks_by_mbid": {RECORDING_ID: recording},
+            }
+            with (
+                self.subTest(force=force),
+                patch.object(
+                    musicbrainz,
+                    "fetch_musicbrainz_recording_details",
+                    return_value=recording,
+                ),
+                patch.object(
+                    artist_resolution, "resolve_artist_name", return_value="Performer"
+                ),
+            ):
+                self.assertIsNone(
+                    musicbrainz_metadata._fetch_standalone_recording(track, force=force)
+                )
+                musicbrainz_metadata._apply_mb_release_metadata(
+                    track, RELEASE_ID, release, force=force
+                )
+            self.assertEqual(track.musicbrainz_trackid, RECORDING_ID)
+            self.assertEqual(track.musicbrainz_albumid, RELEASE_ID)
+            self.assertIsNone(track.label)
+            self.assertIn("musicbrainz_trackid", track.metadata_conflicts)
+            self.assertNotIn("musicbrainz_albumid", track.metadata_conflicts)
+
     def test_clean_album_recording_requires_local_edition_evidence(self) -> None:
         for force in (False, True):
             for advisory in (None, "Explicit"):

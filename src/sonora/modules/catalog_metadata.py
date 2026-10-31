@@ -835,7 +835,7 @@ def _update_genius(track_info: TrackInfo, genius_api_token: str | None) -> None:
                 or validated_score < get_config().genius_match_threshold
             ):
                 track_info.metadata_conflicts["genius_song_id_validation"] = (
-                    "Stored Genius title or collaboration differs; credits "
+                    "Stored Genius title, collaborators, or album differ; credits "
                     "withheld pending recording verification."
                 )
                 return

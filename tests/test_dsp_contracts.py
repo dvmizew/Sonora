@@ -150,15 +150,11 @@ class TestSpectralContracts(IsolatedTestCase):
         ):
             self.assertEqual(spectral.detect_fake_lossless(path), (False, 0, None))
 
-    def test_encoder_profile_boundaries_use_spectral_cutoff(self) -> None:
+    def test_cutoff_detection_does_not_claim_a_source_codec_or_bitrate(self) -> None:
         path = self.test_directory / "spectral.wav"
         path.touch()
         frequencies = np.arange(0, 22051, 250)
-        for cutoff, profile in (
-            (16500, "128kbps MP3/AAC"),
-            (17500, "160kbps MP3"),
-            (18500, "192kbps MP3"),
-        ):
+        for cutoff in (16500, 17500, 18500):
             power = np.full((len(frequencies), 10), 1e-9)
             power[np.flatnonzero(frequencies == cutoff)[0], :] = 1
             with (
@@ -175,7 +171,10 @@ class TestSpectralContracts(IsolatedTestCase):
             self.assertTrue(fake)
             self.assertEqual(detected, cutoff / 1000)
             assert description is not None
-            self.assertIn(profile, description)
+            self.assertIn(f"{cutoff / 1000:.1f} kHz", description)
+            self.assertIn("requires review", description)
+            self.assertNotIn("kbps", description)
+            self.assertNotIn("MP3", description)
 
 
 class TestReplayGainFailureContracts(IsolatedTestCase):

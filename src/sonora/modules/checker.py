@@ -147,7 +147,6 @@ def check_file(
                     )
             for index, picture in enumerate(audio_flac.pictures):
                 if len(picture.data) == 0:
-                    categories.add(_IssueCategory.CORRUPT)
                     issues.append(f"Corrupt 0-byte picture block at index {index}.")
         except (MutagenError, OSError) as error:
             LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
@@ -160,10 +159,9 @@ def check_file(
         try:
             is_fake, _, description = detect_fake_lossless(file_path)
             if is_fake:
-                categories.add(_IssueCategory.CORRUPT)
                 issues.append(
                     description
-                    or "Possible fake lossless (spectral cutoff below 16kHz)."
+                    or "Spectral cutoff below 16 kHz; source quality requires review."
                 )
         except OSError as error:
             LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
@@ -384,17 +382,13 @@ def check_file(
                         f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{delimiter_name}')"
                     )
 
-        _, title_features = extract_title_features(
-            track.title, primary_artist=track.artist
-        )
+        _, title_features = extract_title_features(track.title)
         if title_features:
             issues.append(
                 f"TITLE tag '{track.title}' contains 'feat' info (Rule: clean title, use FEATURED_ARTISTS tag)"
             )
 
-        _, filename_features = extract_title_features(
-            file_path.stem, primary_artist=track.artist
-        )
+        _, filename_features = extract_title_features(file_path.stem)
         if filename_features:
             issues.append(
                 f"Filename contains 'feat' info: '{file_path.name}' (Rule: clean filename)"
@@ -414,11 +408,20 @@ def check_file(
         file_path,
         track_number=track.track_number if track is not None else None,
     )
-    if not companion_lrcs:
+    if not companion_lrcs and not (
+        track is not None
+        and any(
+            re.search(
+                r"[\[(]\s*instrumental\s*[\])]|\binstrumentals\s*$",
+                value,
+                re.IGNORECASE,
+            )
+            for value in (track.title, track.album)
+        )
+    ):
         categories.add(_IssueCategory.MISSING_LYRICS)
         issues.append("Missing synchronized lyrics (.lrc) file.")
     elif any(lrc.stat().st_size == 0 for lrc in companion_lrcs):
-        categories.add(_IssueCategory.CORRUPT)
         issues.append("Corrupt 0-byte synchronized lyrics (.lrc) file.")
 
     if track is not None:

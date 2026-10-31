@@ -12,7 +12,8 @@ from sonora.core.logger import LOG
 
 def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
     """
-    Returns: tuple of (is_fake_lossless, detected_cutoff_khz, description)
+    Returns (has_suspicious_cutoff, detected_cutoff_khz, description).
+    A cutoff alone cannot establish the source codec or prove audio corruption.
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Audio file not found: {file_path}")
@@ -101,16 +102,9 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
             # and complete stopband attenuation (< -75 dBFS) into quantization noise floor
             if passband_level > -73.0 and cliff_drop >= 18.0 and stopband_peak < -75.0:
                 detected_cutoff_khz = float(target_frequency / 1000.0)
-                if detected_cutoff_khz <= 16.5:
-                    encoder_profile = "128kbps MP3/AAC"
-                elif detected_cutoff_khz <= 17.8:
-                    encoder_profile = "160kbps MP3"
-                else:
-                    encoder_profile = "192kbps MP3"
-
                 description = (
-                    f"Brickwall spectral cutoff detected at ~{detected_cutoff_khz:.1f}kHz "
-                    f"(likely upscaled {encoder_profile} fake lossless)"
+                    f"Sharp spectral cutoff near {detected_cutoff_khz:.1f} kHz; "
+                    "possible lossy source or mastering filter. Source quality requires review."
                 )
                 return True, detected_cutoff_khz, description
 

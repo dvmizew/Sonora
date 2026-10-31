@@ -122,7 +122,9 @@ _LYRICS_EXTRACT_TS_REGEX = re.compile(
     r"(?:(\[)|<)(\d{1,3}):([0-5]\d)(?:[\.:](\d{1,6}))?(?(1)\]|>)"
 )
 _LYRICS_JUNK_PATTERNS = [
-    re.compile(r"^\d+\s*(?:Contributor|Translation|Embed)s?$", re.IGNORECASE),
+    re.compile(
+        r"^(?:\d+\s*(?:Contributor|Translation|Embed)s?|Translations)$", re.IGNORECASE
+    ),
     re.compile(r"^You might also like$", re.IGNORECASE),
     re.compile(r"^Read More$", re.IGNORECASE),
     re.compile(r"^See .* Live(?:Get tickets.*)?$", re.IGNORECASE),
@@ -135,7 +137,11 @@ _LYRICS_JUNK_PATTERNS = [
         re.IGNORECASE,
     ),
     re.compile(r"^가사\s*제작\s*:\s*\S+.*$", re.IGNORECASE),
-    re.compile(r"^(?:作词|作曲|编曲|制作人)\s*:.*$", re.IGNORECASE),
+    re.compile(
+        r"^(?:作词|作曲|编曲|制作人?|音频工程师|助理母带工程师|母带工程师|"
+        r"混音师|混音工程师|编程|人声|封面|美声和声)\s*[:：].*$",
+        re.IGNORECASE,
+    ),
     re.compile(r"^Lyrics (?:powered|licensed|provided) by.*$", re.IGNORECASE),
     re.compile(r"^Paroles de la chanson .* par .*$", re.IGNORECASE),
     re.compile(r"^Commercial use is strictly forbidden.*$", re.IGNORECASE),
@@ -150,6 +156,9 @@ _LYRICS_EMBED_END_REGEX = re.compile(r"(?:\d+\s*Embed|^\s*Embed)\s*$", re.IGNORE
 _LRC_METADATA_HEADER_PATTERN = re.compile(
     r"\[(ar|ti|al|au|by|re|ve|length|offset)\s*:([^\]\r\n]*)\]", re.IGNORECASE
 )
+_LYRICS_TITLE_HEADER_REGEX = re.compile(
+    r'(.+?) Lyrics|\[(?:Versuri(?:le piesei| pentru)?|Paroles de)\s+["“„](.+?)["”“](?: cu .+)?\]'
+)
 
 
 def lyrics_identity_matches(
@@ -160,6 +169,9 @@ def lyrics_identity_matches(
         return True
     for line in lyrics_text.splitlines():
         header_line = line.lstrip("\ufeff \t")
+        plain_title = _LYRICS_TITLE_HEADER_REGEX.fullmatch(header_line)
+        if plain_title:
+            header_line = f"[ti:{plain_title[1] or plain_title[2]}]"
         header_matches = list(_LRC_METADATA_HEADER_PATTERN.finditer(header_line))
         if not header_matches or header_matches[0].start() != 0:
             continue
@@ -208,11 +220,15 @@ def lyrics_word_body(lyrics_text: str) -> str:
     lyric_lines = []
     for line in lyrics_text.splitlines():
         header_line = line.lstrip("\ufeff \t")
+        if _LYRICS_TITLE_HEADER_REGEX.fullmatch(header_line):
+            continue
         if _LRC_METADATA_HEADER_PATTERN.match(header_line):
             line = _LRC_METADATA_HEADER_PATTERN.sub("", header_line)
+        if timestamp_match := _LYRICS_TIMESTAMP_REGEX.match(line):
+            line = re.sub(r"^v\d{1,3}:\s*", "", timestamp_match[1])
         line = _LYRICS_EXTRACT_TS_REGEX.sub("", line)
         if re.fullmatch(
-            r"\s*\[(?:intro|outro|verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|hook|refrain|interlude|instrumental|solo|break|drop)(?:\s+\d+)?(?:\s*:\s*[^\]]+)?\]\s*",
+            r"\s*\[(?:intro|outro|verse|chorus|pre[- ]?chorus|post[- ]?chorus|bridge|hook|refrain|interlude|instrumental|solo|break|drop|vers|strof[aă]|refren|pre[- ]?refren|post[- ]?refren|punte)(?:\s+(?:x\s*)?\d+)?(?:\s*:\s*[^\]]+)?\]\s*",
             line,
             re.IGNORECASE,
         ):
@@ -288,6 +304,9 @@ def clean_lyrics_text(text: str | None) -> str | None:
         content_to_check = (
             timestamp_match.group(1).strip() if timestamp_match else stripped_line
         )
+        if timestamp_match:
+            content_to_check = re.sub(r"^v\d{1,3}:\s*", "", content_to_check)
+            stripped_line = stripped_line[: timestamp_match.start(1)] + content_to_check
 
         if timestamp_match and not content_to_check and not has_lyric_content:
             continue
@@ -336,7 +355,7 @@ def extract_max_timestamp(lyrics_text: str | None) -> float | None:
 def is_lyrics_duration_valid(
     lyrics_text: str | None,
     audio_duration: float | None,
-    tolerance_seconds: float = 15.0,
+    tolerance_seconds: float = 2.0,
 ) -> bool:
     """
     Validates that lyrics timestamps do not significantly exceed audio duration.

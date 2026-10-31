@@ -236,6 +236,30 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         self.assertFalse(artists.is_artist_acronym(None))
         self.assertFalse(artists.is_single_group_artist("!!!"))
 
+    def test_joint_main_artists_are_not_repeated_as_features(self) -> None:
+        self.assertEqual(
+            artists.extract_featured_artist_tokens(
+                ["Dora Gaitanovici", "Dani Bușoi", "Guest"],
+                primary_artist="Dora Gaitanovici & Dani Bușoi",
+            ),
+            ["Guest"],
+        )
+        self.assertEqual(
+            artists.extract_featured_artist_tokens(
+                ["Primary", "Guest"], primary_artist="Primary feat. Guest"
+            ),
+            ["Guest"],
+        )
+        policy = SonoraConfig(known_group_artists=frozenset({"Alpha & Beta"}))
+        with patch("sonora.core.artists.get_config", return_value=policy):
+            self.assertEqual(
+                artists.extract_featured_artist_tokens(
+                    ["Alpha & Beta", "Alpha", "Guest"],
+                    primary_artist="Alpha & Beta",
+                ),
+                ["Alpha", "Guest"],
+            )
+
     def test_artist_provider_failures_preserve_clean_input(self) -> None:
         with (
             patch.object(artist_resolution, "get_cached_api", return_value=None),

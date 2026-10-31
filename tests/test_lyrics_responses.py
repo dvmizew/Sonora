@@ -28,6 +28,14 @@ class TestLyricsResponses(ServiceResponseTestCase):
         self.assertNotEqual(lyrics_word_body("心"), lyrics_word_body("xin"))
         self.assertEqual(lyrics_word_body("[Stay with me]"), "stay with me")
         self.assertEqual(lyrics_word_body("[Verse 99: Sung by Artist]"), "")
+        self.assertEqual(
+            lyrics_word_body(
+                "[Versuri pentru „Recording” cu Artist]\n[Strofă 1: Artist]\n"
+                "Nu pleca\n[Refren x2: Artist]\nRămâi"
+            ),
+            lyrics_word_body("[ti:Recording]\nNu pleca\nRămâi"),
+        )
+        self.assertEqual(lyrics_word_body("Recording Lyrics\nWords"), "words")
 
     def test_timestamp_extraction_ignores_metadata_and_mismatched_brackets(
         self,
@@ -172,9 +180,16 @@ class TestLyricsResponses(ServiceResponseTestCase):
         dirty = (
             "[00:12.34] Valid lyric line\n"
             "12 Contributors\n"
+            "Translations\n"
             "You might also like\n"
             "[00:15.00] Second valid line\n"
             "https://genius.com/some-url\n"
+            "[00:16.00] 制作 : Producer\n"
+            "[00:17.00] 音频工程师：Engineer\n"
+            "[00:18.00] 助理母带工程师 : Assistant\n"
+            "[00:19.00] 人声 : Singer\n"
+            "[00:20.00] 混音师 : Mixer\n"
+            "[00:21.00] 编程 : Programmer\n"
             "14Embed"
         )
         self.assertEqual(
@@ -216,11 +231,20 @@ class TestLyricsResponses(ServiceResponseTestCase):
                 "[00:01.00] Just plain lyrics",
             )
 
-            # 3. Just plain lyrics (Quality 2) upgrades to Enhanced (Quality 3)
+            # 3. Synchronized lyrics need an explicit refresh to seek word timing.
+            mock_fetch.reset_mock()
             mock_fetch.return_value = "<00:01.00> Just plain lyrics"
             lyrics, tag_type = process_track_lyrics(
                 audio_file, "Artist", "Title", force=False, duration=180.0
             )
+            self.assertEqual(
+                (lyrics, tag_type), ("[00:01.00] Just plain lyrics", "existing")
+            )
+            mock_fetch.assert_not_called()
+            lyrics, tag_type = process_track_lyrics(
+                audio_file, "Artist", "Title", force=True, duration=180.0
+            )
+            mock_fetch.assert_called_once()
             self.assertEqual(lyrics, "<00:01.00> Just plain lyrics")
             self.assertEqual(tag_type, "enhanced")
 
@@ -259,11 +283,23 @@ class TestLyricsResponses(ServiceResponseTestCase):
             "[by:Lyric editor]\n[Verse 1]\n[Instrumental]\n"
             "[00:01.00][00:03.00]<00:01.10>Written <00:01.50>in the stars\n"
             "[00:05.00]Recorded in my heart\n"
+            "[00:06.00]v1:First voice\n[00:07.00]v2: Second voice\n"
+            "[00:08.00][00:09.00]v12:<00:08.10>Both voices\n"
+            "v1:Untimed literal text\n[00:10.00]Version v1: stays\n"
+            "[00:11.00]v1000:Unknown prefix stays\n"
             "This song is called love\nÉtoiles <05> &amp; 心\nI will embed"
         )
-        expected = text.replace("&amp;", "&")
+        expected = (
+            text.replace("&amp;", "&")
+            .replace("]v1:First", "]First")
+            .replace("]v2: Second", "]Second")
+            .replace("]v12:<", "]<")
+        )
         self.assertEqual(clean_lyrics_text(text), expected)
         self.assertEqual(clean_lyrics_text(expected), expected)
+        self.assertEqual(
+            lyrics_word_body(text.replace("&amp;", "&")), lyrics_word_body(expected)
+        )
 
     def test_clean_lyrics_preserves_end_timestamp_but_not_empty_placeholder(
         self,
@@ -296,10 +332,13 @@ class TestLyricsResponses(ServiceResponseTestCase):
         assert max_ts is not None
         self.assertAlmostEqual(max_ts, 195.2, places=1)
 
-        # Song of 141s (Azteca) rejected against 195s lyrics (tolerance 15s)
         self.assertFalse(is_lyrics_duration_valid(lrc_text, 141.0))
-        # Song of 190s accepted (195.2 <= 190.0 + 15.0 = 205.0)
-        self.assertTrue(is_lyrics_duration_valid(lrc_text, 190.0))
+        self.assertFalse(is_lyrics_duration_valid(lrc_text, 190.0))
+        self.assertTrue(is_lyrics_duration_valid(lrc_text, 195.0))
+        self.assertTrue(is_lyrics_duration_valid(lrc_text, 190.0, 15.0))
+        self.assertFalse(
+            is_lyrics_duration_valid("[02:34.34]And around we go", 140.811)
+        )
 
     def test_get_lyrics_quality_filters_empty_headers(self) -> None:
         header_only = "[ar:Artist]\n[ti:Title]\n[al:Album]"

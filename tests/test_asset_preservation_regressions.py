@@ -104,7 +104,12 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
             lyrics, "fetch_synced_lyrics", return_value="Other words entirely"
         ):
             text, status = track_processing_module.process_track_lyrics(
-                audio_path, "Alpha", "Song", duration=10, conflicts=conflicts
+                audio_path,
+                "Alpha",
+                "Song",
+                duration=10,
+                conflicts=conflicts,
+                force=True,
             )
         self.assertEqual((text, status), (original, "existing"))
         self.assertIn("disagree", conflicts["lyrics"])

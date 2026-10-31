@@ -401,7 +401,9 @@ conflicts remain visible in the final summary; uncertain fields are preserved.
 
 ### `sonora lyrics`
 
-Fetches lyrics, upgrades plain text when a matching synchronized version is available, and cleans existing LRC files. Recognized web markup and footer debris are removed while timing markers, LRC metadata and lyric words are preserved.
+Fetches lyrics, upgrades plain text when a matching synchronized version is available, and cleans existing LRC files. Recognized web markup, speaker prefixes in timed lines, and footer debris are removed while timing markers, LRC metadata and lyric words are preserved.
+
+Valid synchronized lyrics are reused without a provider lookup. Use `--force` to refresh them or look for word-level timing. Plain lyrics can still be upgraded during a normal run.
 
 The command reports conflicting lyrics for review instead of silently replacing different words. It preserves existing synchronized lyrics when only a lower-quality result is available. Matching provider metadata does not independently prove that every lyric word or timestamp is correct.
 
@@ -416,7 +418,7 @@ sonora lyrics /path/to/music --force
 **Options:**
 - `path`: Directory containing audio files (required).
 - `-t, --threads N`: Number of parallel threads (default: `4`).
-- `--force`: Refetch lyrics even if `.lrc` file already exists.
+- `--force`: Refresh existing synchronized lyrics and look for word-level timing. API caching still applies.
 - `--dry-run`: Preview cleanup and replacements without changing audio or LRC files.
 - `--json PATH`: Save changes, review cases and failures to a report.
 - `--musixmatch-token TOKEN`: Musixmatch user token for enhanced synced lyrics.

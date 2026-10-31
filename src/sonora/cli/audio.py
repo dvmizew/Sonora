@@ -393,6 +393,7 @@ def lyrics(
 ) -> int:
     """
     Fetch and save synchronized lyrics (.lrc) files and embedded lyrics.
+    Reuse valid synchronized lyrics unless --force; upgrade plain lyrics when available.
     """
     token = parse_musixmatch_token(musixmatch_token or get_config().musixmatch_token)
     lookup_state: dict[str, Any] = {
