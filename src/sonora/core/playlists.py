@@ -74,6 +74,9 @@ def update_local_playlists(
         for source, target in renames.items()
         if dry_run or target.is_file()
     }
+    original_paths: dict[Path, Path] = {}
+    for source, target in renames.items():
+        original_paths.setdefault(target.resolve(), source)
     for playlist in sorted(folder.iterdir()):
         if (
             playlist.suffix.casefold() not in {".m3u", ".m3u8"}
@@ -81,6 +84,7 @@ def update_local_playlists(
         ):
             continue
         original = playlist.read_bytes()
+        destination_playlist = renames.get(playlist, playlist)
         try:
             text = original.decode("utf-8")
         except UnicodeDecodeError:
@@ -98,7 +102,7 @@ def update_local_playlists(
                 result.append(line)
                 continue
             reference = Path(reference_text)
-            source = playlist.parent / reference
+            source = original_paths.get(playlist.resolve(), playlist).parent / reference
             unresolved_reason = "Missing"
             replacement = resolved_renames.get(source.resolve())
             if (
@@ -123,7 +127,7 @@ def update_local_playlists(
             rewritten = (
                 str(replacement)
                 if reference.is_absolute()
-                else os.path.relpath(replacement, playlist.parent)
+                else os.path.relpath(replacement, destination_playlist.parent)
             )
             leading = content[: len(content) - len(content.lstrip())]
             trailing = content[len(content.rstrip()) :]
@@ -134,8 +138,8 @@ def update_local_playlists(
         payload = "".join(result).encode("utf-8")
         if payload != original:
             if dry_run:
-                LOG.detail(f"[DRY-RUN] Would update playlist: {playlist}")
+                LOG.detail(f"[DRY-RUN] Would update playlist: {destination_playlist}")
             else:
                 atomic_write_bytes(playlist, payload)
-            updated.append(playlist)
+            updated.append(destination_playlist)
     return updated

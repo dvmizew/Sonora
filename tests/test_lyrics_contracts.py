@@ -788,6 +788,36 @@ class TestLyricsLookupState(IsolatedTestCase):
         query.assert_not_called()
         self.assertEqual(details["lookup_status"], "cache")
 
+    def test_rate_limit_suspends_further_requests_in_the_run(self) -> None:
+        import threading
+
+        for status in (429, 502, 503):
+            state: dict[str, Any] = {
+                "lock": threading.Lock(),
+                "failures": 0,
+                "suspended": False,
+            }
+            request = httpx.Request("GET", "https://lrclib.net/api/get")
+            response = httpx.Response(
+                status, request=request, headers={"Retry-After": "120"}
+            )
+            error = httpx.HTTPStatusError(
+                "retry later", request=request, response=response
+            )
+            with (
+                self.subTest(status=status),
+                patch.object(lyrics, "_query_syncedlyrics", side_effect=error) as query,
+                patch.object(lyrics, "set_cached_api") as cache,
+            ):
+                with self.assertRaisesRegex(RuntimeError, f"HTTP {status}"):
+                    lyrics.fetch_synced_lyrics("Primary", "Limited", lookup_state=state)
+                self.assertIsNone(
+                    lyrics.fetch_synced_lyrics("Primary", "Next", lookup_state=state)
+                )
+            self.assertTrue(state["suspended"])
+            self.assertEqual(query.call_count, 1)
+            cache.assert_not_called()
+
     def test_definitive_miss_resets_consecutive_failure_count(self) -> None:
         import threading
 

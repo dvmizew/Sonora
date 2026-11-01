@@ -370,7 +370,7 @@ def fetch_synced_lyrics(
             lookup_details.update(
                 cache_hit=False,
                 lookup_status="deferred",
-                lookup_reason="Network lookups suspended after repeated provider failures; retry in a later run",
+                lookup_reason="Network lookups suspended after provider errors or a retry request; retry in a later run",
             )
             return None
         queries = [f"{artist.lower()} - {title.lower()}".strip()]
@@ -456,10 +456,16 @@ def fetch_synced_lyrics(
             )
             if transient and lookup_state is not None:
                 lookup_state["failures"] += 1
-                if lookup_state["failures"] >= 3:
+                if lookup_state["failures"] >= 3 or (
+                    isinstance(last_exception, httpx.HTTPStatusError)
+                    and (
+                        last_exception.response.status_code == 429
+                        or bool(last_exception.response.headers.get("Retry-After"))
+                    )
+                ):
                     lookup_state["suspended"] = True
                     LOG.warning(
-                        "Lyrics provider keeps failing; network lookups are suspended for this run. Cached and local lyrics remain available."
+                        "Lyrics provider is unavailable or rate-limited; network lookups are suspended for this run. Cached and local lyrics remain available."
                     )
             elif lookup_state is not None:
                 lookup_state["failures"] = 0

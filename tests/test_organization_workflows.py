@@ -16,6 +16,64 @@ from tests.module_support import ModuleTestCase
 
 
 class TestOrganizationWorkflows(ModuleTestCase):
+    def test_artist_consolidation_preserves_root_and_moved_playlist_references(
+        self,
+    ) -> None:
+        source = self.tmp_path / "library"
+        canonical = source / "Primary" / "Album" / "01 - Song.wav"
+        incoming = source / "PRIMARY" / "Album" / "01 - Song.wav"
+        for path, body in (
+            (canonical, b"first recording"),
+            (incoming, b"second recording"),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        root_playlist = source / "library.m3u"
+        root_playlist.write_text("PRIMARY/Album/01 - Song.wav\n")
+        moved_playlist = incoming.parent / "album.m3u"
+        moved_playlist.write_text("01 - Song.wav\n")
+        incoming.with_suffix(".lrc").write_text("[00:01.00] Second recording lyrics\n")
+        updated: list[Path] = []
+        with patch(
+            "sonora.modules.organizer.read_track_metadata",
+            side_effect=lambda path: TrackInfo(
+                path,
+                artist="Primary",
+                title="Song",
+                album="Album",
+                track_number=1,
+                total_tracks=3,
+            ),
+        ):
+            organize_library_singles(
+                source,
+                source / "Singles",
+                dry_run=True,
+                max_threads=1,
+                updated_playlists=updated,
+            )
+            expected_playlists = {root_playlist, canonical.parent / "album.m3u"}
+            self.assertEqual(set(updated), expected_playlists)
+            self.assertTrue(incoming.exists())
+            self.assertTrue(incoming.with_suffix(".lrc").exists())
+            self.assertFalse((source / "Singles").exists())
+            updated.clear()
+            organize_library_singles(
+                source, source / "Singles", max_threads=1, updated_playlists=updated
+            )
+        for playlist in (root_playlist, canonical.parent / "album.m3u"):
+            reference = playlist.read_text().strip()
+            self.assertEqual(
+                (playlist.parent / reference).read_bytes(), b"second recording"
+            )
+            self.assertIn(playlist, updated)
+        self.assertEqual(canonical.read_bytes(), b"first recording")
+        self.assertEqual(
+            (canonical.parent / "01 - Song (2).lrc").read_text(),
+            "[00:01.00] Second recording lyrics\n",
+        )
+        self.assertFalse(canonical.with_suffix(".lrc").exists())
+
     @patch("sonora.modules.organizer.read_track_metadata")
     def test_organize_library_singles(self, mock_read: Any) -> None:
         src_dir = self.tmp_path / "source"

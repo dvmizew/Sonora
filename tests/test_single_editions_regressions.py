@@ -22,6 +22,43 @@ from tests.support import IsolatedTestCase
 
 
 class TestSingleEditionsRegressions(AudioRegressionTestCase):
+    def test_dry_run_reserves_destinations_for_distinct_recordings(self) -> None:
+        source = self.root / "incoming"
+        target = self.root / "Singles"
+        originals = []
+        for index in range(3):
+            path = source / f"recording-{index}.flac"
+            path.parent.mkdir(exist_ok=True)
+            sf.write(path, np.zeros(4410 + index * 176400), 44100)
+            with taglib.File(str(path)) as audio:
+                audio.tags.update(
+                    ARTIST=["Alpha"],
+                    TITLE=["Song"],
+                    ISRC=[f"USAAA000000{min(index, 1)}"],
+                )
+                audio.save()
+            originals.append(path)
+        expected = {
+            target / "Alpha - Song" / "01 - Song.flac",
+            target / "Alpha - Song [USAAA0000001]" / "01 - Song.flac",
+            target / "Alpha - Song [USAAA0000001]" / "01 - Song (2).flac",
+        }
+        with patch.object(organizer.LOG, "detail") as detail:
+            self.assertEqual(
+                organize_library_singles(source, target, dry_run=True, max_threads=1),
+                3,
+            )
+        previews = {
+            str(call.args[0]).split(" -> ", 1)[1]
+            for call in detail.call_args_list
+            if str(call.args[0]).startswith("[DRY-RUN] Would move ")
+        }
+        self.assertEqual(previews, {str(path) for path in expected})
+        self.assertTrue(all(path.exists() for path in originals))
+        self.assertFalse(target.exists())
+        self.assertEqual(organize_library_singles(source, target, max_threads=1), 3)
+        self.assertEqual(set(target.rglob("*.flac")), expected)
+
     def test_destination_collision_does_not_quarantine_other_isrc(self) -> None:
         source = self.root / "incoming.flac"
         target = self.root / "existing.flac"

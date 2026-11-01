@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import threading
 from collections import Counter, deque
 from collections.abc import Iterator, Mapping
 from concurrent.futures import Executor, Future, ThreadPoolExecutor, as_completed
@@ -264,6 +265,7 @@ def process_single_track(
     provider_executor: Executor | None = None,
     album_context: _AlbumMetadataContext | None = None,
     musixmatch_token: str | None = None,
+    lyrics_lookup_state: dict[str, Any] | None = None,
 ) -> TrackInfo:
     if album_context is None:
         album_context = _AlbumMetadataContext()
@@ -357,6 +359,7 @@ def process_single_track(
             fetch_lyrics=fetch_lyrics,
             fetch_itunes_art=fetch_itunes_art,
             musixmatch_token=musixmatch_token,
+            lyrics_lookup_state=lyrics_lookup_state,
             force=force,
             dry_run=dry_run,
         )
@@ -431,6 +434,10 @@ def _resolve_album_folder_identity(
             pass
 
     resolved_album = _select_album_value(album_counts, folder_album)
+    if len({normalize_str(album) for album in album_counts}) > 1 and normalize_str(
+        folder_album or ""
+    ) not in {normalize_str(album) for album in album_counts}:
+        resolved_album = None
     resolved_artist = _select_album_value(artist_counts, folder_artist)
 
     return resolved_artist, resolved_album
@@ -807,15 +814,25 @@ def _finalize_album_assets_and_replaygain(
     fetch_artwork: bool = True,
 ) -> None:
     """Calculates album ReplayGain and downloads companion artist and label assets."""
-    valid_album_files = [t.file_path for t in valid_tracks]
-    if fetch_replaygain and valid_album_files:
-        wait_if_paused()
-        replaygain_module.calculate_album_replaygain(
-            valid_album_files,
-            force=force,
-            dry_run=dry_run,
-            max_threads=max_threads,
-        )
+    gain_groups: dict[tuple[str, str], list[Path]] = {}
+    for track in valid_tracks or current_album_results:
+        if not track.is_alien and not {"identity", "isrc"}.intersection(
+            track.metadata_conflicts
+        ):
+            key = (
+                normalize_str(track.album_artist or track.artist or ""),
+                normalize_str(track.album or str(track.file_path)),
+            )
+            gain_groups.setdefault(key, []).append(track.file_path)
+    if fetch_replaygain:
+        for album_files in gain_groups.values():
+            wait_if_paused()
+            replaygain_module.calculate_album_replaygain(
+                album_files,
+                force=force,
+                dry_run=dry_run,
+                max_threads=max_threads,
+            )
 
     artwork_tracks = [
         track
@@ -960,6 +977,11 @@ def tag_album_folder(
 
     results: list[TrackInfo] = []
     current_album_results: list[TrackInfo] = []
+    lyrics_lookup_state: dict[str, Any] = {
+        "lock": threading.Lock(),
+        "failures": 0,
+        "suspended": False,
+    }
 
     with create_progress() as progress:
         task = progress.add_task("[cyan]Tagging tracks...", total=len(all_audio_files))
@@ -1031,12 +1053,14 @@ def tag_album_folder(
                             fetch_bpm=fetch_bpm,
                             fetch_key=fetch_key,
                             fetch_lyrics=fetch_lyrics,
-                            fetch_itunes_art=fetch_itunes_art,
+                            fetch_itunes_art=fetch_itunes_art
+                            and album_context.has_album_context,
                             lastfm_api_key=lastfm_api_key,
                             acoustid_api_key=acoustid_api_key,
                             discogs_user_token=discogs_user_token,
                             genius_api_token=genius_api_token,
                             musixmatch_token=musixmatch_token,
+                            lyrics_lookup_state=lyrics_lookup_state,
                             force=force,
                             dry_run=dry_run,
                             album_context=album_context,
@@ -1069,7 +1093,8 @@ def tag_album_folder(
                     valid_tracks = [
                         t
                         for t in current_album_results
-                        if not t.is_alien
+                        if album_context.has_album_context
+                        and not t.is_alien
                         and not {"identity", "isrc"}.intersection(t.metadata_conflicts)
                     ]
                     _harmonize_album_genres(
@@ -1089,7 +1114,8 @@ def tag_album_folder(
                         force=force,
                         dry_run=dry_run,
                         max_threads=max_threads,
-                        fetch_artwork=fetch_itunes_art,
+                        fetch_artwork=fetch_itunes_art
+                        and album_context.has_album_context,
                     )
                     if not dry_run:
                         current_album_results = _record_persisted_album(

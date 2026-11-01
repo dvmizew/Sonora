@@ -148,6 +148,7 @@ def _update_lyrics(
     force: bool = False,
     dry_run: bool = False,
     musixmatch_token: str | None = None,
+    lyrics_lookup_state: dict[str, Any] | None = None,
 ) -> None:
     if not fetch_lyrics:
         return
@@ -188,6 +189,7 @@ def _update_lyrics(
             existing_lyrics=track_info.lyrics,
             musixmatch_token=musixmatch_token,
             conflicts=track_info.metadata_conflicts,
+            lookup_state=lyrics_lookup_state,
         )
         if lyrics_text and tag_type:
             track_info.lyrics = lyrics_text
@@ -292,6 +294,7 @@ def _process_audio_and_save_tags(
     force: bool,
     dry_run: bool,
     musixmatch_token: str | None = None,
+    lyrics_lookup_state: dict[str, Any] | None = None,
 ) -> TrackInfo:
     """Computes audio DSP features, fetches lyrics/artwork, and writes updated tags."""
     _update_cuesheet(track_info, file_path, cuesheet_content)
@@ -313,6 +316,7 @@ def _process_audio_and_save_tags(
         force=force,
         dry_run=dry_run,
         musixmatch_token=musixmatch_token,
+        lyrics_lookup_state=lyrics_lookup_state,
     )
     normalize_track_metadata(track_info)
 

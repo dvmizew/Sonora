@@ -118,6 +118,10 @@ class TestTaggingWorkflows(ModuleTestCase):
         ):
             results = tag_album_folder(album_dir, max_threads=2, fetch_itunes_art=False)
         self.assertEqual(len(results), 2)
+        states = [
+            call.kwargs["lyrics_lookup_state"] for call in mock_process.call_args_list
+        ]
+        self.assertIs(states[0], states[1])
 
     def test_resolve_album_folder_identity(self) -> None:
         album_dir = self.tmp_path / "Artist - Great Album"
@@ -159,6 +163,34 @@ class TestTaggingWorkflows(ModuleTestCase):
             artist, album = _resolve_album_folder_identity(singles_dir, [f_single])
             self.assertEqual(artist, "3 Doors Down")
             self.assertIsNone(album)
+
+    def test_progress_retains_estimate_for_tracks_longer_than_thirty_seconds(
+        self,
+    ) -> None:
+        from sonora.core.logger import create_progress
+
+        progress = create_progress()
+        clock = [0.0]
+        with patch.object(progress, "get_time", side_effect=lambda: clock[0]):
+            task_id = progress.add_task("Tagging", total=10)
+            for moment in (70.0, 140.0, 210.0):
+                clock[0] = moment
+                progress.advance(task_id)
+            self.assertIsNotNone(progress.tasks[0].speed)
+            self.assertIsNotNone(progress.tasks[0].time_remaining)
+
+    def test_artist_download_folder_has_no_shared_release_context(self) -> None:
+        artist_dir = self.tmp_path / "Mornye" / "Daniel Di Angelo"
+        paths = [artist_dir / f"{index}.flac" for index in range(3)]
+        with patch("sonora.audio.metadata.read_track_metadata") as read:
+            read.side_effect = [
+                TrackInfo(paths[0], artist="Daniel Di Angelo", album="Addicted"),
+                TrackInfo(paths[1], artist="Daniel Di Angelo", album="Addicted"),
+                TrackInfo(paths[2], artist="Daniel Di Angelo", album="Comfort Mode"),
+            ]
+            artist, album = _resolve_album_folder_identity(artist_dir, paths)
+        self.assertEqual(artist, "Daniel Di Angelo")
+        self.assertIsNone(album)
 
     def test_resolve_album_track_position(self) -> None:
         mb_release: dict[str, object] = {

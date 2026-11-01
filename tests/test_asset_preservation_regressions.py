@@ -135,6 +135,32 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
             artist_art.assert_not_called()
             label_art.assert_not_called()
 
+    def test_mixed_downloads_receive_separate_album_replaygain(self) -> None:
+        tracks = [
+            TrackInfo(self.root / "a.flac", artist="Alpha", album="Album"),
+            TrackInfo(self.root / "b.flac", artist="Alpha", album="Album"),
+            TrackInfo(self.root / "single.flac", artist="Alpha", album="Single"),
+        ]
+        with patch.object(
+            tagger.replaygain_module, "calculate_album_replaygain"
+        ) as gain:
+            tagger._finalize_album_assets_and_replaygain(
+                self.root,
+                tracks,
+                [],
+                "Alpha",
+                None,
+                True,
+                False,
+                True,
+                2,
+                fetch_artwork=False,
+            )
+        self.assertEqual(
+            [call.args[0] for call in gain.call_args_list],
+            [[tracks[0].file_path, tracks[1].file_path], [tracks[2].file_path]],
+        )
+
     def test_lyrics_preserve_unowned_text(self) -> None:
         audio_path = self.audio("notes.wav")
         notes = audio_path.with_suffix(".txt")

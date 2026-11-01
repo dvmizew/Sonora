@@ -108,6 +108,7 @@ def create_progress() -> Progress:
         TextColumn("[dim]/[/dim]"),
         TimeRemainingColumn(),
         console=CONSOLE,
+        speed_estimate_period=3600,
     )
 
 

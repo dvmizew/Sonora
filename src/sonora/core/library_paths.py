@@ -89,12 +89,17 @@ def group_files_by_album_root(files: Sequence[Path]) -> dict[Path, list[Path]]:
     return grouped
 
 
-def resolve_unique_path(target_path: Path, current_path: Path | None = None) -> Path:
+def resolve_unique_path(
+    target_path: Path,
+    current_path: Path | None = None,
+    reserved_paths: set[Path] | None = None,
+) -> Path:
     """
     Resolve a unique, non-colliding destination path by incrementing a counter
-    'Stem (2).ext', 'Stem (3).ext' if target_path already exists on disk.
+    'Stem (2).ext', 'Stem (3).ext' if target_path exists or is reserved by a preview.
     """
-    if not target_path.exists() or (
+    reserved_paths = reserved_paths or set()
+    if (not target_path.exists() and target_path not in reserved_paths) or (
         current_path and target_path.resolve() == current_path.resolve()
     ):
         return target_path
@@ -104,7 +109,7 @@ def resolve_unique_path(target_path: Path, current_path: Path | None = None) -> 
     extension = target_path.suffix
     while True:
         candidate = parent_dir / f"{base_stem} ({counter}){extension}"
-        if not candidate.exists() or (
+        if (not candidate.exists() and candidate not in reserved_paths) or (
             current_path and candidate.resolve() == current_path.resolve()
         ):
             return candidate
