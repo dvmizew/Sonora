@@ -95,7 +95,6 @@ class TestMusicbrainzResponses(ServiceResponseTestCase):
         details = fetch_musicbrainz_release_details(
             "11111111-2222-3333-4444-555555555555"
         )
-        self.assertIsNotNone(details)
         assert details is not None
         self.assertEqual(details["total_discs"], 2)
         self.assertEqual(details["total_tracks"], 4)
@@ -148,12 +147,9 @@ class TestMusicbrainzResponses(ServiceResponseTestCase):
             ]
         }
         release_result = search_musicbrainz_release("Artist", "Album Title")
-        self.assertIsNotNone(release_result)
-        if release_result:
-            self.assertEqual(
-                release_result["id"], "c8b03190-306c-4125-9b32-3f9d86d60a12"
-            )
-            self.assertEqual(release_result["country"], "US")
+        assert release_result is not None
+        self.assertEqual(release_result["id"], "c8b03190-306c-4125-9b32-3f9d86d60a12")
+        self.assertEqual(release_result["country"], "US")
 
     def test_call_musicbrainz_retries_on_transient_network_error(self) -> None:
         import musicbrainzngs

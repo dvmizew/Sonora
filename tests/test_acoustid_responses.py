@@ -160,7 +160,6 @@ class TestAcoustidResponses(ServiceResponseTestCase):
 
     @patch("sonora.services.acoustid.acoustid")
     def test_lookup_acoustid(self, mock_acoustid: MagicMock) -> None:
-        mock_acoustid.fingerprint_file.return_value = (120.0, "fingerprint_data_str")
         mock_acoustid.lookup.return_value = {}
         mock_acoustid.parse_lookup_result.return_value = [
             (0.95, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Title", "Artist")
@@ -178,33 +177,42 @@ class TestAcoustidResponses(ServiceResponseTestCase):
 
     @patch("sonora.services.acoustid.acoustid")
     def test_acoustid_low_score_returns_none(self, mock_acoustid: MagicMock) -> None:
-        mock_acoustid.fingerprint_file.return_value = (100.0, "fp_data")
         mock_acoustid.lookup.return_value = {}
         mock_acoustid.parse_lookup_result.return_value = [
             (0.5, "c8b03190-306c-4125-9b32-3f9d86d60a12", "Title", "Artist")
         ]
 
-        self.assertIsNone(lookup_acoustid(Path(__file__), api_key="dummy_key"))
+        with patch.object(
+            fingerprint_service,
+            "fingerprint_audio_file",
+            return_value=(100.0, "fp_data"),
+        ):
+            self.assertIsNone(lookup_acoustid(Path(__file__), api_key="dummy_key"))
+        mock_acoustid.lookup.assert_called_once()
 
     @patch("sonora.services.acoustid.acoustid")
     def test_acoustid_rejects_fingerprint_collision(
         self, mock_acoustid: MagicMock
     ) -> None:
-        mock_acoustid.fingerprint_file.return_value = (216.0, "fp_data")
         mock_acoustid.lookup.return_value = {}
         # AcoustID returns high audio score (0.95) for unrelated song (e.g. Diego Modena - Brazil)
         mock_acoustid.parse_lookup_result.return_value = [
             (0.95, "cbe3bed2-4dc5-461d-b6e3-a5e11c9845d5", "Brazil", "Diego Modena")
         ]
 
-        # When searching for Laurentiu Duta - Shining Heart, the collision must be rejected
-        mbid = lookup_acoustid(
-            Path(__file__),
-            api_key="dummy_key",
-            expected_title="Shining Heart",
-            expected_artist="Laurentiu Duta",
-        )
+        with patch.object(
+            fingerprint_service,
+            "fingerprint_audio_file",
+            return_value=(216.0, "fp_data"),
+        ):
+            mbid = lookup_acoustid(
+                Path(__file__),
+                api_key="dummy_key",
+                expected_title="Shining Heart",
+                expected_artist="Laurentiu Duta",
+            )
         self.assertIsNone(mbid)
+        mock_acoustid.lookup.assert_called_once()
 
     @patch("sonora.services.acoustid._fingerprint_file_with_timeout")
     def test_fingerprint_in_memory_cache(self, mock_fp: MagicMock) -> None:
@@ -218,7 +226,6 @@ class TestAcoustidResponses(ServiceResponseTestCase):
             self.assertEqual(fp1, "AQADtEmSJEqiJE")
             self.assertEqual(mock_fp.call_count, 1)
 
-            # Second call hits in-memory cache without calling acoustid.fingerprint_file again
             dur2, fp2 = fingerprint_audio_file(audio_file)
             self.assertEqual(dur2, 180.0)
             self.assertEqual(fp2, "AQADtEmSJEqiJE")
@@ -230,9 +237,6 @@ class TestAcoustidResponses(ServiceResponseTestCase):
     ) -> None:
         import acoustid
 
-        from sonora.services.acoustid import lookup_acoustid
-
-        mock_acoustid.fingerprint_file.return_value = (180.0, "fp_test")
         mock_acoustid.lookup.side_effect = [
             acoustid.WebServiceError("HTTP 503 Service Unavailable"),
             {

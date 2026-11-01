@@ -172,8 +172,6 @@ class LibraryStateVault:
         try:
             with self._connection() as conn:
                 resolved_keys = [(k,) for k in path_to_stat]
-                state_map: dict[str, tuple[int, int, str]] = {}
-
                 conn.execute(
                     "CREATE TEMP TABLE IF NOT EXISTS _batch_paths (path TEXT PRIMARY KEY);"
                 )
@@ -184,8 +182,9 @@ class LibraryStateVault:
                 cursor = conn.execute(
                     "SELECT t.file_path, t.mtime_ns, t.file_size, t.status FROM track_state t INNER JOIN _batch_paths b ON t.file_path = b.path;"
                 )
-                for row in cursor.fetchall():
-                    state_map[row[0]] = (row[1], row[2], row[3])
+                state_map: dict[str, tuple[int, int, str]] = {
+                    row[0]: (row[1], row[2], row[3]) for row in cursor
+                }
 
                 for path_str, (
                     orig_path,
@@ -307,19 +306,18 @@ class LibraryStateVault:
                 ):
                     p.unlink(missing_ok=True)
                 return count
-            else:
-                conn = sqlite3.connect(
-                    str(self.db_path), timeout=30.0, check_same_thread=False
-                )
-                try:
-                    removed_count = conn.execute("DELETE FROM track_state;").rowcount
-                    conn.commit()
-                    conn.isolation_level = None
-                    conn.execute("VACUUM;")
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-                finally:
-                    conn.close()
-                return removed_count
+            conn = sqlite3.connect(
+                str(self.db_path), timeout=30.0, check_same_thread=False
+            )
+            try:
+                removed_count = conn.execute("DELETE FROM track_state;").rowcount
+                conn.commit()
+                conn.isolation_level = None
+                conn.execute("VACUUM;")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            finally:
+                conn.close()
+            return removed_count
 
     def close(self) -> None:
         """Cleanly close all connections opened by this vault across all threads."""

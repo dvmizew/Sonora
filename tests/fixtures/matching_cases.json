@@ -1,6 +1,6 @@
 {
   "scope": "Synthetic pairwise identity-policy regression corpus, independently labeled from the safety requirements. Not a measured real-library accuracy sample. Rejected candidates are unresolved identity proposals, not identified songs.",
-  "policy_sources": ["GEMINI.md sections 7 and 9", "https://picard-docs.musicbrainz.org/en/latest/config/options_matching.html"],
+  "policy_sources": ["README.md#configuration-api-keys", "src/sonora/defaults.json", "https://picard-docs.musicbrainz.org/en/latest/config/options_matching.html"],
   "cases": [
     {"name":"exact_identity","expected_artist":"Orion Quartet","expected_title":"Night Signal","candidate_artist":"Orion Quartet","candidate_title":"Night Signal","expected_accept":true,"reason":"Exact recording text agrees."},
     {"name":"case_difference","expected_artist":"ORION QUARTET","expected_title":"NIGHT SIGNAL","candidate_artist":"Orion Quartet","candidate_title":"Night Signal","expected_accept":true,"reason":"Case does not change identity."},

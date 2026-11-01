@@ -10,7 +10,6 @@ from music_metadata_filter.functions import (
     remove_parody,
     remove_reissue,
     remove_remastered,
-    remove_zero_width,
     replace_nbsp,
     youtube,
 )
@@ -101,7 +100,6 @@ def extract_series_number(text: str | None) -> int | None:
 _METADATA_FILTER = MetadataFilter(
     {
         "track": (
-            remove_zero_width,
             replace_nbsp,
             remove_clean_explicit,
             remove_reissue,

@@ -9,7 +9,6 @@ from typing import TypeGuard
 import anyascii
 import ftfy
 import pycountry
-from music_metadata_filter.functions import remove_zero_width
 from pathvalidate import sanitize_filename
 
 from sonora.core.config import get_config, get_disambiguation_pattern
@@ -35,15 +34,8 @@ def safe_int_pair(value: object) -> tuple[int | None, int | None]:
         return None, None
     if isinstance(value, int):
         return value, None
-    numeric_text = str(value).strip()
-    if not numeric_text:
-        return None, None
-    if "/" in numeric_text:
-        parts = numeric_text.split("/", 1)
-        curr = safe_int(parts[0])
-        tot = safe_int(parts[1])
-        return curr, tot
-    return safe_int(numeric_text), None
+    current, _, total = str(value).partition("/")
+    return safe_int(current), safe_int(total)
 
 
 def safe_float(value: object) -> float | None:
@@ -112,7 +104,7 @@ def clean_unicode_punct(text: str | None) -> str:
     if not text:
         return ""
     cleaned = ftfy.fix_text(str(text))
-    cleaned = remove_zero_width(cleaned)
+    cleaned = re.sub("[\u200b\u2060\ufeff]", "", cleaned)
     cleaned = _UNICODE_HYPHENS_PATTERN.sub("-", cleaned)
     cleaned = _SPACES_BEFORE_COMMA_PATTERN.sub(",", cleaned)
     return normalize_legacy_diacritics(cleaned)

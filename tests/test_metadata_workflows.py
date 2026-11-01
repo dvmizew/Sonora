@@ -265,6 +265,7 @@ class TestMetadataWorkflows(ModuleTestCase):
         track_metadata.label = "Test Label"
         track_metadata.barcode = "123456789012"
 
+        expected = track_metadata.to_dict()
         write_track_metadata(track_metadata)
 
         reloaded = read_track_metadata(wav_path)
@@ -274,6 +275,19 @@ class TestMetadataWorkflows(ModuleTestCase):
         self.assertEqual(
             reloaded.musicbrainz_albumid, "a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d"
         )
+        for field in (
+            "artist_sort",
+            "album_artist_sort",
+            "total_tracks",
+            "total_discs",
+            "release_type",
+            "release_status",
+            "release_country",
+            "label",
+            "barcode",
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(getattr(reloaded, field), expected[field])
 
     def test_find_audio_files_ignores_hidden_directories(self) -> None:
         normal_wav = self.tmp_path / "normal.wav"

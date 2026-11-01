@@ -10,6 +10,7 @@ from sonora.audio.metadata import read_track_metadata
 from sonora.core.cache import (
     get_api_cache_dir,
 )
+from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
 from sonora.modules import organizer
 from sonora.modules.organizer import (
@@ -22,6 +23,29 @@ from tests.support import IsolatedTestCase
 
 
 class TestSingleEditionsRegressions(AudioRegressionTestCase):
+    def test_quarantine_keeps_lyrics_paired_when_names_collide(self) -> None:
+        for collision_suffix in (".flac", ".lrc"):
+            with self.subTest(collision_suffix=collision_suffix):
+                source = self.root / collision_suffix[1:] / "Song.flac"
+                source.parent.mkdir()
+                source.write_bytes(b"incoming audio")
+                source.with_suffix(".lrc").write_text("incoming lyrics")
+                quarantine = source.parent / ".duplicates"
+                quarantine.mkdir()
+                collision = quarantine / f"Song{collision_suffix}"
+                collision.write_bytes(b"existing recording")
+
+                target = organizer._quarantine_file(source, quarantine)
+
+                self.assertEqual(target.name, "Song (2).flac")
+                self.assertEqual(target.read_bytes(), b"incoming audio")
+                self.assertEqual(
+                    target.with_suffix(".lrc").read_text(), "incoming lyrics"
+                )
+                self.assertEqual(collision.read_bytes(), b"existing recording")
+                self.assertFalse(source.exists())
+                self.assertFalse(source.with_suffix(".lrc").exists())
+
     def test_dry_run_reserves_destinations_for_distinct_recordings(self) -> None:
         source = self.root / "incoming"
         target = self.root / "Singles"
@@ -43,7 +67,7 @@ class TestSingleEditionsRegressions(AudioRegressionTestCase):
             target / "Alpha - Song [USAAA0000001]" / "01 - Song.flac",
             target / "Alpha - Song [USAAA0000001]" / "01 - Song (2).flac",
         }
-        with patch.object(organizer.LOG, "detail") as detail:
+        with patch.object(LOG, "detail") as detail:
             self.assertEqual(
                 organize_library_singles(source, target, dry_run=True, max_threads=1),
                 3,
@@ -210,8 +234,6 @@ class TestSingleEditionsRegressions(AudioRegressionTestCase):
 
 class TestSingleIdentity(IsolatedTestCase):
     def test_guests_in_titles_artists_and_cobilling_remain_distinct(self) -> None:
-        from sonora.core.models import TrackInfo
-
         for artist_a, artist_b, title_a, title_b in (
             ("Artist", "Artist", "Song (feat. Alice)", "Song (feat. Bob)"),
             ("Artist feat. Alice", "Artist feat. Bob", "Song", "Song"),
@@ -247,8 +269,6 @@ class TestSingleIdentity(IsolatedTestCase):
                 )
 
     def test_equivalent_feature_encodings_are_duplicates(self) -> None:
-        from sonora.core.models import TrackInfo
-
         registry = SingleDeduplicator()
         registry.register(
             TrackInfo(
@@ -292,8 +312,6 @@ class TestSingleIdentity(IsolatedTestCase):
         self.assertEqual({path: path.read_bytes() for path in originals}, originals)
 
     def test_layout_is_independent_of_library_size(self) -> None:
-        from sonora.core.models import TrackInfo
-
         source = get_api_cache_dir().parent / "library"
         source.mkdir(parents=True)
         track = TrackInfo(file_path=source / "Song.flac", artist="Artist", title="Song")

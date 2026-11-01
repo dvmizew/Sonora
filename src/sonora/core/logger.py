@@ -51,10 +51,7 @@ class SonoraLogger:
                 CONSOLE.print(message, highlight=False)
 
     def info(self, message: str) -> None:
-        if message.startswith(("   ∟", "", "", "")):
-            self._log_message(message)
-        else:
-            self._log_message(f"[info]INFO:[/info] {message}")
+        self._log_message(message)
 
     def detail(self, message: str) -> None:
         """Show per-file decisions only when explicitly requested."""
@@ -86,10 +83,7 @@ class SonoraLogger:
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
         for metric, value, style in rows:
-            if style:
-                table.add_row(metric, value, style=style)
-            else:
-                table.add_row(metric, value)
+            table.add_row(metric, value, style=style or None)
         with _LOG_LOCK:
             CONSOLE.print(table)
 

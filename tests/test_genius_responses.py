@@ -50,12 +50,11 @@ class TestGeniusResponses(ServiceResponseTestCase):
         song_details = fetch_genius_song_details(
             "Artist", "Title", api_token="dummy_genius_token"
         )
-        self.assertIsNotNone(song_details)
+        assert song_details is not None
         self.assertEqual(mock_get.call_args.kwargs["params"], {"text_format": "plain"})
-        if song_details:
-            self.assertEqual(song_details["description"], "Song story description")
-            self.assertEqual(song_details["producers"], "Producer 1")
-            self.assertEqual(song_details["writers"], "Writer 1")
+        self.assertEqual(song_details["description"], "Song story description")
+        self.assertEqual(song_details["producers"], "Producer 1")
+        self.assertEqual(song_details["writers"], "Writer 1")
 
     @patch("sonora.services.genius.get_cached_api")
     def test_fetch_genius_song_details_cached(self, mock_cache: MagicMock) -> None:
@@ -70,7 +69,6 @@ class TestGeniusResponses(ServiceResponseTestCase):
             "release_date": None,
         }
         details = fetch_genius_song_details("Artist", "Title", api_token="dummy_token")
-        self.assertIsNotNone(details)
         assert details is not None
         self.assertEqual(details["description"], "Cached story")
 

@@ -130,11 +130,10 @@ def _score_musicbrainz_candidate(
         )
         release_artist = str(release_artist_credit.get("name", ""))
 
-    base_score = score_artist_title_match(artist, album, release_artist, release_title)
-    if base_score <= 0.0:
+    score = score_artist_title_match(artist, album, release_artist, release_title)
+    if score <= 0.0:
         return 0.0
 
-    score = base_score
     album_norm = normalize_str(album)
     disambig = str(release.get("disambiguation") or "").strip().lower()
     edition_tokens = set(normalize_str(disambig).split())
@@ -675,20 +674,18 @@ def fetch_musicbrainz_release_details(
         release_title = release_dict.get("title")
         release_artist = release_dict.get("artist-credit-phrase")
         artist_credits = release_dict.get("artist-credit", [])
-        album_artist_id = (
-            artist_credits[0].get("artist", {}).get("id")
-            if artist_credits
-            and isinstance(artist_credits, list)
-            and isinstance(artist_credits[0], dict)
-            else None
-        )
+        album_artist_id = None
+        artist_sort = None
         if (
-            not release_artist
-            and artist_credits
+            artist_credits
             and isinstance(artist_credits, list)
             and isinstance(artist_credits[0], dict)
         ):
-            release_artist = artist_credits[0].get("artist", {}).get("name")
+            primary_artist = artist_credits[0].get("artist", {})
+            album_artist_id = primary_artist.get("id")
+            artist_sort = primary_artist.get("sort-name")
+            if not release_artist:
+                release_artist = primary_artist.get("name")
 
         track_indexes = _release_track_indexes(
             release_dict, release_artist, album_artist_id
@@ -697,15 +694,6 @@ def fetch_musicbrainz_release_details(
         text_representation = release_dict.get("text-representation", {})
         language = text_representation.get("language")
         script = text_representation.get("script")
-
-        artist_credits = release_dict.get("artist-credit", [])
-        artist_sort = None
-        if (
-            artist_credits
-            and isinstance(artist_credits, list)
-            and isinstance(artist_credits[0], dict)
-        ):
-            artist_sort = artist_credits[0].get("artist", {}).get("sort-name")
 
         details: dict[str, object] = {
             "title": release_title,

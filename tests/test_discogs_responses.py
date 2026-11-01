@@ -36,7 +36,6 @@ class TestDiscogsResponses(ServiceResponseTestCase):
         }
         mock_get.return_value = response
         details = fetch_discogs_release_details(1)
-        self.assertIsNotNone(details)
         assert details is not None
         for scope in (details, details["track_credits"]["1"]):
             self.assertEqual(scope["producers"], "First Producer, Second Producer")
@@ -72,7 +71,6 @@ class TestDiscogsResponses(ServiceResponseTestCase):
             mock_get.return_value = response
             with self.subTest(scope=scope, positions=positions):
                 details = fetch_discogs_release_details(1)
-                self.assertIsNotNone(details)
                 assert details is not None
                 self.assertEqual(details["producers"], "Album Producer")
                 self.assertIsNone(details["composer"])
@@ -109,7 +107,6 @@ class TestDiscogsResponses(ServiceResponseTestCase):
             mock_get.return_value = response
             with self.subTest(titles=titles):
                 details = fetch_discogs_release_details(1)
-                self.assertIsNotNone(details)
                 assert details is not None
                 credits = details["track_credits"]
                 for position, title in enumerate(titles, start=1):
@@ -168,20 +165,17 @@ class TestDiscogsResponses(ServiceResponseTestCase):
         release_result = search_discogs_release(
             "Artist", "Test Album", user_token="dummy_token"
         )
-        self.assertIsNotNone(release_result)
-        if release_result:
-            self.assertEqual(release_result["id"], 999)
-            self.assertEqual(release_result["artist_id"], "12345")
-            self.assertEqual(release_result["label"], "Test Label")
-            self.assertEqual(release_result["catalog_number"], "CAT-123")
-            self.assertEqual(release_result["barcode"], "123456789012")
-            self.assertEqual(release_result["media"], "CD, Album, Deluxe Edition")
-            self.assertEqual(release_result["styles"], ["Trap", "Cloud Rap"])
-            self.assertEqual(release_result["producers"], "Metro Boomin")
-            self.assertEqual(release_result["composer"], "Composer Guy")
-            self.assertEqual(
-                release_result["track_credits"]["1"]["producers"], "Southside"
-            )
+        assert release_result is not None
+        self.assertEqual(release_result["id"], 999)
+        self.assertEqual(release_result["artist_id"], "12345")
+        self.assertEqual(release_result["label"], "Test Label")
+        self.assertEqual(release_result["catalog_number"], "CAT-123")
+        self.assertEqual(release_result["barcode"], "123456789012")
+        self.assertEqual(release_result["media"], "CD, Album, Deluxe Edition")
+        self.assertEqual(release_result["styles"], ["Trap", "Cloud Rap"])
+        self.assertEqual(release_result["producers"], "Metro Boomin")
+        self.assertEqual(release_result["composer"], "Composer Guy")
+        self.assertEqual(release_result["track_credits"]["1"]["producers"], "Southside")
 
     def test_search_discogs_without_token_returns_none(self) -> None:
         self.assertIsNone(search_discogs_release("Artist", "Album", user_token=None))
@@ -201,7 +195,6 @@ class TestDiscogsResponses(ServiceResponseTestCase):
         mock_get.return_value = mock_response
 
         details = fetch_discogs_release_details(12345, user_token=None)
-        self.assertIsNotNone(details)
         assert details is not None
         self.assertEqual(details["id"], 12345)
         self.assertEqual(details["title"], "Public Release")

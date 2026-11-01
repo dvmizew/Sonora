@@ -1,5 +1,4 @@
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,13 +10,6 @@ from tests.support import IsolatedTestCase
 
 
 class TestCLIInterface(IsolatedTestCase):
-    def setUp(self) -> None:
-        self.temporary_directory = tempfile.TemporaryDirectory()
-        self.temporary_path = Path(self.temporary_directory.name)
-
-    def tearDown(self) -> None:
-        self.temporary_directory.cleanup()
-
     def test_verbose_works_before_and_after_commands_without_leaking(self) -> None:
         from sonora.core.logger import LOG
 
@@ -29,8 +21,8 @@ class TestCLIInterface(IsolatedTestCase):
             return []
 
         for arguments in (
-            ["--verbose", "tag", str(self.temporary_path)],
-            ["tag", str(self.temporary_path), "--verbose"],
+            ["--verbose", "tag", str(self.test_directory)],
+            ["tag", str(self.test_directory), "--verbose"],
         ):
             with (
                 self.subTest(arguments=arguments),
@@ -51,7 +43,7 @@ class TestCLIInterface(IsolatedTestCase):
             patch("sonora.core.logger.CONSOLE.print") as output,
         ):
             tag.side_effect = tag_with_diagnostics
-            self.assertEqual(main(["tag", str(self.temporary_path)]), 0)
+            self.assertEqual(main(["tag", str(self.test_directory)]), 0)
             self.assertFalse(
                 any(
                     "Provider decision" in str(call.args)
@@ -73,7 +65,7 @@ class TestCLIInterface(IsolatedTestCase):
                 main(
                     [
                         "tag",
-                        str(self.temporary_path),
+                        str(self.test_directory),
                         "--dry-run",
                         "--verbose",
                         "--lastfm-key",
@@ -91,15 +83,15 @@ class TestCLIInterface(IsolatedTestCase):
         with patch(
             "sonora.cli.library.tag_album_folder", side_effect=OSError("disk full")
         ):
-            self.assertEqual(main(["tag", str(self.temporary_path), "--verbose"]), 1)
+            self.assertEqual(main(["tag", str(self.test_directory), "--verbose"]), 1)
         self.assertFalse(LOG.verbose)
 
     def test_default_check_limits_console_findings_without_truncating_json(
         self,
     ) -> None:
-        output_path = self.temporary_path / "findings.json"
+        output_path = self.test_directory / "findings.json"
         issues = {
-            str(self.temporary_path / f"recording-{index}.flac"): [
+            str(self.test_directory / f"recording-{index}.flac"): [
                 "Missing artist",
                 "Missing title",
             ]
@@ -113,7 +105,7 @@ class TestCLIInterface(IsolatedTestCase):
             patch("sonora.core.logger.LOG.warning") as warning,
         ):
             self.assertEqual(
-                main(["check", str(self.temporary_path), "--json", str(output_path)]), 0
+                main(["check", str(self.test_directory), "--json", str(output_path)]), 0
             )
         findings = [
             call.args[0]
@@ -134,7 +126,7 @@ class TestCLIInterface(IsolatedTestCase):
             mock_tag_album_folder.return_value = [
                 TrackInfo(file_path=Path("dummy.flac"))
             ]
-            exit_code = main(["tag", str(self.temporary_path), "-t", "2"])
+            exit_code = main(["tag", str(self.test_directory), "-t", "2"])
             self.assertEqual(exit_code, 0)
             mock_tag_album_folder.assert_called_once()
 
@@ -146,7 +138,7 @@ class TestCLIInterface(IsolatedTestCase):
             exit_code = main(
                 [
                     "tag",
-                    str(self.temporary_path),
+                    str(self.test_directory),
                     "--fanart-key",
                     "test_fanart_key",
                     "--no-shazam",
@@ -169,7 +161,7 @@ class TestCLIInterface(IsolatedTestCase):
             exit_code = main(
                 [
                     "tag",
-                    str(self.temporary_path),
+                    str(self.test_directory),
                     "--no-dsp",
                     "--ignore-cache",
                 ]
@@ -193,9 +185,9 @@ class TestCLIInterface(IsolatedTestCase):
                     genre="Pop",
                 )
             ]
-            json_output_path = self.temporary_path / "tag_report.json"
+            json_output_path = self.test_directory / "tag_report.json"
             exit_code = main(
-                ["tag", str(self.temporary_path), "--json", str(json_output_path)]
+                ["tag", str(self.test_directory), "--json", str(json_output_path)]
             )
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_output_path.exists())
@@ -206,25 +198,25 @@ class TestCLIInterface(IsolatedTestCase):
     def test_handle_check_subcommand(self) -> None:
         with patch("sonora.cli.library.check_library") as mock_check:
             mock_check.return_value = CheckReport(total_files=1, corrupt_files=0)
-            exit_code = main(["check", str(self.temporary_path)])
+            exit_code = main(["check", str(self.test_directory)])
             self.assertEqual(exit_code, 0)
             mock_check.assert_called_once()
 
     def test_handle_rename_subcommand(self) -> None:
         with patch("sonora.cli.library.rename_directory_files") as mock_rename:
             mock_rename.return_value = [Path("01 - Artist - Title.flac")]
-            exit_code = main(["rename", str(self.temporary_path)])
+            exit_code = main(["rename", str(self.test_directory)])
             self.assertEqual(exit_code, 0)
             mock_rename.assert_called_once()
 
     def test_handle_organize_subcommand(self) -> None:
         with patch("sonora.cli.library.organize_library_singles") as mock_organize:
             mock_organize.return_value = 5
-            target_directory = self.temporary_path / "Singles"
+            target_directory = self.test_directory / "Singles"
             exit_code = main(
                 [
                     "organize",
-                    str(self.temporary_path),
+                    str(self.test_directory),
                     "--target-singles",
                     str(target_directory),
                 ]
@@ -234,17 +226,17 @@ class TestCLIInterface(IsolatedTestCase):
 
     def test_handle_backup_subcommand(self) -> None:
         with patch("sonora.cli.library.backup_library_tags") as mock_backup:
-            mock_backup.return_value = self.temporary_path / "backup.json"
-            exit_code = main(["backup", str(self.temporary_path)])
+            mock_backup.return_value = self.test_directory / "backup.json"
+            exit_code = main(["backup", str(self.test_directory)])
             self.assertEqual(exit_code, 0)
             mock_backup.assert_called_once()
 
     def test_handle_rename_subcommand_with_json(self) -> None:
         with patch("sonora.cli.library.rename_directory_files") as mock_rename:
             mock_rename.return_value = [Path("01 - Artist - Title.flac")]
-            json_output = self.temporary_path / "rename_report.json"
+            json_output = self.test_directory / "rename_report.json"
             exit_code = main(
-                ["rename", str(self.temporary_path), "--json", str(json_output)]
+                ["rename", str(self.test_directory), "--json", str(json_output)]
             )
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_output.exists())
@@ -252,9 +244,9 @@ class TestCLIInterface(IsolatedTestCase):
     def test_handle_organize_subcommand_with_json(self) -> None:
         with patch("sonora.cli.library.organize_library_singles") as mock_organize:
             mock_organize.return_value = 3
-            json_output = self.temporary_path / "organize_report.json"
+            json_output = self.test_directory / "organize_report.json"
             exit_code = main(
-                ["organize", str(self.temporary_path), "--json", str(json_output)]
+                ["organize", str(self.test_directory), "--json", str(json_output)]
             )
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_output.exists())
@@ -262,9 +254,9 @@ class TestCLIInterface(IsolatedTestCase):
     def test_handle_restore_subcommand_with_json(self) -> None:
         with patch("sonora.cli.library.restore_library_tags") as mock_restore:
             mock_restore.return_value = 5
-            dummy_backup = self.temporary_path / "backup.json"
+            dummy_backup = self.test_directory / "backup.json"
             dummy_backup.write_text("{}", encoding="utf-8")
-            json_output = self.temporary_path / "restore_report.json"
+            json_output = self.test_directory / "restore_report.json"
             exit_code = main(["restore", str(dummy_backup), "--json", str(json_output)])
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_output.exists())
@@ -275,11 +267,11 @@ class TestCLIInterface(IsolatedTestCase):
                 total_scanned=1,
                 modified_files={"song.flac": ["artist: 'Old' -> 'New'"]},
             )
-            json_output = self.temporary_path / "normalize_report.json"
+            json_output = self.test_directory / "normalize_report.json"
             exit_code = main(
                 [
                     "normalize",
-                    str(self.temporary_path),
+                    str(self.test_directory),
                     "--bpm",
                     "--replaygain",
                     "--json",
@@ -293,10 +285,10 @@ class TestCLIInterface(IsolatedTestCase):
     def test_handle_normalize_subcommand_no_dsp(self) -> None:
         with patch("sonora.cli.library.normalize_library") as mock_normalize:
             mock_normalize.return_value = NormalizeReport()
-            exit_code = main(["normalize", str(self.temporary_path), "--no-dsp"])
+            exit_code = main(["normalize", str(self.test_directory), "--no-dsp"])
             self.assertEqual(exit_code, 0)
             mock_normalize.assert_called_once_with(
-                self.temporary_path,
+                self.test_directory,
                 fetch_bpm=False,
                 fetch_key=False,
                 fetch_replaygain=False,
@@ -306,9 +298,9 @@ class TestCLIInterface(IsolatedTestCase):
             )
 
     def test_handle_bpm_subcommand(self) -> None:
-        song = self.temporary_path / "song.flac"
+        song = self.test_directory / "song.flac"
         song.write_bytes(b"dummy")
-        json_out = self.temporary_path / "bpm.json"
+        json_out = self.test_directory / "bpm.json"
         with (
             patch("sonora.cli.audio.calculate_bpm") as mock_calc_bpm,
             patch("sonora.cli.audio.read_track_metadata") as mock_read,
@@ -316,7 +308,7 @@ class TestCLIInterface(IsolatedTestCase):
         ):
             mock_read.return_value = TrackInfo(file_path=song, bpm=None)
             mock_calc_bpm.return_value = 128.0
-            exit_code = main(["bpm", str(self.temporary_path), "--json", str(json_out)])
+            exit_code = main(["bpm", str(self.test_directory), "--json", str(json_out)])
             self.assertEqual(exit_code, 0)
             mock_write.assert_called_once()
             mock_read.assert_called_once()
@@ -324,9 +316,9 @@ class TestCLIInterface(IsolatedTestCase):
             self.assertTrue(json_out.exists())
 
     def test_handle_key_subcommand(self) -> None:
-        song = self.temporary_path / "song.flac"
+        song = self.test_directory / "song.flac"
         song.write_bytes(b"dummy")
-        json_out = self.temporary_path / "key.json"
+        json_out = self.test_directory / "key.json"
         with (
             patch("sonora.cli.audio.detect_key_details") as mock_detect_key,
             patch("sonora.cli.audio.read_track_metadata") as mock_read,
@@ -335,7 +327,7 @@ class TestCLIInterface(IsolatedTestCase):
             # Test key detection on missing key
             mock_read.return_value = TrackInfo(file_path=song, initial_key=None)
             mock_detect_key.return_value = ("C#m", "12A", 0.85)
-            exit_code = main(["key", str(self.temporary_path), "--json", str(json_out)])
+            exit_code = main(["key", str(self.test_directory), "--json", str(json_out)])
             self.assertEqual(exit_code, 0)
             mock_write.assert_called_once()
             mock_read.assert_called_once()
@@ -348,28 +340,28 @@ class TestCLIInterface(IsolatedTestCase):
             mock_detect_key.reset_mock()
             mock_read.return_value = TrackInfo(file_path=song, initial_key="m")
             mock_detect_key.return_value = ("Am", "8A", 0.90)
-            exit_code_invalid = main(["key", str(self.temporary_path)])
+            exit_code_invalid = main(["key", str(self.test_directory)])
             self.assertEqual(exit_code_invalid, 0)
             mock_detect_key.assert_called_once()
             mock_write.assert_called_once()
 
     def test_handle_replaygain_subcommand(self) -> None:
-        song = self.temporary_path / "song.flac"
+        song = self.test_directory / "song.flac"
         song.write_bytes(b"dummy")
-        json_out = self.temporary_path / "rg.json"
+        json_out = self.test_directory / "rg.json"
         with patch("sonora.cli.audio.calculate_album_replaygain") as mock_rg:
             mock_rg.return_value = True
             exit_code = main(
-                ["replaygain", str(self.temporary_path), "--json", str(json_out)]
+                ["replaygain", str(self.test_directory), "--json", str(json_out)]
             )
             self.assertEqual(exit_code, 0)
             mock_rg.assert_called_once()
             self.assertTrue(json_out.exists())
 
     def test_handle_lyrics_subcommand(self) -> None:
-        song = self.temporary_path / "song.flac"
+        song = self.test_directory / "song.flac"
         song.write_bytes(b"dummy")
-        json_out = self.temporary_path / "lyrics.json"
+        json_out = self.test_directory / "lyrics.json"
         with (
             patch("sonora.cli.audio.process_track_lyrics") as mock_lyrics,
             patch("sonora.cli.audio.read_track_metadata") as mock_read,
@@ -380,7 +372,7 @@ class TestCLIInterface(IsolatedTestCase):
             )
             mock_lyrics.return_value = ("[00:01.00] Line", "synced")
             exit_code = main(
-                ["lyrics", str(self.temporary_path), "--json", str(json_out)]
+                ["lyrics", str(self.test_directory), "--json", str(json_out)]
             )
             self.assertEqual(exit_code, 0)
             mock_read.assert_called_once()
@@ -389,9 +381,9 @@ class TestCLIInterface(IsolatedTestCase):
             self.assertTrue(json_out.exists())
 
     def test_handle_keyboard_interrupts(self) -> None:
-        dummy_backup = self.temporary_path / "backup.json"
+        dummy_backup = self.test_directory / "backup.json"
         dummy_backup.write_text("{}", encoding="utf-8")
-        song = self.temporary_path / "song.flac"
+        song = self.test_directory / "song.flac"
         song.write_bytes(b"dummy")
 
         with (
@@ -427,17 +419,17 @@ class TestCLIInterface(IsolatedTestCase):
             ),
         ):
             for args in [
-                ["tag", str(self.temporary_path)],
-                ["check", str(self.temporary_path)],
-                ["rename", str(self.temporary_path)],
-                ["organize", str(self.temporary_path)],
-                ["backup", str(self.temporary_path)],
+                ["tag", str(self.test_directory)],
+                ["check", str(self.test_directory)],
+                ["rename", str(self.test_directory)],
+                ["organize", str(self.test_directory)],
+                ["backup", str(self.test_directory)],
                 ["restore", str(dummy_backup)],
-                ["normalize", str(self.temporary_path)],
-                ["bpm", str(self.temporary_path), "--force"],
-                ["key", str(self.temporary_path), "--force"],
-                ["replaygain", str(self.temporary_path), "--force"],
-                ["lyrics", str(self.temporary_path), "--force"],
+                ["normalize", str(self.test_directory)],
+                ["bpm", str(self.test_directory), "--force"],
+                ["key", str(self.test_directory), "--force"],
+                ["replaygain", str(self.test_directory), "--force"],
+                ["lyrics", str(self.test_directory), "--force"],
             ]:
                 with self.subTest(args=args):
                     exit_code = main(args)
@@ -513,10 +505,6 @@ class TestTagReportVerification(IsolatedTestCase):
         self.assertEqual(report["statistics"]["enrichment"]["genre_percentage"], 99.97)
         rows = summary.call_args.args[1]
         self.assertIn(("Tracks with Genre", "6507/6509 (99.97%)", None), rows)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestReportProvenance(IsolatedTestCase):
@@ -616,3 +604,7 @@ class TestReportProvenance(IsolatedTestCase):
         self.assertIn(("Tracks with Genius ID", "1/2 (50.00%)", None), rows)
         self.assertEqual(rows[0], ("Total Tracks Previewed", "2", None))
         self.assertEqual(rows[-1][0], "Audio Formats")
+
+
+if __name__ == "__main__":
+    unittest.main()

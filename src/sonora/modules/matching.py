@@ -227,8 +227,7 @@ def _match_position_by_authoritative_id(
         disc_tracks = release_details.get("tracks_by_disc_and_position", {})
         if not isinstance(disc_tracks, dict):
             continue
-        candidates = list(disc_tracks.items())
-        for position_key, recording in candidates:
+        for position_key, recording in disc_tracks.items():
             recording = require_api_object(recording, "Album recording")
             recording_id = recording.get(id_field)
             identifier_matches = (

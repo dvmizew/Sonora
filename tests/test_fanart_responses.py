@@ -48,15 +48,12 @@ class TestFanartResponses(ServiceResponseTestCase):
             mock_get.return_value = mock_resp
 
             artwork = fetch_fanart_artist(mbid)
-            self.assertIsNotNone(artwork)
-            if artwork:
-                self.assertIn("https://assets.fanart.tv/hdlogo.png", artwork.logo_urls)
-                self.assertIn(
-                    "https://assets.fanart.tv/fanart.jpg", artwork.background_urls
-                )
-                self.assertIn(
-                    "https://assets.fanart.tv/banner.jpg", artwork.banner_urls
-                )
+            assert artwork is not None
+            self.assertIn("https://assets.fanart.tv/hdlogo.png", artwork.logo_urls)
+            self.assertIn(
+                "https://assets.fanart.tv/fanart.jpg", artwork.background_urls
+            )
+            self.assertIn("https://assets.fanart.tv/banner.jpg", artwork.banner_urls)
 
         # 3. 404 response returns None
         with patch("sonora.services.fanart.get_config") as mock_cfg:
@@ -94,10 +91,9 @@ class TestFanartResponses(ServiceResponseTestCase):
             mock_get.return_value = mock_resp
 
             artwork = fetch_fanart_album(rg_mbid)
-            self.assertIsNotNone(artwork)
-            if artwork:
-                self.assertIn("https://assets.fanart.tv/cdart.png", artwork.cdart_urls)
-                self.assertIn("https://assets.fanart.tv/cover.jpg", artwork.cover_urls)
+            assert artwork is not None
+            self.assertIn("https://assets.fanart.tv/cdart.png", artwork.cdart_urls)
+            self.assertIn("https://assets.fanart.tv/cover.jpg", artwork.cover_urls)
 
     @patch("sonora.core.http.SESSION.get")
     def test_fetch_fanart_label(self, mock_get: MagicMock) -> None:
@@ -118,9 +114,8 @@ class TestFanartResponses(ServiceResponseTestCase):
             mock_get.return_value = mock_resp
 
             artwork = fetch_fanart_label(label_mbid)
-            self.assertIsNotNone(artwork)
-            if artwork:
-                self.assertIn("https://assets.fanart.tv/label.png", artwork.label_urls)
+            assert artwork is not None
+            self.assertIn("https://assets.fanart.tv/label.png", artwork.label_urls)
 
         # Missing API key returns None
         with patch("sonora.services.fanart.get_config") as mock_cfg:

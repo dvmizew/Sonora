@@ -194,9 +194,7 @@ class TestReplayGainFailureContracts(IsolatedTestCase):
     def setUp(self) -> None:
         self.path = self.test_directory / "recording.flac"
         self.path.touch()
-        self.measurement = replaygain.LoudnessMeasurement(
-            self.path, 2, 0.5, -20, 10, (-20,)
-        )
+        self.measurement = replaygain.LoudnessMeasurement(self.path, 2, 0.5, (-20,))
 
     def test_album_gate_uses_block_energy_and_remains_stable_at_extreme_levels(
         self,

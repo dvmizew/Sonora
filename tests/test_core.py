@@ -502,6 +502,11 @@ class TestCoreUtils(IsolatedTestCase):
         self.assertEqual(clean_unicode_punct("Saint‐Tropez"), "Saint-Tropez")
         self.assertEqual(clean_unicode_punct("Făt‐Frumos"), "Făt-Frumos")
         self.assertEqual(clean_unicode_punct("\u200bits me"), "its me")
+        for cleaner in (clean_unicode_punct, clean_title):
+            with self.subTest(cleaner=cleaner.__name__):
+                self.assertEqual(cleaner("MAI TII MINTE\u2060?"), "MAI TII MINTE?")
+                self.assertEqual(cleaner("می\u200cروم"), "می\u200cروم")
+                self.assertEqual(cleaner("👩\u200d🎤"), "👩\u200d🎤")
         self.assertEqual(clean_unicode_punct(""), "")
         self.assertEqual(clean_unicode_punct(None), "")
 
@@ -565,7 +570,7 @@ class TestCoreUtils(IsolatedTestCase):
     def test_offline_artist_resolution_does_not_query_providers(
         self, mock_get_cache: MagicMock
     ) -> None:
-        from sonora.core.artists import get_primary_artist, normalize_artist_name
+        from sonora.core.artists import normalize_artist_name
 
         with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
             result = normalize_artist_name("Unknown Indierock Band")
@@ -661,6 +666,16 @@ class TestCoreUtils(IsolatedTestCase):
             self.assertEqual(get_primary_artist(""), "Unknown")
             self.assertEqual(get_primary_artist(None), "Unknown")
 
+    def test_registered_comma_artist_preserves_its_name(self) -> None:
+        self.assertEqual(get_primary_artist("Beach, Please!"), "Beach, Please!")
+        self.assertEqual(
+            extract_featured_artist_tokens("Beach, Please!"), ["Beach, Please!"]
+        )
+        self.assertEqual(get_primary_artist("Artist, Guest"), "Artist")
+        self.assertEqual(
+            extract_featured_artist_tokens("Artist, Guest"), ["Artist", "Guest"]
+        )
+
     def test_group_files_by_parent(self) -> None:
         f1 = Path("/tmp/album1/01.flac")
         f2 = Path("/tmp/album1/02.flac")
@@ -671,22 +686,18 @@ class TestCoreUtils(IsolatedTestCase):
         self.assertEqual(grouped[Path("/tmp/album2")], [f3])
 
     def test_safe_case_rename_and_relocate_companion_lyrics(self) -> None:
-        import tempfile
+        audio = self.test_directory / "Song.flac"
+        audio.write_bytes(b"audio")
+        lrc = self.test_directory / "Song.lrc"
+        lrc.write_text("[00:01.00] test", encoding="utf-8")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            audio = tmp_path / "Song.flac"
-            audio.write_bytes(b"audio")
-            lrc = tmp_path / "Song.lrc"
-            lrc.write_text("[00:01.00] test", encoding="utf-8")
+        target_audio = self.test_directory / "01 - Song.flac"
+        safe_case_rename(audio, target_audio)
+        self.assertTrue(target_audio.exists())
+        self.assertFalse(audio.exists())
 
-            target_audio = tmp_path / "01 - Song.flac"
-            safe_case_rename(audio, target_audio)
-            self.assertTrue(target_audio.exists())
-            self.assertFalse(audio.exists())
-
-            moved_lyrics = relocate_companion_lyrics(audio, target_audio)
-            self.assertEqual(len(moved_lyrics), 1)
-            target_lrc = tmp_path / "01 - Song.lrc"
-            self.assertTrue(target_lrc.exists())
-            self.assertFalse(lrc.exists())
+        moved_lyrics = relocate_companion_lyrics(audio, target_audio)
+        self.assertEqual(len(moved_lyrics), 1)
+        target_lrc = self.test_directory / "01 - Song.lrc"
+        self.assertTrue(target_lrc.exists())
+        self.assertFalse(lrc.exists())

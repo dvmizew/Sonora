@@ -255,13 +255,10 @@ def _score_discogs_candidate(
         candidate_artist, candidate_album = release_title.split(" - ", 1)
     else:
         candidate_artist, candidate_album = artist, release_title
-    base_score = score_artist_title_match(
-        artist, album, candidate_artist, candidate_album
-    )
-    if base_score <= 0.0:
+    score = score_artist_title_match(artist, album, candidate_artist, candidate_album)
+    if score <= 0.0:
         return 0.0
 
-    score = base_score
     raw_formats = release_candidate.get("format", [])
     formats: list[str] = (
         [str(f).lower() for f in raw_formats]

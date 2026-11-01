@@ -132,30 +132,29 @@ def _merge_provider_field(
 ) -> None:
     original = getattr(recording, field_name)
     original_source = recording.metadata_sources.get(field_name)
-    if field_name == "featured_artists" and original:
-        expanding_sources = {
-            source
-            for value, source in candidates
-            if value != original and source is not None
-        }
-        if expanding_sources:
-            recording.metadata_conflicts[field_name] = (
-                "Provider expansion of existing featured credits requires "
-                "artist identity verification; existing credits preserved."
-            )
-            return
-    if field_name == "advisory" and original == "Explicit":
-        nonexplicit_sources = {
-            source for value, source in candidates if value is None and source
-        }
-        # Multiple catalogs can describe the same clean edition. Their agreement
-        # does not establish that the local audio belongs to that edition.
-        if nonexplicit_sources:
-            recording.metadata_conflicts["advisory"] = (
-                "Provider rating does not independently verify the local edition; "
-                "existing Explicit advisory preserved."
-            )
-            return
+    if (
+        field_name == "featured_artists"
+        and original
+        and any(
+            value != original and source is not None for value, source in candidates
+        )
+    ):
+        recording.metadata_conflicts[field_name] = (
+            "Provider expansion of existing featured credits requires "
+            "artist identity verification; existing credits preserved."
+        )
+        return
+    # Catalog agreement on a clean edition does not verify the local audio's edition.
+    if (
+        field_name == "advisory"
+        and original == "Explicit"
+        and any(value is None and source for value, source in candidates)
+    ):
+        recording.metadata_conflicts["advisory"] = (
+            "Provider rating does not independently verify the local edition; "
+            "existing Explicit advisory preserved."
+        )
+        return
     if original_source in {
         "MusicBrainz",
         "AcoustID",

@@ -45,6 +45,7 @@ class TestRuntimeStateRegressions(AudioRegressionTestCase):
 
     def test_worker_reconnects_after_main_shutdown(self) -> None:
         vault = LibraryStateVault(self.root / "state.db")
+        self.addCleanup(vault.close)
         audio_path = self.audio("track.wav")
         started = threading.Event()
         resumed = threading.Event()
@@ -56,7 +57,6 @@ class TestRuntimeStateRegressions(AudioRegressionTestCase):
             vault.close()
             resumed.set()
             self.assertTrue(future.result(timeout=3))
-        vault.close()
 
     def test_cancel_releases_paused_workers_before_join(self) -> None:
         cancellation_script = """

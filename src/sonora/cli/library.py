@@ -101,9 +101,7 @@ def tag(
     init_musicbrainz()
 
     if no_dsp:
-        fetch_bpm = False
-        fetch_key = False
-        fetch_replaygain = False
+        fetch_bpm = fetch_key = fetch_replaygain = False
 
     set_ignore_cache(ignore_cache)
 
@@ -117,21 +115,18 @@ def tag(
     resolved_musixmatch_token = parse_musixmatch_token(
         musixmatch_token or config.musixmatch_token
     )
-    has_musixmatch = bool(resolved_musixmatch_token)
-
-    active_keys: list[str] = []
-    if resolved_discogs_token:
-        active_keys.append("[bold green]Discogs[/]")
-    if resolved_acoustid_key:
-        active_keys.append("[bold green]AcoustID[/]")
-    if resolved_genius_token:
-        active_keys.append("[bold green]Genius[/]")
-    if resolved_lastfm_key:
-        active_keys.append("[bold green]Last.fm[/]")
-    if has_musixmatch:
-        active_keys.append("[bold green]Musixmatch[/]")
-    if resolved_fanart_key:
-        active_keys.append("[bold green]Fanart.tv[/]")
+    active_keys = [
+        f"[bold green]{service}[/]"
+        for service, credential in (
+            ("Discogs", resolved_discogs_token),
+            ("AcoustID", resolved_acoustid_key),
+            ("Genius", resolved_genius_token),
+            ("Last.fm", resolved_lastfm_key),
+            ("Musixmatch", resolved_musixmatch_token),
+            ("Fanart.tv", resolved_fanart_key),
+        )
+        if credential
+    ]
 
     if active_keys:
         LOG.detail(f"Active services: {', '.join(active_keys)}")
@@ -467,7 +462,11 @@ def organize(
             "\n[bold yellow]INTERRUPTED[/] - Organization stopped by user (Ctrl+C). Generating summary..."
         )
 
-    if not interrupted:
+    if not interrupted and failures:
+        LOG.warning(
+            f"Organization incomplete: {len(failures)} files or folders failed."
+        )
+    elif not interrupted:
         LOG.success(
             f"Organization preview: {organized_count} single tracks would be moved."
             if dry_run
@@ -640,9 +639,7 @@ def normalize(
         f"Normalizing audio tags in [bold]{escape(str(path))}[/bold] (offline mode)..."
     )
     if no_dsp:
-        fetch_bpm = False
-        fetch_key = False
-        fetch_replaygain = False
+        fetch_bpm = fetch_key = fetch_replaygain = False
     interrupted = False
     report = NormalizeReport()
     try:

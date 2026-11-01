@@ -42,17 +42,24 @@ from sonora.modules.normalization import normalize_track_metadata
 
 def _quarantine_file(file_path: Path, quarantine_dir: Path) -> Path:
     quarantine_dir.mkdir(parents=True, exist_ok=True)
-    target = resolve_unique_path(
-        quarantine_dir / file_path.name, current_path=file_path
-    )
+    companions = find_companion_lyrics(file_path)
+    reserved_paths: set[Path] = set()
+    while True:
+        target = resolve_unique_path(
+            quarantine_dir / file_path.name,
+            current_path=file_path,
+            reserved_paths=reserved_paths,
+        )
+        if all(
+            not target.with_suffix(companion.suffix).exists()
+            or target.with_suffix(companion.suffix) == companion
+            for companion in companions
+        ):
+            break
+        reserved_paths.add(target)
     if target.resolve() != file_path.resolve():
         safe_case_rename(file_path, target)
-    for companion in find_companion_lyrics(file_path):
-        comp_target = resolve_unique_path(
-            quarantine_dir / companion.name, current_path=companion
-        )
-        if comp_target.resolve() != companion.resolve():
-            safe_case_rename(companion, comp_target)
+    relocate_companion_lyrics(file_path, target, sidecars=companions)
     return target
 
 
@@ -448,8 +455,7 @@ def organize_library_singles(
                     )
 
                     if is_single:
-                        for path, track_info in folder_track_infos:
-                            singles_to_process.append((path, track_info))
+                        singles_to_process.extend(folder_track_infos)
             except (KeyboardInterrupt, RuntimeError) as exc:
                 if not is_interruption(exc):
                     raise
@@ -555,7 +561,7 @@ def organize_library_singles(
             raise InterruptedOperationError(moved_count) from None
 
     consolidate_duplicate_artist_dirs(
-        source_dir, dry_run=dry_run, renames=playlist_renames
+        source_dir, dry_run=dry_run, renames=playlist_renames, failures=failures
     )
     playlist_folders = {
         path.parent for path in playlist_renames if path.parent.is_dir()
@@ -586,6 +592,7 @@ def _consolidate_directory_entries(
     parent_dir: Path,
     dry_run: bool = False,
     renames: dict[Path, Path] | None = None,
+    failures: list[str] | None = None,
 ) -> int:
     """Consolidates case-variant and duplicate subdirectories within parent_dir."""
     if not parent_dir.is_dir():
@@ -629,17 +636,11 @@ def _consolidate_directory_entries(
 
         if not canonical_dir:
             non_screaming = [
-                d
-                for d, _, _ in candidate_stats
-                if not (d.name.isupper() and len(d.name) > 3)
+                candidate
+                for candidate in candidate_stats
+                if not (candidate[0].name.isupper() and len(candidate[0].name) > 3)
             ]
-            if non_screaming:
-                canonical_dir = max(
-                    [s for s in candidate_stats if s[0] in non_screaming],
-                    key=lambda s: s[1],
-                )[0]
-            else:
-                canonical_dir = max(candidate_stats, key=lambda s: s[1])[0]
+            canonical_dir = max(non_screaming or candidate_stats, key=lambda s: s[1])[0]
 
         for cand_dir, _, _ in candidate_stats:
             if cand_dir == canonical_dir:
@@ -697,8 +698,10 @@ def _consolidate_directory_entries(
                     cleanup_empty_dirs(cand_dir)
                     cand_dir.rmdir()
             except OSError as error:
-                LOG.debug(
-                    f"Failed to consolidate {cand_dir} into {canonical_dir}: {error}"
+                if failures is not None:
+                    failures.append(str(cand_dir))
+                LOG.warning(
+                    f"Failed to consolidate {escape(str(cand_dir))} into {escape(str(canonical_dir))}: {escape(str(error))}"
                 )
                 continue
             consolidated_count += 1
@@ -710,6 +713,7 @@ def consolidate_duplicate_artist_dirs(
     source_dir: Path,
     dry_run: bool = False,
     renames: dict[Path, Path] | None = None,
+    failures: list[str] | None = None,
 ) -> int:
     """
     Detects case-variant and normalized duplicate artist directories and subdirectories
@@ -722,7 +726,7 @@ def consolidate_duplicate_artist_dirs(
         renames = {}
 
     consolidated_count = _consolidate_directory_entries(
-        source_dir, dry_run=dry_run, renames=renames
+        source_dir, dry_run=dry_run, renames=renames, failures=failures
     )
 
     for entry in list(source_dir.iterdir()):
@@ -730,10 +734,10 @@ def consolidate_duplicate_artist_dirs(
             singles_dir = entry / "Singles"
             if singles_dir.is_dir():
                 consolidated_count += _consolidate_directory_entries(
-                    singles_dir, dry_run=dry_run, renames=renames
+                    singles_dir, dry_run=dry_run, renames=renames, failures=failures
                 )
             consolidated_count += _consolidate_directory_entries(
-                entry, dry_run=dry_run, renames=renames
+                entry, dry_run=dry_run, renames=renames, failures=failures
             )
 
     return consolidated_count
@@ -741,7 +745,7 @@ def consolidate_duplicate_artist_dirs(
 
 def cleanup_empty_dirs(path: Path, target_singles_dir: Path | None = None) -> int:
     removed_count = 0
-    if not path.exists() or not path.is_dir():
+    if not path.is_dir():
         return 0
     for child in sorted(path.rglob("*"), reverse=True):
         if not child.is_dir():

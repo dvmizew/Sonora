@@ -64,23 +64,17 @@ class TestNetworkRetries(IsolatedTestCase):
 
         request = httpx.Request("GET", "https://lrclib.net/api/get")
         response = httpx.Response(429, headers={"Retry-After": "30"}, request=request)
-        transport = RetryTransport(max_retries=1)
-        RateLimiter.set_disabled(False)
-        try:
-            with (
-                patch.object(_HOST_LIMITERS["lrclib.net"], "wait"),
-                patch.object(
-                    httpx.HTTPTransport, "handle_request", return_value=response
-                ),
-                patch("sonora.core.http.wait_for_provider") as defer,
-                patch("sonora.core.http.SystemRandom") as random,
-            ):
-                random.return_value.uniform.return_value = 3.0
-                self.assertIs(transport.handle_request(request), response)
-                defer.assert_called_once_with("lrclib.net", 0, defer_seconds=33)
-        finally:
-            transport.close()
-            RateLimiter.set_disabled(True)
+        with (
+            RetryTransport(max_retries=1) as transport,
+            patch.object(RateLimiter, "_disabled", False),
+            patch.object(_HOST_LIMITERS["lrclib.net"], "wait"),
+            patch.object(httpx.HTTPTransport, "handle_request", return_value=response),
+            patch("sonora.core.http.wait_for_provider") as defer,
+            patch("sonora.core.http.SystemRandom") as random,
+        ):
+            random.return_value.uniform.return_value = 3.0
+            self.assertIs(transport.handle_request(request), response)
+            defer.assert_called_once_with("lrclib.net", 0, defer_seconds=33)
 
     def test_retry_network_call_success_on_first_try(self) -> None:
         from sonora.core.retry import retry_network_call
@@ -159,9 +153,8 @@ class TestNetworkRetries(IsolatedTestCase):
             request=httpx.Request("GET", "https://example.com"),
         )
 
-        transport = RetryTransport(max_retries=3, backoff_factor=0.01)
-
         with (
+            RetryTransport(max_retries=3, backoff_factor=0.01) as transport,
             patch.object(
                 httpx.HTTPTransport,
                 "handle_request",
@@ -187,9 +180,8 @@ class TestNetworkRetries(IsolatedTestCase):
             json={"status": "ok"},
             request=httpx.Request("GET", "https://example.com"),
         )
-        transport = RetryTransport(max_retries=2, backoff_factor=0.01)
-
         with (
+            RetryTransport(max_retries=2, backoff_factor=0.01) as transport,
             patch.object(
                 httpx.HTTPTransport,
                 "handle_request",

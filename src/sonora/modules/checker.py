@@ -804,16 +804,16 @@ def check_library(
         create_progress() as progress,
         ThreadPoolExecutor(max_workers=max_threads) as executor,
     ):
-        future_to_path = {
-            executor.submit(_check_single_file, path, check_spectral): path
+        futures = [
+            executor.submit(_check_single_file, path, check_spectral)
             for path in files_to_process
-        }
+        ]
         task = progress.add_task(
             "[cyan]Checking library...", total=len(files_to_process)
         )
         with interactive_pause_listener(progress, task) as pause_stop_event:
             try:
-                for future in as_completed(future_to_path):
+                for future in as_completed(futures):
                     path, file_issues, track_metadata, categories = future.result()
                     report.corrupt_files += _IssueCategory.CORRUPT in categories
                     report.missing_lrc += _IssueCategory.MISSING_LYRICS in categories

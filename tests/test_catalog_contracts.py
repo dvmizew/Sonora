@@ -3,7 +3,6 @@ from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -118,7 +117,7 @@ class TestMetadataMappingContracts(IsolatedTestCase):
         )
         for field, value in cases:
             recording = TrackInfo(Path("recording.flac"), artist="Primary")
-            before = dataclasses.replace(recording)
+            before = recording.copy()
             with self.subTest(field=field, value=value):
                 metadata_merge.apply_metadata_mapping(
                     recording, {"value": value}, {"value": field}, force=True
@@ -197,7 +196,7 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
         )
 
     def test_unmatched_discogs_track_credits_preserve_the_recording(self) -> None:
-        recording = dataclasses.replace(self.recording)
+        recording = self.recording.copy()
         catalog._update_discogs(
             recording,
             "fixture",
@@ -497,12 +496,12 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
         )
 
     def setUp(self) -> None:
-        artist_resolution = patch(
-            "sonora.services.artist_resolution.resolve_artist_name",
-            side_effect=lambda artist: artist,
+        self.enterContext(
+            patch(
+                "sonora.services.artist_resolution.resolve_artist_name",
+                side_effect=lambda artist: artist,
+            )
         )
-        artist_resolution.start()
-        self.addCleanup(artist_resolution.stop)
         self.recording = TrackInfo(
             Path("recording.flac"),
             artist="Primary",
@@ -699,7 +698,7 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
             (["unknown", "rock", "chill"], (None, "rock, chill", "Chill")),
             (["rock", "Rock", "chill", "dark"], ("Rock", "chill, dark", "Chill")),
         ):
-            recording = dataclasses.replace(self.recording)
+            recording = self.recording.copy()
             with (
                 self.subTest(tags=tags),
                 patch.object(lastfm_service, "fetch_lastfm_tags", return_value=tags),
@@ -710,7 +709,7 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
             )
 
     def test_discogs_release_and_track_credits(self) -> None:
-        release: dict[str, Any] = {
+        release: dict[str, object] = {
             "id": 123,
             "styles": ["Alternative", "Indie"],
             "genres": ["rock"],
@@ -890,7 +889,7 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
     def test_deezer_identity_lookup_and_context_isolation(self) -> None:
         self.recording.isrc = "USAAA2100001"
         for has_context in (False, True):
-            recording = dataclasses.replace(self.recording)
+            recording = self.recording.copy()
             with (
                 self.subTest(has_context=has_context),
                 patch.object(
@@ -1046,15 +1045,15 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
                 catalog._update_theaudiodb,
             ),
         )
-        for service, name, enrich in providers:
-            recording = dataclasses.replace(self.recording)
+        for service, name, update in providers:
+            recording = self.recording.copy()
             with (
                 self.subTest(provider=name),
                 patch.object(
                     service, name, side_effect=httpx.ConnectTimeout("offline")
                 ),
             ):
-                enrich(recording)
+                update(recording)
             self.assertEqual(recording, self.recording)
         with (
             patch.object(

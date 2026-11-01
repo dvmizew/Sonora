@@ -142,7 +142,7 @@ class TestRestoreMemoryAndPreflight(IsolatedTestCase):
             restore.assert_not_called()
 
 
-class TestRenameConsensusAndLyrics(IsolatedTestCase):
+class TestRenameAndLyrics(IsolatedTestCase):
     def test_invalid_utf8_lyrics_remain_unchanged(self) -> None:
         lyrics_path = self.test_directory / "recording.lrc"
         for payload in (b"[00:01.00]caf\xe9\n", b"[ar:Primary]\n[00:01.00]\xff\xfe\n"):

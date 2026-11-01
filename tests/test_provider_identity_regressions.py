@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import subprocess
 from collections.abc import Iterator
 from functools import partial
@@ -245,13 +246,12 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
             httpx.Response(status, stream=stream)
             for status, stream in zip((503, 429, 200), streams)
         ]
-        transport = RetryTransport(backoff_factor=0)
+        transport = self.enterContext(RetryTransport(backoff_factor=0))
         with patch("httpx.HTTPTransport.handle_request", side_effect=responses):
             response = transport.handle_request(
                 httpx.Request("GET", "https://example.invalid/")
             )
         response.close()
-        transport.close()
         self.assertTrue(all(stream.closed for stream in streams))
 
     def test_retry_after_delay_not_truncated(self) -> None:
@@ -655,11 +655,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     genius_song_id="11",
                     metadata_sources={"genius_song_id": "Genius"},
                 )
-                original = dataclasses.replace(
-                    recording,
-                    metadata_sources=recording.metadata_sources.copy(),
-                    metadata_conflicts=recording.metadata_conflicts.copy(),
-                )
+                original = recording.copy()
                 with (
                     patch.object(
                         genius, "fetch_genius_song_details", return_value=None
@@ -943,9 +939,6 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
     def test_rejected_recording_clears_only_its_verified_dependent_work_id(
         self,
     ) -> None:
-        from sonora.modules import musicbrainz_metadata
-        from sonora.services import musicbrainz
-
         recording_id = "11111111-2222-3333-4444-555555555555"
         work_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         for linked_work, expected in (
@@ -982,8 +975,6 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
     def test_clean_musicbrainz_release_blocks_force_writes_to_explicit_audio(
         self,
     ) -> None:
-        import hashlib
-
         for description in ("clean", "16bit clean", "cleaned version"):
             with self.subTest(description=description):
                 path = self.audio("recording.flac")
@@ -1027,10 +1018,6 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 self.assertIn("identity", result.metadata_conflicts)
 
     def test_clean_release_found_by_track_search_also_blocks_force_writes(self) -> None:
-        import hashlib
-
-        from sonora.services import musicbrainz
-
         path = self.audio("recording.flac")
         write_track_metadata(
             TrackInfo(
@@ -1084,8 +1071,6 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
     def test_release_membership_is_required_for_recording_specific_metadata(
         self,
     ) -> None:
-        from sonora.modules import musicbrainz_metadata
-
         for candidate, accepted in (
             ("Original Song", True),
             ("Different Song", False),
@@ -1135,8 +1120,6 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 )
 
     def test_album_release_date_cannot_postdate_an_existing_original_date(self) -> None:
-        from sonora.modules import musicbrainz_metadata
-
         for candidate, expected in (
             ("2021-09-24", "2020-10-16"),
             ("2019-01-01", "2019-01-01"),
@@ -1261,8 +1244,6 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 self.assertEqual(track.advisory, expected)
 
     def test_recording_lookup_cannot_replace_release_sequence(self) -> None:
-        from sonora.modules.musicbrainz_metadata import _apply_mb_recording_metadata
-
         for album_recording in (False, True):
             with (
                 self.subTest(album_recording=album_recording),
@@ -1279,7 +1260,7 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     total_discs=2,
                     total_tracks=6,
                 )
-                _apply_mb_recording_metadata(
+                musicbrainz_metadata._apply_mb_recording_metadata(
                     track,
                     {
                         "artist": "Alpha",
@@ -1343,28 +1324,26 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
 
 class TestITunesIdentityBoundaries(IsolatedTestCase):
     def test_metadata_does_not_trust_candidates_without_an_artist(self) -> None:
-        from sonora.services.itunes import fetch_itunes_track_metadata
-
         with patch(
             "sonora.services.itunes.search_itunes",
             return_value=[{"trackName": "Intro", "trackId": 123}],
         ):
-            self.assertIsNone(fetch_itunes_track_metadata("Artist Alpha", "Intro"))
+            self.assertIsNone(
+                itunes.fetch_itunes_track_metadata("Artist Alpha", "Intro")
+            )
 
     def test_short_titles_cannot_bypass_identity_scoring(self) -> None:
-        from sonora.services.itunes import fetch_itunes_track_metadata
-
         with patch(
             "sonora.services.itunes.search_itunes",
             return_value=[
                 {"trackName": "Outro", "artistName": "Artist Alpha", "trackId": 123}
             ],
         ):
-            self.assertIsNone(fetch_itunes_track_metadata("Artist Alpha", "Intro"))
+            self.assertIsNone(
+                itunes.fetch_itunes_track_metadata("Artist Alpha", "Intro")
+            )
 
     def test_cover_art_does_not_trust_candidates_without_an_artist(self) -> None:
-        from sonora.services.itunes import fetch_itunes_cover_art_url
-
         with patch(
             "sonora.services.itunes.search_itunes",
             return_value=[
@@ -1374,7 +1353,9 @@ class TestITunesIdentityBoundaries(IsolatedTestCase):
                 }
             ],
         ):
-            self.assertIsNone(fetch_itunes_cover_art_url("Artist Alpha", "Record"))
+            self.assertIsNone(
+                itunes.fetch_itunes_cover_art_url("Artist Alpha", "Record")
+            )
 
 
 class TestAudioDBRecordingEvidence(IsolatedTestCase):

@@ -51,7 +51,6 @@ class TestNumberingRepairSafety(AudioRegressionTestCase):
         self.assertTrue(recording._numbering_needs_normalization)
         self.assertNotIn("_numbering_needs_normalization", recording.to_dict())
         result = normalize_single_track(path)
-        self.assertIsNotNone(result)
         assert result is not None
         self.assertTrue(any("numbering" in diff for diff in result._diff_descriptions))
         audio = FLAC(path)

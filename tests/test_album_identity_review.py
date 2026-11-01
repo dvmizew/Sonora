@@ -380,12 +380,12 @@ class TestStandaloneAlbumContext(IsolatedTestCase):
                 artist_resolution, "resolve_artist_name", return_value="Primary"
             ),
             patch.object(tagger, "is_alien_album_track", return_value=True),
-            patch.object(tagger, "_update_metadata") as enrich,
+            patch.object(tagger, "_update_metadata") as update,
             patch.object(
                 tagger, "_process_audio_and_save_tags", return_value=self.recording
             ),
         ):
             tagger.process_single_track(self.path, album_context=context, dry_run=True)
-        self.assertFalse(enrich.call_args.kwargs["album_context"].has_album_context)
+        self.assertFalse(update.call_args.kwargs["album_context"].has_album_context)
         self.assertTrue(context.has_album_context)
         self.assertEqual(context.track_mbids, {(1, 1): "recording"})

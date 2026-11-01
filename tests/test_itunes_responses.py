@@ -90,6 +90,5 @@ class TestItunesResponses(ServiceResponseTestCase):
         itunes_album_details = fetch_itunes_album_details(
             "XXXTENTACION", "Revenge", expected_track_count=7
         )
-        self.assertIsNotNone(itunes_album_details)
-        if itunes_album_details:
-            self.assertEqual(itunes_album_details["itunes_collectionid"], "777")
+        assert itunes_album_details is not None
+        self.assertEqual(itunes_album_details["itunes_collectionid"], "777")

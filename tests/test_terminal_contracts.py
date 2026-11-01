@@ -1,6 +1,7 @@
 import threading
 import time
 from collections import deque
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from rich.progress import Progress, Task, TaskID
@@ -58,6 +59,17 @@ class TerminalScript:
 
 
 class TestTerminalContracts(IsolatedTestCase):
+    def setUp(self) -> None:
+        self.enterContext(
+            patch.dict(
+                "sys.modules",
+                termios=SimpleNamespace(
+                    tcgetattr=Mock(), tcsetattr=Mock(), TCSADRAIN=1, error=OSError
+                ),
+                tty=SimpleNamespace(setcbreak=Mock()),
+            )
+        )
+
     def test_debug_messages_redact_credentials_and_escape_markup(self) -> None:
         instance = logger.SonoraLogger()
         instance.verbose = True

@@ -1,4 +1,3 @@
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,18 +9,14 @@ from tests.support import IsolatedTestCase
 
 class TestLibraryState(IsolatedTestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.temp_dir.name) / "test_state.db"
+        self.db_path = self.test_directory / "test_state.db"
         self.state_mgr = LibraryStateVault(db_path=self.db_path)
+        self.addCleanup(self.state_mgr.close)
 
-        self.test_file1 = Path(self.temp_dir.name) / "song1.flac"
-        self.test_file2 = Path(self.temp_dir.name) / "song2.flac"
+        self.test_file1 = self.test_directory / "song1.flac"
+        self.test_file2 = self.test_directory / "song2.flac"
         self.test_file1.write_bytes(b"dummy audio 1")
         self.test_file2.write_bytes(b"dummy audio 2")
-
-    def tearDown(self) -> None:
-        self.state_mgr.close()
-        self.temp_dir.cleanup()
 
     def test_storage_stats_do_not_create_a_database_for_an_unused_library(self) -> None:
         state_path = state.get_default_state_db_path()

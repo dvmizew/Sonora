@@ -137,7 +137,7 @@ def _parse_genius_song(song_genius_payload: dict[str, object]) -> dict[str, obje
     if album_name is not None and not isinstance(album_name, str):
         raise TypeError("Genius album name must be text")
 
-    result = {
+    return {
         "artist": " & ".join(credited_names),
         "title": str(song_genius_payload.get("title") or ""),
         "genius_song_id": genius_song_id,
@@ -148,7 +148,6 @@ def _parse_genius_song(song_genius_payload: dict[str, object]) -> dict[str, obje
         "release_date": release_date,
         "album": album_name,
     }
-    return result
 
 
 @coalesce_lookup
@@ -261,6 +260,9 @@ def fetch_genius_song_details(
             return None
 
         scored_hits: dict[str, tuple[float, dict[str, object]]] = {}
+        expected_artists = {
+            normalize_str(name) for name in extract_featured_artist_tokens(artist)
+        }
 
         for hit in hits:
             song_candidate = require_api_object(hit.get("result"), "Genius search hit")
@@ -270,9 +272,6 @@ def fetch_genius_song_details(
             hit_artist = str(candidate_artist.get("name") or "")
             hit_title = str(song_candidate.get("title", ""))
 
-            expected_artists = {
-                normalize_str(name) for name in extract_featured_artist_tokens(artist)
-            }
             search_artist = (
                 artist
                 if len(expected_artists) > 1

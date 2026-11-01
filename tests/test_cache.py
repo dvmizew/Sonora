@@ -4,7 +4,7 @@ Unit tests for Sonora caching layer, XDG Base Directory compliance, and CLI cach
 
 import os
 import tempfile
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -30,9 +30,6 @@ from tests.support import IsolatedTestCase
 
 
 class TestDiskCache(IsolatedTestCase):
-    def tearDown(self) -> None:
-        set_ignore_cache(False)
-
     @patch("sonora.core.cache.get_cache")
     def test_get_cached_api_hit(self, mock_get_cache: MagicMock) -> None:
         mock_cache_inst = MagicMock()
@@ -280,7 +277,8 @@ class TestCacheArchitecture(IsolatedTestCase):
         ):
             close_cache()
 
-            def worker(k: str, v: str) -> None:
+            def worker(index: int) -> None:
+                k, v = f"k{index}", f"v{index}"
                 try:
                     set_cached_api(k, v)
                     self.assertEqual(get_cached_api(k), v)
@@ -289,14 +287,8 @@ class TestCacheArchitecture(IsolatedTestCase):
                     if cache is not None:
                         cache.close()
 
-            threads = [
-                threading.Thread(target=worker, args=(f"k{i}", f"v{i}"))
-                for i in range(4)
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                list(executor.map(worker, range(4)))
 
             close_cache()
 

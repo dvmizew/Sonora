@@ -270,22 +270,18 @@ def clear_cache(
 
     if dry_run:
         stats = get_cache_stats()
-        sim_api_entries = stats.api_entries if clear_api else 0
-        sim_api_bytes = stats.api_size_bytes if clear_api else 0
-        sim_state_entries = stats.state_entries if clear_state else 0
-        sim_state_bytes = stats.state_size_bytes if clear_state else 0
-        sim_memory_entries = stats.memory_metadata_entries if clear_memory else 0
-
         return ClearResult(
             cache_dir=cache_dir,
             api_cleared=clear_api,
-            api_entries_cleared=sim_api_entries,
-            api_bytes_freed=sim_api_bytes,
+            api_entries_cleared=stats.api_entries if clear_api else 0,
+            api_bytes_freed=stats.api_size_bytes if clear_api else 0,
             state_cleared=clear_state,
-            state_entries_cleared=sim_state_entries,
-            state_bytes_freed=sim_state_bytes,
+            state_entries_cleared=stats.state_entries if clear_state else 0,
+            state_bytes_freed=stats.state_size_bytes if clear_state else 0,
             memory_cleared=clear_memory,
-            memory_metadata_cleared=sim_memory_entries,
+            memory_metadata_cleared=stats.memory_metadata_entries
+            if clear_memory
+            else 0,
             purged=purge,
             dry_run=True,
         )

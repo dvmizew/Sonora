@@ -795,7 +795,7 @@ def get_audio_duration(file_path: Path) -> float | None:
         import mutagen
 
         m_file = mutagen.File(file_path)
-        if m_file and getattr(m_file, "info", None):
+        if m_file is not None and getattr(m_file, "info", None):
             return safe_float(m_file.info.length)
     except (OSError, MutagenError):
         pass

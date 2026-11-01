@@ -37,10 +37,8 @@ def normalize_track_metadata(
     Unifies offline tag normalization and online tag post-processing into a single source of truth.
     """
     if track_info.title:
-        raw_t_lower = track_info.title.lower()
-        if not track_info.advisory and (
-            re.search(r"[\(\[\{]\s*explicit\s*[\)\]\}]", raw_t_lower)
-            or "album version (explicit)" in raw_t_lower
+        if not track_info.advisory and re.search(
+            r"[\(\[\{]\s*explicit\s*[\)\]\}]", track_info.title.lower()
         ):
             track_info.advisory = "Explicit"
 
@@ -59,7 +57,7 @@ def normalize_track_metadata(
         )
         if title_feats and not track_info.featured_artists:
             track_info.featured_artists = normalize_featured_artists(
-                [track_info.featured_artists, *title_feats],
+                title_feats,
                 primary_artist=track_info.artist,
             )
         track_info.title = clean_unicode_punct(clean_base)
@@ -71,7 +69,7 @@ def normalize_track_metadata(
             track_info.artist = base_artist
         if extracted_features and not track_info.featured_artists:
             track_info.featured_artists = normalize_featured_artists(
-                [track_info.featured_artists, *extracted_features],
+                extracted_features,
                 primary_artist=track_info.artist,
             )
         track_info.artist = clean_disambiguation(track_info.artist)

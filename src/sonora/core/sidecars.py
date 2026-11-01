@@ -76,16 +76,12 @@ def relocate_companion_artwork(
         source_art = source_dir / art_name
         target_art = target_dir / art_name
         if source_art.is_file() and not target_art.exists():
-            if not dry_run:
-                try:
+            try:
+                if not dry_run:
                     shutil.move(str(source_art), str(target_art))
-                    relocated.append(target_art)
-                except OSError as error:
-                    LOG.debug(
-                        f"Failed to relocate companion artwork {source_art}: {error}"
-                    )
-            else:
                 relocated.append(target_art)
+            except OSError as error:
+                LOG.debug(f"Failed to relocate companion artwork {source_art}: {error}")
     return relocated
 
 

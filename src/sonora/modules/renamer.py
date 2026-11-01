@@ -455,10 +455,7 @@ def rename_directory_files(
                                 report.folders_renamed += 1
                     elif album_counts:
                         ranked_album_credits = album_counts.most_common(1)
-                        if (
-                            ranked_album_credits
-                            and ranked_album_credits[0][1] > len(files) / 2
-                        ):
+                        if ranked_album_credits[0][1] > len(files) / 2:
                             album_artist, album_title = ranked_album_credits[0][0]
                         elif (
                             len({album_title for _, album_title in album_counts}) == 1

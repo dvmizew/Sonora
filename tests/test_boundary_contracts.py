@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -261,7 +260,7 @@ class TestProviderBoundaryFailures(IsolatedTestCase):
         self.assertEqual((result.title, result.artist), ("Recording", "Primary"))
 
     def test_theaudiodb_empty_tracks_and_normalized_track_fields(self) -> None:
-        payloads: tuple[dict[str, Any], ...] = (
+        payloads: tuple[dict[str, object], ...] = (
             {"track": None},
             {"track": []},
             {

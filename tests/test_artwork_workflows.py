@@ -1,4 +1,3 @@
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 from sonora.audio.art import (
@@ -12,7 +11,7 @@ from tests.module_support import ModuleTestCase
 
 class TestArtworkWorkflows(ModuleTestCase):
     @patch("sonora.services.theaudiodb.SESSION.get")
-    def test_theaudiodb_service(self, mock_get: Any) -> None:
+    def test_theaudiodb_service(self, mock_get: MagicMock) -> None:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {

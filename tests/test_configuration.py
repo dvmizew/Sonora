@@ -34,12 +34,6 @@ from tests.support import IsolatedTestCase
 
 
 class TestSonoraConfig(IsolatedTestCase):
-    def setUp(self) -> None:
-        clear_config_cache()
-
-    def tearDown(self) -> None:
-        clear_config_cache()
-
     def test_featured_artist_deduplication_uses_configured_threshold(self) -> None:
         for threshold, expected in ((88.0, []), (100.0, ["Example Artists"])):
             with (
@@ -162,35 +156,30 @@ class TestSonoraConfig(IsolatedTestCase):
         self.assertFalse(custom_cfg.is_generic_container("flac"))
 
     def test_config_parsing_toml_and_json(self) -> None:
-        import tempfile
+        toml_path = self.test_directory / "config.toml"
+        toml_path.write_text(
+            '[sonora]\nartist_match_threshold = 92.5\ndisc_folder_patterns = ["^disc_\\\\d+$"]\n',
+            encoding="utf-8",
+        )
+        parsed_toml = _parse_config_data(toml_path)
+        self.assertEqual(parsed_toml.get("artist_match_threshold"), 92.5)
+        self.assertEqual(parsed_toml.get("disc_folder_patterns"), ["^disc_\\d+$"])
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
+        json_path = self.test_directory / "config.json"
+        json_path.write_text(
+            '{"artist_match_threshold": 88.0, "featuring_conjunctions": ["feat", "ft"]}',
+            encoding="utf-8",
+        )
+        parsed_json = _parse_config_data(json_path)
+        self.assertEqual(parsed_json.get("artist_match_threshold"), 88.0)
 
-            toml_path = tmp_path / "config.toml"
-            toml_path.write_text(
-                '[sonora]\nartist_match_threshold = 92.5\ndisc_folder_patterns = ["^disc_\\\\d+$"]\n',
-                encoding="utf-8",
-            )
-            parsed_toml = _parse_config_data(toml_path)
-            self.assertEqual(parsed_toml.get("artist_match_threshold"), 92.5)
-            self.assertEqual(parsed_toml.get("disc_folder_patterns"), ["^disc_\\d+$"])
+        empty_path = self.test_directory / "empty.toml"
+        empty_path.write_text("", encoding="utf-8")
+        self.assertEqual(_parse_config_data(empty_path), {})
 
-            json_path = tmp_path / "config.json"
-            json_path.write_text(
-                '{"artist_match_threshold": 88.0, "featuring_conjunctions": ["feat", "ft"]}',
-                encoding="utf-8",
-            )
-            parsed_json = _parse_config_data(json_path)
-            self.assertEqual(parsed_json.get("artist_match_threshold"), 88.0)
-
-            empty_path = tmp_path / "empty.toml"
-            empty_path.write_text("", encoding="utf-8")
-            self.assertEqual(_parse_config_data(empty_path), {})
-
-            corrupt_path = tmp_path / "corrupt.toml"
-            corrupt_path.write_text("invalid [ [ toml", encoding="utf-8")
-            self.assertEqual(_parse_config_data(corrupt_path), {})
+        corrupt_path = self.test_directory / "corrupt.toml"
+        corrupt_path.write_text("invalid [ [ toml", encoding="utf-8")
+        self.assertEqual(_parse_config_data(corrupt_path), {})
 
     def test_dynamic_pattern_generation(self) -> None:
         split_pat = get_artist_split_pattern()

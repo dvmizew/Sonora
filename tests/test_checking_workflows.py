@@ -1,6 +1,5 @@
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sonora.core.models import TrackInfo
 from sonora.core.text import is_valid_uuid
@@ -32,7 +31,7 @@ class TestCheckingWorkflows(ModuleTestCase):
         )
 
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library(self, mock_read: Any) -> None:
+    def test_check_library(self, mock_read: MagicMock) -> None:
         audio_file_1 = self.tmp_path / "song.wav"
         write_silent_wav(audio_file_1)
 
@@ -45,7 +44,9 @@ class TestCheckingWorkflows(ModuleTestCase):
         self.assertTrue((self.tmp_path / "report.json").exists())
 
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library_multi_file_and_folder_issues(self, mock_read: Any) -> None:
+    def test_check_library_multi_file_and_folder_issues(
+        self, mock_read: MagicMock
+    ) -> None:
         album_dir = self.tmp_path / "AlbumFolder"
         album_dir.mkdir(parents=True, exist_ok=True)
         file1 = album_dir / "01 - Song 1.wav"
@@ -86,7 +87,7 @@ class TestCheckingWorkflows(ModuleTestCase):
         )
 
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library_album_tag_mismatch(self, mock_read: Any) -> None:
+    def test_check_library_album_tag_mismatch(self, mock_read: MagicMock) -> None:
         album_dir = self.tmp_path / "Artist - Album"
         album_dir.mkdir(parents=True, exist_ok=True)
         file1 = album_dir / "01 - Track 1.wav"
@@ -126,7 +127,7 @@ class TestCheckingWorkflows(ModuleTestCase):
         self.assertFalse(any("Mismatched ALBUM tag" in issue for issue in file1_issues))
 
     @patch("sonora.modules.checker.read_track_metadata")
-    def test_check_library_alien_track_detection(self, mock_read: Any) -> None:
+    def test_check_library_alien_track_detection(self, mock_read: MagicMock) -> None:
         album_dir = self.tmp_path / "Main Artist - Main Album"
         album_dir.mkdir(parents=True, exist_ok=True)
         file1 = album_dir / "01 - Track 1.wav"
@@ -170,7 +171,7 @@ class TestCheckingWorkflows(ModuleTestCase):
 
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library_alien_single_duplicate_position(
-        self, mock_read: Any
+        self, mock_read: MagicMock
     ) -> None:
         album_dir = self.tmp_path / "Artist - Album"
         album_dir.mkdir(parents=True, exist_ok=True)
@@ -215,7 +216,7 @@ class TestCheckingWorkflows(ModuleTestCase):
 
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library_compilation_preserved_from_alien(
-        self, mock_read: Any
+        self, mock_read: MagicMock
     ) -> None:
         album_dir = self.tmp_path / "Various Artists - OST"
         album_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +261,7 @@ class TestCheckingWorkflows(ModuleTestCase):
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_unsplit_collaborative_artist_subset(
-        self, mock_read: Any, mock_checksum: Any
+        self, mock_read: MagicMock, mock_checksum: MagicMock
     ) -> None:
         mock_checksum.return_value = True
         wav_path = self.tmp_path / "03 - Ric Flair Drip.wav"
@@ -286,7 +287,7 @@ class TestCheckingWorkflows(ModuleTestCase):
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_unsplit_collaborative_track_with_primary_artist(
-        self, mock_read: Any, mock_checksum: Any
+        self, mock_read: MagicMock, mock_checksum: MagicMock
     ) -> None:
         mock_checksum.return_value = True
         wav_path = self.tmp_path / "03 - Stai.wav"
@@ -312,7 +313,7 @@ class TestCheckingWorkflows(ModuleTestCase):
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_feat_in_artist_no_double_unsplit_warning(
-        self, mock_read: Any, mock_checksum: Any
+        self, mock_read: MagicMock, mock_checksum: MagicMock
     ) -> None:
         mock_checksum.return_value = True
         wav_path = self.tmp_path / "04 - Mr. Right Now.wav"
@@ -339,7 +340,7 @@ class TestCheckingWorkflows(ModuleTestCase):
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_unsplit_delimiter_true_positive(
-        self, mock_read: Any, mock_checksum: Any
+        self, mock_read: MagicMock, mock_checksum: MagicMock
     ) -> None:
         mock_checksum.return_value = True
         wav_path = self.tmp_path / "01 - Intro.wav"
@@ -365,7 +366,7 @@ class TestCheckingWorkflows(ModuleTestCase):
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_diacritic_collaborative_track_alignment(
-        self, mock_read: Any, mock_checksum: Any
+        self, mock_read: MagicMock, mock_checksum: MagicMock
     ) -> None:
         mock_checksum.return_value = True
         wav_path = self.tmp_path / "01 - LVL UP.wav"
@@ -391,7 +392,7 @@ class TestCheckingWorkflows(ModuleTestCase):
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_collective_compilation_joint_billing_conjunction(
-        self, mock_read: Any, mock_checksum: Any
+        self, mock_read: MagicMock, mock_checksum: MagicMock
     ) -> None:
         mock_checksum.return_value = True
         wav_path = self.tmp_path / "02 - CHAMPAIN & VACAY.wav"
@@ -433,7 +434,7 @@ class TestCheckingWorkflows(ModuleTestCase):
     @patch("sonora.modules.checker.verify_flac_checksum")
     @patch("sonora.modules.checker.read_track_metadata")
     def test_check_library_spectral_check_option(
-        self, mock_read: Any, mock_checksum: Any, mock_spectral: Any
+        self, mock_read: MagicMock, mock_checksum: MagicMock, mock_spectral: MagicMock
     ) -> None:
         flac_file = self.tmp_path / "song.flac"
         flac_file.write_bytes(b"FLAC dummy content")

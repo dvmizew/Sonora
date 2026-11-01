@@ -20,8 +20,6 @@ class LoudnessMeasurement:
     file_path: Path
     track_gain: float
     track_peak: float
-    loudness: float
-    duration: float
     block_loudness: tuple[float, ...]
 
 
@@ -58,7 +56,6 @@ def _measure_track_loudness(
 
         meter = pyloudnorm.Meter(sample_rate)
         track_loudness = float(meter.integrated_loudness(audio_data))
-        duration = float(len(audio_data) / sample_rate)
         track_peak = float(np.max(np.abs(audio_data)))
 
         track_gain = (
@@ -70,8 +67,6 @@ def _measure_track_loudness(
             audio_path,
             track_gain,
             track_peak,
-            track_loudness,
-            duration,
             tuple(float(level) for level in meter.blockwise_loudness),
         )
     except (ValueError, OSError) as error:

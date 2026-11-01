@@ -21,7 +21,7 @@ class TestOrganizationWorkflows(ModuleTestCase):
     ) -> None:
         source = self.tmp_path / "library"
         canonical = source / "Primary" / "Album" / "01 - Song.wav"
-        incoming = source / "PRIMARY" / "Album" / "01 - Song.wav"
+        incoming = source / "PRIMARY!" / "Album" / "01 - Song.wav"
         for path, body in (
             (canonical, b"first recording"),
             (incoming, b"second recording"),
@@ -29,7 +29,7 @@ class TestOrganizationWorkflows(ModuleTestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(body)
         root_playlist = source / "library.m3u"
-        root_playlist.write_text("PRIMARY/Album/01 - Song.wav\n")
+        root_playlist.write_text("PRIMARY!/Album/01 - Song.wav\n")
         moved_playlist = incoming.parent / "album.m3u"
         moved_playlist.write_text("01 - Song.wav\n")
         incoming.with_suffix(".lrc").write_text("[00:01.00] Second recording lyrics\n")

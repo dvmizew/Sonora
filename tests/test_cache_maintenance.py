@@ -22,10 +22,6 @@ from sonora.core.cache_storage import CacheDecodeError, MetadataDisk
 from sonora.core.state import LibraryStateVault, get_library_state, reset_library_state
 from tests.support import IsolatedTestCase
 
-"""
-Unit tests for Sonora caching layer, XDG Base Directory compliance, and CLI cache management.
-"""
-
 
 class _SpyingConnection:
     """Wrapper around sqlite3.Connection to inspect statement execution and transaction isolation."""
@@ -56,9 +52,6 @@ class _SpyingConnection:
         if "VACUUM" in sql.upper() or "WAL_CHECKPOINT" in sql.upper():
             self._isolation_levels.append(self._conn.isolation_level)
         return self._conn.execute(sql, *args)
-
-    def close(self) -> None:
-        self._conn.close()
 
 
 class TestSqliteVacuumAndCheckpoint(IsolatedTestCase):

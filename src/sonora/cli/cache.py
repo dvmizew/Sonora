@@ -147,9 +147,7 @@ def cache_clear_cmd(
     Clear Sonora API cache, library state, and memory caches.
     """
     if all_caches:
-        do_api = True
-        do_state = True
-        do_memory = True
+        do_api = do_state = do_memory = True
     elif not (api or state or memory):
         do_api = True
         do_state = purge

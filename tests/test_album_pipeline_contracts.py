@@ -97,10 +97,11 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         label.assert_not_called()
 
     def test_partial_release_indexes_do_not_establish_identity(self) -> None:
-        for release in (
+        releases: tuple[dict[str, object], ...] = (
             {"tracks_by_disc_and_position": {(1, 1): {"recording_mbid": None}}},
-            {"tracks_by_disc_and_position": {(1, 1): {"recording_mbid": None}}},
-        ):
+            {"tracks_by_disc_and_position": {(1, 1): {}}},
+        )
+        for release in releases:
             recording = dataclasses.replace(self.recording, musicbrainz_albumid=MBID)
             with (
                 self.subTest(release=release),

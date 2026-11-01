@@ -121,12 +121,11 @@ def fetch_itunes_cover_art_url(
         if isinstance(artwork_url, str):
             if "100x100bb" in artwork_url:
                 return artwork_url.replace("100x100bb", f"{resolution}x{resolution}bb")
-            upgraded_url = re.sub(
+            return re.sub(
                 r"\b\d+x\d+(?:bb)?(?:-\d+)?\b",
                 f"{resolution}x{resolution}bb",
                 artwork_url,
             )
-            return upgraded_url
 
     return None
 
@@ -212,9 +211,7 @@ def fetch_itunes_track_metadata(
                 f"Ambiguous iTunes recording for {escape(artist)} - {escape(title)}; metadata unchanged"
             )
         return None
-    best_result = ranked[0][1]
-
-    return _parse_itunes_track(best_result)
+    return _parse_itunes_track(ranked[0][1])
 
 
 def _parse_itunes_track(track_entry: Mapping[str, object]) -> dict[str, object]:
@@ -257,10 +254,9 @@ def _score_itunes_album(
     normalized_target: str,
     expected_track_count: int | None = None,
 ) -> float:
-    score = 0.0
     collection_title = str(album_dict.get("collectionName", ""))
     candidate_artist = str(album_dict.get("artistName", ""))
-    score += score_artist_title_match(artist, album, candidate_artist, collection_title)
+    score = score_artist_title_match(artist, album, candidate_artist, collection_title)
     if normalize_str(collection_title) == normalized_target:
         score += 30.0
     if str(album_dict.get("collectionExplicitness", "")).lower() == "explicit":

@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,7 +28,7 @@ from tests.support import IsolatedTestCase
 
 class TestXDGCacheCompliance(IsolatedTestCase):
     def test_api_cache_dir_xdg_isolation(self) -> None:
-        """Verify DiskCache storage is isolated in api/ subdirectory under XDG cache dir (Rule 8)."""
+        """Keep API cache shards separate from the library state database."""
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.dict(os.environ, {"XDG_CACHE_HOME": tmpdir}),
@@ -57,17 +58,10 @@ class TestXDGCacheCompliance(IsolatedTestCase):
 
 
 class TestCacheConcurrencyAndStorageInvariants(IsolatedTestCase):
-    """
-    Test suite verifying internal storage invariants of Sonora's cache according to GEMINI.md Rule 8:
-    1. API cache is isolated in api/ subdirectory and does not conflict with library_state.db.
-    2. Thread safety: 16 concurrent threads performing reads/writes without deadlocks or locked errors.
-    3. Negative caching: empty string '' and empty dict {} are preserved and distinguished from cache misses.
-    4. Cache recovery: corrupted temp files / shards are cleanly recovered via check(fix=True) without exceptions.
-    5. clear_cache(clear_api=True, clear_state=False) leaves library_state.db completely intact in normal and purge modes.
-    """
+    """Cache recovery, concurrency and clearing preserve library state."""
 
     def test_api_cache_isolation_and_library_state_independence(self) -> None:
-        """API cache is confined to api/ and check(fix=True) never touches library_state.db."""
+        """API cache repair never touches the library state database."""
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.dict(os.environ, {"XDG_CACHE_HOME": tmpdir}),
@@ -166,18 +160,17 @@ class TestCacheConcurrencyAndStorageInvariants(IsolatedTestCase):
                     ) as error:
                         exceptions.append(error)
 
-                threads = [
-                    threading.Thread(target=worker, args=(t_idx,))
-                    for t_idx in range(num_threads)
-                ]
-                for thread in threads:
-                    thread.start()
-                for thread in threads:
-                    thread.join(timeout=30.0)
-                    if thread.is_alive():
-                        exceptions.append(
-                            TimeoutError(f"Thread {thread} timed out / deadlocked.")
-                        )
+                executor = ThreadPoolExecutor(max_workers=num_threads)
+                wait_for_workers = True
+                try:
+                    futures = [executor.submit(worker, i) for i in range(num_threads)]
+                    for future in futures:
+                        future.result(timeout=30)
+                except TimeoutError:
+                    wait_for_workers = False
+                    raise
+                finally:
+                    executor.shutdown(wait=wait_for_workers, cancel_futures=True)
 
                 self.assertEqual(
                     len(exceptions), 0, f"Exceptions occurred: {exceptions}"

@@ -123,7 +123,7 @@ def _restore_single_track(
 def backup_library_tags(
     directory: Path, output_file: Path | None = None, max_threads: int = 4
 ) -> Path:
-    if not directory.exists() or not directory.is_dir():
+    if not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")
 
     LOG.info(f"Scanning for files in {escape(str(directory))}...")
@@ -210,9 +210,8 @@ def backup_library_tags(
         LOG.info(
             f"Successfully backed up {backed_up}/{len(audio_files)} files to {escape(str(output_path))}"
         )
-        if failed > 0:
-            LOG.warning(f"   {failed} files could not be read")
         if failed:
+            LOG.warning(f"   {failed} files could not be read")
             raise OSError(
                 f"Partial backup saved to {output_path}: {failed} unreadable files"
             )

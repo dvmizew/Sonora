@@ -411,8 +411,8 @@ def _resolve_album_folder_identity(
     if folder_album and get_config().is_generic_container(folder_album):
         folder_album = None
 
-    album_counts: dict[str, int] = {}
-    artist_counts: dict[str, int] = {}
+    album_counts: Counter[str] = Counter()
+    artist_counts: Counter[str] = Counter()
 
     for audio_file in audio_files:
         try:
@@ -420,23 +420,21 @@ def _resolve_album_folder_identity(
             if track_metadata.album and not get_config().is_generic_container(
                 track_metadata.album
             ):
-                album_counts[track_metadata.album] = (
-                    album_counts.get(track_metadata.album, 0) + 1
-                )
+                album_counts[track_metadata.album] += 1
             candidate_artist = track_metadata.album_artist or track_metadata.artist
             if candidate_artist and not get_config().is_generic_container(
                 candidate_artist
             ):
-                artist_counts[candidate_artist] = (
-                    artist_counts.get(candidate_artist, 0) + 1
-                )
+                artist_counts[candidate_artist] += 1
         except OSError:
             pass
 
     resolved_album = _select_album_value(album_counts, folder_album)
-    if len({normalize_str(album) for album in album_counts}) > 1 and normalize_str(
-        folder_album or ""
-    ) not in {normalize_str(album) for album in album_counts}:
+    normalized_albums = {normalize_str(album) for album in album_counts}
+    if (
+        len(normalized_albums) > 1
+        and normalize_str(folder_album or "") not in normalized_albums
+    ):
         resolved_album = None
     resolved_artist = _select_album_value(artist_counts, folder_artist)
 
@@ -940,7 +938,7 @@ def tag_album_folder(
     failures: list[dict[str, str]] | None = None,
     musixmatch_token: str | None = None,
 ) -> list[TrackInfo]:
-    if not folder_path.exists() or not folder_path.is_dir():
+    if not folder_path.is_dir():
         raise FileNotFoundError(f"Album folder not found: {folder_path}")
 
     if fanart_api_key:

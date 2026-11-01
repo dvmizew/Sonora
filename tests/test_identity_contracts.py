@@ -2,7 +2,6 @@ import dataclasses
 import json
 import os
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -95,7 +94,7 @@ class TestArtistResolutionContracts(IsolatedTestCase):
 
     def test_artist_resolution_obeys_alias_and_punctuation_precedence(self) -> None:
         cases: tuple[
-            tuple[str, list[dict[str, Any]], list[dict[str, Any]], str], ...
+            tuple[str, list[dict[str, object]], list[dict[str, object]], str], ...
         ] = (
             ("Primary", [{"name": "Primary!"}], [], "Primary"),
             ("Primary", [], [{"name": "Primary!"}], "Primary"),
@@ -277,14 +276,10 @@ class TestArtistResolutionContracts(IsolatedTestCase):
 class TestAlbumIdentityContracts(IsolatedTestCase):
     def test_album_position_indexes_use_disc_and_position(self) -> None:
         recording = {"title": "Recording", "artist": "Primary"}
-        for index_name, key in (("tracks_by_disc_and_position", (2, 3)),):
-            with self.subTest(index_name=index_name, key=key):
-                details = {index_name: {key: recording}}
-                self.assertTrue(
-                    matching._pos_in_album(
-                        3, disc_number=2, album_mb_release_details=details
-                    )
-                )
+        details = {"tracks_by_disc_and_position": {(2, 3): recording}}
+        self.assertTrue(
+            matching._pos_in_album(3, disc_number=2, album_mb_release_details=details)
+        )
         self.assertFalse(
             matching._pos_in_album(
                 1,
@@ -498,13 +493,13 @@ class TestMusicBrainzMetadataContracts(IsolatedTestCase):
             "recording_mbid": MBID,
             "isrc": "USAAA2100001",
         }
-        resolution = patch.object(
-            artist_resolution,
-            "resolve_artist_name",
-            side_effect=lambda name: name,
+        self.enterContext(
+            patch.object(
+                artist_resolution,
+                "resolve_artist_name",
+                side_effect=lambda name: name,
+            )
         )
-        resolution.start()
-        self.addCleanup(resolution.stop)
 
     def test_any_recording_isrc_can_fill_a_missing_title(self) -> None:
         self.recording.title = "Untitled"
@@ -680,7 +675,7 @@ class TestMusicBrainzMetadataContracts(IsolatedTestCase):
             ({"id": MBID, "date": "2020"}, MBID, "2020"),
             ({"id": MBID, "date": "bad"}, MBID, None),
         ):
-            recording = dataclasses.replace(self.recording)
+            recording = self.recording.copy()
             with (
                 self.subTest(release=release),
                 patch.object(
@@ -769,7 +764,7 @@ class TestMusicBrainzMetadataContracts(IsolatedTestCase):
     def test_release_metadata_preserves_track_counts_and_normalizes_album_identity(
         self,
     ) -> None:
-        release: dict[str, Any] = {
+        release: dict[str, object] = {
             "title": "Record",
             "album_artist": "Primary",
             "musicbrainz_artistid": OTHER_MBID,
@@ -845,8 +840,6 @@ class TestMusicBrainzMetadataContracts(IsolatedTestCase):
 
 class TestArtistResponseContracts(IsolatedTestCase):
     def test_artist_resolution_exposes_malformed_deezer_responses(self) -> None:
-        from sonora.services.artist_resolution import resolve_artist_name
-
         payload: object
         for payload in ([], {"data": "wrong"}, {"data": [None]}):
             with (
@@ -860,4 +853,4 @@ class TestArtistResponseContracts(IsolatedTestCase):
                 request.return_value.status_code = 200
                 request.return_value.json.return_value = payload
                 with self.assertRaises(TypeError):
-                    resolve_artist_name("Artist Alpha")
+                    artist_resolution.resolve_artist_name("Artist Alpha")

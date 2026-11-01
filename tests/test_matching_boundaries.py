@@ -1,7 +1,6 @@
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import Any
 
 from sonora.core.config import SonoraConfig
 from sonora.core.models import TrackInfo
@@ -383,7 +382,7 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
     def test_entity_indexes_preserve_all_codes_and_ignore_missing_positions(
         self,
     ) -> None:
-        release: dict[str, Any] = {
+        release: dict[str, object] = {
             "artist": "Primary",
             "title": "Record",
             "tracks_by_disc_and_position": {
@@ -489,7 +488,7 @@ class TestAlienClassificationBoundaries(IsolatedTestCase):
         )
 
     def test_different_release_disc_layout_cannot_renumber_local_tracks(self) -> None:
-        releases: tuple[dict[str, Any], ...] = (
+        releases: tuple[dict[str, object], ...] = (
             {"total_discs": 1},
             {"tracks_by_disc_and_position": {(1, 9): {"title": "Recording"}}},
             {"total_discs": 2},

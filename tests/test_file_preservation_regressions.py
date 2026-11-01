@@ -66,7 +66,7 @@ class TestFilePreservationRegressions(AudioRegressionTestCase):
         self.assertEqual(list(self.root.iterdir()), [destination])
 
     def test_directory_merge_preserves_collisions(self) -> None:
-        for folder, payload in (("Artist", b"original"), ("ARTIST", b"different")):
+        for folder, payload in (("Artist", b"original"), ("ARTIST!", b"different")):
             recording = self.root / folder / "Album" / "01.flac"
             recording.parent.mkdir(parents=True)
             recording.write_bytes(payload)

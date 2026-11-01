@@ -52,22 +52,20 @@ class TestShazamResponses(ServiceResponseTestCase):
             }
 
             recognized_track = recognize_audio_track(audio_file)
-            self.assertIsNotNone(recognized_track)
-            if recognized_track:
-                self.assertEqual(recognized_track.title, "Starboy")
-                self.assertEqual(recognized_track.artist, "The Weeknd")
-                self.assertEqual(recognized_track.album, "Starboy")
-                self.assertEqual(recognized_track.genre, "R&B/Soul")
-                self.assertEqual(recognized_track.isrc, "USUM71607007")
-                self.assertEqual(recognized_track.apple_music_id, "123456")
-                self.assertEqual(
-                    recognized_track.cover_art_url, "https://shazam.com/cover.jpg"
-                )
-                self.assertEqual(recognized_track.release_date, "2016")
-                self.assertEqual(recognized_track.label, "Republic Records")
-                self.assertIsNotNone(recognized_track.lyrics)
-                if recognized_track.lyrics:
-                    self.assertIn("worst mood", recognized_track.lyrics)
+            assert recognized_track is not None
+            self.assertEqual(recognized_track.title, "Starboy")
+            self.assertEqual(recognized_track.artist, "The Weeknd")
+            self.assertEqual(recognized_track.album, "Starboy")
+            self.assertEqual(recognized_track.genre, "R&B/Soul")
+            self.assertEqual(recognized_track.isrc, "USUM71607007")
+            self.assertEqual(recognized_track.apple_music_id, "123456")
+            self.assertEqual(
+                recognized_track.cover_art_url, "https://shazam.com/cover.jpg"
+            )
+            self.assertEqual(recognized_track.release_date, "2016")
+            self.assertEqual(recognized_track.label, "Republic Records")
+            assert recognized_track.lyrics is not None
+            self.assertIn("worst mood", recognized_track.lyrics)
 
             # 2. Edge case: empty or invalid track payload
             mock_shazam_async.return_value = {"matches": []}
@@ -158,7 +156,6 @@ class TestShazamContracts(IsolatedTestCase):
                 ),
             ):
                 recognized = recognize_audio_track(audio_path)
-            self.assertIsNotNone(recognized)
             assert recognized is not None
             self.assertIsNone(recognized.apple_music_id)
 

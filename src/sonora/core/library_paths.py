@@ -26,19 +26,13 @@ def parse_track_filename(filename: str) -> tuple[int | None, int | None, str]:
     Returns (disc_number, track_number, clean_title).
     """
     stem = Path(filename).stem
-    cd_match = _CD_PREFIXED_FILENAME_PATTERN.match(stem)
-    if cd_match:
-        disc_num = safe_int(cd_match.group(1))
-        track_num = safe_int(cd_match.group(2))
-        title_part = cd_match.group(3).strip()
-        return disc_num, track_num, title_part
-
-    multi_match = _MULTI_DISC_FILENAME_PATTERN.match(stem)
-    if multi_match:
-        disc_num = safe_int(multi_match.group(1))
-        track_num = safe_int(multi_match.group(2))
-        title_part = multi_match.group(3).strip()
-        return disc_num, track_num, title_part
+    for pattern in (_CD_PREFIXED_FILENAME_PATTERN, _MULTI_DISC_FILENAME_PATTERN):
+        if match := pattern.match(stem):
+            return (
+                safe_int(match.group(1)),
+                safe_int(match.group(2)),
+                match.group(3).strip(),
+            )
 
     single_match = _SINGLE_TRACK_FILENAME_PATTERN.match(stem)
     if single_match:
@@ -99,21 +93,16 @@ def resolve_unique_path(
     'Stem (2).ext', 'Stem (3).ext' if target_path exists or is reserved by a preview.
     """
     reserved_paths = reserved_paths or set()
-    if (not target_path.exists() and target_path not in reserved_paths) or (
-        current_path and target_path.resolve() == current_path.resolve()
-    ):
-        return target_path
+    candidate = target_path
     counter = 2
-    parent_dir = target_path.parent
-    base_stem = target_path.stem
-    extension = target_path.suffix
-    while True:
-        candidate = parent_dir / f"{base_stem} ({counter}){extension}"
-        if (not candidate.exists() and candidate not in reserved_paths) or (
-            current_path and candidate.resolve() == current_path.resolve()
-        ):
-            return candidate
+    while (candidate.exists() or candidate in reserved_paths) and not (
+        current_path and candidate.resolve() == current_path.resolve()
+    ):
+        candidate = target_path.parent / (
+            f"{target_path.stem} ({counter}){target_path.suffix}"
+        )
         counter += 1
+    return candidate
 
 
 def is_in_singles_hierarchy(path: Path, root_dir: Path | None = None) -> bool:

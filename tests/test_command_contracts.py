@@ -50,6 +50,7 @@ class TestEntrypointContracts(IsolatedTestCase):
         for failure in (None, ValueError("not the main thread")):
             with (
                 self.subTest(failure=failure),
+                patch.object(signal, "SIGCONT", 25, create=True),
                 patch.object(signal, "signal", side_effect=failure) as register,
                 patch("socket.setdefaulttimeout"),
             ):

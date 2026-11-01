@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -122,10 +121,10 @@ class TestArtworkContracts(IsolatedTestCase):
     def test_missing_label_assets_and_label_transport_errors_create_no_files(
         self,
     ) -> None:
-        for artwork, download in (
-            (None, None),
-            (fanart.FanartLabelArtwork(label_urls=("logo",)), None),
-            (OSError("offline"), None),
+        for artwork in (
+            None,
+            fanart.FanartLabelArtwork(label_urls=("logo",)),
+            OSError("offline"),
         ):
             with (
                 self.subTest(artwork=artwork),
@@ -140,7 +139,7 @@ class TestArtworkContracts(IsolatedTestCase):
                     return_value=artwork,
                     side_effect=artwork if isinstance(artwork, OSError) else None,
                 ),
-                patch.object(art, "download_fanart_image_bytes", return_value=download),
+                patch.object(art, "download_fanart_image_bytes", return_value=None),
             ):
                 art.process_label_artwork(self.test_directory, MBID)
             self.assertFalse((self.test_directory / "label.png").exists())
@@ -437,7 +436,7 @@ class TestFanartProviderContracts(IsolatedTestCase):
 
     def test_album_payload_shapes_preserve_disc_and_cover_urls(self) -> None:
         descriptor = [{"url": "https://example.com/disc.png"}]
-        payloads: tuple[dict[str, Any], ...] = (
+        payloads: tuple[dict[str, object], ...] = (
             {"albums": {MBID: {"cdart": descriptor}}},
             {
                 "albums": [

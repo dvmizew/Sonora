@@ -40,7 +40,7 @@ def _load_user_overrides() -> dict[str, str]:
             continue
         seen_paths.add(path)
         try:
-            if path.exists() and path.is_file() and path.stat().st_size > 0:
+            if path.is_file() and path.stat().st_size > 0:
                 alias_dict = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(alias_dict, dict):
                     for src, dest in alias_dict.items():
@@ -396,8 +396,6 @@ def harmonize_artist_casing(candidate_artist: str, reference_artist: str) -> str
         return candidate_artist
 
     is_acronym = is_artist_acronym(candidate_artist)
-    if candidate_artist.isupper() and not is_acronym and not reference_artist.isupper():
-        return reference_artist
     if reference_artist.isupper() and not is_acronym and not candidate_artist.isupper():
         return candidate_artist
     return reference_artist

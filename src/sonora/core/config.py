@@ -216,10 +216,10 @@ class SonoraConfig:
 
     def is_disc_folder(self, folder_name: str) -> bool:
         clean = folder_name.strip()
-        for folder_pattern in self.disc_folder_patterns:
-            if re.match(folder_pattern, clean, re.IGNORECASE):
-                return True
-        return False
+        return any(
+            re.match(pattern, clean, re.IGNORECASE)
+            for pattern in self.disc_folder_patterns
+        )
 
     def is_generic_container(self, folder_name: str) -> bool:
         return folder_name.strip().lower() in self.generic_containers

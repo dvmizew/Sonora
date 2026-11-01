@@ -422,7 +422,7 @@ def normalize_library(
     dry_run: bool = False,
     max_threads: int = 4,
 ) -> NormalizeReport:
-    if not directory.exists() or not directory.is_dir():
+    if not directory.is_dir():
         raise ValueError(f"Directory not found: {directory}")
 
     LOG.info(f"Scanning for audio files in {escape(str(directory))}...")

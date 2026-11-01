@@ -172,7 +172,6 @@ class TestLyricsResponses(ServiceResponseTestCase):
         mock_get.side_effect = [mock_search_response, mock_song_response]
 
         details = fetch_genius_song_details("Artist", "Title", api_token="token")
-        self.assertIsNotNone(details)
         assert details is not None
         self.assertIsNone(details["description"])
 
@@ -328,7 +327,6 @@ class TestLyricsResponses(ServiceResponseTestCase):
             "[00:10.00] First line\n[01:30.50] Middle line\n[03:15.20] Final line\n"
         )
         max_ts = extract_max_timestamp(lrc_text)
-        self.assertIsNotNone(max_ts)
         assert max_ts is not None
         self.assertAlmostEqual(max_ts, 195.2, places=1)
 

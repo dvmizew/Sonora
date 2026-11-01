@@ -176,7 +176,7 @@ class TestTrackProcessingContracts(IsolatedTestCase):
             self.assertEqual(self.recording.initial_key, "Am")
             self.assertEqual(self.recording.bpm, 123.4)
 
-    def test_lyric_metadata_updates_logs_existing_forced_and_missing_assets(
+    def test_lyrics_updates_accept_provider_text_and_preserve_it_on_failure(
         self,
     ) -> None:
         for existing, force in ((False, False), (True, False), (True, True)):

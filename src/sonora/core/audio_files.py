@@ -8,7 +8,7 @@ def find_audio_files(
     directory: Path, recursive: bool = True, include_hidden: bool = False
 ) -> list[Path]:
     """Find all supported audio files in a directory, ignoring hidden directories/files by default."""
-    if not directory.exists() or not directory.is_dir():
+    if not directory.is_dir():
         return []
     glob_iter = directory.rglob("*") if recursive else directory.glob("*")
     files: list[Path] = []

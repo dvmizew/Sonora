@@ -1,6 +1,8 @@
 import dataclasses
+import json
 from unittest.mock import patch
 
+from sonora.cli import library
 from sonora.core.cancellation import InterruptedOperationError
 from sonora.core.models import TrackInfo
 from sonora.modules import organizer
@@ -151,7 +153,7 @@ class TestDirectoryConsolidationContracts(IsolatedTestCase):
     def test_unmatched_artist_tags_fall_back_to_existing_directory_branding(
         self,
     ) -> None:
-        for name in ("Primary", "PRIMARY"):
+        for name in ("Primary", "PRIMARY!"):
             folder = self.test_directory / name
             folder.mkdir()
             (folder / "recording.flac").touch()
@@ -167,7 +169,7 @@ class TestDirectoryConsolidationContracts(IsolatedTestCase):
                 1,
             )
         self.assertTrue((self.test_directory / "Primary").exists())
-        self.assertTrue((self.test_directory / "PRIMARY").exists())
+        self.assertTrue((self.test_directory / "PRIMARY!").exists())
 
     def test_all_uppercase_variants_consolidate_and_empty_normalized_names_are_ignored(
         self,
@@ -183,7 +185,7 @@ class TestDirectoryConsolidationContracts(IsolatedTestCase):
     def test_single_hierarchy_consolidates_nested_release_case_variants(self) -> None:
         singles = self.test_directory / "Primary" / "Singles"
         (singles / "Record").mkdir(parents=True)
-        (singles / "RECORD").mkdir()
+        (singles / "RECORD!").mkdir()
         self.assertEqual(
             organizer.consolidate_duplicate_artist_dirs(
                 self.test_directory, dry_run=True
@@ -232,7 +234,7 @@ class TestDirectoryConsolidationContracts(IsolatedTestCase):
             organizer._consolidate_directory_entries(self.test_directory / "missing"), 0
         )
         canonical = self.test_directory / "Primary"
-        duplicate = self.test_directory / "PRIMARY"
+        duplicate = self.test_directory / "PRIMARY!"
         canonical.mkdir()
         duplicate.mkdir()
         (canonical / "recording.flac").write_bytes(b"original")
@@ -253,7 +255,7 @@ class TestDirectoryConsolidationContracts(IsolatedTestCase):
         self.assertEqual((canonical / "Nested" / "companion.lrc").read_text(), "lyrics")
 
     def test_metadata_branding_selects_canonical_directory(self) -> None:
-        first = self.test_directory / "Primary"
+        first = self.test_directory / "Primary!"
         second = self.test_directory / "PRIMARY"
         first.mkdir()
         second.mkdir()
@@ -264,25 +266,28 @@ class TestDirectoryConsolidationContracts(IsolatedTestCase):
             organizer, "_read_file_info", return_value=(recording_path, branded)
         ):
             self.assertEqual(
-                organizer._consolidate_directory_entries(
-                    self.test_directory, dry_run=True
-                ),
+                organizer._consolidate_directory_entries(self.test_directory),
                 1,
             )
-        self.assertTrue(first.exists())
+        self.assertFalse(first.exists())
         self.assertTrue(second.exists())
+        self.assertTrue((second / "recording.flac").exists())
 
     def test_consolidation_io_failure_does_not_remove_source_assets(self) -> None:
         first = self.test_directory / "Primary"
-        second = self.test_directory / "PRIMARY"
+        second = self.test_directory / "PRIMARY!"
         first.mkdir()
         second.mkdir()
         audio = second / "recording.flac"
         audio.write_bytes(b"recording")
+        report = self.test_directory / "organization.json"
         with (
             patch.object(
-                organizer, "_read_file_info", side_effect=lambda path: (path, None)
+                organizer,
+                "_read_file_info",
+                side_effect=lambda path: (path, TrackInfo(path, artist="Primary")),
             ),
+            patch.object(organizer, "_is_single_folder", return_value=False),
             patch.object(
                 organizer,
                 "safe_case_rename",
@@ -290,8 +295,11 @@ class TestDirectoryConsolidationContracts(IsolatedTestCase):
             ),
         ):
             self.assertEqual(
-                organizer._consolidate_directory_entries(self.test_directory), 0
+                library.organize(self.test_directory, json_report=report), 1
             )
+        self.assertEqual(
+            json.loads(report.read_text())["summary"]["failed_files"], [str(second)]
+        )
         self.assertEqual(audio.read_bytes(), b"recording")
 
     def test_cleanup_preserves_editor_directories_and_nonempty_folders(self) -> None:

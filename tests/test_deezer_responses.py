@@ -34,11 +34,10 @@ class TestDeezerResponses(ServiceResponseTestCase):
         mock_get.side_effect = [mock_search, mock_album]
 
         release_result = fetch_deezer_album_details("Artist", "Album Title")
-        self.assertIsNotNone(release_result)
-        if release_result:
-            self.assertEqual(release_result["label"], "Universal Music")
-            self.assertEqual(release_result["barcode"], "123456789012")
-            self.assertEqual(release_result["genre"], "Hip Hop")
+        assert release_result is not None
+        self.assertEqual(release_result["label"], "Universal Music")
+        self.assertEqual(release_result["barcode"], "123456789012")
+        self.assertEqual(release_result["genre"], "Hip Hop")
 
     @patch("sonora.services.deezer.SESSION.get")
     def test_fetch_deezer_album_details_prefers_expected_tracks(
@@ -109,9 +108,8 @@ class TestDeezerResponses(ServiceResponseTestCase):
         mock_get.side_effect = [mock_search, mock_track]
 
         track_details = fetch_deezer_track_details("Artist Name", "Track Title")
-        self.assertIsNotNone(track_details)
-        if track_details:
-            self.assertEqual(track_details["isrc"], "USUM71703861")
+        assert track_details is not None
+        self.assertEqual(track_details["isrc"], "USUM71703861")
 
     @patch("sonora.services.deezer.SESSION.get")
     def test_fetch_deezer_track_by_isrc(self, mock_get: MagicMock) -> None:
@@ -136,15 +134,14 @@ class TestDeezerResponses(ServiceResponseTestCase):
         mock_get.return_value = mock_response
 
         deezer_track_metadata = fetch_deezer_track_by_isrc("ROCMA1911835")
-        self.assertIsNotNone(deezer_track_metadata)
-        if deezer_track_metadata:
-            self.assertEqual(
-                deezer_track_metadata["title"], "Cartieru' Pantelimon (feat. Nico)"
-            )
-            self.assertEqual(deezer_track_metadata["isrc"], "ROCMA1911835")
-            self.assertEqual(deezer_track_metadata["track_position"], 2)
-            self.assertTrue(deezer_track_metadata["explicit_lyrics"])
-            self.assertEqual(deezer_track_metadata["featured_artists"], "Nico")
+        assert deezer_track_metadata is not None
+        self.assertEqual(
+            deezer_track_metadata["title"], "Cartieru' Pantelimon (feat. Nico)"
+        )
+        self.assertEqual(deezer_track_metadata["isrc"], "ROCMA1911835")
+        self.assertEqual(deezer_track_metadata["track_position"], 2)
+        self.assertTrue(deezer_track_metadata["explicit_lyrics"])
+        self.assertEqual(deezer_track_metadata["featured_artists"], "Nico")
 
         # Edge case: empty/whitespace returns None without network call
         self.assertIsNone(fetch_deezer_track_by_isrc(""))

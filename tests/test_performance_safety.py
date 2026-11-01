@@ -266,15 +266,20 @@ class TestPerformanceSafety(IsolatedTestCase):
             context.Process(target=_run_process_lookup, args=(str(marker),))
             for _ in range(3)
         ]
-        for process in processes:
-            process.start()
-        for process in processes:
-            process.join(timeout=10)
-            if process.is_alive():
-                process.terminate()
-                process.join()
-                self.fail("Lookup process did not finish")
-            self.assertEqual(process.exitcode, 0)
+        try:
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=10)
+                self.assertFalse(process.is_alive(), "Lookup process did not finish")
+                self.assertEqual(process.exitcode, 0)
+        finally:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                if process.pid is not None:
+                    process.join()
+                process.close()
         self.assertEqual(marker.read_text(), "request\n")
 
     def test_confirmed_misses_expire_earlier_than_successes(self) -> None:
@@ -419,43 +424,37 @@ class TestPerformanceSafety(IsolatedTestCase):
             metadata_conflicts={"genre": "Disputed genre"},
         )
         vault = LibraryStateVault(self.test_directory / "state.db")
-        try:
-            with patch(
-                "sonora.audio.metadata.read_track_metadata",
-                return_value=dataclasses.replace(recording, metadata_conflicts={}),
-            ):
-                persisted = _record_persisted_album(
-                    [recording],
-                    vault,
-                    "TAGGED_OK",
-                    fetch_bpm=False,
-                    fetch_key=False,
-                    fetch_replaygain=False,
-                    fetch_lyrics=False,
-                    fetch_itunes_art=False,
-                )
-            self.assertEqual(
-                persisted[0].metadata_conflicts, recording.metadata_conflicts
+        self.addCleanup(vault.close)
+        with patch(
+            "sonora.audio.metadata.read_track_metadata",
+            return_value=dataclasses.replace(recording, metadata_conflicts={}),
+        ):
+            persisted = _record_persisted_album(
+                [recording],
+                vault,
+                "TAGGED_OK",
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_replaygain=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
             )
-            self.assertEqual(
-                vault.filter_outdated_tracks([path], expected_status="TAGGED_OK"),
-                [path],
+        self.assertEqual(persisted[0].metadata_conflicts, recording.metadata_conflicts)
+        self.assertEqual(
+            vault.filter_outdated_tracks([path], expected_status="TAGGED_OK"),
+            [path],
+        )
+        with patch("sonora.audio.metadata.write_track_metadata") as write:
+            tagger._harmonize_album_genres(
+                [
+                    recording,
+                    dataclasses.replace(recording, genre="Rock", metadata_conflicts={}),
+                ],
+                None,
+                None,
             )
-            with patch("sonora.audio.metadata.write_track_metadata") as write:
-                tagger._harmonize_album_genres(
-                    [
-                        recording,
-                        dataclasses.replace(
-                            recording, genre="Rock", metadata_conflicts={}
-                        ),
-                    ],
-                    None,
-                    None,
-                )
-            self.assertEqual(recording.genre, "Unknown")
-            write.assert_not_called()
-        finally:
-            vault.close()
+        self.assertEqual(recording.genre, "Unknown")
+        write.assert_not_called()
 
     def test_standalone_itunes_cannot_replace_known_release_date_country_or_copyright(
         self,

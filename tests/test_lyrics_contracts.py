@@ -1,4 +1,5 @@
 import json
+import threading
 import urllib.parse
 from dataclasses import replace
 from pathlib import Path
@@ -738,8 +739,6 @@ class TestLyricsLookupState(IsolatedTestCase):
         self.assertTrue(details["cache_hit"])
 
     def test_repeated_failures_suspend_network_but_do_not_cache_misses(self) -> None:
-        import threading
-
         state: dict[str, Any] = {
             "lock": threading.Lock(),
             "failures": 0,
@@ -789,8 +788,6 @@ class TestLyricsLookupState(IsolatedTestCase):
         self.assertEqual(details["lookup_status"], "cache")
 
     def test_rate_limit_suspends_further_requests_in_the_run(self) -> None:
-        import threading
-
         for status in (429, 502, 503):
             state: dict[str, Any] = {
                 "lock": threading.Lock(),
@@ -819,8 +816,6 @@ class TestLyricsLookupState(IsolatedTestCase):
             cache.assert_not_called()
 
     def test_definitive_miss_resets_consecutive_failure_count(self) -> None:
-        import threading
-
         state: dict[str, Any] = {
             "lock": threading.Lock(),
             "failures": 2,

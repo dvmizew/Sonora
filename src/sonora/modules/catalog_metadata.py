@@ -341,8 +341,7 @@ def _update_lastfm(track_info: TrackInfo, lastfm_api_key: str | None) -> None:
             mbid=track_info.musicbrainz_trackid,
         )
         if tags:
-            raw_genre = tags[0]
-            normalized_genre = normalize_genre(raw_genre)
+            normalized_genre = normalize_genre(tags[0])
             if normalized_genre:
                 track_info.genre = normalized_genre
                 track_info.metadata_sources["genre"] = "Last.fm"
@@ -513,7 +512,7 @@ def _update_discogs(
             track_info,
             release,
             discogs_rel_map,
-            force=False if has_authoritative_mb else force,
+            force=force and not has_authoritative_mb,
             source="Discogs",
         )
 
@@ -551,7 +550,7 @@ def _update_discogs(
                     track_info,
                     specific,
                     discogs_track_map,
-                    force=False if has_authoritative_mb else force,
+                    force=force and not has_authoritative_mb,
                     source="Discogs",
                 )
     except _NETWORK_EXCEPTIONS as error:
@@ -769,7 +768,7 @@ def _update_deezer(
             track_info,
             track,
             deezer_track_map,
-            force=False if has_authoritative_mb else force,
+            force=force and not has_authoritative_mb,
             source="Deezer",
         )
     except _NETWORK_EXCEPTIONS as error:

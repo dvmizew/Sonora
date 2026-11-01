@@ -1,5 +1,4 @@
 import dataclasses
-import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -132,9 +131,7 @@ class TestCodeHygiene(IsolatedTestCase):
 
 class TestCheckerMetadataFailures(IsolatedTestCase):
     def setUp(self) -> None:
-        fixture_directory = tempfile.TemporaryDirectory()
-        self.addCleanup(fixture_directory.cleanup)
-        self.audio_path = Path(fixture_directory.name) / "01 - Song.wav"
+        self.audio_path = self.test_directory / "01 - Song.wav"
         self.audio_path.write_bytes(b"unreadable audio fixture")
 
     def test_metadata_failure_still_reports_missing_lyrics(self) -> None:

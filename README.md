@@ -10,7 +10,7 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 
 - **Metadata & Tagging**: Multi-service tag lookup with AcoustID audio fingerprinting and MusicBrainz matching.
 - **Audio Processing**: Calculates BPM, Musical Key & Camelot wheel tonality (`INITIALKEY`), and ReplayGain 2.0 (ITU-R BS.1770-4 / EBU R128) for tracks and albums.
-- **High-Performance Architecture**: Compound album release queries, offline string distance matching, thread-safe persistent cache, and smart library state tracking.
+- **Caching**: Reuses catalog responses and tracks completed files to reduce repeated lookups.
 - **Spectral Analysis**: Checks for spectral signs of lossy transcoding using FFT cutoff analysis.
 - **Artwork & Lyrics**: Downloads high-resolution cover art (up to 3000x3000px) and synchronized `.lrc` lyrics.
 - **Library Tools**: Validates audio file integrity, standardizes file names (`NN - Title.ext`), organizes singles, and backs up tags to JSON / `.json.gz`.
@@ -23,13 +23,13 @@ Supports FLAC, MP3, M4A, MP4, ALAC, OGG, OPUS, WAV, AIFF, WMA, APE, WV, and MPC.
 | **Discogs** | Record labels, catalog numbers, release year, barcodes, media formats |
 | **Apple Music / iTunes** | Cover art (up to 3000px), primary genre, parental advisory |
 | **Deezer** | ISRC, BPM, track gain, cover art, featured artists, producers |
-| **Genius** | Song descriptions, featured artists, producers |
+| **Genius** | Song IDs, writers, featured artists, producers; optional descriptions |
 | **Last.fm** | Top tags (genres/moods), listener counts, play counts |
 | **TheAudioDB** | Artist avatars (`artist.jpg`), banners (`banner.jpg`), music video URLs |
 | **Shazam** | Acoustic recognition (identifies un-tagged/corrupted audio directly from sound waveform) |
-| **Fanart.tv** | Audiophile artwork: transparent CD disc art (`cdart.png`), artist logos (`logo.png`), 4K fanart |
+| **Fanart.tv** | CD disc art (`cdart.png`), artist logos (`logo.png`), background artwork |
 | **AcoustID** | Fingerprint-based MBID lookup using Chromaprint (`fpcalc`) |
-| **Syncedlyrics** | Synced `.lrc` and plain lyrics from Musixmatch, Lrclib, and NetEase |
+| **Lyrics** | LRCLIB recording checks by default; text-only syncedlyrics providers require `allow_unverified_lyrics = true` |
 | **Cover Art Archive** | Front cover art for MusicBrainz releases |
 
 ---
@@ -161,17 +161,7 @@ ShazamIO and syncedlyrics are community integrations, not official Shazam or Mus
 
 Matching penalties and ranking weights can also be configured with `version_equivalence_penalty`, `version_mismatch_penalty`, `remix_modifier_mismatch_penalty`, and `title_score_weight`. Single-edition comparisons use `single_duration_tolerance_seconds` (2 seconds by default) and `single_identifier_title_threshold`. The duration limit favors withholding uncertain matches when recordings differ in length; it does not verify clean versus explicit editions. JSON/TOML boolean settings require actual booleans, and structural lists require strings; invalid settings produce an error.
 
-| Key | Where to get it | What it unlocks |
-| :--- | :--- | :--- |
-| **`DISCOGS_TOKEN`** | [Discogs Developers](https://www.discogs.com/settings/developers) | 60 req/min limit, labels, catalog numbers, barcodes |
-| **`ACOUSTID_API_KEY`** | [AcoustID application registration](https://acoustid.org/new-application) | Audio fingerprinting with an application/client key; user submission keys do not authorize lookups |
-| **`GENIUS_API_TOKEN`** | [Genius API Clients](https://genius.com/api-clients) | Song descriptions and background stories in comment tag |
-| **`LASTFM_API_KEY`** | [Last.fm API](https://www.last.fm/api) | Dynamic mood & style tags |
-| **`FANART_API_KEY`** | [Fanart.tv API](https://fanart.tv/get-an-api-key) | CD art (`cdart.png`), transparent artist logos (`logo.png`), 4K fanart |
-| **`FANART_CLIENT_KEY`** | [Fanart.tv VIP](https://fanart.tv) | VIP access to newly added and exclusive high-res artwork |
-| **`MUSIXMATCH_TOKEN`** | Desktop app / web dump | Word-by-word synced lyrics (`<mm:ss.xx>`) |
-
-*MusicBrainz, Cover Art Archive, Apple Music/iTunes, TheAudioDB, Deezer, **Shazam**, and **PyCountry** require no keys.*
+MusicBrainz, Cover Art Archive, Apple Music/iTunes, TheAudioDB, Deezer and Shazam require no keys. AcoustID needs an application/client key; user submission keys do not authorize lookups. PyCountry provides local reference data without a service account.
 
 ---
 

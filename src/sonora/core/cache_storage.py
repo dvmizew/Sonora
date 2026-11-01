@@ -101,8 +101,7 @@ class MetadataDisk(diskcache.Disk):
         encoded_key = msgpack.packb(
             key, strict_types=True, use_bin_type=True, default=_encode_tuple
         )
-        database_key, raw = super().put(encoded_key)
-        return database_key, raw
+        return super().put(encoded_key)
 
     def get(self, key: Any, raw: bool) -> Any:
         if not raw or not isinstance(key, (bytes, memoryview)):
@@ -117,10 +116,7 @@ class MetadataDisk(diskcache.Disk):
         encoded_value = msgpack.packb(
             value, strict_types=True, use_bin_type=True, default=_encode_tuple
         )
-        size, mode, filename, database_value = super().store(
-            encoded_value, False, key=key
-        )
-        return size, mode, filename, database_value
+        return super().store(encoded_value, False, key=key)
 
     def fetch(self, mode: int, filename: str | None, value: Any, read: bool) -> Any:
         if read:

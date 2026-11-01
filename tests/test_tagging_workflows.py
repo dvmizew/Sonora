@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 from sonora.audio.metadata import write_track_metadata
@@ -30,10 +29,10 @@ class TestTaggingWorkflows(ModuleTestCase):
     @patch("sonora.audio.metadata.read_track_metadata")
     def test_process_single_track(
         self,
-        mock_read: Any,
-        mock_mbid: Any,
-        mock_lyrics: Any,
-        mock_write: Any,
+        mock_read: MagicMock,
+        mock_mbid: MagicMock,
+        mock_lyrics: MagicMock,
+        mock_write: MagicMock,
     ) -> None:
         wav_file = self.tmp_path / "song.wav"
         write_silent_wav(wav_file)
@@ -95,7 +94,9 @@ class TestTaggingWorkflows(ModuleTestCase):
 
     @patch("sonora.services.itunes.fetch_itunes_album_details", return_value=None)
     @patch("sonora.modules.tagger.process_single_track")
-    def test_tag_album_folder(self, mock_process: Any, mock_itunes: MagicMock) -> None:
+    def test_tag_album_folder(
+        self, mock_process: MagicMock, mock_itunes: MagicMock
+    ) -> None:
         album_dir = self.tmp_path / "album"
         audio_file_1 = album_dir / "01.wav"
         audio_file_2 = album_dir / "02.wav"
@@ -121,6 +122,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         states = [
             call.kwargs["lyrics_lookup_state"] for call in mock_process.call_args_list
         ]
+        self.assertIsNotNone(states[0])
         self.assertIs(states[0], states[1])
 
     def test_resolve_album_folder_identity(self) -> None:
@@ -343,7 +345,7 @@ class TestTaggingWorkflows(ModuleTestCase):
     @patch("sonora.audio.metadata.write_track_metadata")
     @patch("sonora.audio.metadata.read_track_metadata")
     def test_process_single_track_preserves_alien_track(
-        self, mock_read: Any, mock_write: Any
+        self, mock_read: MagicMock, mock_write: MagicMock
     ) -> None:
         track_file = self.tmp_path / "03 - Blue Jeans.wav"
         write_silent_wav(track_file)
@@ -400,11 +402,11 @@ class TestTaggingWorkflows(ModuleTestCase):
     @patch("sonora.audio.metadata.read_track_metadata")
     def test_process_single_track_acoustid_discogs_fallback(
         self,
-        mock_read: Any,
-        mock_mbid: Any,
-        mock_acoustid: Any,
-        mock_discogs: Any,
-        mock_write: Any,
+        mock_read: MagicMock,
+        mock_mbid: MagicMock,
+        mock_acoustid: MagicMock,
+        mock_discogs: MagicMock,
+        mock_write: MagicMock,
     ) -> None:
         wav_file = self.tmp_path / "song.wav"
         write_silent_wav(wav_file)
@@ -763,8 +765,12 @@ class TestTaggingWorkflows(ModuleTestCase):
 
         # All 4 tracks must now have 'Alternative' genre
         genres = {t.title: t.genre for t in results}
-        self.assertEqual(genres["Maybe"], "Alternative")
-        self.assertEqual(genres["Grace"], "Alternative")
+        self.assertEqual(
+            genres,
+            dict.fromkeys(
+                ("Grace", "Bruises", "Hold Me While You Wait", "Maybe"), "Alternative"
+            ),
+        )
 
     def test_album_artist_casing_agreement_harmonization(self) -> None:
         """Album artist and track artist casing must harmonize to canonical majority."""
@@ -841,6 +847,7 @@ class TestTaggingWorkflows(ModuleTestCase):
                 fetch_itunes_art=False,
             )
 
+        self.assertEqual(len(harmonized_tracks), 3)
         for track_info_result in harmonized_tracks:
             self.assertEqual(track_info_result.artist, "Alex")
             self.assertEqual(track_info_result.album_artist, "Alex")

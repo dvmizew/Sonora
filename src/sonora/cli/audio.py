@@ -504,4 +504,4 @@ def lyrics(
         }
         _write_json_report(json_report, report_data, "lyrics")
 
-    return 130 if interrupted else (1 if failed_count or incomplete else 0)
+    return 130 if interrupted else (1 if incomplete else 0)

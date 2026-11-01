@@ -86,9 +86,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
     try:
         result = app.meta(arguments, exit_on_error=False)
-        if isinstance(result, int):
-            return result
-        return 0
+        return result if isinstance(result, int) else 0
     except (KeyboardInterrupt, RuntimeError) as exc:
         if not is_interruption(exc):
             raise

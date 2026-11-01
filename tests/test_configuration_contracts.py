@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
@@ -496,20 +495,19 @@ class TestConfigurablePolicies(IsolatedTestCase):
                 construct_config()
 
     def test_configuration_loads_new_policies(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            config_path = Path(directory) / "config.toml"
-            config_path.write_text(
-                "[sonora]\ntitle_match_threshold = 91\nbpm_search_min = 40\nbpm_search_max = 240\nbpm_octave_min = 75\nbpm_octave_max = 190\n",
-                encoding="utf-8",
-            )
-            with patch(
-                "sonora.core.config._discover_config_file", return_value=config_path
-            ):
-                clear_config_cache()
-                config = get_config()
-            self.assertEqual(config.title_match_threshold, 91)
-            self.assertEqual((config.bpm_search_min, config.bpm_search_max), (40, 240))
-            self.assertEqual((config.bpm_octave_min, config.bpm_octave_max), (75, 190))
+        config_path = self.test_directory / "config.toml"
+        config_path.write_text(
+            "[sonora]\ntitle_match_threshold = 91\nbpm_search_min = 40\nbpm_search_max = 240\nbpm_octave_min = 75\nbpm_octave_max = 190\n",
+            encoding="utf-8",
+        )
+        with patch(
+            "sonora.core.config._discover_config_file", return_value=config_path
+        ):
+            clear_config_cache()
+            config = get_config()
+        self.assertEqual(config.title_match_threshold, 91)
+        self.assertEqual((config.bpm_search_min, config.bpm_search_max), (40, 240))
+        self.assertEqual((config.bpm_octave_min, config.bpm_octave_max), (75, 190))
 
     def test_invalid_numeric_configuration(self) -> None:
         for configured in (True, "nan", "not a number"):
@@ -564,19 +562,18 @@ class TestConfigurablePolicies(IsolatedTestCase):
             audio_samples[pulse_start : pulse_start + pulse_length] = np.hanning(
                 pulse_length
             )
-        with tempfile.TemporaryDirectory() as directory:
-            audio_path = Path(directory) / "70bpm.wav"
-            audio_path.touch()
+        audio_path = self.test_directory / "70bpm.wav"
+        audio_path.touch()
+        with patch(
+            "sonora.audio.bpm.load_audio", return_value=(audio_samples, sample_rate)
+        ):
+            measured_bpm = calculate_bpm(audio_path)
+            assert measured_bpm is not None
+            self.assertAlmostEqual(measured_bpm, 70, delta=2)
             with patch(
-                "sonora.audio.bpm.load_audio", return_value=(audio_samples, sample_rate)
+                "sonora.audio.bpm.get_config",
+                return_value=SonoraConfig(bpm_octave_min=75, bpm_octave_max=190),
             ):
-                measured_bpm = calculate_bpm(audio_path)
-                assert measured_bpm is not None
-                self.assertAlmostEqual(measured_bpm, 70, delta=2)
-                with patch(
-                    "sonora.audio.bpm.get_config",
-                    return_value=SonoraConfig(bpm_octave_min=75, bpm_octave_max=190),
-                ):
-                    folded_bpm = calculate_bpm(audio_path)
-                assert folded_bpm is not None
-                self.assertAlmostEqual(folded_bpm, 140, delta=4)
+                folded_bpm = calculate_bpm(audio_path)
+            assert folded_bpm is not None
+            self.assertAlmostEqual(folded_bpm, 140, delta=4)

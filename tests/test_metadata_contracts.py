@@ -14,7 +14,7 @@ from sonora.core.models import NormalizeReport, TrackInfo
 from sonora.modules.backup import backup_library_tags, restore_library_tags
 from sonora.modules.metadata_merge import apply_metadata_mapping
 from sonora.modules.track_processing import normalize_single_track
-from tests.fixtures import image_bytes
+from tests.fixtures import image_bytes, write_silent_wav
 from tests.regression_support import AudioRegressionTestCase
 from tests.support import IsolatedTestCase
 
@@ -237,6 +237,11 @@ class TestMetadataContracts(IsolatedTestCase):
         self.assertEqual(tags["ORIGINALYEAR"], ["1999"])
         self.assertNotIn("TRACKTOTAL", tags)
         self.assertNotIn("DISCTOTAL", tags)
+
+    def test_duration_is_available_without_metadata_tags(self) -> None:
+        path = self.test_directory / "untagged.wav"
+        write_silent_wav(path)
+        self.assertEqual(metadata.get_audio_duration(path), 0.1)
 
     def test_mutagen_duration_and_corrupt_embedded_cover(self) -> None:
         with patch(

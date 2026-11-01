@@ -1,6 +1,5 @@
 import contextlib
 from collections.abc import Callable
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -329,9 +328,7 @@ class TestDeezerCatalogContracts(IsolatedTestCase):
             "nb_tracks": 10,
         }
         self.track = {"id": 2, "title": "Recording", "artist": {"name": "Primary"}}
-        cache = patch.object(deezer, "get_cached_api", return_value=None)
-        cache.start()
-        self.addCleanup(cache.stop)
+        self.enterContext(patch.object(deezer, "get_cached_api", return_value=None))
 
     def test_cover_art_empty_cached_fallback_and_provider_error(self) -> None:
         self.assertIsNone(deezer.fetch_deezer_cover_art_url("", "Record"))
@@ -387,7 +384,7 @@ class TestDeezerCatalogContracts(IsolatedTestCase):
             self.assertEqual(
                 deezer.fetch_deezer_album_details("Primary", "Record"), self.album
             )
-        scenarios: tuple[dict[str, Any], ...] = (
+        scenarios: tuple[dict[str, object], ...] = (
             {"data": []},
             {"error": {"code": 4}},
             {"data": [{"title": "Unrelated", "artist": {"name": "Other"}}]},
@@ -676,7 +673,7 @@ class TestDiscogsCatalogContracts(IsolatedTestCase):
             {},
             {"name": "Producer", "role": "Producer"},
         ]
-        payload: dict[str, Any] = {
+        payload: dict[str, object] = {
             "id": 1,
             "extraartists": credits,
             "tracklist": [
@@ -718,8 +715,7 @@ class TestDiscogsCatalogContracts(IsolatedTestCase):
 
 class TestProviderContracts(IsolatedTestCase):
     def setUp(self) -> None:
-        RateLimiter.set_disabled(True)
-        self.addCleanup(RateLimiter.set_disabled, False)
+        self.enterContext(patch.object(RateLimiter, "_disabled", True))
 
     def test_valid_objects_and_empty_arrays(self) -> None:
         self.assertEqual(require_api_object({}, "response"), {})

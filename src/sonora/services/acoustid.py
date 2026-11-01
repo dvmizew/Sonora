@@ -110,7 +110,7 @@ def fingerprint_audio_file(file_path: Path) -> tuple[float, str]:
         stat.st_size,
     ):
         raise OSError(f"Audio file changed during fingerprinting: {file_path}")
-    result = (float(duration), str(fingerprint))
+    result = (duration, fingerprint)
     set_cached_api(fingerprint_key, result)
     with _ACOUSTID_LOCK:
         if len(_ACOUSTID_CACHE) >= 1024:
@@ -228,7 +228,7 @@ def lookup_acoustid(
                 best_mbid = None
 
         set_cached_api(cache_key, payload)
-        return best_mbid or None
+        return best_mbid
     except (AcoustidError, WebServiceError, OSError) as error:
         LOG.warning(
             f"AcoustID identification unavailable for {escape(file_path.name)}: {escape(str(error))}"

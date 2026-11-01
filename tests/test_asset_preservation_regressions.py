@@ -7,6 +7,7 @@ from PIL import Image
 
 from sonora.audio import art as art_module
 from sonora.audio import metadata as metadata_module
+from sonora.audio import replaygain as replaygain_module
 from sonora.audio.key import key_to_camelot
 from sonora.audio.metadata import (
     clear_metadata_cache,
@@ -141,9 +142,7 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
             TrackInfo(self.root / "b.flac", artist="Alpha", album="Album"),
             TrackInfo(self.root / "single.flac", artist="Alpha", album="Single"),
         ]
-        with patch.object(
-            tagger.replaygain_module, "calculate_album_replaygain"
-        ) as gain:
+        with patch.object(replaygain_module, "calculate_album_replaygain") as gain:
             tagger._finalize_album_assets_and_replaygain(
                 self.root,
                 tracks,
@@ -213,8 +212,8 @@ class TestAssetPreservationRegressions(AudioRegressionTestCase):
 
     def test_album_gate_excludes_quiet_blocks(self) -> None:
         measurements = [
-            LoudnessMeasurement(self.root / "loud.flac", 0, 1, -17, 4, (-17,) * 40),
-            LoudnessMeasurement(self.root / "quiet.flac", 0, 0.1, -57, 4, (-57,) * 40),
+            LoudnessMeasurement(self.root / "loud.flac", 0, 1, (-17,) * 40),
+            LoudnessMeasurement(self.root / "quiet.flac", 0, 0.1, (-57,) * 40),
         ]
         self.assertAlmostEqual(_album_loudness(measurements) or 0.0, -17.0, places=4)
         self.assertIsNone(_album_loudness([]))

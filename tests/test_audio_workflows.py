@@ -90,7 +90,6 @@ class TestAudioWorkflows(ModuleTestCase):
             )
 
             result = normalize_single_track(audio_file, fetch_bpm=False, dry_run=False)
-            self.assertIsNotNone(result)
             assert result is not None
             self.assertEqual(result.artist, "Armin")
             self.assertEqual(result.title, "Melodie")
@@ -109,7 +108,6 @@ class TestAudioWorkflows(ModuleTestCase):
                 title="Song",
             )
             casing_result = normalize_single_track(audio_file, dry_run=False)
-            self.assertIsNotNone(casing_result)
             assert casing_result is not None
             self.assertEqual(casing_result.artist, "Alex")
             self.assertEqual(casing_result.album_artist, "Alex")
@@ -122,7 +120,6 @@ class TestAudioWorkflows(ModuleTestCase):
                 album="Savage Mode II",
             )
             feat_result = normalize_single_track(audio_file, dry_run=False)
-            self.assertIsNotNone(feat_result)
             assert feat_result is not None
             self.assertEqual(feat_result.artist, "21 Savage & Metro Boomin")
             self.assertEqual(feat_result.title, "Mr. Right Now")
@@ -136,7 +133,6 @@ class TestAudioWorkflows(ModuleTestCase):
                 producers=None,
             )
             prod_result = normalize_single_track(audio_file, dry_run=False)
-            self.assertIsNotNone(prod_result)
             assert prod_result is not None
             self.assertEqual(prod_result.title, "Din 94")
             self.assertEqual(prod_result.featured_artists, "Mike Diamondz")
@@ -153,7 +149,6 @@ class TestAudioWorkflows(ModuleTestCase):
                 key_result = normalize_single_track(
                     audio_file, fetch_key=True, dry_run=False
                 )
-                self.assertIsNotNone(key_result)
                 assert key_result is not None
                 self.assertEqual(key_result.initial_key, "Am")
 
@@ -189,7 +184,7 @@ class TestAudioWorkflows(ModuleTestCase):
             mock_write.assert_not_called()
 
 
-class TestLyricsEnrichment(IsolatedTestCase):
+class TestLyricsUpdates(IsolatedTestCase):
     def test_unresolved_local_lyrics_conflicts_remain_visible_in_tagging_results(
         self,
     ) -> None:
@@ -321,7 +316,6 @@ class TestDryRunReports(IsolatedTestCase):
 
     def test_dsp_workers_do_not_write_during_dry_run(self) -> None:
         from sonora.cli import audio as audio_cli
-        from sonora.core.models import TrackInfo
 
         audio_path = Path("track.flac")
         with (

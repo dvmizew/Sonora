@@ -159,7 +159,6 @@ def _resolve_musicbrainz_track_id(
         if track_info.track_number is not None
         else None
     )
-    candidate_mbid: str | None = None
     if potential_mbid is not None:
         is_match = bool(
             candidate_rec
@@ -172,11 +171,10 @@ def _resolve_musicbrainz_track_id(
             and is_valid_uuid(potential_mbid)
             and _album_recording_can_replace_stored_id(track_info, potential_mbid)
         ):
-            candidate_mbid = potential_mbid
-            track_info.musicbrainz_trackid = candidate_mbid
+            track_info.musicbrainz_trackid = potential_mbid
             track_info.metadata_sources["musicbrainz_trackid"] = "MusicBrainz"
             LOG.detail(
-                f"   ∟ [MusicBrainz Album Match] Found MBID: {candidate_mbid[:8]}..."
+                f"   ∟ [MusicBrainz Album Match] Found MBID: {potential_mbid[:8]}..."
             )
     elif not is_valid_uuid(track_info.musicbrainz_trackid):
         # Validate a stored recording before searching: artist/title alone cannot
@@ -404,8 +402,7 @@ def _fetch_or_extract_mb_recording(
     )
     if release_rec is not None:
         return release_rec, True
-    standalone_rec = _fetch_standalone_recording(track_info, force=force)
-    return standalone_rec, False
+    return _fetch_standalone_recording(track_info, force=force), False
 
 
 def _should_update_track_artist(
@@ -495,6 +492,9 @@ def _apply_mb_recording_metadata(
         )
     rec_title = str(recording_details.get("title") or "")
     rec_artist = str(recording_details.get("artist") or "")
+    title_matches = _is_strong_track_match(
+        track_info.artist, track_info.title, rec_artist, rec_title
+    )
     title_updated = title_updated or bool(
         is_album_rec
         and rec_title
@@ -504,12 +504,7 @@ def _apply_mb_recording_metadata(
             or _is_generic(track_info.artist, "artist")
         )
         and _recording_isrc_matches(track_info.isrc, recording_details)
-        and not _is_strong_track_match(
-            track_info.artist, track_info.title, rec_artist, rec_title
-        )
-    )
-    title_matches = _is_strong_track_match(
-        track_info.artist, track_info.title, rec_artist, rec_title
+        and not title_matches
     )
     filename_title_matches = _is_strong_track_match(
         track_info.artist,
@@ -851,9 +846,8 @@ def _update_musicbrainz(
             album_mbid = None
             album_track_mbids = None
             album_mb_release_details = None
-        disc_num = track_info.disc_number or 1
         candidate_rec = _find_album_release_recording(
-            track_info, album_mb_release_details, disc_num
+            track_info, album_mb_release_details, track_info.disc_number or 1
         )
         if _release_edition_conflicts(track_info, candidate_rec):
             return

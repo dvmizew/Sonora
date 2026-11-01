@@ -458,8 +458,6 @@ class TestWorkerCacheLifecycle(IsolatedTestCase):
 
 class TestCacheErrorBoundaries(IsolatedTestCase):
     def test_cache_programming_errors_are_not_silenced(self) -> None:
-        from sonora.core.cache import get_cached_api, set_cached_api
-
         for exception in (RuntimeError("internal bug"), ValueError("internal bug")):
             with (
                 self.subTest(exception=exception),
@@ -473,10 +471,6 @@ class TestCacheErrorBoundaries(IsolatedTestCase):
                     set_cached_api("track", {"title": "Title"})
 
     def test_unavailable_database_is_an_operational_error(self) -> None:
-        import sqlite3
-
-        from sonora.core.cache import get_cached_api, set_cached_api
-
         with patch("sonora.core.cache.get_cache") as cache:
             cache.return_value.get.side_effect = sqlite3.OperationalError("locked")
             cache.return_value.set.side_effect = sqlite3.OperationalError("locked")
@@ -484,9 +478,6 @@ class TestCacheErrorBoundaries(IsolatedTestCase):
             set_cached_api("track", {"title": "Title"})
 
     def test_corrupted_serialized_cache_entry_is_an_operational_error(self) -> None:
-        from sonora.core.cache import get_cached_api
-        from sonora.core.cache_storage import CacheDecodeError
-
         with patch("sonora.core.cache.get_cache") as cache:
             cache.return_value.get.side_effect = CacheDecodeError("corrupted entry")
             self.assertIsNone(get_cached_api("track"))

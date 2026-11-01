@@ -124,8 +124,7 @@ class TrackInfo:
         track_dict["metadata_conflicts"] = dict(self.metadata_conflicts)
         track_dict["file_path"] = str(self.file_path)
         track_dict["file_name"] = self.file_path.name
-        if not track_dict.get("album_artist"):
-            track_dict["album_artist"] = self.album_artist or self.artist
+        track_dict["album_artist"] = self.album_artist or self.artist
         return track_dict
 
 
