@@ -3,7 +3,9 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import AbstractContextManager
 from pathlib import Path
+from typing import TypeVar
 from unittest.mock import patch
 
 from sonora.audio.metadata import clear_metadata_cache
@@ -11,12 +13,19 @@ from sonora.core.cache import clear_normalization_cache, close_cache, set_ignore
 from sonora.core.config import clear_config_cache
 from sonora.core.state import reset_library_state
 
+_T = TypeVar("_T")
+
 
 def reject_network(*arguments: object, **keywords: object) -> None:
     raise AssertionError("Unit tests must mock every outbound request")
 
 
 class IsolatedTestCase(unittest.TestCase):
+    def enterContext(self, cm: AbstractContextManager[_T]) -> _T:
+        result = cm.__enter__()
+        self.addCleanup(cm.__exit__, None, None, None)
+        return result
+
     def run(
         self, result: unittest.TestResult | None = None
     ) -> unittest.TestResult | None:

@@ -2,6 +2,7 @@ from math import gcd
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
 
 from sonora.audio.decode import load_audio
 from sonora.core.config import get_config
@@ -10,7 +11,7 @@ from sonora.core.logger import LOG
 
 def calculate_bpm(
     file_path: Path,
-    audio_data: tuple[np.ndarray, int] | None = None,
+    audio_data: tuple[NDArray[np.float32], int] | None = None,
 ) -> float | None:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
