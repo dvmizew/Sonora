@@ -4,15 +4,24 @@ import inspect
 import sqlite3
 import time
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import closing, nullcontext
+from contextvars import ContextVar
 from typing import ParamSpec, TypeVar
 
 from filelock import FileLock
 
-from sonora.core.cache import get_cache_dir
+from sonora.core.cache import api_cache_session, get_cache_dir
 
 _P = ParamSpec("_P")
 _Result = TypeVar("_Result")
+_LOOKUP_LOCK_SHARDS = 4096
+_HELD_LOOKUP_LOCKS: ContextVar[frozenset[str]] = ContextVar(
+    "held_lookup_locks", default=frozenset()
+)
+
+
+class ProviderDeferredError(TimeoutError):
+    """Raised when a provider cooldown is too long to wait inside a command."""
 
 
 def coalesce_lookup(lookup: Callable[_P, _Result]) -> Callable[_P, _Result]:
@@ -37,9 +46,22 @@ def coalesce_lookup(lookup: Callable[_P, _Result]) -> Callable[_P, _Result]:
         request_digest = hashlib.sha256(request_identity.encode("utf-8")).hexdigest()
         directory = get_cache_dir() / "coordination" / "lookups"
         directory.mkdir(parents=True, exist_ok=True)
+        shard = int(request_digest[:8], 16) % _LOOKUP_LOCK_SHARDS
+        lock_path = str(directory / f"lookup-{shard:04x}.lock")
+        held_locks = _HELD_LOOKUP_LOCKS.get()
+        lock = (
+            FileLock(lock_path, timeout=180)
+            if lock_path not in held_locks
+            else nullcontext()
+        )
+        # shortcut: hash collisions serialize unrelated requests; add shards only if contention is measured.
         # Native OS locks are released on process exit; no expiring lease can overlap a slow request.
-        with FileLock(str(directory / f"{request_digest}.lock"), timeout=180):
-            return lookup(*arguments, **keywords)
+        token = _HELD_LOOKUP_LOCKS.set(held_locks | {lock_path})
+        try:
+            with lock, api_cache_session():
+                return lookup(*arguments, **keywords)
+        finally:
+            _HELD_LOOKUP_LOCKS.reset(token)
 
     return coordinated
 
@@ -72,6 +94,10 @@ def wait_for_provider(
                 )
             return 0.0
         delay = max(0.0, float(existing[0]) - time.time()) if existing else 0.0
+        if delay > 60:
+            raise ProviderDeferredError(
+                f"{provider} requested a {delay:.0f}-second cooldown"
+            )
         if delay > 0:
             time.sleep(delay)
         with connection:

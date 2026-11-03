@@ -139,6 +139,39 @@ assert worker.done()
                         )
         self.assertNotEqual(completed_statuses[0], completed_statuses[1])
 
+    def test_unverified_itunes_album_does_not_supply_album_genre(self) -> None:
+        audio_path = self.audio("track.wav")
+        track = TrackInfo(audio_path, artist="Alpha", title="Song", album="Album")
+        album_context = tagger._AlbumMetadataContext(
+            itunes_details={"genre": "Wrong edition genre"},
+            sample_artist="Alpha",
+            sample_album="Album",
+            itunes_layout_verified=False,
+        )
+        with (
+            patch.object(tagger, "get_library_state"),
+            patch.object(
+                tagger, "_resolve_album_metadata_context", return_value=album_context
+            ),
+            patch.object(tagger, "process_single_track", return_value=track),
+            patch.object(metadata_module, "read_track_metadata", return_value=track),
+            patch.object(tagger, "_harmonize_album_genres") as harmonize_genres,
+            patch.object(tagger, "_harmonize_album_artists"),
+            patch.object(tagger, "_finalize_album_assets_and_replaygain"),
+        ):
+            tagger.tag_album_folder(
+                self.root,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_replaygain=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+                force=True,
+                dry_run=True,
+            )
+
+        self.assertIsNone(harmonize_genres.call_args.args[2])
+
     def test_state_requires_persisted_artwork_when_requested(self) -> None:
         audio_path = self.audio("art-state.flac")
         for actual_dimension, expected_completion in (

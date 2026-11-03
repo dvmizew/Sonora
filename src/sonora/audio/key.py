@@ -4,7 +4,6 @@ from math import gcd
 from pathlib import Path
 
 import numpy as np
-import scipy.signal
 from numpy.typing import NDArray
 
 from sonora.audio.decode import load_audio
@@ -175,6 +174,8 @@ def calculate_chroma(
     if len(audio) == 0 or np.all(audio == 0):
         return None
 
+    import scipy.signal
+
     target_sr = 22050
     if sample_rate > target_sr:
         common_rate = gcd(sample_rate, target_sr)
@@ -251,6 +252,7 @@ def detect_key_from_chroma(
 
 def detect_key_details(
     file_path: Path,
+    audio_data: tuple[NDArray[np.float32], int] | None = None,
 ) -> tuple[str, str, float] | None:
     """
     Analyze audio file and return (key_name, camelot_code, confidence) or None.
@@ -260,12 +262,22 @@ def detect_key_details(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        loaded = load_audio(file_path, mono=True, max_seconds=60.0, offset_seconds=10.0)
-        if loaded is None or len(loaded[0]) < 4096:
-            # Fallback to beginning of file if offset seek yielded insufficient samples (e.g. short track)
+        if audio_data is None:
             loaded = load_audio(
-                file_path, mono=True, max_seconds=60.0, offset_seconds=0.0
+                file_path, mono=True, max_seconds=60.0, offset_seconds=10.0
             )
+            if loaded is None or len(loaded[0]) < 4096:
+                # Short tracks need the beginning for enough analysis samples.
+                loaded = load_audio(
+                    file_path, mono=True, max_seconds=60.0, offset_seconds=0.0
+                )
+        else:
+            audio_mono, sample_rate = audio_data
+            offset = int(sample_rate * 10)
+            key_audio = audio_mono[offset : offset + int(sample_rate * 60)]
+            if len(key_audio) < 4096:
+                key_audio = audio_mono[: int(sample_rate * 60)]
+            loaded = key_audio, sample_rate
 
         if loaded is None:
             return None
@@ -281,11 +293,14 @@ def detect_key_details(
         return None
 
 
-def detect_musical_key(file_path: Path) -> str | None:
+def detect_musical_key(
+    file_path: Path,
+    audio_data: tuple[NDArray[np.float32], int] | None = None,
+) -> str | None:
     """
     Detect canonical musical key (e.g. 'C#m', 'Am', 'C') for an audio file.
     """
-    result = detect_key_details(file_path)
+    result = detect_key_details(file_path, audio_data=audio_data)
     if result is None:
         return None
     return result[0]

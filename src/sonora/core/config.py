@@ -203,7 +203,7 @@ class SonoraConfig:
             self.bpm_octave_min is not None
             and self.bpm_octave_max is not None
             and (
-                not 0 < self.bpm_octave_min
+                not self.bpm_octave_min > 0
                 or not math.isfinite(self.bpm_octave_max)
                 or self.bpm_octave_max < 2 * self.bpm_octave_min
             )
@@ -451,7 +451,12 @@ def get_config() -> SonoraConfig:
         ),
     ):
         configured_secret = next(
-            (raw_data[name] for name in config_names if raw_data.get(name)), None
+            (
+                str(raw_data[name]).strip()
+                for name in config_names
+                if raw_data.get(name) and str(raw_data[name]).strip()
+            ),
+            None,
         )
         if not configured_secret:
             configured_secret = next(

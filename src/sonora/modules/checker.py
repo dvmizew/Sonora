@@ -1,6 +1,7 @@
 import re
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from enum import Enum, auto
 from itertools import pairwise
 from pathlib import Path
@@ -303,7 +304,7 @@ def check_file(
 
         for field_name, tag_label, required in [
             ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID", True),
-            ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID", True),
+            ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID", False),
             ("musicbrainz_artistid", "MUSICBRAINZ_ARTISTID", False),
             ("musicbrainz_albumartistid", "MUSICBRAINZ_ALBUMARTISTID", False),
             ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID", False),
@@ -450,10 +451,8 @@ def _check_single_file(
 ) -> tuple[Path, list[str], TrackInfo | None, set[_IssueCategory]]:
     wait_if_paused()
     track_metadata: TrackInfo | None = None
-    try:
+    with suppress(OSError):
         track_metadata = read_track_metadata(path)
-    except OSError:
-        pass
     categories: set[_IssueCategory] = set()
     file_issues = check_file(
         path,

@@ -94,7 +94,7 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
                 musicbrainz_metadata._fetch_standalone_recording(recording, force=True)
             )
         self.assertEqual(fetch.call_count, 2)
-        search.assert_called_once_with("Alpha", "Original Song")
+        search.assert_called_once_with("Alpha", "Original Song", None)
         self.assertIsNone(recording.musicbrainz_trackid)
 
     def test_standalone_matching_identity_and_missing_identity_with_isrc_are_accepted(
@@ -167,7 +167,6 @@ class TestReportMismatchRegressions(AudioRegressionTestCase):
             }
             with (
                 self.subTest(overrides=overrides),
-                patch.object(lyrics._LRCLIB_LIMITER, "wait"),
                 patch.object(
                     SESSION,
                     "get",
@@ -374,6 +373,28 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
                 None,
                 None,
                 180,
+            )
+        )
+
+    def test_catalog_match_without_artist_requires_a_recording_identifier(self) -> None:
+        self.assertFalse(
+            matching._catalog_recording_matches_track(
+                {"title": "Intro", "duration": 30},
+                "Intro",
+                "Artist A",
+                None,
+                None,
+                30,
+            )
+        )
+        self.assertTrue(
+            matching._catalog_recording_matches_track(
+                {"title": "Intro", "duration": 30, "isrc": "KNOWN"},
+                "Intro",
+                "Artist A",
+                "KNOWN",
+                None,
+                30,
             )
         )
 

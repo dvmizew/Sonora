@@ -174,7 +174,7 @@ class TestRenameAndLyrics(IsolatedTestCase):
             write.assert_not_called()
             self.assertEqual(lyrics_path.read_bytes(), payload)
 
-    def test_rename_report_counts_header_changes_without_audio_rename(self) -> None:
+    def test_rename_preserves_conflicting_lyrics_without_audio_rename(self) -> None:
         audio_path = self.test_directory / "01 - Song.flac"
         audio_path.touch()
         lyrics_path = audio_path.with_suffix(".lrc")
@@ -191,9 +191,12 @@ class TestRenameAndLyrics(IsolatedTestCase):
             renamer.rename_directory_files(self.test_directory, report=first_report)
             second_report = RenameReport()
             renamer.rename_directory_files(self.test_directory, report=second_report)
-        self.assertEqual((first_report.files_renamed, first_report.lrc_synced), (0, 1))
+        self.assertEqual((first_report.files_renamed, first_report.lrc_synced), (0, 0))
         self.assertEqual(
             (second_report.files_renamed, second_report.lrc_synced), (0, 0)
+        )
+        self.assertEqual(
+            lyrics_path.read_text(), "[ar:Old]\n[ti:Old]\n[00:01.00] Lyrics\n"
         )
 
     def test_rename_report_excludes_malformed_lyrics_and_dry_run_updates(self) -> None:

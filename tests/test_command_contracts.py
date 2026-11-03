@@ -88,6 +88,29 @@ class TestEntrypointContracts(IsolatedTestCase):
 
 
 class TestLibraryCommandContracts(IsolatedTestCase):
+    def test_organize_json_identifies_dry_run(self) -> None:
+        report_path = self.test_directory / "organize.json"
+        with (
+            patch.object(library, "organize_library_singles", return_value=2),
+            patch("sonora.core.logger.LOG.summary_table"),
+        ):
+            self.assertEqual(
+                entrypoint.main(
+                    [
+                        "organize",
+                        str(self.test_directory),
+                        "--dry-run",
+                        "--json",
+                        str(report_path),
+                    ]
+                ),
+                0,
+            )
+
+        report = json.loads(report_path.read_text())
+        self.assertTrue(report["dry_run"])
+        self.assertEqual(report["summary"]["single_tracks_organized"], 2)
+
     def test_partial_results_survive_interruptions_in_json_reports(self) -> None:
         recording = TrackInfo(self.test_directory / "recording.flac")
         cases = (
@@ -138,6 +161,43 @@ class TestLibraryCommandContracts(IsolatedTestCase):
             report = json.loads(report_path.read_text())
             self.assertTrue(report["aborted_by_user"])
             self.assertEqual(report[section][counter], expected)
+
+    def test_interrupted_dry_runs_report_proposals_not_completed_changes(self) -> None:
+        for command, boundary, partial_result, expected in (
+            (
+                "rename",
+                "rename_directory_files",
+                RenameReport(total_files=4, files_renamed=2),
+                "Rename preview interrupted: 2/4 files would be renamed.",
+            ),
+            (
+                "organize",
+                "organize_library_singles",
+                2,
+                "Organization preview interrupted: 2 single tracks would be moved.",
+            ),
+        ):
+            with (
+                self.subTest(command=command),
+                patch.object(
+                    library,
+                    boundary,
+                    side_effect=InterruptedOperationError(partial_result),
+                ),
+                patch("sonora.core.logger.LOG.warning") as warning,
+                patch("sonora.core.logger.LOG.summary_table"),
+            ):
+                self.assertEqual(
+                    entrypoint.main([command, str(self.test_directory), "--dry-run"]),
+                    130,
+                )
+
+            warning_text = "\n".join(
+                str(call.args[0]) for call in warning.call_args_list
+            )
+            self.assertIn(expected, warning_text)
+            self.assertNotIn("Partially renamed", warning_text)
+            self.assertNotIn("Partially organized", warning_text)
 
     def test_unrelated_runtime_errors_are_not_reported_as_user_cancellation(
         self,
@@ -236,11 +296,12 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
         path = self.test_directory / "recording.flac"
         dirty = "Hello world\n42Embed"
         path.with_suffix(".lrc").write_text(dirty)
-        track = TrackInfo(path, artist="Artist", title="Song", lyrics=dirty)
+        track = TrackInfo(
+            path, artist="Artist", title="Song", lyrics=dirty, duration=100
+        )
         details: dict[Path, dict[str, object]] = {}
         with (
             patch.object(audio, "read_track_metadata", return_value=track),
-            patch.object(audio, "get_audio_duration", return_value=100),
             patch(
                 "sonora.services.lyrics.fetch_synced_lyrics",
                 side_effect=OSError("offline"),
@@ -273,9 +334,10 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
             patch.object(
                 audio,
                 "read_track_metadata",
-                return_value=TrackInfo(path, artist="Artist", title="Song"),
+                return_value=TrackInfo(
+                    path, artist="Artist", title="Song", duration=100
+                ),
             ),
-            patch.object(audio, "get_audio_duration", return_value=100),
             patch("sonora.services.lyrics.fetch_synced_lyrics", side_effect=deferred),
             patch.object(audio, "write_track_metadata") as write,
         ):

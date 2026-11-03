@@ -73,7 +73,7 @@ dev = [
 build = ["pyinstaller==6.21.0", "setuptools==80.10.2"]
 
 [tool.uv]
-required-version = "==0.13.0"
+required-version = ">=0.13.0,<0.14.0"
 build-constraint-dependencies = ["setuptools==80.10.2"]
 
 [project.scripts]
@@ -95,6 +95,8 @@ untyped_calls_exclude = ["mutagen"]
 include = ["src", "tests"]
 extraPaths = ["src"]
 stubPath = "typings"
+venvPath = "."
+venv = ".venv"
 
 [tool.coverage.run]
 branch = true

@@ -4,6 +4,7 @@ import threading
 from collections import Counter, deque
 from collections.abc import Iterator, Mapping
 from concurrent.futures import Executor, Future, ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ from sonora.services import musicbrainz as musicbrainz_service
 
 @dataclasses.dataclass(slots=True)
 class _AlbumMetadataContext:
+    track_metadata: dict[Path, TrackInfo] = dataclasses.field(default_factory=dict)
     musicbrainz_id: str | None = None
     track_mbids: dict[tuple[int, int], str] | None = None
     mb_release_details: dict[str, Any] | None = None
@@ -143,15 +145,24 @@ def _apply_album_metadata(
                 ) and (track_info.disc_number or 1) <= (track_info.total_discs or 1):
                     track_info.metadata_conflicts.pop("album_sequence", None)
 
-    if album_context.sample_artist and not _is_generic(
-        album_context.sample_artist, "artist"
-    ):
+    itunes_artist = (
+        album_context.itunes_details.get("album_artist")
+        if album_context.itunes_layout_verified and album_context.itunes_details
+        else None
+    )
+    itunes_album_artist = (
+        itunes_artist.strip() if isinstance(itunes_artist, str) else None
+    )
+    album_artist = itunes_album_artist or album_context.sample_artist
+    if album_artist and not _is_generic(album_artist, "artist"):
         if not track_info.album_artist or force:
             track_info.album_artist = preserve_unicode_repertoire(
-                track_info.album_artist, album_context.sample_artist
+                track_info.album_artist, str(album_artist)
             )
+            if itunes_album_artist:
+                track_info.metadata_sources["album_artist"] = "iTunes"
         if _is_generic(track_info.artist, "artist"):
-            track_info.artist = album_context.sample_artist
+            track_info.artist = album_context.sample_artist or str(album_artist)
 
     if (
         album_context.sample_album
@@ -174,6 +185,7 @@ def _update_metadata(
     provider_executor: Executor | None = None,
     *,
     album_context: _AlbumMetadataContext,
+    shazam_attempted: bool = False,
 ) -> None:
     """Resolve recording identity before collecting independent provider proposals."""
     has_album_context = album_context.has_album_context
@@ -187,7 +199,7 @@ def _update_metadata(
     )
     if "identity" in track_info.metadata_conflicts:
         return
-    if (
+    if not shazam_attempted and (
         _is_generic_title(track_info.title)
         or _is_generic(track_info.artist, "artist")
         or (not has_album_context and (force or not track_info.musicbrainz_trackid))
@@ -238,12 +250,15 @@ def _update_metadata(
     ]
     if provider_executor is None:
         proposals = [
-            collect_provider_proposal(track_info, enrich) for enrich in providers
+            collect_provider_proposal(track_info, update_metadata)
+            for update_metadata in providers
         ]
     else:
         futures = [
-            provider_executor.submit(collect_provider_proposal, track_info, enrich)
-            for enrich in providers
+            provider_executor.submit(
+                collect_provider_proposal, track_info, update_metadata
+            )
+            for update_metadata in providers
         ]
         proposals = [future.result() for future in futures]
     merge_provider_proposals(track_info, proposals)
@@ -275,18 +290,24 @@ def process_single_track(
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        track_info = metadata_module.read_track_metadata(file_path)
+        cached_metadata = album_context.track_metadata.get(file_path)
+        track_info = (
+            cached_metadata.copy()
+            if cached_metadata is not None
+            else metadata_module.read_track_metadata(file_path)
+        )
         original_metadata = track_info.copy()
         track_info.artist = artist_resolution.resolve_artist_name(track_info.artist)
 
-        if not bool(
+        shazam_attempted = not bool(
             album_context.track_mbids
             or album_context.mb_release_details
             or album_context.sample_album
         ) and (
             _is_generic_title(track_info.title)
             or _is_generic(track_info.artist, "artist")
-        ):
+        )
+        if shazam_attempted:
             _update_shazam(track_info, file_path, force=False)
 
         has_album_context = album_context.has_album_context
@@ -297,7 +318,11 @@ def process_single_track(
             target_album_title=album_context.sample_album,
             album_mb_release_details=album_context.mb_release_details,
             album_deezer_details=album_context.deezer_details,
-            album_itunes_details=album_context.itunes_details,
+            album_itunes_details=(
+                album_context.itunes_details
+                if album_context.itunes_layout_verified
+                else None
+            ),
         ):
             track_info.is_alien = True
             album_desc = (
@@ -337,6 +362,7 @@ def process_single_track(
             genius_api_token=genius_api_token,
             force=force,
             provider_executor=provider_executor,
+            shazam_attempted=shazam_attempted,
         )
 
         if (
@@ -360,6 +386,7 @@ def process_single_track(
             fetch_itunes_art=fetch_itunes_art,
             musixmatch_token=musixmatch_token,
             lyrics_lookup_state=lyrics_lookup_state,
+            sibling_metadata=album_context.track_metadata or None,
             force=force,
             dry_run=dry_run,
         )
@@ -382,7 +409,9 @@ def _select_album_value(
 
 
 def _resolve_album_folder_identity(
-    album_dir: Path, audio_files: list[Path]
+    album_dir: Path,
+    audio_files: list[Path],
+    track_metadata: list[TrackInfo | None] | None = None,
 ) -> tuple[str | None, str | None]:
     """
     Resolve canonical artist and album name for a directory by combining
@@ -414,20 +443,21 @@ def _resolve_album_folder_identity(
     album_counts: Counter[str] = Counter()
     artist_counts: Counter[str] = Counter()
 
-    for audio_file in audio_files:
-        try:
-            track_metadata = metadata_module.read_track_metadata(audio_file)
-            if track_metadata.album and not get_config().is_generic_container(
-                track_metadata.album
-            ):
-                album_counts[track_metadata.album] += 1
-            candidate_artist = track_metadata.album_artist or track_metadata.artist
-            if candidate_artist and not get_config().is_generic_container(
-                candidate_artist
-            ):
-                artist_counts[candidate_artist] += 1
-        except OSError:
-            pass
+    if track_metadata is None:
+        track_metadata = []
+        for audio_file in audio_files:
+            try:
+                track_metadata.append(metadata_module.read_track_metadata(audio_file))
+            except OSError:
+                track_metadata.append(None)
+    for track in track_metadata:
+        if track is None:
+            continue
+        if track.album and not get_config().is_generic_container(track.album):
+            album_counts[track.album] += 1
+        candidate_artist = track.album_artist or track.artist
+        if candidate_artist and not get_config().is_generic_container(candidate_artist):
+            artist_counts[candidate_artist] += 1
 
     resolved_album = _select_album_value(album_counts, folder_album)
     normalized_albums = {normalize_str(album) for album in album_counts}
@@ -442,7 +472,9 @@ def _resolve_album_folder_identity(
 
 
 def _release_matches_album_tracks(
-    release: dict[str, Any], audio_files: list[Path]
+    release: dict[str, Any],
+    audio_files: list[Path],
+    track_metadata: list[TrackInfo | None] | None = None,
 ) -> bool:
     recordings = release.get("tracks_by_disc_and_position")
     if not isinstance(recordings, dict):
@@ -466,25 +498,42 @@ def _release_matches_album_tracks(
         for position in indexed_recordings
     ):
         return False
-    for audio_path in audio_files:
-        track = metadata_module.read_track_metadata(audio_path)
+    if track_metadata is None:
+        try:
+            track_metadata = [
+                metadata_module.read_track_metadata(audio_path)
+                for audio_path in audio_files
+            ]
+        except OSError:
+            return False
+    if len(track_metadata) != len(audio_files):
+        return False
+    for track in track_metadata:
+        if track is None:
+            return False
         if _compatible_release_layout(track, release) is None:
             return False
         if _is_generic_title(track.title):
             return False
-        candidates = [
-            position
-            for position, recording in indexed_recordings.items()
-            if _recording_matches_track_identity(track, recording)
-        ]
         expected_position = (track.disc_number or 1, track.track_number or 0)
         matched_position: tuple[int, int]
-        if expected_position in candidates:
+        expected_recording = indexed_recordings.get(expected_position)
+        if expected_recording is not None and _recording_matches_track_identity(
+            track, expected_recording
+        ):
             matched_position = expected_position
-        elif len(candidates) == 1:
-            matched_position = candidates[0]
         else:
-            return False
+            candidates = [
+                position
+                for position, recording in indexed_recordings.items()
+                if _recording_matches_track_identity(track, recording)
+            ]
+            if expected_position in candidates:
+                matched_position = expected_position
+            elif len(candidates) == 1:
+                matched_position = candidates[0]
+            else:
+                return False
         del indexed_recordings[matched_position]
     return True
 
@@ -500,9 +549,20 @@ def _resolve_album_metadata_context(
 ) -> _AlbumMetadataContext:
     """Pre-fetches release-level metadata from external providers for an album folder."""
     album_context = _AlbumMetadataContext()
+    track_metadata: list[TrackInfo | None] = []
+    for audio_path in audio_files:
+        try:
+            track_metadata.append(metadata_module.read_track_metadata(audio_path))
+        except OSError:
+            track_metadata.append(None)
+    album_context.track_metadata = {
+        audio_path: track
+        for audio_path, track in zip(audio_files, track_metadata, strict=True)
+        if track is not None
+    }
     try:
         sample_artist, sample_album = _resolve_album_folder_identity(
-            album_dir, audio_files
+            album_dir, audio_files, track_metadata
         )
     except OSError as error:
         LOG.debug(f"Reading album identity failed: {error}")
@@ -512,33 +572,29 @@ def _resolve_album_metadata_context(
     if not (sample_artist and sample_album):
         return album_context
 
+    existing_release_ids: Counter[str] = Counter()
+    existing_itunes_collection_ids: Counter[str] = Counter()
+    expected_advisory = None
     try:
-        existing_release_ids: Counter[str] = Counter()
-        for audio_path in audio_files:
-            try:
-                existing_metadata = metadata_module.read_track_metadata(audio_path)
-            except OSError:
+        for existing_metadata in track_metadata:
+            if existing_metadata is None:
                 continue
+            collection_id = existing_metadata.itunes_collectionid
+            if collection_id and collection_id.isdecimal():
+                existing_itunes_collection_ids[collection_id] += 1
+            if existing_metadata.advisory == "Explicit":
+                expected_advisory = "Explicit"
             if is_valid_uuid(existing_metadata.musicbrainz_albumid):
                 existing_release_ids[str(existing_metadata.musicbrainz_albumid)] += 1
-        if (
-            existing_release_ids
-            and existing_release_ids.most_common(1)[0][1] > len(audio_files) / 2
-        ):
-            release_info: dict[str, object] | None = {
-                "id": existing_release_ids.most_common(1)[0][0]
-            }
+        most_common_release = existing_release_ids.most_common(1)
+        if most_common_release and most_common_release[0][1] > len(audio_files) / 2:
+            release_info: dict[str, object] | None = {"id": most_common_release[0][0]}
         else:
             release_info = musicbrainz_service.search_musicbrainz_release(
                 sample_artist,
                 sample_album,
                 expected_track_count=len(audio_files),
-                expected_advisory="Explicit"
-                if any(
-                    metadata_module.read_track_metadata(path).advisory == "Explicit"
-                    for path in audio_files
-                )
-                else None,
+                expected_advisory=expected_advisory,
             )
         if release_info and release_info.get("id"):
             album_context.musicbrainz_id = str(release_info["id"])
@@ -550,7 +606,7 @@ def _resolve_album_metadata_context(
             if (
                 not album_context.mb_release_details
                 or not _release_matches_album_tracks(
-                    album_context.mb_release_details, audio_files
+                    album_context.mb_release_details, audio_files, track_metadata
                 )
             ):
                 LOG.detail(
@@ -582,12 +638,22 @@ def _resolve_album_metadata_context(
         LOG.debug(f"Pre-fetching Deezer album metadata failed: {error}")
 
     try:
+        most_common_collection = existing_itunes_collection_ids.most_common(1)
+        collection_id = (
+            most_common_collection[0][0]
+            if most_common_collection
+            and most_common_collection[0][1] > len(audio_files) / 2
+            else None
+        )
         album_context.itunes_details = itunes_service.fetch_itunes_album_details(
-            sample_artist, sample_album, expected_track_count=len(audio_files)
+            sample_artist,
+            sample_album,
+            expected_track_count=len(audio_files),
+            collection_id=collection_id,
         )
         if album_context.itunes_details:
             album_context.itunes_layout_verified = _release_matches_album_tracks(
-                album_context.itunes_details, audio_files
+                album_context.itunes_details, audio_files, track_metadata
             )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Pre-fetching Apple album metadata failed: {error}")
@@ -953,6 +1019,7 @@ def tag_album_folder(
 
     all_audio_files = find_audio_files(folder_path, recursive=True)
     if not all_audio_files:
+        LOG.warning("No audio files found to tag.")
         return []
 
     state_vault = get_library_state()
@@ -977,11 +1044,13 @@ def tag_album_folder(
     current_album_results: list[TrackInfo] = []
     lyrics_lookup_state: dict[str, Any] = {
         "lock": threading.Lock(),
+        "request_slots": threading.BoundedSemaphore(min(3, max_threads)),
         "failures": 0,
         "suspended": False,
     }
 
-    with create_progress() as progress:
+    completed = False
+    with suppress(KeyboardInterrupt), create_progress() as progress:
         task = progress.add_task("[cyan]Tagging tracks...", total=len(all_audio_files))
 
         with (
@@ -999,18 +1068,17 @@ def tag_album_folder(
                     fetch_itunes_art=fetch_itunes_art,
                     force=force,
                     dry_run=dry_run,
-                    window=min(2, max_threads),
+                    window=min(2, max_threads) + 1,
                 ):
                     wait_if_paused()
-                    if not any(
-                        audio_path in outdated_files for audio_path in audio_files
-                    ):
+                    if context_future is None:
                         try:
                             results.extend(
-                                [
-                                    metadata_module.read_track_metadata(audio_path)
-                                    for audio_path in audio_files
-                                ]
+                                list(
+                                    executor.map(
+                                        metadata_module.read_track_metadata, audio_files
+                                    )
+                                )
                             )
                         except OSError:
                             outdated_files.update(audio_files)
@@ -1098,7 +1166,9 @@ def tag_album_folder(
                     _harmonize_album_genres(
                         valid_tracks,
                         album_context.deezer_details,
-                        album_context.itunes_details,
+                        album_context.itunes_details
+                        if album_context.itunes_layout_verified
+                        else None,
                         dry_run=dry_run,
                     )
                     _harmonize_album_artists(valid_tracks, dry_run=dry_run)
@@ -1138,7 +1208,10 @@ def tag_album_folder(
                     worker_pool.shutdown(wait=False, cancel_futures=True)
                 for worker_pool in (executor, provider_executor, album_executor):
                     worker_pool.shutdown(wait=True, cancel_futures=True)
-                results.extend(current_album_results)
-                raise InterruptedOperationError(results) from None
+                raise KeyboardInterrupt from None
+        completed = True
 
+    if not completed:
+        results.extend(current_album_results)
+        raise InterruptedOperationError(results) from None
     return results

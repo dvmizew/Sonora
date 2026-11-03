@@ -2,25 +2,31 @@ from math import gcd
 from pathlib import Path
 
 import numpy as np
-import scipy.signal
 
 from sonora.audio.decode import load_audio
 from sonora.core.config import get_config
 from sonora.core.logger import LOG
 
 
-def calculate_bpm(file_path: Path) -> float | None:
+def calculate_bpm(
+    file_path: Path,
+    audio_data: tuple[np.ndarray, int] | None = None,
+) -> float | None:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        loaded = load_audio(file_path, mono=True, max_seconds=60.0)
+        loaded = audio_data or load_audio(file_path, mono=True, max_seconds=60.0)
         if loaded is None:
             return None
 
         audio_mono, sample_rate = loaded
+        if audio_data is not None:
+            audio_mono = audio_mono[: int(sample_rate * 60)]
         if len(audio_mono) == 0:
             return None
+
+        import scipy.signal
 
         if sample_rate > 22050:
             common_rate = gcd(sample_rate, 22050)

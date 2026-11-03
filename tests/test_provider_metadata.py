@@ -63,6 +63,25 @@ class TestProviderMetadata(IsolatedTestCase):
                 self.assertEqual(recording.featured_artists, "Guest")
                 self.assertIn("featured_artists", recording.metadata_conflicts)
 
+    def test_provider_dates_keep_precision_when_shared_parts_agree(self) -> None:
+        for later_date, expected_date, expected_conflict in (
+            ("2023-09-01", "2023-09-01", False),
+            ("2024-09-01", "2023-09-01", True),
+        ):
+            with self.subTest(later_date=later_date):
+                recording = TrackInfo(Path("song.flac"), date="2023-09-01")
+                merge_provider_proposals(
+                    recording,
+                    [
+                        MetadataProposal({"date": ("2023", "Discogs")}, {}),
+                        MetadataProposal({"date": (later_date, "Deezer")}, {}),
+                    ],
+                )
+                self.assertEqual(recording.date, expected_date)
+                self.assertEqual(
+                    "date" in recording.metadata_conflicts, expected_conflict
+                )
+
     def test_local_artist_aliases_preserve_existing_credits(self) -> None:
         for artist, credits in (
             ("Tyga feat. Pharrell", "Pharrell Williams"),

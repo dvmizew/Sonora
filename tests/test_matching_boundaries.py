@@ -714,3 +714,22 @@ class TestRecordingDurationPolicy(IsolatedTestCase):
                     ),
                     accepted,
                 )
+
+    def test_missing_candidate_artist_does_not_verify_known_local_artist(self) -> None:
+        track = TrackInfo(
+            Path("recording.flac"), artist="Artist A", title="Intro", duration=30
+        )
+        self.assertFalse(
+            _recording_matches_track_identity(track, {"title": "Intro", "duration": 30})
+        )
+        track.isrc = "USAAA0000001"
+        self.assertTrue(
+            _recording_matches_track_identity(
+                track,
+                {
+                    "title": "Intro",
+                    "duration": 30,
+                    "isrcs": ["USAAA0000001"],
+                },
+            )
+        )

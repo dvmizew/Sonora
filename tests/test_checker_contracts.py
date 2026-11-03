@@ -604,6 +604,32 @@ class TestCheckerContracts(IsolatedTestCase):
 
 
 class TestCheckerMetadataValidation(IsolatedTestCase):
+    def test_unresolved_musicbrainz_release_edition_is_not_missing_metadata(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        track = TrackInfo(
+            audio_path,
+            artist="Artist",
+            title="Song",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            date="2010",
+            bpm=90,
+            replaygain_track_gain=-1.0,
+            replaygain_track_peak=0.9,
+            musicbrainz_trackid="ada798cb-ba04-48f4-b553-135438fe3f6c",
+            musicbrainz_releasegroupid="a5056c3b-730f-493b-b10e-52f678d72b85",
+        )
+        categories: set[checker._IssueCategory] = set()
+
+        issues = check_file(audio_path, track_metadata=track, categories=categories)
+
+        self.assertFalse(any("MUSICBRAINZ_ALBUMID" in issue for issue in issues))
+        self.assertNotIn(checker._IssueCategory.MISSING_METADATA, categories)
+
     def test_conflicting_lyrics_headers_and_timestamps_are_reported(self) -> None:
         audio_path = self.test_directory / "01 - Song.mp3"
         audio_path.touch()

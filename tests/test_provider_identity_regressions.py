@@ -662,9 +662,10 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     ),
                     patch.object(
                         genius, "lookup_genius_song_details", return_value=stored
-                    ),
+                    ) as lookup,
                 ):
                     catalog_metadata._update_genius(recording, "fixture")
+                lookup.assert_called_once_with("11", api_token="fixture")
                 self.assertEqual(recording.genius_song_id, expected)
                 if expected is None:
                     self.assertIsNone(recording.composer)
@@ -679,6 +680,31 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     [build_provider_proposal(original, recording)],
                 )
                 self.assertEqual(original.genius_song_id, expected)
+
+    def test_genius_uses_a_valid_stored_id_before_search(self) -> None:
+        recording = TrackInfo(
+            self.audio("recording.flac"),
+            artist="Alpha",
+            title="Original Song",
+            genius_song_id="11",
+        )
+        with (
+            patch.object(
+                genius,
+                "lookup_genius_song_details",
+                return_value={
+                    "artist": "Alpha",
+                    "title": "Original Song",
+                    "genius_song_id": 11,
+                    "writers": "Writer",
+                },
+            ) as lookup,
+            patch.object(genius, "fetch_genius_song_details") as search,
+        ):
+            catalog_metadata._update_genius(recording, "fixture")
+        lookup.assert_called_once_with("11", api_token="fixture")
+        search.assert_not_called()
+        self.assertEqual(recording.composer, "Writer")
 
     def test_discogs_position_cannot_supply_another_song_or_unidentified_credits(
         self,
@@ -936,6 +962,45 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     else:
                         self.assertEqual(recording.genre, "Rock")
 
+    def test_clean_apple_album_retries_and_uses_verified_explicit_track(self) -> None:
+        recording = TrackInfo(
+            self.audio("recording.flac"),
+            artist="Alpha",
+            title="Original Song",
+            duration=180,
+            advisory="Explicit",
+            itunes_trackid="11",
+        )
+        cleaned = {
+            "title": "Original Song",
+            "artist": "Alpha",
+            "duration": 180,
+            "itunes_trackid": "11",
+            "itunes_collectionid": "22",
+            "explicitness": "cleaned",
+        }
+        explicit = {
+            "title": "Original Song",
+            "artist": "Alpha",
+            "duration": 180,
+            "itunes_trackid": "44",
+            "itunes_collectionid": "55",
+            "explicitness": "explicit",
+            "genre": "Rock",
+        }
+        album = {"tracks_by_title": {"original song": cleaned}}
+        with patch.object(
+            itunes, "fetch_itunes_track_metadata", return_value=explicit
+        ) as search:
+            catalog_metadata._update_itunes(recording, album, force=True)
+        search.assert_called_once_with(
+            "Alpha", "Original Song", duration=180, advisory="Explicit"
+        )
+        self.assertEqual(recording.itunes_trackid, "44")
+        self.assertEqual(recording.itunes_collectionid, "55")
+        self.assertEqual(recording.genre, "Rock")
+        self.assertNotIn("itunes_trackid", recording.metadata_conflicts)
+
     def test_rejected_recording_clears_only_its_verified_dependent_work_id(
         self,
     ) -> None:
@@ -1016,6 +1081,23 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                 self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
                 self.assertEqual(result.title, "Original Song")
                 self.assertIn("identity", result.metadata_conflicts)
+
+    def test_explicit_musicbrainz_release_requires_local_explicit_evidence(
+        self,
+    ) -> None:
+        for description in ("explicit", "uncensored edition"):
+            with self.subTest(description=description):
+                track = TrackInfo(
+                    self.audio("recording.flac"),
+                    artist="Alpha",
+                    title="Original Song",
+                    album="Album",
+                )
+                blocked = musicbrainz_metadata._release_edition_conflicts(
+                    track, {"disambiguation": description}
+                )
+                self.assertTrue(blocked)
+                self.assertIn("identity", track.metadata_conflicts)
 
     def test_clean_release_found_by_track_search_also_blocks_force_writes(self) -> None:
         path = self.audio("recording.flac")

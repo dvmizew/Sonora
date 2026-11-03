@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sonora.audio import art, bpm, key, metadata, replaygain
+from sonora.audio import decode as decode_module
 from sonora.core.models import RenameReport, TrackInfo
 from sonora.modules import (
     metadata_merge,
@@ -175,6 +176,44 @@ class TestTrackProcessingContracts(IsolatedTestCase):
                 )
             self.assertEqual(self.recording.initial_key, "Am")
             self.assertEqual(self.recording.bpm, 123.4)
+
+    def test_audio_analysis_shares_one_decode_when_bpm_and_key_are_missing(
+        self,
+    ) -> None:
+        recording = TrackInfo(self.path, artist="Artist", title="Song")
+        samples = object()
+        with (
+            patch.object(
+                decode_module,
+                "load_audio",
+                return_value=(samples, 44100),
+            ) as load_audio,
+            patch.object(bpm, "calculate_bpm", return_value=123.4) as calculate_bpm,
+            patch.object(key, "detect_musical_key", return_value="Am") as detect_key,
+        ):
+            track_processing._update_audio_analysis(
+                recording, self.path, fetch_bpm=True, fetch_key=True
+            )
+
+        load_audio.assert_called_once_with(self.path, mono=True, max_seconds=70.0)
+        self.assertIs(calculate_bpm.call_args.kwargs["audio_data"][0], samples)
+        self.assertIs(detect_key.call_args.kwargs["audio_data"][0], samples)
+        self.assertEqual((recording.bpm, recording.initial_key), (123.4, "Am"))
+
+    def test_audio_analysis_does_not_prefetch_for_a_present_empty_key(self) -> None:
+        recording = TrackInfo(self.path, artist="Artist", title="Song", initial_key="")
+        with (
+            patch.object(decode_module, "load_audio") as load_audio,
+            patch.object(bpm, "calculate_bpm", return_value=123.4) as calculate_bpm,
+            patch.object(key, "detect_musical_key") as detect_key,
+        ):
+            track_processing._update_audio_analysis(
+                recording, self.path, fetch_bpm=True, fetch_key=True
+            )
+
+        load_audio.assert_not_called()
+        calculate_bpm.assert_called_once_with(self.path, audio_data=None)
+        detect_key.assert_not_called()
 
     def test_lyrics_updates_accept_provider_text_and_preserve_it_on_failure(
         self,
@@ -602,16 +641,17 @@ class TestRenameFailureContracts(IsolatedTestCase):
     def test_lyric_header_sync_missing_file_and_write_failure(self) -> None:
         path = self.test_directory / "recording.lrc"
         self.assertFalse(renamer.sync_lrc_metadata(path, "Primary", "Recording"))
-        path.write_text("[ar:Old]\n[ti:Old]\n[00:01] Lyrics")
+        path.write_text("[00:01] Lyrics")
         self.assertTrue(renamer.sync_lrc_metadata(path, "Primary", "Recording"))
         self.assertEqual(
             path.read_text(), "[ar:Primary]\n[ti:Recording]\n[00:01] Lyrics"
         )
+        path.write_text("[ar:primary]\n[ti:recording]\n[00:01] Lyrics")
         with patch.object(
             renamer, "atomic_write_bytes", side_effect=OSError("disk full")
         ):
-            self.assertFalse(renamer.sync_lrc_metadata(path, "Changed", "Changed"))
-        self.assertIn("[ar:Primary]", path.read_text())
+            self.assertFalse(renamer.sync_lrc_metadata(path, "Primary", "Recording"))
+        self.assertIn("[ar:primary]", path.read_text())
 
     def test_rename_failure_and_collision_retry_preserve_source_recording(self) -> None:
         path = self.test_directory / "recording.flac"

@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import musicbrainzngs
 
@@ -12,6 +12,110 @@ from tests.service_support import ServiceResponseTestCase
 
 
 class TestMusicbrainzResponses(ServiceResponseTestCase):
+    @patch("sonora.services.musicbrainz.musicbrainzngs")
+    def test_fetch_track_mbid_uses_isrc_before_text_search(
+        self, mock_mb: MagicMock
+    ) -> None:
+        mock_mb.search_recordings.return_value = {
+            "recording-list": [
+                {
+                    "id": "12345678-1234-1234-1234-123456789abc",
+                    "title": "Title",
+                    "artist-credit": [{"artist": {"name": "Artist"}}],
+                }
+            ]
+        }
+
+        cache: dict[str, object] = {}
+
+        with (
+            patch(
+                "sonora.services.musicbrainz.get_cached_api",
+                side_effect=cache.get,
+            ),
+            patch(
+                "sonora.services.musicbrainz.set_cached_api",
+                side_effect=lambda key, value, **_kwargs: cache.__setitem__(key, value),
+            ),
+        ):
+            mbid = fetch_track_mbid("Artist", "Title", isrc="USABC2500001")
+            cached_mbid = fetch_track_mbid("Artist", "Title", isrc="USABC2500001")
+
+        self.assertEqual(mbid, "12345678-1234-1234-1234-123456789abc")
+        self.assertEqual(cached_mbid, mbid)
+        mock_mb.search_recordings.assert_called_once_with(isrc="USABC2500001", limit=5)
+
+    @patch("sonora.services.musicbrainz.musicbrainzngs")
+    def test_fetch_track_mbid_normalizes_display_isrc(self, mock_mb: MagicMock) -> None:
+        mock_mb.search_recordings.return_value = {"recording-list": []}
+
+        fetch_track_mbid("Artist", "Title", isrc="ISRC US-ABC-25-00001")
+
+        self.assertEqual(
+            mock_mb.search_recordings.call_args_list,
+            [
+                call(isrc="USABC2500001", limit=5),
+                call(artist="Artist", recording="Title", limit=5),
+            ],
+        )
+
+    @patch("sonora.services.musicbrainz.musicbrainzngs")
+    def test_invalid_isrc_uses_artist_and_title_search(
+        self, mock_mb: MagicMock
+    ) -> None:
+        mock_mb.search_recordings.return_value = {"recording-list": []}
+
+        fetch_track_mbid("Artist", "Title", isrc="not-an-isrc")
+
+        mock_mb.search_recordings.assert_called_once_with(
+            artist="Artist", recording="Title", limit=5
+        )
+
+    @patch("sonora.services.musicbrainz.musicbrainzngs")
+    def test_missing_isrc_recording_falls_back_to_artist_and_title(
+        self, mock_mb: MagicMock
+    ) -> None:
+        mock_mb.search_recordings.side_effect = [
+            {"recording-list": []},
+            {
+                "recording-list": [
+                    {
+                        "id": "12345678-1234-1234-1234-123456789abc",
+                        "title": "Title",
+                        "artist-credit": [{"artist": {"name": "Artist"}}],
+                    }
+                ]
+            },
+        ]
+
+        mbid = fetch_track_mbid("Artist", "Title", isrc="USABC2500001")
+
+        self.assertEqual(mbid, "12345678-1234-1234-1234-123456789abc")
+        self.assertEqual(
+            mock_mb.search_recordings.call_args_list,
+            [
+                call(isrc="USABC2500001", limit=5),
+                call(artist="Artist", recording="Title", limit=5),
+            ],
+        )
+
+    @patch("sonora.services.musicbrainz.musicbrainzngs")
+    def test_isrc_hit_with_different_identity_is_not_overridden_by_text_search(
+        self, mock_mb: MagicMock
+    ) -> None:
+        mock_mb.search_recordings.return_value = {
+            "recording-list": [
+                {
+                    "id": "12345678-1234-1234-1234-123456789abc",
+                    "title": "Wrong Title",
+                    "artist-credit": [{"artist": {"name": "Other Artist"}}],
+                }
+            ]
+        }
+
+        self.assertIsNone(fetch_track_mbid("Artist", "Title", isrc="USABC2500001"))
+        mock_mb.search_recordings.assert_called_once_with(isrc="USABC2500001", limit=5)
+
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_fetch_track_mbid(self, mock_mb: MagicMock) -> None:
         mock_mb.search_recordings.return_value = {

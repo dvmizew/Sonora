@@ -1,7 +1,6 @@
 from collections import Counter
 from typing import Any
 
-import httpx
 from rich.markup import escape
 
 from sonora.core.api_payloads import (
@@ -12,7 +11,7 @@ from sonora.core.api_payloads import (
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import clean_disambiguation, normalize_country_name, normalize_str
 from sonora.core.titles import score_artist_title_match
@@ -80,6 +79,15 @@ def _add_discogs_credit(
         composers.append(name)
 
 
+def _discogs_label_name(value: object) -> str | None:
+    label = str(value) if value else ""
+    if label.endswith(")"):
+        name, _, number = label[:-1].rpartition(" (")
+        if number.isdecimal():
+            return name
+    return label or None
+
+
 @coalesce_lookup
 def fetch_discogs_release_details(
     release_id: int | str, user_token: str | None = None
@@ -90,6 +98,8 @@ def fetch_discogs_release_details(
     cache_key = f"discogs_rel:v3:{release_id}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
+        if cached.get("label"):
+            cached["label"] = _discogs_label_name(cached["label"])
         return cached
     if cached == "":
         return None
@@ -117,7 +127,7 @@ def fetch_discogs_release_details(
         label_name = None
         catalog_number = None
         if labels:
-            label_name = str(labels[0].get("name")) if labels[0].get("name") else None
+            label_name = _discogs_label_name(labels[0].get("name"))
             catalog_number = (
                 str(labels[0].get("catno"))
                 if labels[0].get("catno") and labels[0].get("catno") != "none"
@@ -242,7 +252,7 @@ def fetch_discogs_release_details(
         }
         set_cached_api(cache_key, release_result)
         return release_result
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Discogs release fetch failed for ID {release_id}: {error}")
         return None
 
@@ -316,6 +326,8 @@ def search_discogs_release(
 
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
+        if cached.get("label"):
+            cached["label"] = _discogs_label_name(cached["label"])
         return cached
     if cached == "":
         return None
@@ -389,7 +401,7 @@ def search_discogs_release(
 
         # Fallback to search result fields if full fetch failed
         labels = selected_release.get("label", [])
-        label_name = str(labels[0]) if isinstance(labels, list) and labels else None
+        label_name = _discogs_label_name(labels[0]) if labels else None
         catalog_number = (
             str(selected_release.get("catno"))
             if selected_release.get("catno")
@@ -426,6 +438,6 @@ def search_discogs_release(
         }
         set_cached_api(cache_key, release_result)
         return release_result
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Discogs search failed for {artist} - {album}: {error}")
         return None

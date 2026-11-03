@@ -23,14 +23,27 @@ def tagging_state_status(
     fetch_lyrics: bool,
     fetch_itunes_art: bool,
 ) -> str:
+    configuration = dataclasses.asdict(config)
+    for credential in (
+        "discogs_token",
+        "acoustid_api_key",
+        "genius_api_token",
+        "lastfm_api_key",
+        "musixmatch_token",
+        "fanart_api_key",
+        "fanart_client_key",
+    ):
+        configuration[credential] = (
+            "<configured>" if configuration[credential] else None
+        )
     state_policy = {
-        "metadata_policy": "consensus-v13",
+        "metadata_policy": "tagging-v13",
         "bpm": fetch_bpm,
         "key": fetch_key,
         "replaygain": fetch_replaygain,
         "lyrics": fetch_lyrics,
         "artwork": fetch_itunes_art,
-        "configuration": dataclasses.asdict(config),
+        "configuration": configuration,
     }
     return (
         "TAGGED_OK:"
@@ -171,13 +184,13 @@ class LibraryStateVault:
 
         try:
             with self._connection() as conn:
-                resolved_keys = [(k,) for k in path_to_stat]
                 conn.execute(
                     "CREATE TEMP TABLE IF NOT EXISTS _batch_paths (path TEXT PRIMARY KEY);"
                 )
                 conn.execute("DELETE FROM _batch_paths;")
                 conn.executemany(
-                    "INSERT INTO _batch_paths (path) VALUES (?);", resolved_keys
+                    "INSERT INTO _batch_paths (path) VALUES (?);",
+                    ((path,) for path in path_to_stat),
                 )
                 cursor = conn.execute(
                     "SELECT t.file_path, t.mtime_ns, t.file_size, t.status FROM track_state t INNER JOIN _batch_paths b ON t.file_path = b.path;"

@@ -179,7 +179,9 @@ def _resolve_musicbrainz_track_id(
     elif not is_valid_uuid(track_info.musicbrainz_trackid):
         # Validate a stored recording before searching: artist/title alone cannot
         # distinguish recordings with the same name on different releases.
-        mbid = musicbrainz_service.fetch_track_mbid(track_info.artist, track_info.title)
+        mbid = musicbrainz_service.fetch_track_mbid(
+            track_info.artist, track_info.title, track_info.isrc
+        )
         if is_valid_uuid(mbid):
             track_info.musicbrainz_trackid = mbid
             track_info.metadata_sources.pop("musicbrainz_trackid", None)
@@ -378,7 +380,7 @@ def _fetch_standalone_recording(
         track_info.metadata_sources.pop("musicbrainz_workid", None)
     if force:
         new_mbid = musicbrainz_service.fetch_track_mbid(
-            track_info.artist, track_info.title
+            track_info.artist, track_info.title, track_info.isrc
         )
         if is_valid_uuid(new_mbid):
             track_info.musicbrainz_trackid = new_mbid
@@ -642,20 +644,23 @@ def _release_edition_conflicts(
     ):
         local_tokens.update(normalize_str(qualifier).split())
     clean_tokens = {"clean", "cleaned", "censored"}
+    explicit_tokens = {"explicit", "uncensored"}
     candidate_clean = bool(clean_tokens.intersection(edition_tokens)) and (
-        "explicit" not in edition_tokens and "uncensored" not in edition_tokens
+        not explicit_tokens.intersection(edition_tokens)
     )
-    local_clean = bool(clean_tokens.intersection(local_tokens)) and (
-        track_info.advisory != "Explicit"
-        and "explicit" not in local_tokens
-        and "uncensored" not in local_tokens
+    candidate_explicit = bool(explicit_tokens.intersection(edition_tokens))
+    local_clean = bool(clean_tokens.intersection(local_tokens)) and not (
+        track_info.advisory == "Explicit" or explicit_tokens.intersection(local_tokens)
+    )
+    local_explicit = track_info.advisory == "Explicit" or bool(
+        explicit_tokens.intersection(local_tokens)
     )
     # An absent advisory is unknown, not evidence of a censored recording.
     # Album position, shared ISRCs and matching duration do not prove the edit.
     if (
         candidate_clean
         and not local_clean
-        or (local_clean and {"explicit", "uncensored"}.intersection(edition_tokens))
+        or (candidate_explicit and not local_explicit)
     ):
         track_info.metadata_conflicts["identity"] = (
             "MusicBrainz clean/explicit edition is not established by local "

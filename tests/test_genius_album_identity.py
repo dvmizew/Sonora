@@ -34,7 +34,10 @@ class TestGeniusAlbumIdentity(IsolatedTestCase):
                     ),
                 ):
                     _update_genius(track, "token")
-                self.assertIn("nav", cache.call_args.args[0])
+                if guest == "NAV":
+                    cache.assert_not_called()
+                else:
+                    self.assertIn("nav", cache.call_args.args[0])
                 self.assertEqual(track.featured_artists, "NAV")
                 if guest == "NAV":
                     self.assertEqual(track.composer, "Lithe, NAV")
@@ -79,18 +82,31 @@ class TestGeniusAlbumIdentity(IsolatedTestCase):
     def test_same_title_on_another_album_is_not_identity_proof(self) -> None:
         song: dict[str, object] = {
             "artist": "Artist",
-            "title": "Introduction",
+            "title": "Same Title",
             "album": "Earlier Album",
         }
         self.assertEqual(
             genius.score_genius_song_match(
-                "Artist", "Introduction", song, album="Later Album"
+                "Artist", "Same Title", song, album="Later Album"
             ),
             0,
         )
         self.assertEqual(
             genius.score_genius_song_match(
-                "Artist", "Introduction", song, album="Earlier Album"
+                "Artist", "Same Title", song, album="Earlier Album"
+            ),
+            100,
+        )
+
+    def test_single_title_album_can_match_catalog_compilation(self) -> None:
+        song: dict[str, object] = {
+            "artist": "Daniel Di Angelo",
+            "title": "Bottled Up",
+            "album": "Essence*",
+        }
+        self.assertEqual(
+            genius.score_genius_song_match(
+                "Daniel Di Angelo", "Bottled Up", song, album="Bottled Up"
             ),
             100,
         )

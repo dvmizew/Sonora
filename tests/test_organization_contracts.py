@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from sonora.cli import library
 from sonora.core.cancellation import InterruptedOperationError
+from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
 from sonora.modules import organizer
 from tests.support import IsolatedTestCase
@@ -38,6 +39,24 @@ class TestSingleDeduplicationContracts(IsolatedTestCase):
             self.recording, musicbrainz_trackid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         )
         self.assertFalse(deduplicator.is_duplicate(candidate))
+
+    def test_reregistered_path_moves_between_artist_groups(self) -> None:
+        deduplicator = organizer.SingleDeduplicator()
+        deduplicator.register(self.recording)
+        deduplicator.register(dataclasses.replace(self.recording, artist="New Artist"))
+
+        self.assertFalse(
+            deduplicator.is_duplicate(
+                dataclasses.replace(self.recording, file_path=self.destination)
+            )
+        )
+        self.assertTrue(
+            deduplicator.is_duplicate(
+                dataclasses.replace(
+                    self.recording, artist="New Artist", file_path=self.destination
+                )
+            )
+        )
 
     def test_missing_registered_file_is_forgotten_before_comparing_quality(
         self,
@@ -150,6 +169,55 @@ class TestSingleDeduplicationContracts(IsolatedTestCase):
 
 
 class TestDirectoryConsolidationContracts(IsolatedTestCase):
+    def test_release_conflict_after_tenth_track_prevents_consolidation(self) -> None:
+        first = self.test_directory / "Primary"
+        second = self.test_directory / "PRIMARY!"
+        first.mkdir()
+        second.mkdir()
+        files = [
+            folder / f"{number:02d} - Song.flac"
+            for folder in (first, second)
+            for number in range(1, 12)
+        ]
+        for path in files:
+            path.touch()
+
+        track_info_by_path = {}
+        for path in files:
+            release_id = (
+                "different-release"
+                if path.parent == second and path.name.startswith("11 -")
+                else "shared-release"
+            )
+            track_info_by_path[path] = TrackInfo(
+                path, artist="Primary", musicbrainz_albumid=release_id
+            )
+
+        with patch.object(
+            organizer, "_read_file_info", side_effect=AssertionError("metadata reread")
+        ):
+            consolidated = organizer._consolidate_directory_entries(
+                self.test_directory,
+                dry_run=True,
+                track_info_by_path=track_info_by_path,
+            )
+
+        self.assertEqual(consolidated, 0)
+
+    def test_dry_run_labels_duplicate_directory_proposals(self) -> None:
+        (self.test_directory / "Primary").mkdir()
+        (self.test_directory / "PRIMARY!").mkdir()
+
+        with patch.object(LOG, "detail") as log_detail:
+            self.assertEqual(
+                organizer._consolidate_directory_entries(
+                    self.test_directory, dry_run=True
+                ),
+                1,
+            )
+
+        self.assertIn("[DRY-RUN] Would consolidate", log_detail.call_args.args[0])
+
     def test_unmatched_artist_tags_fall_back_to_existing_directory_branding(
         self,
     ) -> None:

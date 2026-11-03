@@ -23,6 +23,33 @@ from tests.support import IsolatedTestCase
 
 
 class TestSingleEditionsRegressions(AudioRegressionTestCase):
+    def test_dry_run_labels_duplicate_quarantine_as_a_preview(self) -> None:
+        source = self.root / "library"
+        paths = [
+            source / artist / "Singles" / "Alpha - Song" / "01 - Song.flac"
+            for artist in ("Artist A", "Artist B")
+        ]
+        for path in paths:
+            path.parent.mkdir(parents=True)
+            path.touch()
+
+        def read_file(path: Path) -> tuple[Path, TrackInfo]:
+            return path, TrackInfo(path, artist="Alpha", title="Song")
+
+        with (
+            patch.object(organizer, "_read_file_info", side_effect=read_file),
+            patch.object(LOG, "detail") as detail,
+        ):
+            organize_library_singles(
+                source, source / "Singles", dry_run=True, max_threads=1
+            )
+
+        messages = [str(call.args[0]) for call in detail.call_args_list]
+        self.assertIn("Would quarantine 1 duplicate single(s).", messages)
+        self.assertNotIn("Removed 1 duplicate single(s).", messages)
+        self.assertTrue(all(path.exists() for path in paths))
+        self.assertFalse((source / "Singles" / ".duplicates").exists())
+
     def test_quarantine_keeps_lyrics_paired_when_names_collide(self) -> None:
         for collision_suffix in (".flac", ".lrc"):
             with self.subTest(collision_suffix=collision_suffix):

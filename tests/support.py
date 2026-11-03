@@ -46,6 +46,9 @@ class IsolatedTestCase(unittest.TestCase):
             resources.enter_context(
                 patch("sonora.core.config.load_dotenv", return_value=False)
             )
+            resources.enter_context(
+                patch("sonora.core.retry._DNS_UNAVAILABLE_UNTIL", 0.0)
+            )
             for boundary in (
                 "httpx.HTTPTransport.handle_request",
                 "requests.sessions.Session.send",

@@ -229,6 +229,22 @@ class TestConfigurationFiles(IsolatedTestCase):
         self.assertEqual(configuration.short_title_length, 9)
         self.assertEqual(configuration.genre_aliases, (("test style", "Rock"),))
 
+    def test_blank_config_secret_falls_back_to_environment(self) -> None:
+        config.clear_config_cache()
+        with (
+            patch.dict(os.environ, {"DISCOGS_TOKEN": "environment-token"}, clear=True),
+            patch("sonora.core.config.load_app_environment"),
+            patch(
+                "sonora.core.config._discover_config_file",
+                return_value=Path("config.json"),
+            ),
+            patch(
+                "sonora.core.config._parse_config_data",
+                return_value={"discogs_token": "   "},
+            ),
+        ):
+            self.assertEqual(config.get_config().discogs_token, "environment-token")
+
     def test_file_boolean_and_invalid_environment_boolean(self) -> None:
         config.clear_config_cache()
         with (
@@ -471,6 +487,34 @@ class TestPolicyConfiguration(IsolatedTestCase):
                 dataclasses.replace(SonoraConfig(), title_match_threshold=90), **flags
             ),
         )
+
+    def test_credential_rotation_does_not_invalidate_tagging_state(self) -> None:
+        flags = {
+            "fetch_bpm": False,
+            "fetch_key": False,
+            "fetch_replaygain": False,
+            "fetch_lyrics": False,
+            "fetch_itunes_art": False,
+        }
+        no_token = tagging_state_status(SonoraConfig(), **flags)
+        credential_factories: tuple[tuple[str, Callable[[str], SonoraConfig]], ...] = (
+            ("discogs_token", lambda value: SonoraConfig(discogs_token=value)),
+            ("acoustid_api_key", lambda value: SonoraConfig(acoustid_api_key=value)),
+            ("genius_api_token", lambda value: SonoraConfig(genius_api_token=value)),
+            ("lastfm_api_key", lambda value: SonoraConfig(lastfm_api_key=value)),
+            ("musixmatch_token", lambda value: SonoraConfig(musixmatch_token=value)),
+            ("fanart_api_key", lambda value: SonoraConfig(fanart_api_key=value)),
+            (
+                "fanart_client_key",
+                lambda value: SonoraConfig(fanart_client_key=value),
+            ),
+        )
+        for credential, make_config in credential_factories:
+            with self.subTest(credential=credential):
+                first_token = tagging_state_status(make_config("first"), **flags)
+                rotated_token = tagging_state_status(make_config("rotated"), **flags)
+                self.assertEqual(first_token, rotated_token)
+                self.assertNotEqual(no_token, first_token)
 
 
 class TestConfigurablePolicies(IsolatedTestCase):

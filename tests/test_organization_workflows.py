@@ -1,3 +1,5 @@
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -9,6 +11,7 @@ from sonora.modules.checker import (
 )
 from sonora.modules.organizer import (
     SingleDeduplicator,
+    consolidate_duplicate_artist_dirs,
     organize_library_singles,
 )
 from tests.fixtures import write_silent_wav
@@ -16,6 +19,133 @@ from tests.module_support import ModuleTestCase
 
 
 class TestOrganizationWorkflows(ModuleTestCase):
+    def test_duplicate_artist_dirs_with_distinct_albums_are_consolidated(
+        self,
+    ) -> None:
+        source = self.tmp_path / "library"
+        recordings = {
+            source / "Artist" / "First Album" / "01 - First.flac": "first-release",
+            source / "ARTIST" / "Second Album" / "01 - Second.flac": "second-release",
+        }
+        for path in recordings:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+
+        def read_file(path: Path) -> tuple[Path, TrackInfo]:
+            return path, TrackInfo(
+                path,
+                artist="Artist",
+                album=path.parent.name,
+                musicbrainz_albumid=recordings[path],
+            )
+
+        with patch("sonora.modules.organizer._read_file_info", side_effect=read_file):
+            consolidated = consolidate_duplicate_artist_dirs(source, dry_run=True)
+
+        self.assertEqual(consolidated, 1)
+        self.assertTrue(all(path.exists() for path in recordings))
+        with patch("sonora.modules.organizer._read_file_info", side_effect=read_file):
+            consolidated = consolidate_duplicate_artist_dirs(source)
+
+        self.assertEqual(consolidated, 1)
+        self.assertTrue(
+            (source / "Artist" / "First Album" / "01 - First.flac").exists()
+        )
+        self.assertTrue(
+            (source / "Artist" / "Second Album" / "01 - Second.flac").exists()
+        )
+        self.assertFalse((source / "ARTIST").exists())
+
+    def test_artist_consolidation_preserves_distinct_musicbrainz_releases(
+        self,
+    ) -> None:
+        source = self.tmp_path / "library"
+        standard = source / "Artist" / "Album"
+        expanded = source / "Artist" / "ALBUM"
+        standard_track = standard / "01 - Song.flac"
+        expanded_track = expanded / "01 - Song.flac"
+        for path in (standard_track, expanded_track):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+
+        def read_file(path: Path) -> tuple[Path, TrackInfo]:
+            release_id = (
+                "standard-release" if path == standard_track else "expanded-release"
+            )
+            return path, TrackInfo(
+                path,
+                artist="Artist",
+                album="Album",
+                title="Song",
+                musicbrainz_albumid=release_id,
+                musicbrainz_releasegroupid="same-release-group",
+                track_number=1,
+                total_tracks=1,
+            )
+
+        with patch("sonora.modules.organizer._read_file_info", side_effect=read_file):
+            consolidated = consolidate_duplicate_artist_dirs(source, dry_run=True)
+
+        self.assertEqual(consolidated, 0)
+        self.assertTrue(standard_track.exists())
+        self.assertTrue(expanded_track.exists())
+
+    def test_duplicate_artist_dirs_with_distinct_singles_releases_consolidate(
+        self,
+    ) -> None:
+        source = self.tmp_path / "library"
+        recordings = {
+            source / "Artist" / "Singles" / "01 - First.flac": "first-release",
+            source / "ARTIST" / "Singles" / "01 - Second.flac": "second-release",
+        }
+        for path in recordings:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"audio")
+
+        def read_file(path: Path) -> tuple[Path, TrackInfo]:
+            return path, TrackInfo(
+                path,
+                artist="Artist",
+                title=path.stem,
+                musicbrainz_albumid=recordings[path],
+            )
+
+        with patch("sonora.modules.organizer._read_file_info", side_effect=read_file):
+            consolidated = consolidate_duplicate_artist_dirs(source, dry_run=True)
+
+        self.assertEqual(consolidated, 1)
+        self.assertTrue(all(path.exists() for path in recordings))
+
+    def test_organize_reads_one_track_folders_in_parallel(self) -> None:
+        source = self.tmp_path / "parallel-library"
+        files = [source / f"Folder {index}" / "01 - Song.wav" for index in range(4)]
+        for file_path in files:
+            file_path.parent.mkdir(parents=True)
+            file_path.write_bytes(b"audio")
+
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        def read_file(file_path: Path) -> tuple[Path, TrackInfo]:
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return file_path, TrackInfo(
+                file_path, artist="Artist", title=file_path.parent.name
+            )
+
+        with patch("sonora.modules.organizer._read_file_info", side_effect=read_file):
+            organize_library_singles(
+                source, source / "Singles", dry_run=True, max_threads=4
+            )
+
+        self.assertGreater(maximum, 1)
+
     def test_artist_consolidation_preserves_root_and_moved_playlist_references(
         self,
     ) -> None:
@@ -367,6 +497,31 @@ class TestOrganizationWorkflows(ModuleTestCase):
             self.assertTrue(audio_file_1.exists())
             self.assertTrue(audio_file_2.exists())
             self.assertTrue(audio_file_3.exists())
+
+    def test_organize_does_not_move_album_when_source_is_album_folder(self) -> None:
+        album_dir = self.tmp_path / "Artist - Full Album"
+        album_dir.mkdir()
+        audio_files = [album_dir / f"{number:02d}.wav" for number in range(1, 4)]
+        for audio_file in audio_files:
+            write_silent_wav(audio_file)
+
+        def read_track(path: Path) -> TrackInfo:
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                album="Full Album",
+                title=path.stem,
+                track_number=int(path.stem),
+                total_tracks=12,
+            )
+
+        with patch(
+            "sonora.modules.organizer.read_track_metadata", side_effect=read_track
+        ):
+            moved = organize_library_singles(album_dir, self.tmp_path / "Singles")
+
+        self.assertEqual(moved, 0)
+        self.assertTrue(all(path.exists() for path in audio_files))
 
     def test_organize_library_in_flac_container_does_not_dismantle_albums(self) -> None:
         flac_root = self.tmp_path / "Music" / "FLAC"

@@ -28,7 +28,6 @@ from sonora.core.config import (
 )
 from sonora.core.constants import FEAT_KEYWORDS
 from sonora.core.text import (
-    _COLLAPSE_SPACES_PATTERN,
     _NON_WORD_SPACES_PATTERN,
     clean_unicode_punct,
     normalize_str,
@@ -147,7 +146,7 @@ def extract_title_features(
     cleaned = _METADATA_FILTER.filter_field("track", clean_base)
     cleaned = get_bracket_feat_pattern().sub("", cleaned)
     cleaned = _TITLE_EDITION_PATTERN.sub("", cleaned)
-    cleaned_title = _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned).strip()
+    cleaned_title = " ".join(cleaned.split())
 
     all_raw_feats = bracket_feats + unbracketed_feats
     featured_tokens = extract_featured_artist_tokens(

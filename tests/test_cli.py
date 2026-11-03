@@ -5,7 +5,13 @@ from unittest.mock import MagicMock, patch
 
 from sonora.cli.main import main
 from sonora.cli.reports import _emit_tag_summary_and_report, _tag_coverage_counts
-from sonora.core.models import CheckReport, MetadataSource, NormalizeReport, TrackInfo
+from sonora.core.models import (
+    CheckReport,
+    MetadataSource,
+    NormalizeReport,
+    RenameReport,
+    TrackInfo,
+)
 from tests.support import IsolatedTestCase
 
 
@@ -241,6 +247,49 @@ class TestCLIInterface(IsolatedTestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_output.exists())
 
+    def test_rename_dry_run_report_labels_previewed_changes(self) -> None:
+        json_output = self.test_directory / "rename_report.json"
+
+        def preview_renames(
+            _: Path,
+            *,
+            dry_run: bool = False,
+            max_threads: int = 4,
+            report: RenameReport | None = None,
+        ) -> list[Path]:
+            if report is None:
+                raise AssertionError("rename command must pass its report")
+            report.total_files = 3
+            report.files_renamed = 2
+            report.folders_renamed = 1
+            return []
+
+        with (
+            patch(
+                "sonora.cli.library.rename_directory_files",
+                side_effect=preview_renames,
+            ),
+            patch("sonora.cli.library.LOG.summary_table") as summary_table,
+        ):
+            self.assertEqual(
+                main(
+                    [
+                        "rename",
+                        str(self.test_directory),
+                        "--dry-run",
+                        "--json",
+                        str(json_output),
+                    ]
+                ),
+                0,
+            )
+
+        report = json.loads(json_output.read_text(encoding="utf-8"))
+        self.assertTrue(report["dry_run"])
+        labels = [row[0] for row in summary_table.call_args.args[1]]
+        self.assertIn("Files Would Rename", labels)
+        self.assertIn("Album Folders Would Rename", labels)
+
     def test_handle_organize_subcommand_with_json(self) -> None:
         with patch("sonora.cli.library.organize_library_singles") as mock_organize:
             mock_organize.return_value = 3
@@ -368,7 +417,7 @@ class TestCLIInterface(IsolatedTestCase):
             patch("sonora.cli.audio.write_track_metadata") as mock_write,
         ):
             mock_read.return_value = TrackInfo(
-                file_path=song, artist="Artist", title="Title"
+                file_path=song, artist="Artist", title="Title", duration=60
             )
             mock_lyrics.return_value = ("[00:01.00] Line", "synced")
             exit_code = main(
@@ -377,6 +426,7 @@ class TestCLIInterface(IsolatedTestCase):
             self.assertEqual(exit_code, 0)
             mock_read.assert_called_once()
             mock_lyrics.assert_called_once()
+            self.assertEqual(mock_lyrics.call_args.kwargs["duration"], 60)
             mock_write.assert_called_once()
             self.assertTrue(json_out.exists())
 
@@ -502,7 +552,9 @@ class TestTagReportVerification(IsolatedTestCase):
                 tracks, [], False, self.test_directory, 1, output
             )
         report = json.loads(output.read_text())
-        self.assertEqual(report["statistics"]["enrichment"]["genre_percentage"], 99.97)
+        self.assertEqual(
+            report["statistics"]["metadata_coverage"]["genre_percentage"], 99.97
+        )
         rows = summary.call_args.args[1]
         self.assertIn(("Tracks with Genre", "6507/6509 (99.97%)", None), rows)
 
@@ -563,9 +615,10 @@ class TestReportProvenance(IsolatedTestCase):
             )
 
         report = json.loads(output.read_text())
-        self.assertEqual(report["schema"], "tag_report_v1")
+        self.assertEqual(report["schema"], "tag_report_v2")
         self.assertTrue(report["execution"]["dry_run"])
-        mb_metadata = report["statistics"]["enrichment"]
+        self.assertNotIn("enrichment", report["statistics"])
+        mb_metadata = report["statistics"]["metadata_coverage"]
         self.assertEqual(mb_metadata["genius_matched_count"], 1)
         self.assertEqual(mb_metadata["genius_percentage"], 50.0)
         self.assertEqual(mb_metadata["theaudiodb_matched_count"], 1)

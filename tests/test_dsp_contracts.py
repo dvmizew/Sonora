@@ -1,6 +1,6 @@
 import dataclasses
 import subprocess
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 import soundfile
@@ -50,6 +50,22 @@ class TestTempoContracts(IsolatedTestCase):
                 ),
             ):
                 self.assertIsNone(bpm.calculate_bpm(self.audio_path))
+
+    def test_shared_audio_keeps_the_existing_tempo_window(self) -> None:
+        samples = np.ones(22050 * 70, dtype=np.float32)
+        correlation = np.zeros(500)
+        correlation[100] = 1
+        with (
+            patch.object(bpm, "load_audio") as load_audio,
+            patch(
+                "scipy.signal.spectrogram",
+                return_value=(None, None, np.tile(np.arange(251), (10, 1))),
+            ) as spectrogram,
+            patch("scipy.signal.correlate", return_value=correlation),
+        ):
+            bpm.calculate_bpm(self.audio_path, audio_data=(samples, 22050))
+        load_audio.assert_not_called()
+        self.assertEqual(len(spectrogram.call_args.args[0]), 22050 * 60)
 
     def test_octave_policy_can_fold_or_preserve_detected_tempo(self) -> None:
         for lag, minimum, maximum, expected in (
@@ -126,8 +142,55 @@ class TestMusicalKeyContracts(IsolatedTestCase):
         with patch.object(key, "load_audio", side_effect=OSError("decode failed")):
             self.assertIsNone(key.detect_key_details(path))
 
+    def test_shared_audio_keeps_key_offset_and_short_track_fallback(self) -> None:
+        path = self.test_directory / "recording.wav"
+        path.touch()
+        sample_rate = 1000
+        samples = np.arange(sample_rate * 70, dtype=np.float32)
+        with (
+            patch.object(
+                key, "calculate_chroma", return_value=np.ones(12)
+            ) as calculate_chroma,
+            patch.object(key, "detect_key_from_chroma", return_value=("Am", "8A", 0.9)),
+        ):
+            key.detect_key_details(path, audio_data=(samples, sample_rate))
+        np.testing.assert_array_equal(
+            calculate_chroma.call_args.args[0], samples[sample_rate * 10 :]
+        )
+
+        short_samples = np.arange(5000, dtype=np.float32)
+        with (
+            patch.object(
+                key, "calculate_chroma", return_value=np.ones(12)
+            ) as calculate_chroma,
+            patch.object(key, "detect_key_from_chroma", return_value=("Am", "8A", 0.9)),
+        ):
+            key.detect_key_details(path, audio_data=(short_samples, sample_rate))
+        np.testing.assert_array_equal(calculate_chroma.call_args.args[0], short_samples)
+
 
 class TestSpectralContracts(IsolatedTestCase):
+    def test_antiphase_stereo_does_not_hide_a_brickwall_cutoff(self) -> None:
+        path = self.test_directory / "antiphase.wav"
+        sample_rate = 44100
+        time_axis = np.arange(sample_rate * 25) / sample_rate
+        rng = np.random.default_rng(42)
+        samples = (
+            0.5 * np.sin(2 * np.pi * 100 * time_axis)
+            + 0.2 * np.sin(2 * np.pi * 1000 * time_axis)
+            + rng.normal(0.0, 0.05, len(time_axis))
+        )
+        coefficients = np.fft.rfft(samples)
+        frequencies = np.fft.rfftfreq(len(samples), 1 / sample_rate)
+        coefficients[frequencies > 16000] = 1e-6
+        mono = np.fft.irfft(coefficients, n=len(samples)).astype(np.float32)
+        soundfile.write(path, np.column_stack((mono, -mono)), sample_rate)
+
+        fake, cutoff, _ = spectral.detect_fake_lossless(path)
+
+        self.assertTrue(fake)
+        self.assertLessEqual(cutoff, 16.5)
+
     def test_long_stereo_silence_does_not_resemble_a_transcode(self) -> None:
         path = self.test_directory / "silence.wav"
         soundfile.write(path, np.zeros((32000 * 61, 2), dtype=np.float32), 32000)
@@ -143,7 +206,15 @@ class TestSpectralContracts(IsolatedTestCase):
                 patch.object(spectral, "load_audio", return_value=decoded) as decode,
             ):
                 self.assertEqual(spectral.detect_fake_lossless(path), (False, 0, None))
-            self.assertEqual(decode.call_args.kwargs["offset_seconds"], 30)
+            expected_offsets = (
+                [30, 0]
+                if decoded is not None and len(decoded[0]) < decoded[1] * 5
+                else [30]
+            )
+            self.assertEqual(
+                [call.kwargs["offset_seconds"] for call in decode.call_args_list],
+                expected_offsets,
+            )
         with (
             patch("soundfile.SoundFile", side_effect=OSError("unsupported format")),
             patch.object(spectral, "load_audio", side_effect=OSError("decoder failed")),
@@ -195,6 +266,31 @@ class TestReplayGainFailureContracts(IsolatedTestCase):
         self.path = self.test_directory / "recording.flac"
         self.path.touch()
         self.measurement = replaygain.LoudnessMeasurement(self.path, 2, 0.5, (-20,))
+
+    def test_measurement_and_write_pools_share_the_worker_limit(self) -> None:
+        executor = Mock()
+        executor.__enter__ = Mock(return_value=executor)
+        executor.__exit__ = Mock(return_value=False)
+        completed = Mock()
+        completed.result.return_value = self.measurement
+        executor.submit.return_value = completed
+        executor.map.return_value = [True]
+        with (
+            patch.object(
+                replaygain, "ThreadPoolExecutor", return_value=executor
+            ) as executor_factory,
+            patch.object(
+                replaygain, "_write_album_replaygain_track", return_value=True
+            ),
+        ):
+            replaygain.calculate_album_replaygain(
+                [self.path], force=True, max_threads=100
+            )
+
+        self.assertEqual(
+            executor_factory.call_args_list,
+            [call(max_workers=4), call(max_workers=4)],
+        )
 
     def test_album_gate_uses_block_energy_and_remains_stable_at_extreme_levels(
         self,

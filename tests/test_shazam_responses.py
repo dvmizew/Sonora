@@ -96,7 +96,7 @@ class TestShazamContracts(IsolatedTestCase):
         client = MagicMock()
         client.__aenter__.return_value = client
         client.recognize = AsyncMock(return_value={"matches": []})
-        with patch("sonora.services.shazam.Shazam", return_value=client):
+        with patch("shazamio.Shazam", return_value=client):
             self.assertEqual(
                 asyncio.run(_recognize_async(Path("track.flac"))), {"matches": []}
             )
@@ -109,7 +109,7 @@ class TestShazamContracts(IsolatedTestCase):
                 client.__aenter__.return_value = client
                 client.recognize = AsyncMock(side_effect=error)
                 with (
-                    patch("sonora.services.shazam.Shazam", return_value=client),
+                    patch("shazamio.Shazam", return_value=client),
                     self.assertRaises(type(error)),
                 ):
                     asyncio.run(_recognize_async(Path("track.flac")))
@@ -125,7 +125,7 @@ class TestShazamContracts(IsolatedTestCase):
                 client = MagicMock()
                 client.__aenter__.return_value = client
                 client.recognize = AsyncMock(side_effect=error)
-                with patch("sonora.services.shazam.Shazam", return_value=client):
+                with patch("shazamio.Shazam", return_value=client):
                     self.assertIsNone(asyncio.run(_recognize_async(Path("track.flac"))))
                 client.__aexit__.assert_awaited_once()
 
@@ -134,7 +134,7 @@ class TestShazamContracts(IsolatedTestCase):
         client.__aenter__.return_value = client
         client.recognize = AsyncMock(return_value=[])
         with (
-            patch("sonora.services.shazam.Shazam", return_value=client),
+            patch("shazamio.Shazam", return_value=client),
             self.assertRaises(TypeError),
         ):
             asyncio.run(_recognize_async(Path("track.flac")))
@@ -180,6 +180,27 @@ class TestShazamContracts(IsolatedTestCase):
                     with self.assertRaises(TypeError):
                         recognize_audio_track(audio_path)
                     write_cache.assert_not_called()
+
+    def test_no_match_result_is_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "track.flac"
+            audio_path.write_bytes(b"audio")
+            with (
+                patch(
+                    "sonora.services.shazam.get_cached_api",
+                    side_effect=[None, ""],
+                ),
+                patch("sonora.services.shazam.set_cached_api") as write_cache,
+                patch(
+                    "sonora.services.shazam._recognize_async",
+                    new=AsyncMock(return_value={"matches": []}),
+                ) as recognize,
+            ):
+                self.assertIsNone(recognize_audio_track(audio_path))
+                self.assertIsNone(recognize_audio_track(audio_path))
+            recognize.assert_awaited_once_with(audio_path)
+            write_cache.assert_called_once()
+            self.assertEqual(write_cache.call_args.args[1], "")
 
     def test_cache_distinguishes_equal_basenames(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

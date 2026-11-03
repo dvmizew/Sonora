@@ -112,6 +112,48 @@ class TestDeezerResponses(ServiceResponseTestCase):
         self.assertEqual(track_details["isrc"], "USUM71703861")
 
     @patch("sonora.services.deezer.SESSION.get")
+    def test_track_search_cache_still_filters_each_duration(
+        self, mock_get: MagicMock
+    ) -> None:
+        search = MagicMock()
+        search.status_code = 200
+        search.json.return_value = {
+            "data": [
+                {
+                    "id": 9876,
+                    "title": "Track Title",
+                    "artist": {"name": "Artist Name"},
+                    "duration": 100,
+                }
+            ]
+        }
+        details = MagicMock()
+        details.status_code = 200
+        details.json.return_value = {
+            "title": "Track Title",
+            "artist": {"name": "Artist Name"},
+            "duration": 100,
+        }
+        mock_get.side_effect = [search, details]
+        cache: dict[str, object] = {}
+
+        def set_cache(key: str, value: object, **_kwargs: object) -> None:
+            cache[key] = "" if value is None else value
+
+        with (
+            patch("sonora.services.deezer.get_cached_api", side_effect=cache.get),
+            patch("sonora.services.deezer.set_cached_api", side_effect=set_cache),
+        ):
+            self.assertIsNotNone(
+                fetch_deezer_track_details("Artist Name", "Track Title", duration=100)
+            )
+            self.assertIsNone(
+                fetch_deezer_track_details("Artist Name", "Track Title", duration=200)
+            )
+
+        self.assertEqual(mock_get.call_count, 2)
+
+    @patch("sonora.services.deezer.SESSION.get")
     def test_fetch_deezer_track_by_isrc(self, mock_get: MagicMock) -> None:
         # Happy path
         mock_response = MagicMock()

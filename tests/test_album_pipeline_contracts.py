@@ -18,6 +18,40 @@ MBID = "11111111-2222-3333-4444-555555555555"
 
 
 class TestAlbumPipelineContracts(IsolatedTestCase):
+    def test_process_track_reuses_album_metadata_without_mutating_context(self) -> None:
+        path = self.test_directory / "cached.flac"
+        path.touch()
+        original = TrackInfo(path, title="Song", artist="Original")
+        context = tagger._AlbumMetadataContext(track_metadata={path: original})
+        with (
+            patch.object(
+                metadata,
+                "read_track_metadata",
+                side_effect=AssertionError("track metadata was read twice"),
+            ),
+            patch(
+                "sonora.services.artist_resolution.resolve_artist_name",
+                return_value="Canonical",
+            ),
+            patch.object(tagger, "_update_metadata"),
+            patch.object(
+                tagger,
+                "_process_audio_and_save_tags",
+                side_effect=lambda **values: values["track_info"],
+            ),
+        ):
+            result = tagger.process_single_track(
+                path,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+                album_context=context,
+                dry_run=True,
+            )
+        self.assertEqual(result.artist, "Canonical")
+        self.assertEqual(context.track_metadata[path].artist, "Original")
+
     def test_genre_agreement_abstains_on_conflicts_and_ties(self) -> None:
         for genres, deezer_album, itunes_album in (
             (["Unknown", "Rock"], {"genre": "Pop"}, {"genre": "Jazz"}),
@@ -385,7 +419,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
             ),
             patch.object(
                 metadata, "read_track_metadata", side_effect=tagged_by_path.__getitem__
-            ),
+            ) as read_metadata,
             patch.object(musicbrainz, "search_musicbrainz_release") as search,
             patch.object(
                 musicbrainz, "fetch_musicbrainz_release_details", return_value=release
@@ -405,6 +439,7 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
                 self.test_directory, paths, "fixture", True, True, True
             )
         search.assert_not_called()
+        self.assertEqual(read_metadata.call_count, len(paths))
         self.assertEqual(context.musicbrainz_id, MBID)
         self.assertEqual(
             context.track_mbids,
@@ -415,6 +450,38 @@ class TestAlbumPipelineContracts(IsolatedTestCase):
         )
         self.assertEqual(context.discogs_release, {"label": "Publisher"})
         self.assertEqual(context.sample_artist, "Primary")
+
+    def test_prefetch_uses_majority_itunes_collection_id(self) -> None:
+        paths = [
+            self.test_directory / f"recording-{number}.flac" for number in range(3)
+        ]
+        tracks = {
+            path: dataclasses.replace(
+                self.recording,
+                file_path=path,
+                itunes_collectionid="777" if index < 2 else "888",
+            )
+            for index, path in enumerate(paths)
+        }
+        with (
+            patch.object(
+                tagger,
+                "_resolve_album_folder_identity",
+                return_value=("Primary", "Record"),
+            ),
+            patch.object(
+                metadata, "read_track_metadata", side_effect=tracks.__getitem__
+            ),
+            patch.object(musicbrainz, "search_musicbrainz_release", return_value=None),
+            patch.object(deezer, "fetch_deezer_album_details", return_value=None),
+            patch.object(
+                itunes, "fetch_itunes_album_details", return_value=None
+            ) as fetch,
+        ):
+            tagger._resolve_album_metadata_context(
+                self.test_directory, paths, None, False, False, True
+            )
+        self.assertEqual(fetch.call_args.kwargs["collection_id"], "777")
 
     def test_prefetch_missing_recording_indexes_withholds_release_metadata(
         self,

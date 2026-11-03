@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import pyloudnorm
 from rich.markup import escape
 
 from sonora.audio.decode import load_audio
@@ -53,6 +52,8 @@ def _measure_track_loudness(
         if loaded is None or len(loaded[0]) == 0 or loaded[1] <= 0:
             return None
         audio_data, sample_rate = loaded
+
+        import pyloudnorm
 
         meter = pyloudnorm.Meter(sample_rate)
         track_loudness = float(meter.integrated_loudness(audio_data))
@@ -189,7 +190,7 @@ def calculate_album_replaygain(
         max_album_peak=max_album_peak,
         dry_run=dry_run,
     )
-    with ThreadPoolExecutor(max_workers=max_threads) as executor_write:
+    with ThreadPoolExecutor(max_workers=min(max_threads, 4)) as executor_write:
         try:
             write_results = list(executor_write.map(writer, track_results))
         except (KeyboardInterrupt, RuntimeError) as exc:

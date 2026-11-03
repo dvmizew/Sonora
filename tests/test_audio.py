@@ -527,6 +527,24 @@ class TestAudioEngine(IsolatedTestCase):
         self.assertEqual(cutoff_khz, 0.0)
         self.assertIsNone(description)
 
+    def test_spectral_fallback_retries_from_start_for_short_tracks(self) -> None:
+        path = self.test_directory / "unsupported-short.m4a"
+        path.touch()
+        samples = np.ones(44100 * 5, dtype=np.float32)
+        with (
+            patch("soundfile.SoundFile", side_effect=OSError("unsupported")),
+            patch(
+                "sonora.audio.spectral.load_audio",
+                side_effect=[(np.array([], dtype=np.float32), 44100), (samples, 44100)],
+            ) as load_audio,
+        ):
+            detect_fake_lossless(path)
+
+        self.assertEqual(
+            [call.kwargs["offset_seconds"] for call in load_audio.call_args_list],
+            [30.0, 0.0],
+        )
+
     @patch("taglib.File")
     def test_advisory_metadata_explicit_and_clean_purging(
         self, mock_taglib_cls: MagicMock

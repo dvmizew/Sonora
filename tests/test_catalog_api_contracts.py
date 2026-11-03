@@ -1,4 +1,5 @@
 import contextlib
+import json
 from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,34 @@ from tests.support import IsolatedTestCase
 
 
 class TestITunesCatalogContracts(IsolatedTestCase):
+    def test_explicit_track_search_skips_cleaned_editions(self) -> None:
+        with patch.object(
+            itunes,
+            "search_itunes",
+            return_value=[
+                {
+                    "trackId": 1,
+                    "artistName": "Alpha",
+                    "trackName": "Original Song",
+                    "trackTimeMillis": 180000,
+                    "trackExplicitness": "cleaned",
+                },
+                {
+                    "trackId": 2,
+                    "artistName": "Alpha",
+                    "trackName": "Original Song",
+                    "trackTimeMillis": 180000,
+                    "trackExplicitness": "explicit",
+                },
+            ],
+        ):
+            result = itunes.fetch_itunes_track_metadata(
+                "Alpha", "Original Song", advisory="Explicit", duration=180
+            )
+        assert result is not None
+        self.assertEqual(result["itunes_trackid"], "2")
+        self.assertEqual(result["explicitness"], "explicit")
+
     def test_strict_album_token_policy_rejects_fuzzy_track_and_album_candidates(
         self,
     ) -> None:
@@ -136,6 +165,20 @@ class TestITunesCatalogContracts(IsolatedTestCase):
                 itunes.fetch_itunes_album_details("Primary", "Record"),
                 {"genre": "Rock"},
             )
+
+    def test_itunes_search_requests_more_album_candidates_than_song_candidates(
+        self,
+    ) -> None:
+        for entity, limit in (("album", "25"), ("song", "5")):
+            with (
+                self.subTest(entity=entity),
+                patch.object(itunes, "get_cached_api", return_value=None),
+                patch.object(itunes, "set_cached_api"),
+                patch.object(SESSION, "get") as request,
+            ):
+                request.return_value.json.return_value = {"results": []}
+                itunes.search_itunes("Primary", "Record", entity=entity)
+                self.assertEqual(request.call_args.kwargs["params"]["limit"], limit)
 
     def test_empty_unmatched_or_identifierless_albums_are_rejected(self) -> None:
         for candidates in (
@@ -777,6 +820,49 @@ class TestProviderContracts(IsolatedTestCase):
                     with self.assertRaises(TypeError):
                         invoke()
                     write_cache.assert_not_called()
+
+    def test_provider_boundaries_handle_invalid_json_without_caching(self) -> None:
+        boundaries: tuple[tuple[str, Callable[[], object]], ...] = (
+            ("itunes", lambda: search_itunes("Artist", "Title", "song")),
+            ("deezer", lambda: fetch_deezer_track_details("Artist", "Title")),
+            ("discogs", lambda: search_discogs_release("Artist", "Album", "token")),
+            ("genius", lambda: fetch_genius_song_details("Artist", "Title", "token")),
+            ("lastfm", lambda: fetch_lastfm_tags("Artist", "Title", "key")),
+            ("theaudiodb", lambda: fetch_theaudiodb_track_details("Artist", "Title")),
+            (
+                "fanart",
+                lambda: fetch_fanart_artist(
+                    "11111111-2222-3333-4444-555555555555", "key"
+                ),
+            ),
+            ("lyrics", lambda: _query_lrclib("Artist - Title")),
+        )
+        for service, invoke in boundaries:
+            with (
+                self.subTest(service=service),
+                contextlib.ExitStack() as resources,
+            ):
+                response = MagicMock(status_code=200)
+                response.json.side_effect = json.JSONDecodeError(
+                    "invalid response", "{", 0
+                )
+                resources.enter_context(
+                    patch(
+                        f"sonora.services.{service}.SESSION.get",
+                        return_value=response,
+                    )
+                )
+                resources.enter_context(
+                    patch(
+                        f"sonora.services.{service}.get_cached_api",
+                        return_value=None,
+                    )
+                )
+                write_cache = resources.enter_context(
+                    patch(f"sonora.services.{service}.set_cached_api")
+                )
+                invoke()
+                write_cache.assert_not_called()
 
     def test_itunes_rejects_missing_results_and_invalid_records(self) -> None:
         for payload in ({}, {"results": "wrong"}, {"results": [None]}):

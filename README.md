@@ -151,7 +151,7 @@ Genius descriptions are community prose and can contain unrelated or vandalized 
 
 Independent metadata providers receive separate copies of one resolved recording identity. Their proposals merge in a fixed order: conflicting recording identities or ISRCs prevent tag and asset writes, and conflicting individual fields preserve existing values. JSON reports include `metadata_conflicts` keyed by the disputed field. Tracks with unresolved conflicts are not recorded as complete. Provider agreement is evidence, not a correctness guarantee.
 
-Tagging uses bounded worker pools for tracks and provider queries, and prefetches at most two album contexts while retaining album finalization order. `--threads` controls each main pool; total worker count can therefore exceed that number. API quotas and identical cache-backed lookups are coordinated between Sonora processes using the same cache directory. The portable `filelock` dependency supplies native process locks; coordination files remain outside DiskCache's managed directory. Confirmed catalog misses expire after 30 minutes, successful metadata normally after 28 days, and transient network failures are not stored as misses. Fingerprints persist with file path, size, modification time, change time and decoder-setting invalidation. `--ignore-cache` deliberately bypasses cache reads; `--force` does not.
+Tagging uses bounded worker pools for tracks and provider queries, and prefetches at most two album contexts while retaining album finalization order. `--threads` controls each main pool; total worker count can therefore exceed that number. API quotas and identical cache-backed lookups are coordinated between Sonora processes using the same cache directory. The portable `filelock` dependency supplies native process locks; coordination files remain outside DiskCache's managed directory. Confirmed catalog misses expire after one day, successful metadata normally after 28 days, and transient network failures are not stored as misses. Fingerprints persist with file path, size, modification time, change time and decoder-setting invalidation. `--ignore-cache` deliberately bypasses cache reads; `--force` does not.
 
 Identification can abstain when recordings or releases are ambiguous. Stored recording IDs must agree with meaningful artist/title tags and available duration evidence; an ID alone cannot overwrite a conflicting identity. AcoustID uses whole-file duration, validates candidate metadata, and rejects near ties within `acoustid_match_margin`. Cached fingerprint evidence is validated again against current metadata and settings.
 
@@ -386,8 +386,9 @@ sonora --verbose check /path/to/music --json report.json
 ```
 
 The option works before or after a command. `-v` still prints the version.
-JSON reports always include full results, regardless of verbosity. Metadata
-conflicts remain visible in the final summary; uncertain fields are preserved.
+JSON reports provide structured results; `--verbose` adds per-file console
+output where supported. Metadata conflicts remain visible in the final summary;
+uncertain fields are preserved.
 
 ### `sonora lyrics`
 

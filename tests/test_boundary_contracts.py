@@ -169,7 +169,7 @@ class TestProviderBoundaryFailures(IsolatedTestCase):
 
     def test_itunes_cover_fuzzy_editions_and_series_are_distinct(self) -> None:
         for album, candidates, expected in (
-            ("Record", [{"artistName": "Wrong", "collectionName": "Wrong"}], None),
+            ("Record", [{"artistName": "Wrong", "collectionName": "Record"}], None),
             (
                 "Record",
                 [

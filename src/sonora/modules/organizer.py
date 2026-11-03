@@ -12,7 +12,6 @@ from rich.markup import escape
 from sonora.audio.metadata import read_track_metadata
 from sonora.core.artists import extract_featured_artist_tokens, get_primary_artist
 from sonora.core.audio_files import find_audio_files, group_files_by_parent
-from sonora.core.cache import api_cache_session
 from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import get_config
 from sonora.core.library_paths import (
@@ -63,7 +62,6 @@ def _quarantine_file(file_path: Path, quarantine_dir: Path) -> Path:
     return target
 
 
-@api_cache_session()
 def _read_file_info(file_path: Path) -> tuple[Path, TrackInfo | None]:
     try:
         return file_path, read_track_metadata(file_path)
@@ -128,11 +126,13 @@ class SingleDeduplicator:
 
     def __init__(self) -> None:
         self._tracks: dict[str, list[_RegisteredSingle]] = {}
+        self._artist_by_path: dict[Path, str] = {}
 
     def register(self, track_info: TrackInfo, target_path: Path | None = None) -> None:
         recording = _single_recording(track_info, target_path)
         self.forget(recording.file_path)
         self._tracks.setdefault(recording.primary_artist_key, []).append(recording)
+        self._artist_by_path[recording.file_path] = recording.primary_artist_key
 
     def find_duplicate(self, track_info: TrackInfo) -> _RegisteredSingle | None:
         candidate = _single_recording(track_info)
@@ -175,12 +175,13 @@ class SingleDeduplicator:
         return self.find_duplicate(track_info) is not None
 
     def forget(self, audio_path: Path) -> None:
-        for primary_artist, recordings in self._tracks.items():
-            self._tracks[primary_artist] = [
-                recording
-                for recording in recordings
-                if recording.file_path != audio_path
-            ]
+        primary_artist = self._artist_by_path.pop(audio_path, None)
+        if primary_artist is None:
+            return
+        recordings = self._tracks[primary_artist]
+        self._tracks[primary_artist] = [
+            recording for recording in recordings if recording.file_path != audio_path
+        ]
 
 
 def _quarantine_duplicate_single(
@@ -214,9 +215,6 @@ def _is_single_folder(
     # Never dismantle disc subfolders (e.g. 'CD 1', 'Disc 2')
     if get_config().is_disc_folder(folder.name):
         return False
-
-    if folder.resolve() == source_dir.resolve():
-        return True
 
     if is_in_singles_hierarchy(folder, source_dir) or get_config().is_generic_container(
         folder.name
@@ -425,28 +423,35 @@ def organize_library_singles(
             ThreadPoolExecutor(max_workers=max_threads) as executor,
         ):
             try:
+                track_info_by_path: dict[Path, TrackInfo] = {}
+                file_results = (
+                    (
+                        future.result()
+                        for future in as_completed(
+                            [
+                                executor.submit(_read_file_info, path)
+                                for path in all_audio_files
+                            ]
+                        )
+                    )
+                    if max_threads > 1
+                    else map(_read_file_info, all_audio_files)
+                )
+                for file_path, track_info in file_results:
+                    wait_if_paused()
+                    if track_info is not None:
+                        track_info_by_path[file_path] = track_info
+                    elif failures is not None:
+                        failures.append(str(file_path))
+                    progress.advance(task_scan)
+
                 for folder, files in folder_files.items():
                     wait_if_paused()
-                    folder_track_infos: list[tuple[Path, TrackInfo]] = []
-
-                    file_results = (
-                        (
-                            fut.result()
-                            for fut in as_completed(
-                                [executor.submit(_read_file_info, p) for p in files]
-                            )
-                        )
-                        if max_threads > 1 and len(files) > 1
-                        else (_read_file_info(p) for p in files)
-                    )
-                    for file_path, track_info in file_results:
-                        wait_if_paused()
-                        if track_info is not None:
-                            folder_track_infos.append((file_path, track_info))
-                        elif failures is not None:
-                            failures.append(str(file_path))
-                        progress.advance(task_scan)
-
+                    folder_track_infos = [
+                        (path, track_info_by_path[path])
+                        for path in files
+                        if path in track_info_by_path
+                    ]
                     is_single = _is_single_folder(
                         folder=folder,
                         files=files,
@@ -540,7 +545,7 @@ def organize_library_singles(
                         )
                     else:
                         LOG.detail(
-                            f"[DRY-RUN] Would move {escape(path.name)} -> {escape(str(target_file))}"
+                            f"[DRY-RUN] Would move {escape(str(path))} -> {escape(str(target_file))}"
                         )
 
                     playlist_renames[path] = target_file
@@ -561,17 +566,24 @@ def organize_library_singles(
             raise InterruptedOperationError(moved_count) from None
 
     consolidate_duplicate_artist_dirs(
-        source_dir, dry_run=dry_run, renames=playlist_renames, failures=failures
+        source_dir,
+        dry_run=dry_run,
+        renames=playlist_renames,
+        failures=failures,
+        track_info_by_path={
+            playlist_renames.get(path, path): track_info
+            for path, track_info in track_info_by_path.items()
+        },
     )
-    playlist_folders = {
-        path.parent for path in playlist_renames if path.parent.is_dir()
-    }
-    if playlist_renames:
-        playlist_folders.update(
+    playlist_folders = (
+        {
             path.parent
             for path in source_dir.rglob("*")
             if path.suffix.casefold() in {".m3u", ".m3u8"} and path.is_file()
-        )
+        }
+        if playlist_renames
+        else set()
+    )
     for folder in playlist_folders:
         changed_playlists = update_local_playlists(
             folder, playlist_renames, dry_run=dry_run
@@ -580,7 +592,8 @@ def organize_library_singles(
             updated_playlists.extend(changed_playlists)
 
     if removed_dupes > 0:
-        LOG.detail(f"Removed {removed_dupes} duplicate single(s).")
+        action = "Would quarantine" if dry_run else "Removed"
+        LOG.detail(f"{action} {removed_dupes} duplicate single(s).")
 
     if not dry_run:
         cleanup_empty_dirs(source_dir)
@@ -593,6 +606,7 @@ def _consolidate_directory_entries(
     dry_run: bool = False,
     renames: dict[Path, Path] | None = None,
     failures: list[str] | None = None,
+    track_info_by_path: dict[Path, TrackInfo] | None = None,
 ) -> int:
     """Consolidates case-variant and duplicate subdirectories within parent_dir."""
     if not parent_dir.is_dir():
@@ -612,24 +626,51 @@ def _consolidate_directory_entries(
         if len(candidate_dirs) <= 1:
             continue
 
-        candidate_stats: list[tuple[Path, int, list[str]]] = []
+        candidate_stats: list[tuple[Path, int, list[str], dict[str, set[str]]]] = []
         for cand_dir in candidate_dirs:
             audio_files = find_audio_files(cand_dir)
             if dry_run and renames:
                 audio_files = [path for path in audio_files if path not in renames]
             tag_artists: list[str] = []
-            for af in audio_files[:10]:
-                _, meta = _read_file_info(af)
-                if meta and meta.artist:
-                    tag_artists.append(meta.artist)
-            candidate_stats.append((cand_dir, len(audio_files), tag_artists))
+            release_ids: dict[str, set[str]] = {}
+            for af in audio_files:
+                meta = track_info_by_path.get(af) if track_info_by_path else None
+                if meta is None:
+                    _, meta = _read_file_info(af)
+                if meta:
+                    if meta.artist:
+                        tag_artists.append(meta.artist)
+                    if meta.musicbrainz_albumid:
+                        relative_parent = af.relative_to(cand_dir).parent
+                        parts = relative_parent.parts
+                        album_part = ""
+                        if parts and normalize_str(parts[0]) == "singles":
+                            album_part = parts[1] if len(parts) > 1 else ""
+                        elif not parts:
+                            album_part = cand_dir.name
+                        elif parts:
+                            album_part = parts[0]
+                        album_key = normalize_str(album_part)
+                        if album_key:
+                            release_ids.setdefault(album_key, set()).add(
+                                meta.musicbrainz_albumid
+                            )
+            candidate_stats.append(
+                (cand_dir, len(audio_files), tag_artists, release_ids)
+            )
 
         canonical_dir: Path | None = None
-        all_tags = [art for _, _, tags in candidate_stats for art in tags]
+        release_ids_by_album: dict[str, set[str]] = {}
+        for _, _, _, albums in candidate_stats:
+            for album, ids in albums.items():
+                release_ids_by_album.setdefault(album, set()).update(ids)
+        if any(len(ids) > 1 for ids in release_ids_by_album.values()):
+            continue
+        all_tags = [art for _, _, tags, _ in candidate_stats for art in tags]
         if all_tags:
             most_common_tag = Counter(all_tags).most_common(1)[0][0]
             clean_tag = sanitize_name(most_common_tag)
-            for cand_dir, _, _ in candidate_stats:
+            for cand_dir, _, _, _ in candidate_stats:
                 if cand_dir.name == clean_tag:
                     canonical_dir = cand_dir
                     break
@@ -642,12 +683,13 @@ def _consolidate_directory_entries(
             ]
             canonical_dir = max(non_screaming or candidate_stats, key=lambda s: s[1])[0]
 
-        for cand_dir, _, _ in candidate_stats:
+        for cand_dir, _, _, _ in candidate_stats:
             if cand_dir == canonical_dir:
                 continue
 
+            action = "[DRY-RUN] Would consolidate" if dry_run else "Consolidating"
             LOG.detail(
-                f"Consolidating duplicate directory: {cand_dir.name} -> {canonical_dir.name}"
+                f"{action} duplicate directory: {cand_dir.name} -> {canonical_dir.name}"
             )
             try:
                 audio_files = find_audio_files(cand_dir)
@@ -714,6 +756,7 @@ def consolidate_duplicate_artist_dirs(
     dry_run: bool = False,
     renames: dict[Path, Path] | None = None,
     failures: list[str] | None = None,
+    track_info_by_path: dict[Path, TrackInfo] | None = None,
 ) -> int:
     """
     Detects case-variant and normalized duplicate artist directories and subdirectories
@@ -726,7 +769,11 @@ def consolidate_duplicate_artist_dirs(
         renames = {}
 
     consolidated_count = _consolidate_directory_entries(
-        source_dir, dry_run=dry_run, renames=renames, failures=failures
+        source_dir,
+        dry_run=dry_run,
+        renames=renames,
+        failures=failures,
+        track_info_by_path=track_info_by_path,
     )
 
     for entry in list(source_dir.iterdir()):
@@ -734,10 +781,18 @@ def consolidate_duplicate_artist_dirs(
             singles_dir = entry / "Singles"
             if singles_dir.is_dir():
                 consolidated_count += _consolidate_directory_entries(
-                    singles_dir, dry_run=dry_run, renames=renames, failures=failures
+                    singles_dir,
+                    dry_run=dry_run,
+                    renames=renames,
+                    failures=failures,
+                    track_info_by_path=track_info_by_path,
                 )
             consolidated_count += _consolidate_directory_entries(
-                entry, dry_run=dry_run, renames=renames, failures=failures
+                entry,
+                dry_run=dry_run,
+                renames=renames,
+                failures=failures,
+                track_info_by_path=track_info_by_path,
             )
 
     return consolidated_count

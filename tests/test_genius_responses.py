@@ -161,15 +161,20 @@ class TestGeniusSongIdentity(IsolatedTestCase):
                     composer="Existing Writer",
                     producers="Existing Producer",
                 )
-                with patch.object(
-                    genius,
-                    "fetch_genius_song_details",
-                    return_value={
-                        "genius_song_id": 222,
-                        "writers": "Other Writer",
-                        "producers": "Other Producer",
-                    },
-                ) as lookup:
+                with (
+                    patch.object(
+                        genius,
+                        "fetch_genius_song_details",
+                        return_value={
+                            "genius_song_id": 222,
+                            "writers": "Other Writer",
+                            "producers": "Other Producer",
+                        },
+                    ) as lookup,
+                    patch.object(
+                        genius, "lookup_genius_song_details", return_value=None
+                    ),
+                ):
                     _update_genius(track, "token")
                 lookup.assert_called_once()
                 self.assertEqual(track.genius_song_id, "222")

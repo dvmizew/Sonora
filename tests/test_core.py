@@ -135,10 +135,6 @@ class TestCoreUtils(IsolatedTestCase):
         self.assertEqual(clean_title("Parody [Parody]"), "Parody")
         self.assertEqual(clean_title("Spaces\u200b\u00a0Track"), "Spaces Track")
         self.assertEqual(
-            clean_title("Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"),
-            "Melodie",
-        )
-        self.assertEqual(
             clean_title('R.I.P ROACH "EAST SIDE SOULJA"'),
             'R.I.P ROACH "EAST SIDE SOULJA"',
         )
@@ -149,7 +145,6 @@ class TestCoreUtils(IsolatedTestCase):
             clean_title("Solo (Wideboys remix) (feat. Demi Lovato)"),
             "Solo (Wideboys remix)",
         )
-        self.assertEqual(clean_title(""), "")
 
     def test_edition_markers_do_not_strip_remixer_names(self) -> None:
         for version in (

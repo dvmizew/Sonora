@@ -1,6 +1,8 @@
 import json
 import threading
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ from sonora.core.config import get_config
 from sonora.core.http import SESSION
 from sonora.core.logger import LOG
 from sonora.core.models import TrackInfo
+from sonora.core.titles import clean_title
 from sonora.modules import track_processing
 from sonora.services import lyrics
 from tests.support import IsolatedTestCase
@@ -25,6 +28,50 @@ ENHANCED = "[00:01.00] <00:01.00> First <00:01.50> line"
 
 
 class TestLyricsTokenContracts(IsolatedTestCase):
+    def test_provider_order_partitions_the_lyrics_cache(self) -> None:
+        recorded_keys: list[str] = []
+        with (
+            patch.object(lyrics, "get_cached_api", return_value=None),
+            patch.object(
+                lyrics,
+                "set_cached_api",
+                side_effect=lambda key, value: recorded_keys.append(key),
+            ),
+            patch.object(lyrics, "_query_syncedlyrics", return_value=SYNCED),
+        ):
+            lyrics.fetch_synced_lyrics(
+                "Alpha", "Recording", providers=["Genius", "NetEase"]
+            )
+            lyrics.fetch_synced_lyrics(
+                "Alpha", "Recording", providers=["NetEase", "Genius"]
+            )
+        self.assertEqual(len(recorded_keys), 2)
+        self.assertNotEqual(recorded_keys[0], recorded_keys[1])
+
+    def test_shared_lookup_lock_is_not_held_during_provider_request(self) -> None:
+        lookup_state: dict[str, Any] = {
+            "lock": threading.Lock(),
+            "failures": 0,
+            "suspended": False,
+        }
+
+        def query(*args: Any, **kwargs: Any) -> str:
+            self.assertTrue(lookup_state["lock"].acquire(blocking=False))
+            lookup_state["lock"].release()
+            return SYNCED
+
+        with (
+            patch.object(lyrics, "get_cached_api", return_value=None),
+            patch.object(lyrics, "_query_syncedlyrics", side_effect=query),
+            patch.object(lyrics, "set_cached_api"),
+        ):
+            self.assertEqual(
+                lyrics.fetch_synced_lyrics(
+                    "Primary", "Recording", duration=100, lookup_state=lookup_state
+                ),
+                SYNCED,
+            )
+
     def test_lrclib_failure_does_not_block_explicitly_enabled_fallback(self) -> None:
         for fallback in (SYNCED, None):
             with (
@@ -75,6 +122,26 @@ class TestLyricsTokenContracts(IsolatedTestCase):
             )
         search.assert_not_called()
 
+    def test_authenticated_lookup_passes_language_once(self) -> None:
+        with patch.object(
+            lyrics, "_query_authenticated_musixmatch", return_value=SYNCED
+        ) as query:
+            self.assertEqual(
+                lyrics._query_syncedlyrics(
+                    "Primary - Recording",
+                    False,
+                    False,
+                    False,
+                    ["Musixmatch"],
+                    "en",
+                    musixmatch_token="fixture-token",
+                ),
+                SYNCED,
+            )
+        query.assert_called_once_with(
+            "Primary - Recording", "fixture-token", False, False, False, "en"
+        )
+
     def test_raw_and_exported_tokens_parse_without_writing_sdk_state(self) -> None:
         tokens = (
             " fixture-token ",
@@ -122,7 +189,7 @@ class TestLyricsTokenContracts(IsolatedTestCase):
                 self.subTest(
                     plain_only=plain_only, synced_only=synced_only, synced=synced
                 ),
-                patch.object(lyrics, "Musixmatch") as client_class,
+                patch("syncedlyrics.providers.Musixmatch") as client_class,
                 patch.object(lyrics._LYRICS_LIMITER, "wait"),
                 patch.object(
                     Path,
@@ -152,7 +219,7 @@ class TestLyricsTokenContracts(IsolatedTestCase):
 
     def test_authenticated_client_closes_when_the_sdk_returns_no_result(self) -> None:
         with (
-            patch.object(lyrics, "Musixmatch") as client_class,
+            patch("syncedlyrics.providers.Musixmatch") as client_class,
             patch.object(lyrics._LYRICS_LIMITER, "wait"),
         ):
             client = client_class.return_value
@@ -170,7 +237,7 @@ class TestLyricsTokenContracts(IsolatedTestCase):
         for failure in (OSError("offline"), TypeError("SDK contract changed")):
             with (
                 self.subTest(failure=type(failure).__name__),
-                patch.object(lyrics, "Musixmatch") as client_class,
+                patch("syncedlyrics.providers.Musixmatch") as client_class,
                 patch.object(lyrics._LYRICS_LIMITER, "wait"),
             ):
                 client = client_class.return_value
@@ -186,6 +253,30 @@ class TestLyricsTokenContracts(IsolatedTestCase):
                     )
                 client.session.close.assert_called_once_with()
 
+    def test_authenticated_client_retries_transient_network_errors(self) -> None:
+        with (
+            patch.object(
+                lyrics,
+                "_query_authenticated_musixmatch",
+                side_effect=[OSError("offline"), SYNCED],
+            ) as query,
+            patch.object(lyrics._LYRICS_LIMITER, "wait"),
+            patch("sonora.core.retry.time.sleep"),
+        ):
+            self.assertEqual(
+                lyrics._query_syncedlyrics(
+                    "Alpha - Recording",
+                    False,
+                    False,
+                    False,
+                    ["Musixmatch"],
+                    None,
+                    musixmatch_token="fixture-token",
+                ),
+                SYNCED,
+            )
+            self.assertEqual(query.call_count, 2)
+
     def test_authenticated_failure_falls_back_only_to_other_selected_providers(
         self,
     ) -> None:
@@ -195,7 +286,7 @@ class TestLyricsTokenContracts(IsolatedTestCase):
         ):
             with (
                 self.subTest(providers=providers),
-                patch.object(lyrics, "Musixmatch") as client_class,
+                patch("syncedlyrics.providers.Musixmatch") as client_class,
                 patch.object(lyrics._LYRICS_LIMITER, "wait"),
                 patch("syncedlyrics.search", return_value=SYNCED) as fallback,
             ):
@@ -365,7 +456,6 @@ class TestLyricsParsingContracts(IsolatedTestCase):
         ):
             with (
                 self.subTest(album=album, instrumental=instrumental),
-                patch.object(lyrics._LRCLIB_LIMITER, "wait"),
                 patch.object(
                     SESSION,
                     "get",
@@ -387,6 +477,39 @@ class TestLyricsParsingContracts(IsolatedTestCase):
                 )
             self.assertEqual(result is not None, accepted)
 
+    def test_lrclib_does_not_report_source_without_usable_lyrics(self) -> None:
+        for plain_only, synced_only, payload in (
+            (True, False, {"syncedLyrics": SYNCED}),
+            (False, True, {"plainLyrics": "Song words"}),
+        ):
+            with self.subTest(plain_only=plain_only, synced_only=synced_only):
+                details: dict[str, Any] = {}
+                with patch.object(
+                    SESSION,
+                    "get",
+                    return_value=httpx.Response(
+                        200,
+                        json={
+                            "artistName": "Primary",
+                            "trackName": "Recording",
+                            "albumName": "Record",
+                            "duration": 100,
+                            "id": 123,
+                            **payload,
+                        },
+                    ),
+                ):
+                    result = lyrics._query_lrclib(
+                        "Primary - Recording",
+                        plain_only=plain_only,
+                        synced_only=synced_only,
+                        album_name="Record",
+                        duration=100,
+                        details=details,
+                    )
+                self.assertIsNone(result)
+                self.assertEqual(details, {})
+
     def test_cached_lyrics_with_wrong_headers_are_refetched(self) -> None:
         for header in ("[ar:Other Artist]", "[ti:Different Song]"):
             with (
@@ -407,7 +530,6 @@ class TestLyricsParsingContracts(IsolatedTestCase):
 
     def test_lrclib_request_preserves_fractional_duration(self) -> None:
         with (
-            patch.object(lyrics._LRCLIB_LIMITER, "wait"),
             patch.object(
                 SESSION,
                 "get",
@@ -454,7 +576,6 @@ class TestLyricsParsingContracts(IsolatedTestCase):
         ):
             with (
                 self.subTest(title=title, duration=duration),
-                patch.object(lyrics._LRCLIB_LIMITER, "wait"),
                 patch.object(
                     SESSION,
                     "get",
@@ -474,7 +595,6 @@ class TestLyricsParsingContracts(IsolatedTestCase):
 
     def test_lrclib_transport_errors_and_cached_misses_skip_lyrics(self) -> None:
         with (
-            patch.object(lyrics._LRCLIB_LIMITER, "wait"),
             patch.object(SESSION, "get", side_effect=OSError("offline")),
             self.assertRaisesRegex(OSError, "offline"),
         ):
@@ -548,7 +668,6 @@ class TestLyricsParsingContracts(IsolatedTestCase):
                 }
             with (
                 self.subTest(query=query, plain=plain, synced=synced, payload=payload),
-                patch.object(lyrics._LRCLIB_LIMITER, "wait"),
                 patch.object(
                     SESSION, "get", return_value=httpx.Response(200, json=payload)
                 ) as request,
@@ -578,7 +697,6 @@ class TestLyricsParsingContracts(IsolatedTestCase):
         for field in ("syncedLyrics", "plainLyrics"):
             with (
                 self.subTest(field=field),
-                patch.object(lyrics._LRCLIB_LIMITER, "wait"),
                 patch.object(
                     SESSION, "get", return_value=httpx.Response(200, json={field: 123})
                 ),
@@ -586,7 +704,6 @@ class TestLyricsParsingContracts(IsolatedTestCase):
             ):
                 lyrics._query_lrclib("Primary - Recording")
         with (
-            patch.object(lyrics._LRCLIB_LIMITER, "wait"),
             patch.object(SESSION, "get", return_value=httpx.Response(404)),
         ):
             self.assertIsNone(lyrics._query_lrclib("Recording"))
@@ -671,6 +788,56 @@ class TestLyricsParsingContracts(IsolatedTestCase):
 
 
 class TestLyricsLookupState(IsolatedTestCase):
+    def test_parallel_track_failures_stop_after_three_provider_requests(self) -> None:
+        state: dict[str, Any] = {
+            "lock": threading.Lock(),
+            "request_slots": threading.BoundedSemaphore(3),
+            "failures": 0,
+            "suspended": False,
+        }
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+        error = httpx.HTTPStatusError(
+            "overloaded", request=request, response=httpx.Response(503, request=request)
+        )
+        active = 0
+        peak_active = 0
+        active_lock = threading.Lock()
+
+        def fail_query(*args: Any, **kwargs: Any) -> None:
+            nonlocal active, peak_active
+            with active_lock:
+                active += 1
+                peak_active = max(peak_active, active)
+            time.sleep(0.02)
+            with active_lock:
+                active -= 1
+            raise error
+
+        with (
+            patch.object(lyrics, "get_cached_api", return_value=None),
+            patch.object(
+                lyrics, "_query_syncedlyrics", side_effect=fail_query
+            ) as query,
+            patch.object(lyrics, "set_cached_api"),
+            ThreadPoolExecutor(max_workers=8) as executor,
+        ):
+            list(
+                executor.map(
+                    lambda index: track_processing.process_track_lyrics(
+                        self.test_directory / f"track-{index}.flac",
+                        "Primary",
+                        f"Track {index}",
+                        duration=100,
+                        lookup_state=state,
+                    ),
+                    range(8),
+                )
+            )
+
+        self.assertTrue(state["suspended"])
+        self.assertEqual(query.call_count, 3)
+        self.assertEqual(peak_active, 3)
+
     def test_line_synced_result_is_reused_for_the_same_enhanced_request(self) -> None:
         details: dict[str, Any] = {}
         with (
@@ -693,7 +860,6 @@ class TestLyricsLookupState(IsolatedTestCase):
     def test_cache_preserves_lrclib_source_and_record_id(self) -> None:
         details: dict[str, Any] = {}
         with (
-            patch.object(lyrics._LRCLIB_LIMITER, "wait"),
             patch.object(
                 SESSION,
                 "get",
@@ -1011,12 +1177,178 @@ class TestLyricsHeaderIdentity(IsolatedTestCase):
             )
         )
 
+    def test_timestamped_lyric_ending_in_lyrics_is_not_a_title_header(self) -> None:
+        self.assertTrue(
+            sidecars.lyrics_identity_matches("[00:01.00] Lyrics", "Alpha", "Recording")
+        )
+
 
 class TestExistingLyricsValidation(IsolatedTestCase):
     def setUp(self) -> None:
         self.audio_path = self.test_directory / "recording.flac"
         self.audio_path.touch()
         self.lrc_path = self.audio_path.with_suffix(".lrc")
+
+    def test_missing_lyrics_does_not_scan_siblings_when_lookup_fails(self) -> None:
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=None),
+            patch.object(track_processing, "find_audio_files") as find_audio_files,
+        ):
+            self.assertEqual(
+                track_processing.process_track_lyrics(
+                    self.audio_path, "Alpha", "Recording", duration=100
+                ),
+                (None, None),
+            )
+        find_audio_files.assert_not_called()
+
+    def test_sidecar_duration_is_checked_once(self) -> None:
+        from sonora.core import sidecars
+
+        self.lrc_path.write_text(
+            "[ar:Alpha]\n[ti:Recording]\nPlain lyric text without timestamps"
+        )
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=None),
+            patch.object(
+                track_processing,
+                "is_lyrics_duration_valid",
+                wraps=sidecars.is_lyrics_duration_valid,
+            ) as check_duration,
+        ):
+            self.assertEqual(
+                track_processing.process_track_lyrics(
+                    self.audio_path, "Alpha", "Recording", duration=100
+                ),
+                (
+                    "[ar:Alpha]\n[ti:Recording]\nPlain lyric text without timestamps",
+                    "existing",
+                ),
+            )
+        check_duration.assert_called_once()
+
+    def test_fetched_duplicate_lyrics_are_checked_against_siblings(self) -> None:
+        body = "A complete verse with enough distinctive words to compare. " * 12
+        sibling = self.audio_path.with_name("different.flac")
+        sibling.touch()
+        conflicts: dict[str, str] = {}
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=body),
+            patch.object(
+                metadata_module,
+                "read_track_metadata",
+                return_value=TrackInfo(
+                    sibling, artist="Alpha", title="Different", lyrics=body
+                ),
+            ),
+        ):
+            text, _ = track_processing.process_track_lyrics(
+                self.audio_path,
+                "Alpha",
+                "Recording",
+                duration=100,
+                conflicts=conflicts,
+            )
+        self.assertIsNone(text)
+        self.assertIn("lyrics", conflicts)
+        self.assertFalse(self.lrc_path.exists())
+
+    def test_up_tempo_version_can_share_original_lyrics(self) -> None:
+        body = "A complete verse with enough distinctive words to compare. " * 12
+        sibling = self.audio_path.with_name("birthday-sex.flac")
+        sibling.touch()
+        self.lrc_path.write_text(f"[ar:Jeremih]\n[ti:Birthday Sex (Up-Tempo)]\n{body}")
+        conflicts: dict[str, str] = {}
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=None),
+            patch.object(
+                metadata_module,
+                "read_track_metadata",
+                return_value=TrackInfo(
+                    sibling,
+                    artist="Jeremih",
+                    title="Birthday Sex",
+                    lyrics=body,
+                ),
+            ),
+        ):
+            text, status = track_processing.process_track_lyrics(
+                self.audio_path,
+                "Jeremih",
+                "Birthday Sex (Up-Tempo)",
+                duration=237,
+                conflicts=conflicts,
+            )
+
+        self.assertIsNotNone(text)
+        self.assertEqual(status, "existing")
+        self.assertNotIn("lyrics", conflicts)
+
+    def test_cached_sibling_metadata_avoids_rereading_album_files(self) -> None:
+        body = "A complete verse with enough distinctive words to compare. " * 12
+        sibling = self.audio_path.with_name("different.flac")
+        sibling_metadata = {
+            sibling: TrackInfo(sibling, artist="Alpha", title="Different", lyrics=body)
+        }
+        conflicts: dict[str, str] = {}
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=body),
+            patch.object(track_processing, "find_audio_files") as find_audio_files,
+            patch.object(metadata_module, "read_track_metadata") as read_track_metadata,
+        ):
+            text, status = track_processing.process_track_lyrics(
+                self.audio_path,
+                "Alpha",
+                "Recording",
+                duration=100,
+                sibling_metadata=sibling_metadata,
+                conflicts=conflicts,
+            )
+
+        self.assertIsNone(text)
+        self.assertIsNone(status)
+        self.assertIn("lyrics", conflicts)
+        find_audio_files.assert_not_called()
+        read_track_metadata.assert_not_called()
+
+    def test_lyrics_run_reuses_sibling_metadata_between_tracks(self) -> None:
+        paths = [self.audio_path]
+        paths.extend(self.test_directory / f"track-{index}.flac" for index in (2, 3))
+        body = "A complete verse with enough distinctive words to compare. " * 12
+        metadata = {}
+        for index, path in enumerate(paths, start=1):
+            path.touch(exist_ok=True)
+            title = f"Recording {index}"
+            path.with_suffix(".lrc").write_text(f"[ar:Alpha]\n[ti:{title}]\n{body}")
+            metadata[path] = TrackInfo(
+                path, artist="Alpha", title=title, lyrics=f"[ti:{title}]\n{body}"
+            )
+        lookup_state: dict[str, Any] = {"lock": threading.Lock()}
+        with (
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=None),
+            patch.object(
+                track_processing, "find_audio_files", return_value=paths
+            ) as find,
+            patch.object(
+                metadata_module, "read_track_metadata", side_effect=metadata.get
+            ) as read,
+            patch(
+                "sonora.modules.track_processing.clean_title", wraps=clean_title
+            ) as clean_title_mock,
+        ):
+            for index, path in enumerate(paths, start=1):
+                track_processing.process_track_lyrics(
+                    path,
+                    "Alpha",
+                    f"Recording {index}",
+                    duration=100,
+                    force=True,
+                    lookup_state=lookup_state,
+                )
+
+        find.assert_called_once_with(self.test_directory, recursive=False)
+        self.assertEqual(read.call_count, len(paths))
+        self.assertEqual(clean_title_mock.call_count, 3 * len(paths))
 
     def test_instrumentals_never_import_vocal_lyrics(self) -> None:
         for title, album in (
@@ -1319,6 +1651,30 @@ class TestExistingLyricsValidation(IsolatedTestCase):
 
         self.assertIn("UTF-8", conflicts["lyrics"])
         lookup.assert_not_called()
+
+    def test_unreadable_sidecar_remains_a_review_conflict(self) -> None:
+        self.lrc_path.write_text("[ar:Alpha]\n[ti:Recording]\n[00:01] words")
+        conflicts: dict[str, str] = {}
+        original_read_text = Path.read_text
+
+        def fail_sidecar(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path == self.lrc_path:
+                raise PermissionError("unreadable")
+            return original_read_text(path, *args, **kwargs)
+
+        with (
+            patch.object(Path, "read_text", fail_sidecar),
+            patch.object(lyrics, "fetch_synced_lyrics", return_value=None),
+        ):
+            track_processing.process_track_lyrics(
+                self.audio_path,
+                "Alpha",
+                "Recording",
+                duration=100,
+                conflicts=conflicts,
+            )
+
+        self.assertIn("lyrics", conflicts)
 
 
 class TestLyricsHeaderRepair(IsolatedTestCase):

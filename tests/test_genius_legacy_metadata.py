@@ -28,16 +28,28 @@ class TestGeniusLegacyMetadata(IsolatedTestCase):
                 "featured_artists": "Deezer",
             },
         )
-        with patch.object(
-            genius,
-            "fetch_genius_song_details",
-            return_value={
-                "genius_song_id": "2",
-                "writers": "Same writer",
-                "description": "Description of the second album",
-                "producers": "Another producer",
-                "featured_artists": "Another guest",
-            },
+        with (
+            patch.object(
+                genius,
+                "fetch_genius_song_details",
+                return_value={
+                    "genius_song_id": "2",
+                    "writers": "Same writer",
+                    "description": "Description of the second album",
+                    "producers": "Another producer",
+                    "featured_artists": "Another guest",
+                },
+            ),
+            patch.object(
+                genius,
+                "lookup_genius_song_details",
+                return_value={
+                    "artist": "Performer",
+                    "title": "Introduction",
+                    "album": "First Album",
+                    "genius_song_id": 1,
+                },
+            ),
         ):
             catalog_metadata._update_genius(track, "fixture")
         self.assertEqual(track.genius_song_id, "2")

@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from sqlite3 import Connection
 from typing import Any
 from warnings import WarningMessage
 
@@ -31,6 +32,8 @@ class JSONDisk(Disk):
 class Cache:
     directory: str
     disk: Disk
+    @property
+    def _con(self) -> Connection: ...
     def __init__(
         self,
         directory: str | None = ...,

@@ -9,7 +9,15 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_sub
 datas = []
 hiddenimports = []
 binaries = []
-for package in ("sonora", "anyascii", "pycountry", "ftfy", "syncedlyrics", "music_metadata_filter", "filelock", "ijson"):
+datas += collect_data_files("sonora")
+for package in (
+    "anyascii",
+    "pycountry",
+    "ftfy",
+    "syncedlyrics",
+    "music_metadata_filter",
+    "ijson",
+):
     datas += collect_data_files(package)
     hiddenimports += collect_submodules(package)
 for package in ("soundfile", "shazamio", "shazamio_core", "msgpack"):

@@ -10,6 +10,21 @@ from tests.service_support import ServiceResponseTestCase
 
 
 class TestDiscogsResponses(ServiceResponseTestCase):
+    @patch("sonora.services.discogs.get_cached_api")
+    def test_cached_discogs_labels_drop_numeric_disambiguation(
+        self, get_cached: MagicMock
+    ) -> None:
+        get_cached.return_value = {"label": "Seek Music (2)"}
+        details = fetch_discogs_release_details(1)
+        self.assertIsNotNone(details)
+        assert details is not None
+        self.assertEqual(details["label"], "Seek Music")
+        get_cached.return_value = {"label": "Seek Music (2)"}
+        release = search_discogs_release("Artist", "Album", user_token="token")
+        self.assertIsNotNone(release)
+        assert release is not None
+        self.assertEqual(release["label"], "Seek Music")
+
     @patch("sonora.services.discogs.SESSION.get")
     def test_album_and_track_credits_preserve_order_roles_and_deduplication(
         self, mock_get: MagicMock
@@ -145,7 +160,7 @@ class TestDiscogsResponses(ServiceResponseTestCase):
             "genres": ["Hip Hop"],
             "styles": ["Trap", "Cloud Rap"],
             "country": "US",
-            "labels": [{"name": "Test Label", "catno": "CAT-123"}],
+            "labels": [{"name": "Test Label (2)", "catno": "CAT-123"}],
             "formats": [{"name": "CD", "descriptions": ["Album", "Deluxe Edition"]}],
             "identifiers": [{"type": "Barcode", "value": "123456789012"}],
             "extraartists": [
@@ -179,6 +194,32 @@ class TestDiscogsResponses(ServiceResponseTestCase):
 
     def test_search_discogs_without_token_returns_none(self) -> None:
         self.assertIsNone(search_discogs_release("Artist", "Album", user_token=None))
+
+    @patch("sonora.services.discogs.SESSION.get")
+    def test_search_fallback_cleans_only_numeric_label_disambiguation(
+        self, mock_get: MagicMock
+    ) -> None:
+        for index, (label, expected) in enumerate(
+            (("Seek Music (2)", "Seek Music"), ("Label (UK)", "Label (UK)"))
+        ):
+            search = MagicMock(status_code=200)
+            search.json.return_value = {
+                "results": [
+                    {
+                        "id": index + 1,
+                        "title": f"Artist {index} - Album {index}",
+                        "label": [label],
+                        "format": ["Digital"],
+                    }
+                ]
+            }
+            details = MagicMock(status_code=503)
+            mock_get.side_effect = [search, details]
+            result = search_discogs_release(
+                f"Artist {index}", f"Album {index}", user_token="token"
+            )
+            assert result is not None
+            self.assertEqual(result["label"], expected)
 
     @patch("sonora.services.discogs.SESSION.get")
     def test_fetch_discogs_release_details_without_token(

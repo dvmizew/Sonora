@@ -5,6 +5,27 @@ import unittest
 
 
 class TestImportBoundaries(unittest.TestCase):
+    def test_cli_import_does_not_load_audio_providers(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json,sys; sys.path[:0] = json.loads(sys.argv[1]); "
+                    "import sonora.cli.main; print(json.dumps(sorted(sys.modules)))"
+                ),
+                json.dumps(sys.path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        imported_modules = set(json.loads(result.stdout))
+        self.assertFalse(
+            imported_modules.intersection({"scipy", "shazamio", "syncedlyrics"})
+        )
+
     def test_small_modules_do_not_load_network_or_dsp_dependencies(self) -> None:
         for module_name in (
             "sonora.core",

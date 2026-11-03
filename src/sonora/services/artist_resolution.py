@@ -3,8 +3,6 @@
 import re
 from typing import Any
 
-import httpx
-
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.artists import (
     _load_user_overrides,
@@ -12,7 +10,7 @@ from sonora.core.artists import (
 )
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import (
     clean_disambiguation,
@@ -54,7 +52,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
             clean_name.istitle() and cached.isupper() and not is_cached_acronym
         ):
             set_cached_api(cache_key, None)
-        elif not (cached.isupper() and not is_cached_acronym):
+        elif cached == clean_name or not (cached.isupper() and not is_cached_acronym):
             return clean_unicode_punct(cached)
 
     artists: list[dict[str, Any]] = []
@@ -100,7 +98,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
                 resolved_artist = clean_unicode_punct(resolved_name)
                 set_cached_api(cache_key, resolved_artist)
                 return resolved_artist
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"MusicBrainz API error during artist resolution: {error}")
 
     try:
@@ -150,7 +148,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     resolved_artist = clean_unicode_punct(resolved_name)
                     set_cached_api(cache_key, resolved_artist)
                     return resolved_artist
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Deezer API error during artist resolution: {error}")
 
     clean_words = clean_name.split()

@@ -17,7 +17,6 @@ from sonora.core.config import (
 from sonora.core.constants import DIRS, FEAT_KEYWORDS
 from sonora.core.logger import LOG
 from sonora.core.text import (
-    _COLLAPSE_SPACES_PATTERN,
     clean_disambiguation,
     clean_unicode_punct,
     normalize_str,
@@ -164,7 +163,7 @@ def extract_balanced_features(
             i += 1
 
     base_parts.append(text[last_end:])
-    base_title = _COLLAPSE_SPACES_PATTERN.sub(" ", "".join(base_parts)).strip()
+    base_title = " ".join("".join(base_parts).split())
     return base_title, matches, open_char, close_char
 
 

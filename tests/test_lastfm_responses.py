@@ -66,6 +66,20 @@ class TestLastfmResponses(ServiceResponseTestCase):
             self.assertEqual(fetch_lastfm_tags("Primary", "Recording", "key", mbid), [])
         save.assert_not_called()
 
+    def test_malformed_json_is_treated_as_a_provider_failure(self) -> None:
+        request = httpx.Request("GET", "https://ws.audioscrobbler.com/2.0/")
+        with (
+            patch.object(lastfm, "get_cached_api", return_value=None),
+            patch.object(lastfm, "set_cached_api") as save,
+            patch.object(
+                SESSION,
+                "get",
+                return_value=httpx.Response(200, content=b"{invalid", request=request),
+            ),
+        ):
+            self.assertEqual(fetch_lastfm_tags("Primary", "Recording", "key"), [])
+        save.assert_not_called()
+
     @patch("sonora.core.http.SESSION.get")
     def test_fetch_lastfm_tags(self, mock_get: MagicMock) -> None:
         mock_response = MagicMock()

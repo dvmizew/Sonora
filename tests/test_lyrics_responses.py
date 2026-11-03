@@ -77,13 +77,13 @@ class TestLyricsResponses(ServiceResponseTestCase):
         configuration.start()
         self.addCleanup(configuration.stop)
 
-    @patch("sonora.services.lyrics.syncedlyrics")
-    def test_fetch_synced_lyrics(self, mock_syncedlyrics: MagicMock) -> None:
+    @patch("syncedlyrics.search")
+    def test_fetch_synced_lyrics(self, mock_search: MagicMock) -> None:
         # 1. Basic search
-        mock_syncedlyrics.search.return_value = "[00:12.34] Test lyric line"
+        mock_search.return_value = "[00:12.34] Test lyric line"
         lyrics = fetch_synced_lyrics("Artist", "Title")
         self.assertEqual(lyrics, "[00:12.34] Test lyric line")
-        mock_syncedlyrics.search.assert_called_with(
+        mock_search.assert_called_with(
             "artist - title",
             plain_only=False,
             synced_only=False,
@@ -92,7 +92,7 @@ class TestLyricsResponses(ServiceResponseTestCase):
         )
 
         # 2. Options search
-        mock_syncedlyrics.search.return_value = "<00:12.34> Enhanced lyric line"
+        mock_search.return_value = "<00:12.34> Enhanced lyric line"
         lyrics_enhanced = fetch_synced_lyrics(
             "Artist",
             "Title",
@@ -102,7 +102,7 @@ class TestLyricsResponses(ServiceResponseTestCase):
             lang="en",
         )
         self.assertEqual(lyrics_enhanced, "<00:12.34> Enhanced lyric line")
-        mock_syncedlyrics.search.assert_called_with(
+        mock_search.assert_called_with(
             "artist - title",
             plain_only=False,
             synced_only=True,
@@ -111,33 +111,33 @@ class TestLyricsResponses(ServiceResponseTestCase):
             lang="en",
         )
 
-    @patch("sonora.services.lyrics.syncedlyrics")
+    @patch("syncedlyrics.search")
     def test_fetch_synced_lyrics_raises_api_service_error_on_failure(
-        self, mock_syncedlyrics: MagicMock
+        self, mock_search: MagicMock
     ) -> None:
-        mock_syncedlyrics.search.side_effect = RuntimeError("Network timeout")
+        mock_search.side_effect = RuntimeError("Network timeout")
         with self.assertRaises(RuntimeError):
             fetch_synced_lyrics("FailArtist", "FailTitle")
 
     @patch("sonora.services.lyrics.set_cached_api")
     @patch("sonora.services.lyrics.get_cached_api", return_value=None)
-    @patch("sonora.services.lyrics.syncedlyrics")
+    @patch("syncedlyrics.search")
     def test_fetch_synced_lyrics_negative_caching(
         self,
-        mock_syncedlyrics: MagicMock,
+        mock_search: MagicMock,
         mock_get_cache: MagicMock,
         mock_set_cache: MagicMock,
     ) -> None:
-        mock_syncedlyrics.search.return_value = None
+        mock_search.return_value = None
         result = fetch_synced_lyrics("Artist Without Lyrics", "Instrumental Track")
         self.assertIsNone(result)
         self.assertEqual(mock_set_cache.call_args.args[1], "")
         mock_get_cache.return_value = ""
-        mock_syncedlyrics.search.reset_mock()
+        mock_search.reset_mock()
         self.assertIsNone(
             fetch_synced_lyrics("Artist Without Lyrics", "Instrumental Track")
         )
-        mock_syncedlyrics.search.assert_not_called()
+        mock_search.assert_not_called()
 
     def test_synced_lyrics_empty_query_returns_none(self) -> None:
         self.assertIsNone(fetch_synced_lyrics("", ""))

@@ -165,7 +165,7 @@ def _emit_tag_summary_and_report(
             coverage_statistics[count_key] = counts[metric]
             coverage_statistics[percentage_key] = round(percentages[metric], 2)
         report_data = {
-            "schema": "tag_report_v1",
+            "schema": "tag_report_v2",
             "generator": "Sonora",
             "version": __version__,
             "summary_text": summary_text,
@@ -179,7 +179,7 @@ def _emit_tag_summary_and_report(
             "statistics": {
                 "total_tracks": total_tracks,
                 "total_failures": len(failures),
-                "enrichment": coverage_statistics,
+                "metadata_coverage": coverage_statistics,
                 "audio_formats": {
                     "lossless_tracks": counts["lossless"],
                     "lossy_tracks": lossy_count,

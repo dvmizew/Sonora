@@ -1,7 +1,6 @@
 import re
 from collections.abc import Mapping
 
-import httpx
 from rapidfuzz import fuzz
 from rich.markup import escape
 
@@ -10,7 +9,7 @@ from sonora.core.artists import get_primary_artist
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import normalize_str, safe_float, safe_int
 from sonora.core.titles import (
@@ -30,7 +29,8 @@ def search_itunes(
     Search iTunes Search API for album or track metadata.
     """
     query_term = f"{artist} {term}".strip()
-    cache_key = f"itunes:{normalize_str(artist)}:{normalize_str(term)}:{entity}:{country.upper()}"
+    limit = 25 if entity == "album" else 5
+    cache_key = f"itunes:{normalize_str(artist)}:{normalize_str(term)}:{entity}:{country.upper()}:{limit}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, list):
         return cached
@@ -39,7 +39,7 @@ def search_itunes(
         "term": query_term,
         "entity": entity,
         "country": country,
-        "limit": "5",
+        "limit": str(limit),
     }
 
     try:
@@ -51,7 +51,7 @@ def search_itunes(
         )
         set_cached_api(cache_key, results)
         return results
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"iTunes Search API request failed for {query_term}: {error}")
         return []
 
@@ -163,29 +163,39 @@ def fetch_itunes_track_metadata(
     *,
     track_id: str | None = None,
     duration: float | None = None,
+    advisory: str | None = None,
 ) -> dict[str, object] | None:
     """
-    Fetch comprehensive track metadata from iTunes Search API.
+    Fetch track metadata from the iTunes Search API.
     """
     if track_id:
         try:
             candidate = lookup_itunes_track(track_id)
-        except (httpx.HTTPError, OSError) as error:
+        except API_RESPONSE_ERRORS as error:
             LOG.warning(f"iTunes identifier lookup unavailable: {escape(str(error))}")
             return None
-        if candidate and recording_identity_matches(
-            artist,
-            title,
-            str(candidate.get("artist") or ""),
-            str(candidate.get("title") or ""),
-            expected_duration=duration,
-            candidate_duration=safe_float(candidate.get("duration")),
+        if (
+            candidate
+            and (advisory != "Explicit" or candidate.get("advisory") == "Explicit")
+            and recording_identity_matches(
+                artist,
+                title,
+                str(candidate.get("artist") or ""),
+                str(candidate.get("title") or ""),
+                expected_duration=duration,
+                candidate_duration=safe_float(candidate.get("duration")),
+            )
         ):
             return candidate
     results = search_itunes(artist=artist, term=title, entity="song")
 
     candidates: dict[str, tuple[float, dict[str, object]]] = {}
     for result in results:
+        if (
+            advisory == "Explicit"
+            and str(result.get("trackExplicitness") or "").lower() != "explicit"
+        ):
+            continue
         track_name = str(result.get("trackName") or "")
         result_artist = str(result.get("artistName") or "")
         if not recording_identity_matches(
@@ -275,65 +285,89 @@ def _score_itunes_album(
 
 @coalesce_lookup
 def fetch_itunes_album_details(
-    artist: str, album: str, expected_track_count: int | None = None
+    artist: str,
+    album: str,
+    expected_track_count: int | None = None,
+    collection_id: str | None = None,
 ) -> dict[str, object] | None:
     """
     Fetch album details and index its recordings by title and disc position.
     """
-    results = search_itunes(artist=artist, term=album, entity="album")
-    if not results:
-        return None
+    if collection_id and collection_id.isdecimal():
+        best_album: dict[str, object] = {"collectionId": collection_id}
+    else:
+        results = search_itunes(artist=artist, term=album, entity="album")
+        if not results:
+            return None
 
-    normalized_target = normalize_str(album)
-    matching_albums: list[dict[str, object]] = []
+        normalized_target = normalize_str(album)
+        matching_albums: list[dict[str, object]] = []
 
-    for result in results:
-        collection_name = str(result.get("collectionName", ""))
-        candidate_artist = str(result.get("artistName", ""))
-        if (
-            score_artist_title_match(artist, album, candidate_artist, collection_name)
-            <= 0.0
-        ):
-            continue
-        normalized_name = normalize_str(collection_name)
-        if (
-            normalized_name == normalized_target
-            or fuzz.token_set_ratio(normalized_target, normalized_name)
-            >= get_config().album_token_match_threshold
-        ):
-            matching_albums.append(result)
+        for result in results:
+            collection_name = str(result.get("collectionName", ""))
+            candidate_artist = str(result.get("artistName", ""))
+            if (
+                score_artist_title_match(
+                    artist, album, candidate_artist, collection_name
+                )
+                <= 0.0
+            ):
+                continue
+            normalized_name = normalize_str(collection_name)
+            if (
+                normalized_name == normalized_target
+                or fuzz.token_set_ratio(normalized_target, normalized_name)
+                >= get_config().album_token_match_threshold
+            ):
+                matching_albums.append(result)
 
-    if not matching_albums:
-        return None
+        if not matching_albums:
+            return None
 
-    ranked_albums = sorted(
-        (
+        ranked_albums = sorted(
             (
-                _score_itunes_album(
-                    candidate, artist, album, normalized_target, expected_track_count
-                ),
-                candidate,
-            )
-            for candidate in {
-                str(candidate.get("collectionId")): candidate
-                for candidate in matching_albums
-            }.values()
-        ),
-        key=lambda ranked: ranked[0],
-        reverse=True,
-    )
-    if len(ranked_albums) > 1 and ranked_albums[0][0] == ranked_albums[1][0]:
-        LOG.detail(f"Ambiguous iTunes album for {escape(artist)} - {escape(album)}")
-        return None
-    best_album = ranked_albums[0][1]
+                (
+                    _score_itunes_album(
+                        candidate,
+                        artist,
+                        album,
+                        normalized_target,
+                        expected_track_count,
+                    ),
+                    candidate,
+                )
+                for candidate in {
+                    str(candidate.get("collectionId")): candidate
+                    for candidate in matching_albums
+                }.values()
+            ),
+            key=lambda ranked: ranked[0],
+            reverse=True,
+        )
+        if len(ranked_albums) > 1 and ranked_albums[0][0] == ranked_albums[1][0]:
+            LOG.detail(f"Ambiguous iTunes album for {escape(artist)} - {escape(album)}")
+            return None
+        best_album = ranked_albums[0][1]
 
-    collection_id = best_album.get("collectionId")
-    if not collection_id:
+    chosen_collection_id = best_album.get("collectionId")
+    if not chosen_collection_id:
         return None
 
-    cache_key = f"itunes_album_lookup:v6:{collection_id}"
+    cache_key = f"itunes_album_lookup:v6:{chosen_collection_id}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
+        positions = cached.get("tracks_by_disc_and_position")
+        artists = set()
+        if isinstance(positions, dict):
+            artists = {
+                track["artist"].strip()
+                for track in positions.values()
+                if isinstance(track, dict)
+                and isinstance(track.get("artist"), str)
+                and track["artist"].strip()
+            }
+        if "album_artist" not in cached and len(artists) == 1:
+            return {**cached, "album_artist": next(iter(artists))}
         return cached
     if cached == "":
         return None
@@ -341,7 +375,7 @@ def fetch_itunes_album_details(
     try:
         url = "https://itunes.apple.com/lookup"
         params: dict[str, str | int] = {
-            "id": str(collection_id),
+            "id": str(chosen_collection_id),
             "entity": "song",
             "limit": 200,
         }
@@ -351,12 +385,24 @@ def fetch_itunes_album_details(
         raw_items = require_api_records(
             itunes_payload.get("results"), "iTunes lookup results"
         )
+        collection = next(
+            (
+                item
+                for item in raw_items
+                if item.get("wrapperType") == "collection"
+                and str(item.get("collectionId")) == str(chosen_collection_id)
+            ),
+            None,
+        )
+        if collection is not None:
+            best_album = {**best_album, **collection}
 
         tracks_by_disc_and_position: dict[tuple[int, int], dict[str, object]] = {}
         tracks_by_title: dict[str, dict[str, object]] = {}
         repeated_titles: set[str] = set()
         album_meta: dict[str, object] = {
-            "itunes_collectionid": str(collection_id),
+            "album_artist": best_album.get("artistName"),
+            "itunes_collectionid": str(chosen_collection_id),
             "itunes_artistid": str(best_album.get("artistId"))
             if best_album.get("artistId")
             else None,
@@ -374,7 +420,7 @@ def fetch_itunes_album_details(
             disc_number = safe_int(track_entry.get("discNumber")) or 1
             track_title = str(track_entry.get("trackName", ""))
             track_metadata = _parse_itunes_track(track_entry)
-            track_metadata["itunes_collectionid"] = str(collection_id)
+            track_metadata["itunes_collectionid"] = str(chosen_collection_id)
             track_metadata["track_number"] = track_number
             track_metadata["disc_number"] = disc_number
             if track_number is not None:
@@ -391,6 +437,6 @@ def fetch_itunes_album_details(
 
         set_cached_api(cache_key, album_meta)
         return album_meta
-    except (httpx.HTTPError, OSError) as error:
-        LOG.debug(f"iTunes album lookup failed for ID {collection_id}: {error}")
+    except API_RESPONSE_ERRORS as error:
+        LOG.debug(f"iTunes album lookup failed for ID {chosen_collection_id}: {error}")
         return None

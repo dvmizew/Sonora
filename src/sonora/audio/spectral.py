@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
-import scipy.signal
 import soundfile
 from numpy.typing import NDArray
 
@@ -20,7 +19,7 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
 
     try:
         sample_rate: int = 44100
-        audio_mono: NDArray[np.float32] | None = None
+        audio_data: NDArray[np.float32] | None = None
 
         # Partial read: seek to active middle section (30% in) to avoid silent/spoken intros
         try:
@@ -44,27 +43,34 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
                         frames=read_frames, dtype="float32", always_2d=True
                     ),
                 )
-                if raw_samples.shape[1] > 1:
-                    audio_mono = np.mean(raw_samples, axis=1)
-                else:
-                    audio_mono = raw_samples[:, 0]
+                audio_data = raw_samples
         except (soundfile.LibsndfileError, OSError):
-            audio_mono = None
+            audio_data = None
 
-        if audio_mono is None:
-            loaded_audio = load_audio(
-                file_path, mono=True, max_seconds=20.0, offset_seconds=30.0
-            )
+        if audio_data is None:
+            loaded_audio = load_audio(file_path, max_seconds=20.0, offset_seconds=30.0)
+            if loaded_audio is not None and len(loaded_audio[0]) < loaded_audio[1] * 5:
+                loaded_audio = load_audio(
+                    file_path, max_seconds=20.0, offset_seconds=0.0
+                )
             if loaded_audio is None:
                 return False, 0.0, None
-            audio_mono, sample_rate = loaded_audio
+            audio_data, sample_rate = loaded_audio
 
-        if sample_rate < 32000 or len(audio_mono) < sample_rate * 5:
+        if sample_rate < 32000 or len(audio_data) < sample_rate * 5:
             return False, 0.0, None
 
-        frequency_axis, _, spectrogram_matrix = scipy.signal.spectrogram(
-            audio_mono, fs=sample_rate, nperseg=2048, noverlap=1024
-        )
+        import scipy.signal
+
+        channels = audio_data[:, None] if audio_data.ndim == 1 else audio_data
+        spectra = [
+            scipy.signal.spectrogram(
+                channels[:, channel], fs=sample_rate, nperseg=2048, noverlap=1024
+            )
+            for channel in range(channels.shape[1])
+        ]
+        frequency_axis = spectra[0][0]
+        spectrogram_matrix = np.mean([spectrum[2] for spectrum in spectra], axis=0)
 
         # 95th percentile power across time slices captures high-frequency transient peaks (hi-hats, vocal air)
         peak_spectrum_power = np.percentile(spectrogram_matrix, 95, axis=1)

@@ -92,8 +92,26 @@ class TestUtilityFileContracts(IsolatedTestCase):
             [target / "cover.jpg"],
         )
         self.assertTrue(cover.exists())
-        with patch("shutil.move", side_effect=PermissionError("destination locked")):
+        with patch.object(
+            sidecars,
+            "safe_case_rename",
+            side_effect=PermissionError("destination locked"),
+        ):
             self.assertEqual(sidecars.relocate_companion_artwork(source, target), [])
+        target_cover = target / "cover.jpg"
+        path_exists = Path.exists
+
+        def create_destination(path: Path) -> bool:
+            if path == target_cover and not path_exists(path):
+                path.write_bytes(b"existing artwork")
+                return False
+            return path_exists(path)
+
+        with patch.object(Path, "exists", create_destination):
+            self.assertEqual(sidecars.relocate_companion_artwork(source, target), [])
+        self.assertEqual(cover.read_bytes(), b"artwork")
+        self.assertEqual(target_cover.read_bytes(), b"existing artwork")
+        target_cover.unlink()
         self.assertEqual(
             sidecars.relocate_companion_artwork(source, target),
             [target / "cover.jpg"],

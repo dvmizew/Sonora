@@ -110,9 +110,6 @@ def clean_unicode_punct(text: str | None) -> str:
     return normalize_legacy_diacritics(cleaned)
 
 
-_COLLAPSE_SPACES_PATTERN = re.compile(r"\s+")
-
-
 @lru_cache(maxsize=8192)
 def clean_disambiguation(name: str | None) -> str:
     """
@@ -121,8 +118,7 @@ def clean_disambiguation(name: str | None) -> str:
     """
     if not name:
         return ""
-    cleaned = get_disambiguation_pattern().sub("", str(name)).strip()
-    return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned)
+    return " ".join(get_disambiguation_pattern().sub("", str(name)).split())
 
 
 def count_unicode_accents(text: str) -> int:
@@ -185,13 +181,8 @@ def normalize_str(text: str | None) -> str:
         return ""
     fixed_text = ftfy.fix_text(str(text)).replace("$", "s").replace("_", " ")
     ascii_text = anyascii.anyascii(fixed_text)
-    cleaned_text = "".join(
-        char
-        for char in unicodedata.normalize("NFD", ascii_text.lower())
-        if unicodedata.category(char) != "Mn"
-    )
-    cleaned_text = _NON_WORD_SPACES_PATTERN.sub(" ", cleaned_text)
-    return _COLLAPSE_SPACES_PATTERN.sub(" ", cleaned_text).strip()
+    cleaned_text = _NON_WORD_SPACES_PATTERN.sub(" ", ascii_text.lower())
+    return " ".join(cleaned_text.split())
 
 
 def normalize_advisory(value: str | None) -> str | None:
@@ -365,7 +356,7 @@ def sanitize_name(name: str | None) -> str:
         return "Unknown"
     fixed_text = ftfy.fix_text(str(name)).replace("/", "_").replace("\\", "_")
     sanitized = sanitize_filename(fixed_text, replacement_text="")
-    sanitized = re.sub(r"\s+", " ", sanitized).strip().rstrip(".")
+    sanitized = " ".join(sanitized.split()).rstrip(".")
     return sanitized or "Unknown"
 
 

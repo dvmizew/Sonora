@@ -4,10 +4,71 @@ from unittest.mock import patch
 from sonora.audio import metadata
 from sonora.core.models import TrackInfo
 from sonora.modules import tagger
+from sonora.modules.matching import _recording_matches_track_identity
 from tests.support import IsolatedTestCase
 
 
 class TestVerifiedAlbumLayout(IsolatedTestCase):
+    def test_album_layout_checks_expected_position_before_scanning_candidates(
+        self,
+    ) -> None:
+        files = [Path(f"{index}.flac") for index in range(1, 4)]
+        tracks: list[TrackInfo | None] = [
+            TrackInfo(
+                path,
+                artist="Performer",
+                title=f"Song {index}",
+                track_number=index,
+            )
+            for index, path in enumerate(files, 1)
+        ]
+        release = {
+            "tracks_by_disc_and_position": {
+                (1, index): {"artist": "Performer", "title": f"Song {index}"}
+                for index in range(1, 4)
+            }
+        }
+
+        with patch(
+            "sonora.modules.tagger._recording_matches_track_identity",
+            wraps=_recording_matches_track_identity,
+        ) as identity_match:
+            self.assertTrue(
+                tagger._release_matches_album_tracks(release, files, tracks)
+            )
+
+        self.assertEqual(identity_match.call_count, len(files))
+
+    def test_verified_itunes_album_artist_repairs_album_credit_only(self) -> None:
+        for verified, expected in (
+            (False, "4 226"),
+            (True, "4 226 & RAVA"),
+        ):
+            with self.subTest(verified=verified):
+                track = TrackInfo(
+                    Path("01 - Song.flac"),
+                    artist="4 226",
+                    album_artist="Old Artist",
+                    title="Song",
+                    album="Album",
+                )
+                tagger._apply_album_metadata(
+                    track,
+                    track.file_path,
+                    True,
+                    album_context=tagger._AlbumMetadataContext(
+                        itunes_details={"album_artist": "4 226 & RAVA"},
+                        itunes_layout_verified=verified,
+                        sample_artist="4 226",
+                    ),
+                )
+                self.assertEqual(track.album_artist, expected)
+                self.assertEqual(track.artist, "4 226")
+                self.assertEqual(
+                    track.metadata_sources.get("album_artist"),
+                    "iTunes" if verified else None,
+                )
+
     def test_complete_verified_edition_repairs_totals_without_guessing_folder_count(
         self,
     ) -> None:

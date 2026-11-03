@@ -375,6 +375,21 @@ class TestMusicBrainzCatalogContracts(IsolatedTestCase):
             with self.subTest(field=field):
                 self.assertEqual(details[field], value)
 
+    def test_malformed_optional_relationships_do_not_crash_recording_lookup(
+        self,
+    ) -> None:
+        recording = credited_recording()
+        recording["artist-relation-list"] = [{"type": "composer", "artist": None}]
+        recording["work-relation-list"] = [{"work": None}]
+        with patch.object(
+            service, "_call_musicbrainz", return_value={"recording": recording}
+        ):
+            details = service.fetch_musicbrainz_recording_details(MBID)
+        self.assertIsNotNone(details)
+        assert details is not None
+        self.assertIsNone(details["composer"])
+        self.assertIsNone(details["musicbrainz_workid"])
+
     def test_recording_empty_cached_and_invalid_requests(self) -> None:
         self.assertIsNone(service.fetch_musicbrainz_recording_details(""))
         with patch.object(

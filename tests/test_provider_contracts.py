@@ -1,4 +1,6 @@
+import socket
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -14,6 +16,32 @@ MBID = "11111111-2222-3333-4444-555555555555"
 
 
 class TestAcousticIdentityContracts(IsolatedTestCase):
+    def test_dns_failure_suspends_acoustid_lookups_for_the_run(self) -> None:
+        dns_error = socket.gaierror(socket.EAI_NONAME, "name not known")
+        failure = OSError("network request failed")
+        failure.__cause__ = dns_error
+        with (
+            patch.object(
+                fingerprint_service,
+                "_ACOUSTID_DNS_UNAVAILABLE",
+                threading.Event(),
+            ),
+            patch.object(
+                fingerprint_service, "fingerprint_audio_file", return_value=(10, "fp")
+            ),
+            patch.object(fingerprint_service, "get_cached_api", return_value=None),
+            patch.object(
+                fingerprint_service, "retry_network_call", side_effect=failure
+            ) as request,
+        ):
+            self.assertIsNone(
+                fingerprint_service.lookup_acoustid(Path("first.flac"), "fixture")
+            )
+            self.assertIsNone(
+                fingerprint_service.lookup_acoustid(Path("second.flac"), "fixture")
+            )
+        request.assert_called_once()
+
     def test_json_duration_precision_preserves_a_valid_acoustic_candidate(self) -> None:
         recording_path = self.test_directory / "recording.flac"
         recording_path.touch()

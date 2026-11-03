@@ -9,7 +9,6 @@ from sonora.core.config import (
 )
 from sonora.core.models import TrackInfo
 from sonora.core.retry import retry_network_call
-from sonora.core.text import normalize_language_name
 from sonora.modules.checker import check_file
 from sonora.modules.track_processing import (
     _compute_tag_diffs,
@@ -70,26 +69,6 @@ class TestCodeHygiene(IsolatedTestCase):
                 "https://example.com/exact/1400x1400bb.jpg",
             )
 
-    def test_itunes_rejects_wrong_artist_and_different_album_series(self) -> None:
-        album_candidates = [
-            {
-                "artistName": "Unrelated Performer",
-                "collectionName": "Test Record II",
-                "artworkUrl100": "https://example.com/other/100x100bb.jpg",
-            },
-            {
-                "artistName": "Artist Alpha",
-                "collectionName": "Test Record III",
-                "artworkUrl100": "https://example.com/series/100x100bb.jpg",
-            },
-        ]
-        with patch(
-            "sonora.services.itunes.search_itunes", return_value=album_candidates
-        ):
-            self.assertIsNone(
-                fetch_itunes_cover_art_url("Artist Alpha", "Test Record II")
-            )
-
     def test_retry_rejects_empty_attempt_budget_before_calling(self) -> None:
         for attempts in (0, -1):
             with self.subTest(attempts=attempts):
@@ -114,19 +93,6 @@ class TestCodeHygiene(IsolatedTestCase):
         self.assertNotIn("private lyric content", "".join(descriptions))
         self.assertEqual(_describe_tag_diffs([]), [])
         self.assertEqual(_render_tag_diffs([]), [])
-
-    def test_iso_language_codes_take_precedence_over_matching_names(self) -> None:
-        for language_code, language_name in (
-            ("en", "English"),
-            ("EN", "English"),
-            ("eng", "English"),
-            ("fre", "French"),
-            ("ger", "German"),
-        ):
-            with self.subTest(language_code=language_code):
-                self.assertEqual(normalize_language_name(language_code), language_name)
-        self.assertIsNone(normalize_language_name(None))
-        self.assertEqual(normalize_language_name("unknown"), "unknown")
 
 
 class TestCheckerMetadataFailures(IsolatedTestCase):

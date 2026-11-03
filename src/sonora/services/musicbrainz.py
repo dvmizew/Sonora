@@ -1,3 +1,4 @@
+import re
 import urllib.error
 from collections.abc import Callable
 from typing import Any, TypeVar
@@ -9,7 +10,12 @@ from rich.markup import escape
 
 from sonora import __version__
 from sonora.core.api_payloads import require_api_object, require_api_records
-from sonora.core.cache import get_cached_api, set_cached_api
+from sonora.core.cache import (
+    DEFAULT_API_TTL_SECONDS,
+    NEGATIVE_API_TTL_SECONDS,
+    get_cached_api,
+    set_cached_api,
+)
 from sonora.core.config import get_config
 from sonora.core.constants import RATE_LIMIT_MUSICBRAINZ
 from sonora.core.coordination import coalesce_lookup
@@ -285,66 +291,90 @@ def search_musicbrainz_release(
 
 
 @coalesce_lookup
-def fetch_track_mbid(artist: str, title: str) -> str | None:
+def fetch_track_mbid(artist: str, title: str, isrc: str | None = None) -> str | None:
     cleaned_title = clean_title(title)
-    cache_key = (
-        f"mb_recording_search:v1:{normalize_str(artist)}:{normalize_str(cleaned_title)}"
-    )
-    cached = get_cached_api(cache_key)
-    if cached == "":
-        return None
-    try:
-        if cached is None:
-            result = _call_musicbrainz(
-                musicbrainzngs.search_recordings,
-                artist=artist,
-                recording=cleaned_title,
-                limit=5,
-            )
-            payload = require_api_object(
-                result, "MusicBrainz recording search response"
-            )
-            set_cached_api(
-                cache_key,
-                payload,
-                expire_seconds=1800 if not payload.get("recording-list") else 2419200,
-            )
-        else:
-            payload = require_api_object(cached, "Cached MusicBrainz recording search")
-        scores: dict[str, float] = {}
-        for recording in require_api_records(
-            payload.get("recording-list", []), "MusicBrainz recordings"
-        ):
-            credits = recording.get("artist-credit", [])
-            recording_artist = (
-                "".join(
-                    str(credit.get("artist", {}).get("name", ""))
-                    + str(credit.get("joinphrase", ""))
-                    if isinstance(credit, dict)
-                    else str(credit)
-                    for credit in credits
+    searches = []
+    if isrc and isrc.strip():
+        normalized_isrc = "".join(
+            isrc.strip().upper().removeprefix("ISRC").split()
+        ).replace("-", "")
+        if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{3}[0-9]{7}", normalized_isrc):
+            searches.append(
+                (
+                    f"mb_recording_isrc:v1:{normalized_isrc}",
+                    {"isrc": normalized_isrc},
                 )
-                if isinstance(credits, list)
-                else ""
             )
-            score = score_artist_title_match(
-                artist,
-                cleaned_title,
-                recording_artist,
-                str(recording.get("title") or ""),
+    searches.append(
+        (
+            f"mb_recording_search:v1:{normalize_str(artist)}:{normalize_str(cleaned_title)}",
+            {"artist": artist, "recording": cleaned_title},
+        )
+    )
+    try:
+        for cache_key, query in searches:
+            cached = get_cached_api(cache_key)
+            if cached == "":
+                continue
+            if cached is None:
+                result = _call_musicbrainz(
+                    musicbrainzngs.search_recordings, **query, limit=5
+                )
+                payload = require_api_object(
+                    result, "MusicBrainz recording search response"
+                )
+                set_cached_api(
+                    cache_key,
+                    payload,
+                    expire_seconds=NEGATIVE_API_TTL_SECONDS
+                    if not payload.get("recording-list")
+                    else DEFAULT_API_TTL_SECONDS,
+                )
+            else:
+                payload = require_api_object(
+                    cached, "Cached MusicBrainz recording search"
+                )
+            records = require_api_records(
+                payload.get("recording-list", []), "MusicBrainz recordings"
             )
-            recording_id = str(recording.get("id") or "")
-            if score > 0 and is_valid_uuid(recording_id):
-                scores[recording_id] = max(score, scores.get(recording_id, 0))
-        ranked = sorted(scores, key=scores.__getitem__, reverse=True)
-        if not ranked:
-            return None
-        if len(ranked) > 1 and scores[ranked[0]] == scores[ranked[1]]:
-            LOG.detail(
-                f"Ambiguous MusicBrainz recording for {escape(artist)} - {escape(title)}; identity unchanged"
-            )
-            return None
-        return ranked[0]
+            if not records:
+                continue
+
+            scores: dict[str, float] = {}
+            for recording in records:
+                credits = recording.get("artist-credit", [])
+                recording_artist = (
+                    "".join(
+                        str(credit.get("artist", {}).get("name", ""))
+                        + str(credit.get("joinphrase", ""))
+                        if isinstance(credit, dict)
+                        else str(credit)
+                        for credit in credits
+                    )
+                    if isinstance(credits, list)
+                    else ""
+                )
+                score = score_artist_title_match(
+                    artist,
+                    cleaned_title,
+                    recording_artist,
+                    str(recording.get("title") or ""),
+                )
+                recording_id = str(recording.get("id") or "")
+                if score > 0 and is_valid_uuid(recording_id):
+                    scores[recording_id] = max(score, scores.get(recording_id, 0))
+            ranked = sorted(scores, key=scores.__getitem__, reverse=True)
+            if not ranked:
+                if query.get("isrc"):
+                    return None
+                continue
+            if len(ranked) > 1 and scores[ranked[0]] == scores[ranked[1]]:
+                LOG.detail(
+                    f"Ambiguous MusicBrainz recording for {escape(artist)} - {escape(title)}; identity unchanged"
+                )
+                return None
+            return ranked[0]
+        return None
     except (
         MusicBrainzError,
         OSError,
@@ -392,7 +422,8 @@ def _parse_recording_credits(recording: dict[str, Any]) -> dict[str, object]:
     )
     for relationship in artist_rels:
         relationship_type = str(relationship.get("type", "")).lower()
-        artist_name = relationship.get("artist", {}).get("name")
+        artist = relationship.get("artist")
+        artist_name = artist.get("name") if isinstance(artist, dict) else None
         if not artist_name:
             continue
         if relationship_type in ("composer", "writer"):
@@ -410,7 +441,8 @@ def _parse_recording_credits(recording: dict[str, Any]) -> dict[str, object]:
     )
     work_id = None
     if work_rels:
-        work_id = work_rels[0].get("work", {}).get("id")
+        work = work_rels[0].get("work")
+        work_id = work.get("id") if isinstance(work, dict) else None
 
     return {
         "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
@@ -426,8 +458,8 @@ def fetch_musicbrainz_recording_details(
     recording_mbid: str,
 ) -> dict[str, object] | None:
     """
-    Fetch comprehensive recording credits and relationships from MusicBrainz
-    including composers, lyricists, producers, remixers, and ISRCs.
+    Fetch recording credits and relationships from MusicBrainz, including
+    composers, lyricists, producers, remixers, and ISRCs.
     """
     if not recording_mbid or not is_valid_uuid(recording_mbid):
         return None
@@ -609,7 +641,7 @@ def fetch_musicbrainz_release_details(
     release_mbid: str,
 ) -> dict[str, object] | None:
     """
-    Fetch comprehensive release metadata from MusicBrainz including barcode,
+    Fetch release metadata from MusicBrainz, including barcode,
     label, catalog number, media format, country, language, and release group.
     """
     if not release_mbid or not is_valid_uuid(release_mbid):

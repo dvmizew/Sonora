@@ -425,6 +425,21 @@ class TestMetadataContracts(IsolatedTestCase):
 
 
 class TestAdvisoryPersistence(AudioRegressionTestCase):
+    def test_mp4_advisory_and_codec_share_one_mutagen_read(self) -> None:
+        source = self.audio("source.wav")
+        path = self.root / "recording.m4a"
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(source), "-c:a", "aac", str(path)],
+            check=True,
+            capture_output=True,
+        )
+        metadata.clear_metadata_cache(path)
+
+        with patch.object(metadata, "MP4", wraps=MP4) as open_mp4:
+            metadata.read_track_metadata(path)
+
+        open_mp4.assert_called_once_with(path)
+
     def test_lyrics_only_write_preserves_every_other_raw_tag(self) -> None:
         path = self.audio("lyrics.flac")
         with taglib.File(str(path)) as recording:

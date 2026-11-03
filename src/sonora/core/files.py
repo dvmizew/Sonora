@@ -1,4 +1,3 @@
-import errno
 import os
 import shutil
 import tempfile
@@ -71,9 +70,7 @@ def move_file_exclusively(source: Path, destination: Path) -> None:
     """Publish a file without overwriting an existing destination, even across devices."""
     try:
         os.link(source, destination)
-    except OSError as error:
-        if error.errno != errno.EXDEV:
-            raise
+    except OSError:
         with destination.open("xb") as output:
             try:
                 with source.open("rb") as audio_input:

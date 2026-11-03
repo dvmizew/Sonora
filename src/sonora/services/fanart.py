@@ -3,13 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import is_valid_uuid, safe_int
 
@@ -55,7 +53,7 @@ def _extract_image_urls(raw_items: Any) -> list[str]:
 
 
 def download_fanart_image_bytes(url: str | None) -> bytes | None:
-    """Download image payload from Fanart.tv with rate limiting and robust error handling."""
+    """Download an image from Fanart.tv while respecting its rate limit."""
     if not url:
         return None
 
@@ -63,7 +61,7 @@ def download_fanart_image_bytes(url: str | None) -> bytes | None:
         response = SESSION.get(url, timeout=12)
         if response.status_code == 200:
             return response.content
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Failed to download fanart image from {url}: {error}")
     return None
 
@@ -125,7 +123,7 @@ def _fetch_artwork_urls(
             cache_key, {field: list(values) for field, values in urls.items()}
         )
         return urls
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Fanart.tv {kind} fetch failed for {identifier}: {error}")
         return None
 

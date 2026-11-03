@@ -217,6 +217,22 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         self.assertEqual(artist_resolution.resolve_artist_name(" "), "Unknown Artist")
         self.assertEqual(artist_resolution.resolve_artist_name("!!!"), "!!!")
 
+    def test_cached_allcaps_artist_names_skip_provider_lookups(self) -> None:
+        for name in ("RAVA", "BLANCO", "ELIO"):
+            with (
+                self.subTest(artist=name),
+                patch.object(artist_resolution, "get_cached_api", return_value=name),
+                patch.object(
+                    musicbrainz, "search_musicbrainz_artists", return_value=[]
+                ) as search,
+                patch.object(
+                    SESSION, "get", return_value=httpx.Response(404)
+                ) as request,
+            ):
+                self.assertEqual(artist_resolution.resolve_artist_name(name), name)
+                search.assert_not_called()
+                request.assert_not_called()
+
     def test_registered_groups_and_featured_subtokens_are_preserved(self) -> None:
         policy = SonoraConfig(known_group_artists=frozenset({"Alpha & Beta"}))
         with patch("sonora.core.artists.get_config", return_value=policy):

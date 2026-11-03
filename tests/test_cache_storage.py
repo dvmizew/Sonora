@@ -1,23 +1,80 @@
 import io
 import sqlite3
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 import msgpack
+from filelock import FileLock
 
+from sonora.core import cache as cache_module
+from sonora.core import coordination
 from sonora.core.cache import (
     get_api_cache_dir,
     get_cache,
+    get_cache_dir,
     get_cached_api,
     set_cached_api,
 )
 from sonora.core.cache_storage import CacheDecodeError, MetadataDisk
+from sonora.core.coordination import coalesce_lookup
 from tests.support import IsolatedTestCase
 
 
 class TestMetadataCacheStorage(IsolatedTestCase):
+    def test_lookup_lock_files_use_a_bounded_set_of_shards(self) -> None:
+        @coordination.coalesce_lookup
+        def lookup(key: str) -> str:
+            return key
+
+        with patch.object(coordination, "_LOOKUP_LOCK_SHARDS", 4):
+            for index in range(32):
+                self.assertEqual(lookup(str(index)), str(index))
+
+        lock_files = list((get_cache_dir() / "coordination" / "lookups").glob("*.lock"))
+        self.assertLessEqual(len(lock_files), 4)
+
+    def test_coalesced_worker_lookup_reuses_one_cache_session(self) -> None:
+        @coalesce_lookup
+        def lookup(key: str) -> str:
+            value = get_cached_api(key)
+            if value is None:
+                set_cached_api(key, "cached")
+            return str(get_cached_api(key))
+
+        with (
+            patch.object(
+                cache_module,
+                "_open_api_cache",
+                wraps=cache_module._open_api_cache,
+            ) as open_cache,
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            result = executor.submit(lookup, "worker-session").result()
+
+        self.assertEqual(result, "cached")
+        open_cache.assert_called_once_with(get_api_cache_dir())
+
+    def test_nested_lookups_do_not_reacquire_the_same_shard_lock(self) -> None:
+        @coalesce_lookup
+        def inner_lookup() -> str:
+            return "complete"
+
+        @coalesce_lookup
+        def outer_lookup() -> str:
+            return inner_lookup()
+
+        def short_lock(path: str, timeout: float = 180) -> object:
+            return FileLock(path, timeout=0.05)
+
+        with (
+            patch.object(coordination, "_LOOKUP_LOCK_SHARDS", 1),
+            patch("sonora.core.coordination.FileLock", side_effect=short_lock),
+        ):
+            self.assertEqual(outer_lookup(), "complete")
+
     def test_catalog_indexes_and_artwork_types_survive_reopening(self) -> None:
         from sonora.core.cache import close_cache
 

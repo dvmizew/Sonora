@@ -6,6 +6,7 @@ import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import diskcache
@@ -72,10 +73,21 @@ class TestDiskCache(IsolatedTestCase):
         )
 
     @patch("sonora.core.cache.get_cache")
-    def test_set_cached_api_none_value(self, mock_get_cache: MagicMock) -> None:
-        set_cached_api("key_none", None)
+    def test_confirmed_misses_last_a_day_without_extending_explicit_expiry(
+        self, mock_get_cache: MagicMock
+    ) -> None:
+        values: tuple[Any, ...] = (None, "", {}, [], {"results": []})
+        for value in values:
+            with self.subTest(value=value):
+                mock_get_cache.return_value.set.reset_mock()
+                set_cached_api("missing", value)
+                mock_get_cache.return_value.set.assert_called_once_with(
+                    "missing", "" if value is None else value, expire=86400
+                )
+        mock_get_cache.return_value.set.reset_mock()
+        set_cached_api("missing", None, expire_seconds=60)
         mock_get_cache.return_value.set.assert_called_once_with(
-            "key_none", "", expire=1800
+            "missing", "", expire=60
         )
 
     @patch("sonora.core.cache.get_cache")

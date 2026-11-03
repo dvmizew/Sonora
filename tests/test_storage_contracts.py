@@ -31,17 +31,20 @@ from sonora.core.state import LibraryStateVault
 from tests.support import IsolatedTestCase
 
 
-def _worker_cache_session(fail: bool = False) -> diskcache.Cache:
+def _worker_cache_session(
+    fail: bool = False,
+) -> tuple[diskcache.Cache, sqlite3.Connection]:
     with api_cache_session():
         owned_cache = get_cache()
         assert owned_cache is not None
+        owned_connection = owned_cache._con
         with api_cache_session():
             assert get_cache() is owned_cache
             set_cached_api("worker-session", {"title": "Recording"})
         if fail:
             raise OSError("worker failure")
     assert get_cache() is None
-    return owned_cache
+    return owned_cache, owned_connection
 
 
 def _close_and_remove_api_directory(api_directory: Path) -> None:
@@ -131,6 +134,34 @@ class TestAtomicFileContracts(IsolatedTestCase):
         self.assertFalse(source.exists())
         self.assertEqual(destination.read_bytes(), b"complete recording")
         self.assertEqual(destination.stat().st_mtime_ns, original_mtime)
+
+    def test_move_falls_back_when_filesystem_rejects_hard_links(self) -> None:
+        source = self.test_directory / "source.flac"
+        source.write_bytes(b"complete recording")
+        destination = self.test_directory / "destination.flac"
+        with patch(
+            "sonora.core.files.os.link",
+            side_effect=OSError(errno.EPERM, "hard links unsupported"),
+        ):
+            move_file_exclusively(source, destination)
+        self.assertFalse(source.exists())
+        self.assertEqual(destination.read_bytes(), b"complete recording")
+
+    def test_hard_link_fallback_refuses_existing_destination(self) -> None:
+        source = self.test_directory / "source.flac"
+        destination = self.test_directory / "destination.flac"
+        source.write_bytes(b"source recording")
+        destination.write_bytes(b"existing recording")
+        with (
+            patch(
+                "sonora.core.files.os.link",
+                side_effect=OSError(errno.EPERM, "hard links unsupported"),
+            ),
+            self.assertRaises(FileExistsError),
+        ):
+            move_file_exclusively(source, destination)
+        self.assertEqual(source.read_bytes(), b"source recording")
+        self.assertEqual(destination.read_bytes(), b"existing recording")
 
     def test_failed_cross_device_copy_removes_partial_destination(self) -> None:
         source = self.test_directory / "source.flac"
@@ -414,9 +445,10 @@ class TestLibraryStateFailureContracts(IsolatedTestCase):
 
 
 class TestWorkerCacheLifecycle(IsolatedTestCase):
-    def test_worker_closes_owned_cache_and_preserves_main_cache(self) -> None:
+    def test_worker_closes_owned_connection_and_preserves_main_connection(self) -> None:
         shared_cache = get_cache()
         assert shared_cache is not None
+        main_connection = shared_cache._con
         original_close = diskcache.Cache.close
         with (
             patch.object(
@@ -424,15 +456,19 @@ class TestWorkerCacheLifecycle(IsolatedTestCase):
             ) as close,
             ThreadPoolExecutor(max_workers=1) as executor,
         ):
-            owned_cache = executor.submit(_worker_cache_session).result()
-            self.assertIsNot(owned_cache, shared_cache)
+            owned_cache, owned_connection = executor.submit(
+                _worker_cache_session
+            ).result()
+            self.assertIs(owned_cache, shared_cache)
+            self.assertIsNot(owned_connection, main_connection)
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed database"):
+                _ = owned_connection.in_transaction
             self.assertTrue(
                 any(call.args[0] is owned_cache for call in close.call_args_list)
             )
-            self.assertFalse(
-                any(call.args[0] is shared_cache for call in close.call_args_list)
-            )
             self.assertIs(get_cache(), shared_cache)
+            self.assertIs(shared_cache._con, main_connection)
+            self.assertEqual(main_connection.execute("SELECT 1").fetchone(), (1,))
             self.assertEqual(get_cached_api("worker-session"), {"title": "Recording"})
 
     def test_worker_exception_closes_session_and_allows_next_task(self) -> None:

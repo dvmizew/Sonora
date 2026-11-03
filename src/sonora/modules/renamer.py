@@ -27,7 +27,11 @@ from sonora.core.logger import (
 )
 from sonora.core.models import RenameReport, TrackInfo
 from sonora.core.playlists import update_local_playlists
-from sonora.core.sidecars import find_companion_lyrics, relocate_companion_lyrics
+from sonora.core.sidecars import (
+    find_companion_lyrics,
+    lyrics_identity_matches,
+    relocate_companion_lyrics,
+)
 from sonora.core.text import normalize_str, safe_int, sanitize_name
 from sonora.core.titles import clean_title, strip_corrupt_brackets
 
@@ -43,6 +47,8 @@ def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
     try:
         with lrc_path.open(encoding="utf-8", newline="") as file_handle:
             lines = file_handle.readlines()
+        if not lyrics_identity_matches("".join(lines), artist, title):
+            return False
 
         new_lines: list[str] = []
         identity_headers = {"ar": artist, "ti": title}

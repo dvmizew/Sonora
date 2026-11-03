@@ -1,14 +1,13 @@
 import urllib.parse
 from typing import Any
 
-import httpx
 from rich.markup import escape
 
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import normalize_str, safe_float, safe_int
 from sonora.core.titles import (
@@ -88,7 +87,7 @@ def fetch_deezer_cover_art_url(artist: str, album: str) -> str | None:
 
         set_cached_api(cache_key, best_cover_url)
         return best_cover_url
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Deezer cover art lookup failed for {artist} - {album}: {error}")
         return None
 
@@ -210,10 +209,8 @@ def fetch_deezer_album_details(
         tracks_page = require_api_object(
             album_deezer_payload.get("tracks", {}), "Deezer album tracks"
         )
-        tracks_deezer_payload = list(
-            require_api_records(
-                tracks_page.get("data", []), "Deezer album track records"
-            )
+        tracks_deezer_payload = require_api_records(
+            tracks_page.get("data", []), "Deezer album track records"
         )
         visited_pages: set[str] = set()
         while tracks_page.get("next"):
@@ -287,7 +284,7 @@ def fetch_deezer_album_details(
         }
         set_cached_api(cache_key, result)
         return result
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Deezer album details lookup failed for {artist} - {album}: {error}")
         return None
 
@@ -390,7 +387,7 @@ def fetch_deezer_track_by_isrc(
         result = _parse_deezer_track_payload(track_deezer_payload)
         set_cached_api(cache_key, result)
         return result
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Deezer track lookup by ISRC failed for {isrc}: {error}")
         return None
 
@@ -418,20 +415,30 @@ def fetch_deezer_track_details(
 
     query = f"{artist} {clean_track_title}"
     url = f"https://api.deezer.com/search/track?q={urllib.parse.quote(query)}"
+    search_cache_key = f"deezer_track_search:v1:{url}"
 
     try:
-        response = SESSION.get(url, timeout=6)
-        if response.status_code != 200:
-            if response.status_code == 404:
-                set_cached_api(cache_key, None)
-            return None
+        catalog_candidates = get_cached_api(search_cache_key)
+        if isinstance(catalog_candidates, list):
+            catalog_candidates = require_api_records(
+                catalog_candidates, "Deezer search results"
+            )
+        else:
+            response = SESSION.get(url, timeout=6)
+            if response.status_code != 200:
+                if response.status_code == 404:
+                    set_cached_api(cache_key, None)
+                return None
 
-        deezer_payload = require_api_object(response.json(), "Deezer search response")
-        if deezer_payload.get("error"):
-            return None
-        catalog_candidates = require_api_records(
-            deezer_payload.get("data"), "Deezer search results"
-        )
+            deezer_payload = require_api_object(
+                response.json(), "Deezer search response"
+            )
+            if deezer_payload.get("error"):
+                return None
+            catalog_candidates = require_api_records(
+                deezer_payload.get("data"), "Deezer search results"
+            )
+            set_cached_api(search_cache_key, catalog_candidates)
         if not catalog_candidates:
             set_cached_api(cache_key, None)
             return None
@@ -496,6 +503,6 @@ def fetch_deezer_track_details(
             return None
         set_cached_api(cache_key, result)
         return result
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Deezer track details lookup failed for {artist} - {title}: {error}")
         return None

@@ -212,7 +212,7 @@ class TestNetwork(IsolatedTestCase):
             fetch_genius_song_details("Artist", "Title", api_token="dummy_token")
         )
 
-    @patch("sonora.services.lyrics.syncedlyrics.search")
+    @patch("syncedlyrics.search")
     def test_lyrics_upstream_exception(self, mock_search: MagicMock) -> None:
         mock_search.side_effect = httpx.RemoteProtocolError(
             "Musixmatch connection dropped"

@@ -359,7 +359,9 @@ def rename(
         )
     else:
         LOG.warning(
-            f"Partially renamed {report.files_renamed}/{report.total_files} files before interruption."
+            f"Rename preview interrupted: {report.files_renamed}/{report.total_files} files would be renamed."
+            if dry_run
+            else f"Partially renamed {report.files_renamed}/{report.total_files} files before interruption."
         )
 
     renaming_summary_rows = [
@@ -375,12 +377,12 @@ def rename(
             "red" if report.failed_files else None,
         ),
         (
-            "Files Renamed on Disk",
+            "Files Would Rename" if dry_run else "Files Renamed on Disk",
             str(report.files_renamed),
             "green" if report.files_renamed > 0 else None,
         ),
         (
-            "Album Folders Renamed",
+            "Album Folders Would Rename" if dry_run else "Album Folders Renamed",
             str(report.folders_renamed),
             "green" if report.folders_renamed > 0 else None,
         ),
@@ -399,6 +401,7 @@ def rename(
                 "schema": "rename_report_v1",
                 "generator": "Sonora",
                 "aborted_by_user": interrupted,
+                "dry_run": dry_run,
                 "target_path": str(path.resolve()),
                 "summary": {
                     "total_scanned": report.total_files,
@@ -474,7 +477,9 @@ def organize(
         )
     else:
         LOG.warning(
-            f"Partially organized {organized_count} single tracks before interruption."
+            f"Organization preview interrupted: {organized_count} single tracks would be moved."
+            if dry_run
+            else f"Partially organized {organized_count} single tracks before interruption."
         )
 
     organization_summary_rows = [
@@ -500,6 +505,7 @@ def organize(
                 "schema": "organize_report_v1",
                 "generator": "Sonora",
                 "aborted_by_user": interrupted,
+                "dry_run": dry_run,
                 "source_path": str(path.resolve()),
                 "target_singles_path": str(destination_directory.resolve()),
                 "summary": {

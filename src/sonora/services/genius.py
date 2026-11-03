@@ -1,11 +1,9 @@
-import httpx
-
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.artists import extract_featured_artist_tokens
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION
 from sonora.core.logger import LOG
 from sonora.core.text import clean_disambiguation, normalize_str
 from sonora.core.titles import clean_title, score_artist_title_match
@@ -35,6 +33,10 @@ def score_genius_song_match(
         if candidate_album:
             if normalize_str(clean_title(album)) != normalize_str(
                 clean_title(candidate_album)
+            ) and (
+                structural_title
+                or normalize_str(clean_title(album))
+                != normalize_str(clean_title(title))
             ):
                 return 0.0
         elif structural_title:
@@ -185,7 +187,7 @@ def lookup_genius_song_details(
                 ).get("song"),
                 "Genius song",
             )
-        except (httpx.HTTPError, OSError) as error:
+        except API_RESPONSE_ERRORS as error:
             LOG.debug(f"Genius song lookup failed for {identifier}: {error}")
             return None
     returned_id = song_payload.get("id")
@@ -329,6 +331,6 @@ def fetch_genius_song_details(
         set_cached_api(cache_key, result)
         return result
 
-    except (httpx.HTTPError, OSError) as error:
+    except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Genius song details fetch failed for {artist} - {title}: {error}")
         return None

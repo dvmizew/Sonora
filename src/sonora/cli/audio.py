@@ -11,7 +11,6 @@ from rich.markup import escape
 from sonora.audio.bpm import calculate_bpm
 from sonora.audio.key import detect_key_details, key_to_camelot
 from sonora.audio.metadata import (
-    get_audio_duration,
     read_track_metadata,
     write_track_metadata,
 )
@@ -327,7 +326,6 @@ def _process_lyrics_file(
         file_details[audio_path] = details
     try:
         track_info = read_track_metadata(audio_path)
-        audio_duration = get_audio_duration(audio_path)
         lrc_path = audio_path.with_suffix(".lrc")
         previous_sidecar = lrc_path.read_bytes() if lrc_path.exists() else None
         conflicts: dict[str, str] = {}
@@ -339,7 +337,7 @@ def _process_lyrics_file(
             dry_run=True,
             isrc=track_info.isrc,
             album_name=track_info.album,
-            duration=audio_duration,
+            duration=track_info.duration,
             existing_lyrics=track_info.lyrics,
             conflicts=conflicts,
             musixmatch_token=musixmatch_token,

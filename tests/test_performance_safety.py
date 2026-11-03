@@ -235,6 +235,34 @@ class TestPerformanceSafety(IsolatedTestCase):
         self.assertEqual(original.artist, "Alpha")
         self.assertTrue(original.metadata_conflicts)
 
+    def test_forced_metadata_update_does_not_repeat_shazam_preflight(self) -> None:
+        track = TrackInfo(
+            Path("recording.flac"), artist="Unknown Artist", title="Track 01"
+        )
+        with (
+            patch.object(tagger, "_update_musicbrainz"),
+            patch.object(tagger, "_update_shazam") as shazam,
+            patch.object(tagger, "_update_acoustid"),
+            patch.object(tagger, "_update_itunes"),
+            patch.object(tagger, "_update_lastfm"),
+            patch.object(tagger, "_update_discogs"),
+            patch.object(tagger, "_update_deezer"),
+            patch.object(tagger, "_update_genius"),
+            patch.object(tagger, "_update_theaudiodb"),
+        ):
+            tagger._update_metadata(
+                track,
+                track.file_path,
+                None,
+                None,
+                None,
+                None,
+                force=True,
+                album_context=tagger._AlbumMetadataContext(),
+                shazam_attempted=True,
+            )
+        shazam.assert_not_called()
+
     def test_identical_threaded_lookups_make_one_provider_request(self) -> None:
         barrier = threading.Barrier(6)
         response = httpx.Response(
@@ -291,7 +319,7 @@ class TestPerformanceSafety(IsolatedTestCase):
             cache.set_cached_api(key, value)
         storage = cache.get_cache()
         assert storage is not None
-        for key, expected in (("miss", 1800), ("empty", 1800), ("success", 2419200)):
+        for key, expected in (("miss", 86400), ("empty", 86400), ("success", 2419200)):
             _, expiry = storage.get(key, expire_time=True)
             self.assertAlmostEqual(expiry - time.time(), expected, delta=2)
         self.assertIsNone(cache.get_cached_api("absent"))

@@ -123,13 +123,13 @@ def _get_tag(tags: dict[str, list[str]], *keys: str) -> str | None:
 
 
 def _read_advisory(
-    file_path: Path, tags: dict[str, list[str]]
+    file_path: Path, tags: dict[str, list[str]], mp4_audio: MP4 | None = None
 ) -> tuple[str | None, bool]:
     advisory = normalize_advisory(_get_tag(tags, *_TAG_SCHEMA["advisory"]))
     existing = {key: tags[key] for key in _TAG_SCHEMA["advisory"] if key in tags}
     if file_path.suffix.lower() in {".m4a", ".mp4"}:
         # TagLib's property map does not expose the native MP4 content-rating atom.
-        rating = MP4(file_path).get("rtng")
+        rating = (mp4_audio if mp4_audio is not None else MP4(file_path)).get("rtng")
         if rating is not None:
             advisory = "Explicit" if rating == [4] else None
         return advisory, bool(existing) or rating != ([4] if advisory else None)
@@ -146,7 +146,9 @@ def _write_mp4_advisory(file_path: Path, advisory: str | None) -> None:
     recording.save()
 
 
-def _read_audio_encoding(file_path: Path) -> tuple[bool, int | None]:
+def _read_audio_encoding(
+    file_path: Path, mp4_audio: MP4 | None = None
+) -> tuple[bool, int | None]:
     file_ext = file_path.suffix.lower()
     if file_ext in {".flac", ".wav", ".aiff", ".alac", ".ape", ".wv"}:
         is_lossless = True
@@ -154,7 +156,7 @@ def _read_audio_encoding(file_path: Path) -> tuple[bool, int | None]:
         is_lossless = False
     elif file_ext in {".m4a", ".mp4"}:
         try:
-            mp4_audio = MP4(file_path)
+            mp4_audio = mp4_audio if mp4_audio is not None else MP4(file_path)
             is_lossless = str(getattr(mp4_audio.info, "codec", "")).lower() == "alac"
         except (MutagenError, OSError):
             is_lossless = False
@@ -232,6 +234,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
     try:
         with taglib.File(str(file_path)) as song:
             tags = song.tags
+            mp4_audio = (
+                MP4(file_path) if file_path.suffix.lower() in {".m4a", ".mp4"} else None
+            )
 
             artist = _get_tag(tags, "ARTIST", "TPE1", "AUTHOR") or "Unknown Artist"
             title = _get_tag(tags, "TITLE", "TIT2") or "Unknown Title"
@@ -344,7 +349,9 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                 field: _get_tag(tags, *tag_keys)
                 for field, tag_keys in _TAG_SCHEMA.items()
             }
-            advisory, advisory_needs_normalization = _read_advisory(file_path, tags)
+            advisory, advisory_needs_normalization = _read_advisory(
+                file_path, tags, mp4_audio
+            )
             tidal_payload = None
             try:
                 value = _get_tag(tags, "TIDAL_DATA")
@@ -389,7 +396,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
                     mapped_fields["featured_artists"] = additional_features
             mapped_fields["advisory"] = advisory
 
-            is_lossless, bits_per_sample = _read_audio_encoding(file_path)
+            is_lossless, bits_per_sample = _read_audio_encoding(file_path, mp4_audio)
 
             track_info = TrackInfo(
                 file_path=file_path,

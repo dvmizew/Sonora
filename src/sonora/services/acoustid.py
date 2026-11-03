@@ -17,12 +17,14 @@ from sonora.core.constants import RATE_LIMIT_ACOUSTID
 from sonora.core.coordination import coalesce_lookup
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
-from sonora.core.retry import retry_network_call
+from sonora.core.retry import _dns_error, retry_network_call
 from sonora.core.text import is_valid_uuid, safe_float
 from sonora.core.titles import recording_identity_matches
 
 _ACOUSTID_CACHE: dict[tuple[str, int, int, int], tuple[float, str]] = {}
 _ACOUSTID_LOCK = threading.RLock()
+# shortcut: DNS failure disables AcoustID until exit; reset if Sonora becomes long-lived.
+_ACOUSTID_DNS_UNAVAILABLE = threading.Event()
 
 
 def _fingerprint_file_with_timeout(
@@ -136,7 +138,7 @@ def lookup_acoustid(
     Validates artist/title evidence, then ranks candidates by acoustic confidence.
     Returns the MBID string if found, otherwise None.
     """
-    if not api_key:
+    if not api_key or _ACOUSTID_DNS_UNAVAILABLE.is_set():
         return None
 
     try:
@@ -230,6 +232,15 @@ def lookup_acoustid(
         set_cached_api(cache_key, payload)
         return best_mbid
     except (AcoustidError, WebServiceError, OSError) as error:
+        if _dns_error(error) is not None:
+            with _ACOUSTID_LOCK:
+                first_failure = not _ACOUSTID_DNS_UNAVAILABLE.is_set()
+                _ACOUSTID_DNS_UNAVAILABLE.set()
+            if first_failure:
+                LOG.warning(
+                    "AcoustID lookups suspended for this run after DNS resolution failed"
+                )
+            return None
         LOG.warning(
             f"AcoustID identification unavailable for {escape(file_path.name)}: {escape(str(error))}"
         )

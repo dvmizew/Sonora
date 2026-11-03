@@ -252,6 +252,7 @@ class TestSonoraConfig(IsolatedTestCase):
 
     def test_normalize_language_name(self) -> None:
         self.assertEqual(normalize_language_name("en"), "English")
+        self.assertEqual(normalize_language_name("EN"), "English")
         self.assertEqual(normalize_language_name("eng"), "English")
         self.assertEqual(normalize_language_name("English"), "English")
         self.assertEqual(normalize_language_name("ro"), "Romanian")
@@ -260,6 +261,7 @@ class TestSonoraConfig(IsolatedTestCase):
         self.assertEqual(normalize_language_name("de"), "German")
         self.assertEqual(normalize_language_name("deu"), "German")
         self.assertEqual(normalize_language_name("ger"), "German")
+        self.assertEqual(normalize_language_name("fre"), "French")
         self.assertEqual(normalize_language_name("ja"), "Japanese")
         self.assertEqual(normalize_language_name("jpn"), "Japanese")
         self.assertIsNone(normalize_language_name(None))
@@ -269,6 +271,7 @@ class TestSonoraConfig(IsolatedTestCase):
             normalize_language_name("KlingonXYZ"),
             "KlingonXYZ",
         )
+        self.assertEqual(normalize_language_name("unknown"), "unknown")
 
     def test_normalize_script_name(self) -> None:
         self.assertEqual(normalize_script_name("Latn"), "Latin")

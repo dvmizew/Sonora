@@ -1,3 +1,4 @@
+import socket
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
@@ -64,6 +65,50 @@ class TestRetryTransportContracts(IsolatedTestCase):
         self.assertIs(raised.exception, error)
         self.assertEqual(send.call_count, 2)
         sleep.assert_called_once_with(0.25)
+
+    def test_dns_lookup_failures_are_not_retried(self) -> None:
+        for code in (socket.EAI_AGAIN, socket.EAI_NONAME):
+            with self.subTest(code=code):
+                dns_error = socket.gaierror(code, "DNS lookup failed")
+                error = httpx.ConnectError("connection failed")
+                error.__cause__ = dns_error
+                with (
+                    patch("sonora.core.retry._DNS_UNAVAILABLE_UNTIL", 0.0),
+                    patch(
+                        "httpx.HTTPTransport.handle_request", side_effect=error
+                    ) as send,
+                    patch("sonora.core.http.time.sleep") as sleep,
+                    RetryTransport() as transport,
+                    self.assertRaises(httpx.ConnectError) as raised,
+                ):
+                    transport.handle_request(
+                        httpx.Request("GET", "https://example.com")
+                    )
+                self.assertIs(raised.exception, error)
+                send.assert_called_once()
+                sleep.assert_not_called()
+        send.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_unknown_host_does_not_suspend_other_http_requests(self) -> None:
+        import socket
+
+        request = httpx.Request("GET", "https://example.com")
+        error = httpx.ConnectError("connection failed", request=request)
+        error.__cause__ = socket.gaierror(socket.EAI_NONAME, "Unknown host")
+        responses = [error, httpx.Response(200, request=request)]
+        with (
+            patch("sonora.core.retry._DNS_UNAVAILABLE_UNTIL", 0.0),
+            patch("httpx.HTTPTransport.handle_request", side_effect=responses) as send,
+            patch("sonora.core.http.time.sleep") as sleep,
+            RetryTransport(max_retries=1) as transport,
+        ):
+            with self.assertRaises(httpx.ConnectError):
+                transport.handle_request(request)
+            response = transport.handle_request(request)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(send.call_count, 2)
+            sleep.assert_not_called()
 
     def test_retry_dates_support_naive_utc_and_timezone_aware_deadlines(self) -> None:
         instant = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)

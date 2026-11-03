@@ -1,7 +1,6 @@
 import html
 import math
 import re
-import shutil
 import unicodedata
 from collections.abc import Sequence
 from functools import lru_cache
@@ -78,7 +77,7 @@ def relocate_companion_artwork(
         if source_art.is_file() and not target_art.exists():
             try:
                 if not dry_run:
-                    shutil.move(str(source_art), str(target_art))
+                    safe_case_rename(source_art, target_art)
                 relocated.append(target_art)
             except OSError as error:
                 LOG.debug(f"Failed to relocate companion artwork {source_art}: {error}")
@@ -165,7 +164,11 @@ def lyrics_identity_matches(
         return True
     for line in lyrics_text.splitlines():
         header_line = line.lstrip("\ufeff \t")
-        plain_title = _LYRICS_TITLE_HEADER_REGEX.fullmatch(header_line)
+        plain_title = (
+            None
+            if _LYRICS_TIMESTAMP_REGEX.match(header_line)
+            else _LYRICS_TITLE_HEADER_REGEX.fullmatch(header_line)
+        )
         if plain_title:
             header_line = f"[ti:{plain_title[1] or plain_title[2]}]"
         header_matches = list(_LRC_METADATA_HEADER_PATTERN.finditer(header_line))

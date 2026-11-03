@@ -194,6 +194,50 @@ class TestCancellationChains(IsolatedTestCase):
 
 
 class TestTaggingPoolCancellation(IsolatedTestCase):
+    def test_repeated_interrupt_during_shutdown_keeps_completed_tracks(self) -> None:
+        path = self.test_directory / "recording.flac"
+        path.touch()
+        recording = TrackInfo(path, artist="Alpha", title="Original Song")
+        original = ThreadPoolExecutor.shutdown
+        interrupted: set[bool] = set()
+
+        def shutdown(
+            executor: ThreadPoolExecutor,
+            wait: bool = True,
+            *,
+            cancel_futures: bool = False,
+        ) -> None:
+            original(executor, wait=wait, cancel_futures=cancel_futures)
+            if wait and cancel_futures not in interrupted:
+                interrupted.add(cancel_futures)
+                raise KeyboardInterrupt
+
+        with (
+            patch.object(
+                tagger,
+                "_resolve_album_metadata_context",
+                return_value=tagger._AlbumMetadataContext(),
+            ),
+            patch.object(tagger, "process_single_track", return_value=recording),
+            patch.object(
+                tagger,
+                "_finalize_album_assets_and_replaygain",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch.object(ThreadPoolExecutor, "shutdown", shutdown),
+            self.assertRaises(InterruptedOperationError) as stopped,
+        ):
+            tagger.tag_album_folder(
+                self.test_directory,
+                force=True,
+                dry_run=True,
+                max_threads=1,
+                fetch_itunes_art=False,
+                fetch_replaygain=False,
+            )
+        self.assertEqual(interrupted, {True, False})
+        self.assertEqual(stopped.exception.partial_result, [recording])
+
     def test_interrupt_cancels_all_worker_queues_before_joining_any_pool(self) -> None:
         path = self.test_directory / "recording.flac"
         path.touch()

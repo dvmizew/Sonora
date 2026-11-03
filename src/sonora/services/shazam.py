@@ -7,16 +7,6 @@ from pathlib import Path
 from stat import S_ISREG
 from typing import Any
 
-import aiohttp
-from shazamio import Shazam
-from shazamio.exceptions import (
-    BadContentType,
-    BadParseData,
-    BadResponseStatus,
-    FailedDecodeJson,
-)
-from shazamio_core import SignatureError
-
 from sonora.core.api_payloads import (
     require_api_object,
     require_api_records,
@@ -48,6 +38,16 @@ class ShazamTrackInfo:
 
 async def _recognize_async(file_path: Path) -> dict[str, Any] | None:
     """Execute asynchronous acoustic recognition against the Shazam API."""
+    import aiohttp
+    from shazamio import Shazam
+    from shazamio.exceptions import (
+        BadContentType,
+        BadParseData,
+        BadResponseStatus,
+        FailedDecodeJson,
+    )
+    from shazamio_core import SignatureError
+
     try:
         async with Shazam() as shazam_client:
             raw_result = await asyncio.wait_for(
@@ -90,6 +90,8 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
         return None
 
     cached = get_cached_api(cache_key)
+    if cached == "":
+        return None
     if isinstance(cached, dict):
         return ShazamTrackInfo(
             title=str(cached.get("title", "")),
@@ -111,6 +113,7 @@ def recognize_audio_track(file_path: Path) -> ShazamTrackInfo | None:
 
     track_payload = raw_payload.get("track")
     if track_payload is None:
+        set_cached_api(cache_key, "")
         return None
     track = require_api_object(track_payload, "Shazam track")
 

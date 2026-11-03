@@ -1,6 +1,8 @@
 import atexit
+import json
+import socket
+import threading
 import time
-from contextlib import nullcontext
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from random import SystemRandom
@@ -20,9 +22,16 @@ from sonora.core.constants import (
     RATE_LIMIT_THEAUDIODB,
     USER_AGENT,
 )
-from sonora.core.coordination import wait_for_provider
+from sonora.core.coordination import ProviderDeferredError, wait_for_provider
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
+from sonora.core.retry import (
+    _dns_error,
+    _dns_requests_suspended,
+    _suspend_dns_requests,
+)
+
+API_RESPONSE_ERRORS = (httpx.HTTPError, json.JSONDecodeError, OSError)
 
 _HOST_LIMITERS = {
     "itunes.apple.com": RateLimiter(RATE_LIMIT_ITUNES, provider="itunes.apple.com"),
@@ -78,56 +87,88 @@ class RetryTransport(httpx.HTTPTransport):
             raise ValueError("max_retries must be positive")
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
+        self._lrclib_lock = threading.Lock()
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host == "lrclib.net":
+            with self._lrclib_lock:
+                return self._handle_request(request)
+        return self._handle_request(request)
+
+    def _handle_request(self, request: httpx.Request) -> httpx.Response:
         limiter = _HOST_LIMITERS.get(request.url.host)
-        with (
-            limiter.lock
-            if limiter is not None and request.url.host == "lrclib.net"
-            else nullcontext()
-        ):
-            attempt = 0
-            while True:
-                try:
-                    if limiter is not None:
-                        interval = (
-                            RATE_LIMIT_DISCOGS_UNAUTHENTICATED
-                            if request.url.host == "api.discogs.com"
-                            and "Authorization" not in request.headers
-                            else None
+        http_retry_limit = (
+            min(self.max_retries, 2)
+            if request.url.host == "lrclib.net"
+            else self.max_retries
+        )
+        attempt = 0
+        while True:
+            if _dns_requests_suspended():
+                raise httpx.ConnectError(
+                    "DNS lookup temporarily suspended after a resolver failure",
+                    request=request,
+                )
+            try:
+                if limiter is not None:
+                    interval = (
+                        RATE_LIMIT_DISCOGS_UNAUTHENTICATED
+                        if request.url.host == "api.discogs.com"
+                        and "Authorization" not in request.headers
+                        else None
+                    )
+                    limiter.wait(interval)
+                    if _dns_requests_suspended():
+                        raise httpx.ConnectError(
+                            "DNS lookup temporarily suspended after a resolver failure",
+                            request=request,
                         )
-                        limiter.wait(interval)
-                    response = super().handle_request(request)
-                    if response.status_code in (429, 502, 503, 504):
-                        delay = _retry_delay(
-                            response.headers.get("Retry-After"),
-                            self.backoff_factor * (2**attempt),
-                        )
-                        if request.url.host == "lrclib.net":
-                            delay += SystemRandom().uniform(0.0, delay * 0.3)
-                        if limiter is not None and not limiter._disabled:
-                            wait_for_provider(request.url.host, 0, defer_seconds=delay)
-                        if delay > 60.0 or attempt >= self.max_retries - 1:
-                            return response
-                        response.close()
-                        LOG.debug(
-                            f"HTTP {response.status_code} for {request.url.host}. "
-                            f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
-                        )
-                        time.sleep(delay)
-                        attempt += 1
-                        continue
-                    return response
-                except (httpx.TransportError, OSError) as exc:
-                    if attempt >= self.max_retries - 1:
-                        raise
-                    delay = self.backoff_factor * (2**attempt)
+                response = super().handle_request(request)
+                if response.status_code in (429, 502, 503, 504):
+                    fallback_delay = (
+                        1.0
+                        if request.url.host == "lrclib.net"
+                        and response.status_code == 503
+                        else self.backoff_factor * (2**attempt)
+                    )
+                    delay = _retry_delay(
+                        response.headers.get("Retry-After"),
+                        fallback_delay,
+                    )
+                    if request.url.host == "lrclib.net":
+                        delay += SystemRandom().uniform(0.0, delay * 0.3)
+                    if limiter is not None and not limiter._disabled:
+                        wait_for_provider(request.url.host, 0, defer_seconds=delay)
+                    if delay > 60.0 or attempt >= http_retry_limit - 1:
+                        return response
+                    response.close()
                     LOG.debug(
-                        f"HTTP transport error ({type(exc).__name__}) for {request.url.host}. "
-                        f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
+                        f"HTTP {response.status_code} for {request.url.host}. "
+                        f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{http_retry_limit})..."
                     )
                     time.sleep(delay)
                     attempt += 1
+                    continue
+                return response
+            except ProviderDeferredError:
+                raise
+            except (httpx.TransportError, OSError) as exc:
+                dns_error = _dns_error(exc)
+                if dns_error is not None:
+                    if dns_error.errno == socket.EAI_AGAIN:
+                        _suspend_dns_requests()
+                    raise
+                if _dns_requests_suspended():
+                    raise
+                if attempt >= self.max_retries - 1:
+                    raise
+                delay = self.backoff_factor * (2**attempt)
+                LOG.debug(
+                    f"HTTP transport error ({type(exc).__name__}) for {request.url.host}. "
+                    f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
+                )
+                time.sleep(delay)
+                attempt += 1
 
 
 SESSION = httpx.Client(

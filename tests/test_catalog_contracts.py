@@ -244,14 +244,17 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
             date="2020",
             musicbrainz_albumid=MBID,
         )
-        catalog._update_deezer(recording, album, has_album_context=True)
-        self.assertEqual(
-            (recording.album, recording.total_tracks, recording.date),
-            ("Record", 10, "2020"),
-        )
-        recording.musicbrainz_albumid = None
-        catalog._update_deezer(recording, album, has_album_context=True)
-        catalog._update_deezer(recording, album, has_album_context=True, force=True)
+        with patch.object(
+            deezer_service, "fetch_deezer_track_details", return_value=None
+        ):
+            catalog._update_deezer(recording, album, has_album_context=True)
+            self.assertEqual(
+                (recording.album, recording.total_tracks, recording.date),
+                ("Record", 10, "2020"),
+            )
+            recording.musicbrainz_albumid = None
+            catalog._update_deezer(recording, album, has_album_context=True)
+            catalog._update_deezer(recording, album, has_album_context=True, force=True)
         self.assertEqual(recording.total_tracks, 10)
 
     def test_deezer_preserves_conflicting_isrc_even_for_exact_duration_match(
@@ -740,7 +743,13 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
         release["track_credits"] = {
             "found song": {"title": "Found Song", "composer": "Composer"}
         }
-        catalog._update_discogs(self.recording, "fixture", release, force=True)
+        catalog._update_discogs(
+            self.recording,
+            "fixture",
+            release,
+            has_album_context=True,
+            force=True,
+        )
         self.assertEqual(self.recording.date, "2020")
         self.assertEqual(self.recording.composer, "Composer")
 

@@ -1,6 +1,9 @@
 import dataclasses
 import re
+import threading
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,7 @@ from rich.markup import escape
 from sonora.audio import art as art_module
 from sonora.audio import bpm as bpm_module
 from sonora.audio import cuesheet as cuesheet_module
+from sonora.audio import decode as decode_module
 from sonora.audio import key as key_module
 from sonora.audio import metadata as metadata_module
 from sonora.audio import replaygain as replaygain_module
@@ -83,10 +87,11 @@ def _update_bpm(
     file_path: Path,
     fetch_bpm: bool,
     force: bool = False,
+    audio_data: tuple[Any, int] | None = None,
 ) -> None:
     if fetch_bpm and (track_info.bpm is None or force):
         try:
-            bpm = bpm_module.calculate_bpm(file_path)
+            bpm = bpm_module.calculate_bpm(file_path, audio_data=audio_data)
             if bpm is not None:
                 track_info.bpm = bpm
                 LOG.detail(f"   ∟ BPM Calculated: [green]{bpm}[/]")
@@ -99,6 +104,7 @@ def _update_key(
     file_path: Path,
     fetch_key: bool,
     force: bool = False,
+    audio_data: tuple[Any, int] | None = None,
 ) -> None:
     is_key_invalid = bool(
         track_info.initial_key
@@ -106,7 +112,9 @@ def _update_key(
     )
     if fetch_key and (track_info.initial_key is None or force or is_key_invalid):
         try:
-            detected_key = key_module.detect_musical_key(file_path)
+            detected_key = key_module.detect_musical_key(
+                file_path, audio_data=audio_data
+            )
             if detected_key is not None:
                 track_info.initial_key = detected_key
                 camelot = key_module.key_to_camelot(detected_key) or "Unknown"
@@ -115,6 +123,32 @@ def _update_key(
                 )
         except OSError as error:
             LOG.debug(f"Key calculation failed for {track_info.title}: {error}")
+
+
+def _update_audio_analysis(
+    track_info: TrackInfo,
+    file_path: Path,
+    *,
+    fetch_bpm: bool,
+    fetch_key: bool,
+    force: bool = False,
+) -> None:
+    needs_bpm = fetch_bpm and (track_info.bpm is None or force)
+    needs_key = fetch_key and (
+        track_info.initial_key is None
+        or force
+        or bool(
+            track_info.initial_key
+            and key_module.key_to_camelot(track_info.initial_key) is None
+        )
+    )
+    audio_data = (
+        decode_module.load_audio(file_path, mono=True, max_seconds=70.0)
+        if needs_bpm and needs_key
+        else None
+    )
+    _update_bpm(track_info, file_path, fetch_bpm, force=force, audio_data=audio_data)
+    _update_key(track_info, file_path, fetch_key, force=force, audio_data=audio_data)
 
 
 def _update_artwork(
@@ -149,34 +183,16 @@ def _update_lyrics(
     dry_run: bool = False,
     musixmatch_token: str | None = None,
     lyrics_lookup_state: dict[str, Any] | None = None,
+    sibling_metadata: Mapping[Path, TrackInfo] | None = None,
 ) -> None:
     if not fetch_lyrics:
         return
     try:
         lrc_path = file_path.with_suffix(".lrc")
         had_lrc = lrc_path.exists() and lrc_path.stat().st_size > 0
-        resolved_duration = metadata_module.get_audio_duration(file_path)
-        local_lyrics = [track_info.lyrics, track_info.synced_lyrics]
-        if had_lrc:
-            try:
-                local_lyrics.append(lrc_path.read_text(encoding="utf-8-sig"))
-            except (OSError, UnicodeError):
-                track_info.metadata_conflicts["lyrics"] = (
-                    "Existing lyrics cannot be read as UTF-8; review before reuse."
-                )
-        if any(
-            lyric_text
-            and (
-                not lyrics_identity_matches(
-                    lyric_text, track_info.artist, track_info.title
-                )
-                or not is_lyrics_duration_valid(lyric_text, resolved_duration)
-            )
-            for lyric_text in local_lyrics
-        ):
-            track_info.metadata_conflicts["lyrics"] = (
-                "Existing lyrics headers or timestamps conflict with the recording; review required."
-            )
+        resolved_duration = track_info.duration
+        if resolved_duration is None or resolved_duration <= 0:
+            resolved_duration = metadata_module.get_audio_duration(file_path)
         lyrics_text, tag_type = process_track_lyrics(
             file_path,
             track_info.artist,
@@ -190,6 +206,7 @@ def _update_lyrics(
             musixmatch_token=musixmatch_token,
             conflicts=track_info.metadata_conflicts,
             lookup_state=lyrics_lookup_state,
+            sibling_metadata=sibling_metadata,
         )
         if lyrics_text and tag_type:
             track_info.lyrics = lyrics_text
@@ -295,11 +312,17 @@ def _process_audio_and_save_tags(
     dry_run: bool,
     musixmatch_token: str | None = None,
     lyrics_lookup_state: dict[str, Any] | None = None,
+    sibling_metadata: Mapping[Path, TrackInfo] | None = None,
 ) -> TrackInfo:
     """Computes audio DSP features, fetches lyrics/artwork, and writes updated tags."""
     _update_cuesheet(track_info, file_path, cuesheet_content)
-    _update_bpm(track_info, file_path, fetch_bpm, force=force)
-    _update_key(track_info, file_path, fetch_key, force=force)
+    _update_audio_analysis(
+        track_info,
+        file_path,
+        fetch_bpm=fetch_bpm,
+        fetch_key=fetch_key,
+        force=force,
+    )
     cover_image = None
     if not track_info.is_alien:
         cover_image = (
@@ -317,6 +340,7 @@ def _process_audio_and_save_tags(
         dry_run=dry_run,
         musixmatch_token=musixmatch_token,
         lyrics_lookup_state=lyrics_lookup_state,
+        sibling_metadata=sibling_metadata,
     )
     normalize_track_metadata(track_info)
 
@@ -381,8 +405,13 @@ def normalize_single_track(
 
     original_metadata = current_info.copy()
 
-    _update_bpm(current_info, file_path, fetch_bpm, force=force)
-    _update_key(current_info, file_path, fetch_key, force=force)
+    _update_audio_analysis(
+        current_info,
+        file_path,
+        fetch_bpm=fetch_bpm,
+        fetch_key=fetch_key,
+        force=force,
+    )
 
     normalize_track_metadata(current_info)
 
@@ -544,6 +573,7 @@ def process_track_lyrics(
     conflicts: dict[str, str] | None = None,
     details: dict[str, Any] | None = None,
     lookup_state: dict[str, Any] | None = None,
+    sibling_metadata: Mapping[Path, TrackInfo] | None = None,
 ) -> tuple[str | None, str | None]:
     """Validate and upgrade sidecar/embedded lyrics without lowering sync quality.
 
@@ -575,27 +605,32 @@ def process_track_lyrics(
         except UnicodeDecodeError:
             existing_content = None
             current_quality = 0
+            reason = "Local lyric file is not valid UTF-8; review its encoding before replacing it."
+            if conflicts is not None:
+                conflicts["lyrics"] = reason
+            if details is not None:
+                details.update(action="review", source="sidecar", reason=reason)
             if not force:
-                reason = "Local lyric file is not valid UTF-8; review its encoding before replacing it."
-                if conflicts is not None:
-                    conflicts["lyrics"] = reason
-                if details is not None:
-                    details.update(action="review", source="sidecar", reason=reason)
                 return None, "review"
         except OSError as error:
             LOG.warning(
                 f"Cannot read lyrics for {escape(file_path.name)}: {escape(str(error))}"
             )
             lookup_failed = True
+            if conflicts is not None:
+                conflicts["lyrics"] = (
+                    "Existing lyrics cannot be read; review the file before reuse."
+                )
 
-    if existing_content and is_lyrics_duration_valid(
+    sidecar_duration_valid = existing_content is not None and is_lyrics_duration_valid(
         existing_content, resolved_duration
-    ):
+    )
+    if sidecar_duration_valid:
         current_quality = get_lyrics_quality(existing_content)
 
     if existing_content and (
         not lyrics_identity_matches(existing_content, artist, title)
-        or not is_lyrics_duration_valid(existing_content, resolved_duration)
+        or not sidecar_duration_valid
     ):
         LOG.warning(
             f"Local lyrics require review for {escape(file_path.name)}: "
@@ -673,44 +708,88 @@ def process_track_lyrics(
             return None, "review"
         return None, None
 
-    other_song_bodies: list[str] = []
-    version_pattern = (
-        r"\s*[\(\[][^\)\]]*\b(?:remix|mix|edit|live|acoustic|instrumental|"
-        r"extended|version|sped up|slowed|reverb)\b[^\)\]]*[\)\]]"
-        r"|\s+[-–—]\s+(?:sped up|slowed(?:\s*\+?\s*reverb)?)\s*$"
-    )
-    for sibling in find_audio_files(file_path.parent, recursive=False):
-        if sibling == file_path:
-            continue
-        try:
-            original = metadata_module.read_track_metadata(sibling)
-        except (OSError, ValueError, MutagenError):
-            continue
-        current_title, sibling_title = (
-            normalize_str(
-                clean_title(
-                    re.sub(version_pattern, "", name or "", flags=re.IGNORECASE)
+    other_song_bodies: list[str] | None = None
+
+    def get_sibling_metadata() -> Mapping[Path, TrackInfo] | None:
+        if sibling_metadata is not None or lookup_state is None:
+            return sibling_metadata
+        with lookup_state["lock"]:
+            albums: dict[Path, Mapping[Path, TrackInfo]] = lookup_state.setdefault(
+                "sibling_metadata", {}
+            )
+            locks = lookup_state.setdefault("sibling_metadata_locks", {})
+            lock = locks.setdefault(file_path.parent, threading.Lock())
+        with lock:
+            if file_path.parent not in albums:
+                album: dict[Path, TrackInfo] = {}
+                for sibling in find_audio_files(file_path.parent, recursive=False):
+                    try:
+                        album[sibling] = metadata_module.read_track_metadata(sibling)
+                    except (OSError, ValueError, MutagenError):
+                        continue
+                albums[file_path.parent] = album
+            return albums[file_path.parent]
+
+    def get_other_song_bodies() -> list[str]:
+        nonlocal other_song_bodies
+        if other_song_bodies is None:
+            other_song_bodies = []
+            version_pattern = (
+                r"\s*[\(\[][^\)\]]*\b(?:remix|mix|edit|live|acoustic|instrumental|"
+                r"up[\s-]?tempo|extended|version|sped up|slowed|reverb)\b[^\)\]]*[\)\]]"
+                r"|\s+[-–—]\s+(?:sped up|slowed(?:\s*\+?\s*reverb)?)\s*$"
+            )
+            cached_metadata = get_sibling_metadata()
+            siblings = (
+                cached_metadata.items()
+                if cached_metadata is not None
+                else (
+                    (sibling, None)
+                    for sibling in find_audio_files(file_path.parent, recursive=False)
                 )
             )
-            for name in (title, original.title)
-        )
-        different_song = current_title != sibling_title
-        different_remix_credit = (
-            "remix" in title.casefold()
-            and any(
-                token in artist.casefold() for token in (" & ", " feat", " ft.", ";")
+            current_title = normalize_str(
+                clean_title(re.sub(version_pattern, "", title, flags=re.IGNORECASE))
             )
-            and normalize_str(original.artist) != normalize_str(artist)
-        )
-        if different_song or different_remix_credit:
-            body = lyrics_word_body(
-                clean_lyrics_text(original.lyrics or original.synced_lyrics) or ""
-            )
-            if len(body) >= 200:
-                other_song_bodies.append(body)
+            for sibling, original in siblings:
+                if sibling == file_path:
+                    continue
+                if original is None:
+                    try:
+                        original = metadata_module.read_track_metadata(sibling)
+                    except (OSError, ValueError, MutagenError):
+                        continue
+                sibling_title = normalize_str(
+                    clean_title(
+                        re.sub(
+                            version_pattern,
+                            "",
+                            original.title or "",
+                            flags=re.IGNORECASE,
+                        )
+                    )
+                )
+                different_song = current_title != sibling_title
+                different_remix_credit = (
+                    "remix" in title.casefold()
+                    and any(
+                        token in artist.casefold()
+                        for token in (" & ", " feat", " ft.", ";")
+                    )
+                    and normalize_str(original.artist) != normalize_str(artist)
+                )
+                if different_song or different_remix_credit:
+                    body = lyrics_word_body(
+                        clean_lyrics_text(original.lyrics or original.synced_lyrics)
+                        or ""
+                    )
+                    if len(body) >= 200:
+                        other_song_bodies.append(body)
+        return other_song_bodies
+
     if existing_content and any(
         fuzz.ratio(lyrics_word_body(existing_content), body) >= 98
-        for body in other_song_bodies
+        for body in get_other_song_bodies()
     ):
         LOG.warning(
             f"Existing lyrics for {escape(file_path.name)} match another recording; reuse withheld."
@@ -756,16 +835,20 @@ def process_track_lyrics(
             lookup_options["details"] = details
         if lookup_state is not None:
             lookup_options["lookup_state"] = lookup_state
-        lyrics_text = lyrics_service.fetch_synced_lyrics(
-            artist,
-            title,
-            enhanced=True,
-            isrc=isrc,
-            album_name=album_name,
-            duration=resolved_duration,
-            musixmatch_token=musixmatch_token,
-            **lookup_options,
+        request_slots = (
+            lookup_state.get("request_slots") if lookup_state is not None else None
         )
+        with request_slots or nullcontext():
+            lyrics_text = lyrics_service.fetch_synced_lyrics(
+                artist,
+                title,
+                enhanced=True,
+                isrc=isrc,
+                album_name=album_name,
+                duration=resolved_duration,
+                musixmatch_token=musixmatch_token,
+                **lookup_options,
+            )
     except (
         httpx.HTTPError,
         OSError,
@@ -824,7 +907,7 @@ def process_track_lyrics(
 
     if lyrics_text and any(
         fuzz.ratio(lyrics_word_body(lyrics_text), body) >= 98
-        for body in other_song_bodies
+        for body in get_other_song_bodies()
     ):
         LOG.warning(
             f"Fetched lyrics for {escape(file_path.name)} match another recording; import withheld."

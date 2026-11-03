@@ -31,21 +31,15 @@ class TestRenameWorkflows(ModuleTestCase):
         self.assertIn("[ti:Track Title]", content)
         self.assertIn("[00:10.00] Line 1", content)
 
-    def test_sync_lrc_metadata_existing_headers(self) -> None:
+    def test_sync_lrc_metadata_preserves_conflicting_headers(self) -> None:
         lrc_file = self.tmp_path / "existing.lrc"
-        lrc_file.write_text(
-            "[ar:Old Artist]\n[ti:Old Title]\n[00:15.00] Line 2\n", encoding="utf-8"
-        )
+        original = "[ar:Old Artist]\n[ti:Old Title]\n[00:15.00] Line 2\n"
+        lrc_file.write_text(original, encoding="utf-8")
 
-        success = sync_lrc_metadata(lrc_file, "New Artist", "New Title")
-        self.assertTrue(success)
+        changed = sync_lrc_metadata(lrc_file, "New Artist", "New Title")
 
-        content = lrc_file.read_text(encoding="utf-8")
-        self.assertIn("[ar:New Artist]", content)
-        self.assertIn("[ti:New Title]", content)
-        self.assertNotIn("[ar:Old Artist]", content)
-        self.assertNotIn("[ti:Old Title]", content)
-        self.assertIn("[00:15.00] Line 2", content)
+        self.assertFalse(changed)
+        self.assertEqual(lrc_file.read_text(encoding="utf-8"), original)
 
     @patch("sonora.modules.renamer.read_track_metadata")
     def test_rename_track_file(self, mock_read: Any) -> None:

@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,7 +12,10 @@ from sonora.modules.catalog_metadata import (
 )
 from sonora.modules.matching import _resolve_album_track_position
 from sonora.modules.metadata_merge import apply_metadata_mapping
-from sonora.modules.musicbrainz_metadata import _update_musicbrainz
+from sonora.modules.musicbrainz_metadata import (
+    _resolve_musicbrainz_track_id,
+    _update_musicbrainz,
+)
 from sonora.modules.tagger import (
     _AlbumMetadataContext,
     _resolve_album_folder_identity,
@@ -23,6 +28,13 @@ from tests.module_support import ModuleTestCase
 
 
 class TestTaggingWorkflows(ModuleTestCase):
+    def test_tag_empty_directory_warns(self) -> None:
+        album_dir = self.tmp_path / "empty"
+        album_dir.mkdir()
+        with patch("sonora.modules.tagger.LOG.warning") as warning:
+            self.assertEqual(tag_album_folder(album_dir), [])
+        warning.assert_called_once_with("No audio files found to tag.")
+
     @patch("sonora.audio.metadata.write_track_metadata")
     @patch("sonora.services.lyrics.fetch_synced_lyrics")
     @patch("sonora.services.musicbrainz.fetch_track_mbid")
@@ -125,6 +137,42 @@ class TestTaggingWorkflows(ModuleTestCase):
         self.assertIsNotNone(states[0])
         self.assertIs(states[0], states[1])
 
+    def test_cached_tracks_are_read_in_parallel(self) -> None:
+        album_dir = self.tmp_path / "cached album"
+        files = [album_dir / f"{index}.wav" for index in range(4)]
+        for path in files:
+            write_silent_wav(path)
+
+        state = MagicMock()
+        state.filter_outdated_tracks.return_value = []
+        active = 0
+        maximum_active = 0
+        lock = threading.Lock()
+
+        def read_track(path: Path) -> TrackInfo:
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return TrackInfo(file_path=path, artist="Artist", title=path.stem)
+
+        with (
+            patch("sonora.modules.tagger.get_library_state", return_value=state),
+            patch(
+                "sonora.modules.tagger.metadata_module.read_track_metadata",
+                side_effect=read_track,
+            ),
+            patch("sonora.modules.tagger._resolve_album_metadata_context") as resolve,
+        ):
+            results = tag_album_folder(album_dir, max_threads=4)
+
+        self.assertEqual(len(results), len(files))
+        self.assertGreater(maximum_active, 1)
+        resolve.assert_not_called()
+
     def test_resolve_album_folder_identity(self) -> None:
         album_dir = self.tmp_path / "Artist - Great Album"
         f1 = album_dir / "01 - Song.wav"
@@ -172,6 +220,7 @@ class TestTaggingWorkflows(ModuleTestCase):
         from sonora.core.logger import create_progress
 
         progress = create_progress()
+        self.assertEqual(progress.speed_estimate_period, 300.0)
         clock = [0.0]
         with patch.object(progress, "get_time", side_effect=lambda: clock[0]):
             task_id = progress.add_task("Tagging", total=10)
@@ -299,6 +348,22 @@ class TestTaggingWorkflows(ModuleTestCase):
         self.assertIsNone(track.musicbrainz_trackid)
         self.assertIsNone(track.producers)
 
+    def test_standalone_musicbrainz_lookup_uses_track_isrc(self) -> None:
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Artist",
+            title="Song",
+            isrc="USABC2500001",
+        )
+        recording_id = "12345678-1234-1234-1234-123456789abc"
+        with patch(
+            "sonora.modules.musicbrainz_metadata.musicbrainz_service.fetch_track_mbid",
+            return_value=recording_id,
+        ) as search:
+            _resolve_musicbrainz_track_id(track, None, None)
+        search.assert_called_once_with("Artist", "Song", "USABC2500001")
+        self.assertEqual(track.musicbrainz_trackid, recording_id)
+
     def test_update_musicbrainz_updates_corrupted_title_via_isrc(self) -> None:
         track = TrackInfo(
             file_path=Path("dummy.wav"),
@@ -390,6 +455,46 @@ class TestTaggingWorkflows(ModuleTestCase):
             self.assertTrue(track_metadata.is_alien)
             self.assertEqual(track_metadata.artist, "Lana Del Rey")
             self.assertEqual(track_metadata.title, "Blue Jeans")
+
+    def test_unverified_itunes_tracklist_cannot_mark_an_alternate_track_alien(
+        self,
+    ) -> None:
+        track_file = self.tmp_path / "02 - Alternate Version.wav"
+        write_silent_wav(track_file)
+        track = TrackInfo(
+            file_path=track_file,
+            artist="Artist",
+            title="Alternate Version",
+            album="Album",
+            track_number=2,
+        )
+        itunes_details = {
+            "title": "Album",
+            "album_artist": "Artist",
+            "tracks_by_disc_and_position": {
+                (1, 1): {"artist": "Artist", "title": "Track One"},
+                (1, 2): {"artist": "Artist", "title": "Track Two"},
+                (1, 3): {"artist": "Artist", "title": "Track Three"},
+            },
+        }
+        with patch("sonora.modules.tagger._update_metadata"):
+            result = process_single_track(
+                track_file,
+                album_context=_AlbumMetadataContext(
+                    track_metadata={track_file: track},
+                    itunes_details=itunes_details,
+                    sample_artist="Artist",
+                    sample_album="Album",
+                    itunes_layout_verified=False,
+                ),
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+                dry_run=True,
+            )
+
+        self.assertFalse(result.is_alien)
 
     def test_tag_album_folder_nonexistent_directory(self) -> None:
         with self.assertRaises(FileNotFoundError):
@@ -625,7 +730,7 @@ class TestTaggingWorkflows(ModuleTestCase):
                 force=True,
             )
 
-        # Track number and disc number must be preserved, while producer credit is enriched
+        # Preserve track numbering while filling in the producer credit.
         self.assertEqual(trk.track_number, 17)
         self.assertEqual(trk.disc_number, 1)
         self.assertEqual(trk.producers, "D.A. Got That Dope")

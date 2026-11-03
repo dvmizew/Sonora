@@ -40,7 +40,7 @@ def load_audio(
                 if audio_data.shape[1] > 1
                 else audio_data[:, 0]
             )
-        return audio_data, int(sample_rate)
+        return audio_data, sample_rate
     except (soundfile.LibsndfileError, OSError) as error:
         LOG.debug(f"soundfile decode failed for {file_path}: {error}")
 

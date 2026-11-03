@@ -257,12 +257,50 @@ def _update_itunes(
                 duration=track_info.duration,
             )
 
+        replacing_clean_itunes_id = False
+        if (
+            api_payload
+            and track_info.advisory == "Explicit"
+            and api_payload.get("explicitness") == "cleaned"
+        ):
+            explicit_recording = (
+                itunes_service.fetch_itunes_track_metadata(
+                    track_info.artist,
+                    track_info.title,
+                    duration=track_info.duration,
+                    advisory="Explicit",
+                )
+                if force
+                else None
+            )
+            if (
+                explicit_recording
+                and explicit_recording.get("explicitness") == "explicit"
+                and _catalog_recording_matches_track(
+                    explicit_recording,
+                    track_info.title,
+                    track_info.artist,
+                    track_info.isrc,
+                    None,
+                    track_info.duration,
+                )
+            ):
+                api_payload = explicit_recording
+                is_album_match = False
+                replacing_clean_itunes_id = True
+            else:
+                track_info.metadata_conflicts["itunes_trackid"] = (
+                    "Apple has no verified explicit match for this recording; "
+                    "iTunes metadata was withheld."
+                )
+                return
+
         if api_payload and not _catalog_recording_matches_track(
             api_payload,
             track_info.title,
             track_info.artist,
             track_info.isrc,
-            track_info.itunes_trackid,
+            None if replacing_clean_itunes_id else track_info.itunes_trackid,
             track_info.duration,
         ):
             LOG.detail(
@@ -271,15 +309,6 @@ def _update_itunes(
             return
 
         if api_payload:
-            if (
-                track_info.advisory == "Explicit"
-                and api_payload.get("explicitness") == "cleaned"
-            ):
-                track_info.metadata_conflicts["itunes_trackid"] = (
-                    "Apple identifies a cleaned edition while local tags mark "
-                    "the recording explicit; metadata updates withheld."
-                )
-                return
             if api_payload.get("itunes_trackid"):
                 apply_metadata_mapping(
                     track_info,
@@ -524,6 +553,11 @@ def _update_discogs(
             specific = None
             for candidate_key in (track_key, track_info.title.lower()):
                 candidate_credits = track_credits_dict.get(candidate_key)
+                if isinstance(candidate_credits, dict) and has_album_context:
+                    candidate_credits = {
+                        "artist": track_info.artist,
+                        **candidate_credits,
+                    }
                 if isinstance(
                     candidate_credits, dict
                 ) and _catalog_recording_matches_track(
@@ -787,18 +821,39 @@ def _update_genius(track_info: TrackInfo, genius_api_token: str | None) -> None:
     if featured_artists:
         credited_artist = f"{credited_artist} feat. {', '.join(featured_artists)}"
     try:
-        genius_details = genius_service.fetch_genius_song_details(
-            credited_artist,
-            track_info.title,
-            api_token=genius_api_token,
-            album=track_info.album,
-        )
-        if not genius_details:
-            if not track_info.genius_song_id:
-                return
+        stored_song = None
+        genius_details = None
+        if (
+            track_info.genius_song_id
+            and track_info.artist
+            and track_info.title
+            and not _is_generic(track_info.artist, "artist")
+            and not _is_generic_title(track_info.title)
+        ):
             stored_song = genius_service.lookup_genius_song_details(
                 track_info.genius_song_id, api_token=genius_api_token
             )
+            if (
+                stored_song
+                and genius_service.score_genius_song_match(
+                    credited_artist,
+                    track_info.title,
+                    stored_song,
+                    album=track_info.album,
+                )
+                >= get_config().genius_match_threshold
+            ):
+                genius_details = stored_song
+        if not genius_details:
+            genius_details = genius_service.fetch_genius_song_details(
+                credited_artist,
+                track_info.title,
+                api_token=genius_api_token,
+                album=track_info.album,
+            )
+        if not genius_details:
+            if not track_info.genius_song_id:
+                return
             if (
                 not stored_song
                 or _is_generic(track_info.artist, "artist")
@@ -891,7 +946,6 @@ def _update_genius(track_info: TrackInfo, genius_api_token: str | None) -> None:
         )
         if genius_details.get("writers") and not track_info.lyricist:
             track_info.lyricist = str(genius_details["writers"])
-        LOG.debug("   ∟ 📝 [Genius] Fetched song details & credits")
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(
             f"Genius metadata update failed for {escape(track_info.title)}: {escape(str(error))}"

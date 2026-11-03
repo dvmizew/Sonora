@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import warnings
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -17,7 +17,7 @@ from sonora.core.constants import DIRS
 from sonora.core.logger import LOG
 
 DEFAULT_API_TTL_SECONDS: int = 2419200  # 28 days
-NEGATIVE_API_TTL_SECONDS: int = 1800  # Retry confirmed catalog misses after 30 minutes.
+NEGATIVE_API_TTL_SECONDS: int = 86400  # One day for confirmed catalog misses.
 API_CACHE_MISS = ""
 _CACHE_INSTANCE: diskcache.Cache | None = None
 _CACHE_LOCK = threading.RLock()
@@ -114,12 +114,21 @@ def set_ignore_cache(ignore: bool) -> None:
 
 
 def _open_api_cache(api_cache_dir: Path) -> diskcache.Cache | None:
-    try:
-        api_cache_dir.mkdir(parents=True, exist_ok=True)
-        return diskcache.Cache(str(api_cache_dir), timeout=10, disk=MetadataDisk)
-    except (OSError, sqlite3.Error) as error:
-        LOG.debug(f"Cache initialization failed: {error}")
-        return None
+    global _CACHE_INSTANCE
+    with _CACHE_LOCK:
+        if _CACHE_INSTANCE is not None and _CACHE_INSTANCE.directory != str(
+            api_cache_dir
+        ):
+            close_cache()
+        if _CACHE_INSTANCE is None:
+            try:
+                api_cache_dir.mkdir(parents=True, exist_ok=True)
+                _CACHE_INSTANCE = diskcache.Cache(
+                    str(api_cache_dir), timeout=10, disk=MetadataDisk
+                )
+            except (OSError, sqlite3.Error) as error:
+                LOG.debug(f"Cache initialization failed: {error}")
+        return _CACHE_INSTANCE
 
 
 @contextmanager
@@ -144,17 +153,9 @@ def api_cache_session() -> Iterator[None]:
 
 
 def get_cache() -> diskcache.Cache | None:
-    global _CACHE_INSTANCE
     if threading.current_thread() is not threading.main_thread():
         return _WORKER_CACHE.get()
-    api_cache_dir = get_api_cache_dir()
-    if _CACHE_INSTANCE is not None and _CACHE_INSTANCE.directory != str(api_cache_dir):
-        close_cache()
-
-    if _CACHE_INSTANCE is None:
-        with _CACHE_LOCK:
-            _CACHE_INSTANCE = _open_api_cache(api_cache_dir)
-    return _CACHE_INSTANCE
+    return _open_api_cache(get_api_cache_dir())
 
 
 @api_cache_session()
@@ -183,8 +184,7 @@ def set_cached_api(
     """Store value into disk cache with expiration (default 28 days)."""
     if value is None:
         value = API_CACHE_MISS
-        expire_seconds = min(expire_seconds, NEGATIVE_API_TTL_SECONDS)
-    elif not value or (isinstance(value, dict) and value.get("results") == []):
+    if not value or (isinstance(value, dict) and value.get("results") == []):
         expire_seconds = min(expire_seconds, NEGATIVE_API_TTL_SECONDS)
     cache = get_cache()
     if cache is not None:
@@ -208,10 +208,8 @@ def _get_api_cache_size(api_cache_dir: Path) -> int:
             return api_cache_dir.stat().st_size
         for entry in api_cache_dir.rglob("*"):
             if entry.is_file():
-                try:
+                with suppress(OSError):
                     total += entry.stat().st_size
-                except OSError:
-                    pass
     except OSError as error:
         LOG.debug(f"Failed to calculate API cache size: {error}")
     return total

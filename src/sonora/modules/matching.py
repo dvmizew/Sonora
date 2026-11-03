@@ -77,14 +77,34 @@ def _recording_matches_track_identity(
     candidate_title = str(recording.get("title") or "")
     candidate_duration = safe_float(recording.get("duration"))
     candidate_artist = recording.get("artist")
+    has_candidate_artist = not _is_generic(
+        str(candidate_artist) if candidate_artist else None, "artist"
+    )
+    identified = (
+        _recording_isrc_matches(track_info.isrc, recording)
+        or (
+            bool(track_info.musicbrainz_trackid)
+            and recording.get("recording_mbid") == track_info.musicbrainz_trackid
+        )
+        or (
+            bool(track_info.itunes_trackid)
+            and str(recording.get("itunes_trackid") or "") == track_info.itunes_trackid
+        )
+    )
     if not candidate_title:
+        return False
+    if (
+        not _is_generic(track_info.artist, "artist")
+        and not has_candidate_artist
+        and not identified
+    ):
         return False
     return recording_identity_matches(
         track_info.artist
-        if candidate_artist and not _is_generic(track_info.artist, "artist")
+        if has_candidate_artist and not _is_generic(track_info.artist, "artist")
         else None,
         candidate_title if _is_generic_title(track_info.title) else track_info.title,
-        str(candidate_artist) if candidate_artist else None,
+        str(candidate_artist) if has_candidate_artist else None,
         candidate_title,
         expected_duration=track_info.duration,
         candidate_duration=candidate_duration,
@@ -852,6 +872,12 @@ def _catalog_recording_matches_track(
         matched_identifier = True
     candidate_artist = recording.get("artist")
     candidate_title = recording.get("title")
+    if (
+        not _is_generic(artist, "artist")
+        and _is_generic(str(candidate_artist) if candidate_artist else None, "artist")
+        and not matched_identifier
+    ):
+        return False
     if _is_generic_title(title):
         return bool(
             matched_identifier
@@ -900,11 +926,13 @@ def _find_track_in_album_mapping(
             if len(position_candidates) == 1:
                 candidates.extend(position_candidates)
     if isinstance(tracks_by_title, dict) and title and not _is_generic_title(title):
-        for title_key in dict.fromkeys(
-            (normalize_str(clean_title(title)), normalize_str(title))
-        ):
-            if title_key in tracks_by_title:
-                candidates.append(tracks_by_title[title_key])
+        candidates.extend(
+            tracks_by_title[title_key]
+            for title_key in dict.fromkeys(
+                (normalize_str(clean_title(title)), normalize_str(title))
+            )
+            if title_key in tracks_by_title
+        )
     for candidate in candidates:
         recording = require_api_object(candidate, "Album recording")
         # Position is an edition-specific hint; it must not import another song's fields.

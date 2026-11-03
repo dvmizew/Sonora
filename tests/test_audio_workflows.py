@@ -185,6 +185,52 @@ class TestAudioWorkflows(ModuleTestCase):
 
 
 class TestLyricsUpdates(IsolatedTestCase):
+    def test_known_track_duration_skips_another_audio_read(self) -> None:
+        audio_path = self.test_directory / "recording.flac"
+        audio_path.touch()
+        track = TrackInfo(audio_path, artist="Alpha", title="Song", duration=60)
+        with (
+            patch("sonora.audio.metadata.get_audio_duration") as read_duration,
+            patch(
+                "sonora.modules.track_processing.process_track_lyrics",
+                return_value=(None, None),
+            ),
+        ):
+            _update_lyrics(track, audio_path, True, dry_run=True)
+
+        read_duration.assert_not_called()
+
+    def test_sidecar_is_read_once_for_validation(self) -> None:
+        audio_path = self.test_directory / "recording.flac"
+        audio_path.touch()
+        lrc_path = audio_path.with_suffix(".lrc")
+        lrc_path.write_text("[ar:Alpha]\n[ti:Song]\n[00:01.00] words", encoding="utf-8")
+        original_read_text = Path.read_text
+        reads = 0
+
+        def count_reads(
+            path: Path,
+            encoding: str | None = None,
+            errors: str | None = None,
+        ) -> str:
+            nonlocal reads
+            if path == lrc_path:
+                reads += 1
+            return original_read_text(path, encoding, errors)
+
+        with (
+            patch("sonora.audio.metadata.get_audio_duration", return_value=60),
+            patch.object(Path, "read_text", count_reads),
+        ):
+            _update_lyrics(
+                TrackInfo(audio_path, artist="Alpha", title="Song"),
+                audio_path,
+                True,
+                dry_run=True,
+            )
+
+        self.assertEqual(reads, 1)
+
     def test_unresolved_local_lyrics_conflicts_remain_visible_in_tagging_results(
         self,
     ) -> None:
@@ -201,8 +247,8 @@ class TestLyricsUpdates(IsolatedTestCase):
                 with (
                     patch("sonora.audio.metadata.get_audio_duration", return_value=60),
                     patch(
-                        "sonora.modules.track_processing.process_track_lyrics",
-                        return_value=(None, None),
+                        "sonora.services.lyrics.fetch_synced_lyrics",
+                        return_value=None,
                     ),
                 ):
                     _update_lyrics(track, audio_path, True, dry_run=True)

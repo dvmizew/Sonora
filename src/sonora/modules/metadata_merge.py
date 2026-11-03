@@ -64,10 +64,10 @@ _PROVIDER_FIELDS = tuple(
 
 @api_cache_session()
 def collect_provider_proposal(
-    recording: TrackInfo, enrich: Callable[[TrackInfo], None]
+    recording: TrackInfo, update_metadata: Callable[[TrackInfo], None]
 ) -> MetadataProposal:
     candidate = recording.copy()
-    enrich(candidate)
+    update_metadata(candidate)
     return build_provider_proposal(recording, candidate)
 
 
@@ -167,6 +167,18 @@ def _merge_provider_field(
         for value, _ in candidates
     }
     if len(distinct) > 1:
+        if field_name in {"date", "original_date"}:
+            dates: list[tuple[str | None, MetadataSource | None]] = [
+                (normalize_date(str(value)), source) for value, source in candidates
+            ]
+            if all(value for value, _ in dates):
+                shortest = min((value for value, _ in dates if value), key=len)
+                if all(value.startswith(shortest) for value, _ in dates if value):
+                    value, source = max(dates, key=lambda item: len(item[0] or ""))
+                    setattr(recording, field_name, value)
+                    if source is not None:
+                        recording.metadata_sources[field_name] = source
+                    return
         alternatives = "; ".join(
             f"{source or 'provider'}={str(value)[:120]!r}"
             for value, source in candidates
@@ -175,11 +187,11 @@ def _merge_provider_field(
         recording.metadata_conflicts[field_name] = description
         LOG.detail(f"{escape(recording.file_path.name)}: {escape(description)}")
         return
-    value, source = candidates[0]
-    setattr(recording, field_name, value)
-    if source is not None:
-        recording.metadata_sources[field_name] = source
-    elif value is None:
+    candidate_value, candidate_source = candidates[0]
+    setattr(recording, field_name, candidate_value)
+    if candidate_source is not None:
+        recording.metadata_sources[field_name] = candidate_source
+    elif candidate_value is None:
         recording.metadata_sources.pop(field_name, None)
 
 

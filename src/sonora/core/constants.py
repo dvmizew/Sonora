@@ -61,9 +61,7 @@ RATE_LIMIT_THEAUDIODB: float = (
     2.05  # https://www.theaudiodb.com/free_music_api: 30 req/min.
 )
 RATE_LIMIT_LYRICS: float = 1.0  # SyncedLyrics upstream provider pool
-RATE_LIMIT_LRCLIB: float = (
-    1.0  # Below LRCLIB's approximate 90 requests/min for identified clients.
-)
+RATE_LIMIT_LRCLIB: float = 0.3  # LRCLIB recommends a 200–500 ms gap for batch requests.
 RATE_LIMIT_ITUNES: float = (
     3.0  # Apple iTunes Search API (official policy approx 20 calls/min = 3.0s)
 )
