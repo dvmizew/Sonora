@@ -1,24 +1,55 @@
-import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from sonora.core import state
 from sonora.core.state import LibraryStateVault
+from tests.support import IsolatedTestCase
 
 
-class TestLibraryState(unittest.TestCase):
+class TestLibraryState(IsolatedTestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.temp_dir.name) / "test_state.db"
+        self.db_path = self.test_directory / "test_state.db"
         self.state_mgr = LibraryStateVault(db_path=self.db_path)
+        self.addCleanup(self.state_mgr.close)
 
-        self.test_file1 = Path(self.temp_dir.name) / "song1.flac"
-        self.test_file2 = Path(self.temp_dir.name) / "song2.flac"
+        self.test_file1 = self.test_directory / "song1.flac"
+        self.test_file2 = self.test_directory / "song2.flac"
         self.test_file1.write_bytes(b"dummy audio 1")
         self.test_file2.write_bytes(b"dummy audio 2")
 
-    def tearDown(self) -> None:
-        self.state_mgr.close()
-        self.temp_dir.cleanup()
+    def test_storage_stats_do_not_create_a_database_for_an_unused_library(self) -> None:
+        state_path = state.get_default_state_db_path()
+        self.assertFalse(state_path.exists())
+        self.assertEqual(state.get_state_storage_stats(), (0, 0))
+        self.assertFalse(state_path.exists())
+
+    def test_storage_stats_include_active_state_and_reopen_existing_database(
+        self,
+    ) -> None:
+        library_state = state.get_library_state()
+        library_state.record_track_state(self.test_file1, status="TAGGED_OK")
+        for reopen in (False, True):
+            with self.subTest(reopen=reopen):
+                if reopen:
+                    state.reset_library_state()
+                entry_count, storage_bytes = state.get_state_storage_stats()
+                self.assertEqual(entry_count, 1)
+                self.assertGreater(storage_bytes, 0)
+
+    def test_storage_stats_report_io_failures(self) -> None:
+        with (
+            patch.object(Path, "stat", side_effect=PermissionError("locked file")),
+            self.assertRaises(OSError),
+        ):
+            state.get_state_storage_stats()
+        library_state = state.get_library_state()
+        with (
+            patch.object(Path, "stat", side_effect=PermissionError("locked file")),
+            self.assertRaises(OSError),
+        ):
+            state.get_state_storage_stats()
+        self.assertIs(state.get_library_state(), library_state)
 
     def test_state_lifecycle(self) -> None:
         # Initially not up to date
@@ -54,6 +85,22 @@ class TestLibraryState(unittest.TestCase):
             [self.test_file1, self.test_file2]
         )
         self.assertEqual(outdated_modified, [self.test_file1])
+
+    def test_is_track_up_to_date_supports_hash_status(self) -> None:
+        self.state_mgr.record_tracks_state_batch(
+            [self.test_file1], status="TAGGED_OK:abcdef123456"
+        )
+        self.assertTrue(self.state_mgr.is_track_up_to_date(self.test_file1))
+        self.assertTrue(
+            self.state_mgr.is_track_up_to_date(
+                self.test_file1, expected_status="TAGGED_OK:abcdef123456"
+            )
+        )
+        self.assertFalse(
+            self.state_mgr.is_track_up_to_date(
+                self.test_file1, expected_status="TAGGED_OK:different_hash"
+            )
+        )
 
 
 if __name__ == "__main__":

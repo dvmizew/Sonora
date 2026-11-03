@@ -1,24 +1,48 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+import sys
+from pathlib import Path
 
-datas = collect_data_files('anyascii') + collect_data_files('pycountry') + collect_data_files('ftfy')
-hiddenimports = collect_submodules('anyascii') + collect_submodules('pycountry') + collect_submodules('syncedlyrics') + collect_submodules('ftfy')
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+
+datas = []
+hiddenimports = []
+binaries = []
+datas += collect_data_files("sonora")
+for package in (
+    "anyascii",
+    "pycountry",
+    "ftfy",
+    "syncedlyrics",
+    "music_metadata_filter",
+    "ijson",
+):
+    datas += collect_data_files(package)
+    hiddenimports += collect_submodules(package)
+for package in ("soundfile", "shazamio", "shazamio_core", "msgpack"):
+    package_datas, package_binaries, package_imports = collect_all(package)
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_imports
+
 
 a = Analysis(
     ['src/sonora/cli/main.py'],
     pathex=['src'],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # Fingerprinting uses fpcalc directly; pyacoustid's optional decoder pulls in GUI stacks.
+    excludes=['audioread'],
     noarchive=False,
     optimize=0,
 )
+# Sonora uses ISO names and codes, without gettext translation catalogs.
+a.datas = [entry for entry in a.datas if Path(entry[0]).parts[:2] != ("pycountry", "locales")]
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -27,11 +51,11 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='sonora-linux-x86_64',
+    name='sonora-windows-x86_64' if sys.platform == 'win32' else 'sonora-linux-x86_64',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,

@@ -1,23 +1,25 @@
 from pathlib import Path
+from typing import cast
 
 import numpy as np
-import scipy.signal
 import soundfile
+from numpy.typing import NDArray
 
-from sonora.audio.bpm import load_audio
+from sonora.audio.decode import load_audio
 from sonora.core.logger import LOG
 
 
 def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
     """
-    Returns: tuple of (is_fake_lossless, detected_cutoff_khz, description)
+    Returns (has_suspicious_cutoff, detected_cutoff_khz, description).
+    A cutoff alone cannot establish the source codec or prove audio corruption.
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Audio file not found: {file_path}")
 
     try:
         sample_rate: int = 44100
-        audio_mono: np.ndarray | None = None
+        audio_data: NDArray[np.float32] | None = None
 
         # Partial read: seek to active middle section (30% in) to avoid silent/spoken intros
         try:
@@ -35,31 +37,40 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
 
                 audio_file.seek(int(sample_rate * offset_seconds))
                 read_frames = int(sample_rate * 20.0)
-                raw_samples = audio_file.read(
-                    frames=read_frames, dtype="float32", always_2d=True
+                raw_samples = cast(
+                    NDArray[np.float32],
+                    audio_file.read(
+                        frames=read_frames, dtype="float32", always_2d=True
+                    ),
                 )
-                if raw_samples.shape[1] > 1:
-                    audio_mono = np.mean(raw_samples, axis=1)
-                else:
-                    audio_mono = raw_samples[:, 0]
+                audio_data = raw_samples
         except (soundfile.LibsndfileError, OSError):
-            audio_mono = None
+            audio_data = None
 
-        if audio_mono is None:
-            loaded_audio = load_audio(
-                file_path, mono=True, max_seconds=20.0, offset_seconds=30.0
-            )
+        if audio_data is None:
+            loaded_audio = load_audio(file_path, max_seconds=20.0, offset_seconds=30.0)
+            if loaded_audio is not None and len(loaded_audio[0]) < loaded_audio[1] * 5:
+                loaded_audio = load_audio(
+                    file_path, max_seconds=20.0, offset_seconds=0.0
+                )
             if loaded_audio is None:
                 return False, 0.0, None
-            audio_mono, sample_rate = loaded_audio
+            audio_data, sample_rate = loaded_audio
 
-        if sample_rate < 32000 or len(audio_mono) < sample_rate * 5:
+        if sample_rate < 32000 or len(audio_data) < sample_rate * 5:
             return False, 0.0, None
 
-        # Compute Fast Fourier Transform spectrogram
-        frequency_axis, _, spectrogram_matrix = scipy.signal.spectrogram(
-            audio_mono, fs=sample_rate, nperseg=2048, noverlap=1024
-        )
+        import scipy.signal
+
+        channels = audio_data[:, None] if audio_data.ndim == 1 else audio_data
+        spectra = [
+            scipy.signal.spectrogram(
+                channels[:, channel], fs=sample_rate, nperseg=2048, noverlap=1024
+            )
+            for channel in range(channels.shape[1])
+        ]
+        frequency_axis = spectra[0][0]
+        spectrogram_matrix = np.mean([spectrum[2] for spectrum in spectra], axis=0)
 
         # 95th percentile power across time slices captures high-frequency transient peaks (hi-hats, vocal air)
         peak_spectrum_power = np.percentile(spectrogram_matrix, 95, axis=1)
@@ -97,16 +108,9 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
             # and complete stopband attenuation (< -75 dBFS) into quantization noise floor
             if passband_level > -73.0 and cliff_drop >= 18.0 and stopband_peak < -75.0:
                 detected_cutoff_khz = float(target_frequency / 1000.0)
-                if detected_cutoff_khz <= 16.5:
-                    encoder_profile = "128kbps MP3/AAC"
-                elif detected_cutoff_khz <= 17.8:
-                    encoder_profile = "160kbps MP3"
-                else:
-                    encoder_profile = "192kbps MP3"
-
                 description = (
-                    f"Brickwall spectral cutoff detected at ~{detected_cutoff_khz:.1f}kHz "
-                    f"(likely upscaled {encoder_profile} fake lossless)"
+                    f"Sharp spectral cutoff near {detected_cutoff_khz:.1f} kHz; "
+                    "possible lossy source or mastering filter. Source quality requires review."
                 )
                 return True, detected_cutoff_khz, description
 

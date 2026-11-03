@@ -1,16 +1,59 @@
 import atexit
 import contextlib
+import dataclasses
+import hashlib
+import json
 import sqlite3
 import threading
 import time
 from collections.abc import Generator
 from pathlib import Path
 
+from sonora.core.config import SonoraConfig
 from sonora.core.constants import DIRS
 from sonora.core.logger import LOG
 
 
-def _get_default_db_path() -> Path:
+def tagging_state_status(
+    config: SonoraConfig,
+    *,
+    fetch_bpm: bool,
+    fetch_key: bool,
+    fetch_replaygain: bool,
+    fetch_lyrics: bool,
+    fetch_itunes_art: bool,
+) -> str:
+    configuration = dataclasses.asdict(config)
+    for credential in (
+        "discogs_token",
+        "acoustid_api_key",
+        "genius_api_token",
+        "lastfm_api_key",
+        "musixmatch_token",
+        "fanart_api_key",
+        "fanart_client_key",
+    ):
+        configuration[credential] = (
+            "<configured>" if configuration[credential] else None
+        )
+    state_policy = {
+        "metadata_policy": "tagging-v13",
+        "bpm": fetch_bpm,
+        "key": fetch_key,
+        "replaygain": fetch_replaygain,
+        "lyrics": fetch_lyrics,
+        "artwork": fetch_itunes_art,
+        "configuration": configuration,
+    }
+    return (
+        "TAGGED_OK:"
+        + hashlib.sha256(
+            json.dumps(state_policy, sort_keys=True, default=sorted).encode("utf-8")
+        ).hexdigest()
+    )
+
+
+def get_default_state_db_path() -> Path:
     return DIRS.user_cache_path / "library_state.db"
 
 
@@ -22,11 +65,12 @@ class LibraryStateVault:
     """Persistent SQLite-backed state tracker for library files."""
 
     def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path = db_path if db_path is not None else _get_default_db_path()
+        self.db_path = db_path if db_path is not None else get_default_state_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._all_connections: set[sqlite3.Connection] = set()
         self._connections_lock = threading.Lock()
+        self._generation = 0
         self._init_db()
 
     def _create_tables(self, conn: sqlite3.Connection) -> None:
@@ -41,13 +85,12 @@ class LibraryStateVault:
             );
             """
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_track_path ON track_state(file_path);"
-        )
         conn.commit()
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
+        if getattr(self._local, "generation", -1) != self._generation:
+            conn = None
         if conn is None:
             needs_init = not self.db_path.exists()
             conn = sqlite3.connect(
@@ -59,6 +102,7 @@ class LibraryStateVault:
             if needs_init:
                 self._create_tables(conn)
             self._local.conn = conn
+            self._local.generation = self._generation
             with self._connections_lock:
                 self._all_connections.add(conn)
         return conn
@@ -70,7 +114,10 @@ class LibraryStateVault:
             with conn:
                 yield conn
         except sqlite3.OperationalError:
-            self.close()
+            with self._connections_lock:
+                self._all_connections.discard(conn)
+            conn.close()
+            self._local.conn = None
             raise
 
     def _init_db(self) -> None:
@@ -83,7 +130,9 @@ class LibraryStateVault:
         finally:
             init_conn.close()
 
-    def is_track_up_to_date(self, file_path: Path) -> bool:
+    def is_track_up_to_date(
+        self, file_path: Path, expected_status: str | None = None
+    ) -> bool:
         """Check if file on disk has not changed since it was last successfully tagged."""
         try:
             stat = file_path.stat()
@@ -99,16 +148,23 @@ class LibraryStateVault:
                 row = cursor.fetchone()
                 if row:
                     mtime_ns, file_size, status = row
+                    status_valid = (
+                        status == expected_status
+                        if expected_status is not None
+                        else (status == "TAGGED_OK" or status.startswith("TAGGED_OK:"))
+                    )
                     return bool(
                         mtime_ns == current_mtime
                         and file_size == current_size
-                        and status == "TAGGED_OK"
+                        and status_valid
                     )
         except (OSError, sqlite3.Error) as error:
             LOG.debug(f"State check failed for {file_path}: {error}")
         return False
 
-    def filter_outdated_tracks(self, file_paths: list[Path]) -> list[Path]:
+    def filter_outdated_tracks(
+        self, file_paths: list[Path], expected_status: str = "TAGGED_OK"
+    ) -> list[Path]:
         """
         Efficiently batch-check a list of file paths against the SQLite state index.
         Returns only the file paths that are missing or have been modified.
@@ -135,21 +191,20 @@ class LibraryStateVault:
 
         try:
             with self._connection() as conn:
-                resolved_keys = [(k,) for k in path_to_stat]
-                state_map: dict[str, tuple[int, int, str]] = {}
-
                 conn.execute(
                     "CREATE TEMP TABLE IF NOT EXISTS _batch_paths (path TEXT PRIMARY KEY);"
                 )
                 conn.execute("DELETE FROM _batch_paths;")
                 conn.executemany(
-                    "INSERT INTO _batch_paths (path) VALUES (?);", resolved_keys
+                    "INSERT INTO _batch_paths (path) VALUES (?);",
+                    ((path,) for path in path_to_stat),
                 )
                 cursor = conn.execute(
                     "SELECT t.file_path, t.mtime_ns, t.file_size, t.status FROM track_state t INNER JOIN _batch_paths b ON t.file_path = b.path;"
                 )
-                for row in cursor.fetchall():
-                    state_map[row[0]] = (row[1], row[2], row[3])
+                state_map: dict[str, tuple[int, int, str]] = {
+                    row[0]: (row[1], row[2], row[3]) for row in cursor
+                }
 
                 for path_str, (
                     orig_path,
@@ -161,7 +216,7 @@ class LibraryStateVault:
                         if (
                             cached_mtime == current_mtime
                             and cached_size == current_size
-                            and status == "TAGGED_OK"
+                            and status == expected_status
                         ):
                             continue
                     outdated.append(orig_path)
@@ -228,16 +283,17 @@ class LibraryStateVault:
 
     def get_state_count(self) -> int:
         """Return total number of tracked files in the library state database."""
-        if not self.db_path.exists():
-            return 0
         try:
+            self.db_path.stat()
             with self._connection() as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM track_state;")
-                row = cursor.fetchone()
-                return int(row[0]) if row else 0
-        except (sqlite3.Error, OSError) as error:
-            LOG.debug(f"Failed to get state count: {error}")
+                return int(next(cursor)[0])
+        except FileNotFoundError:
             return 0
+        except (sqlite3.Error, OSError) as error:
+            raise OSError(
+                f"Cannot count library state entries: {self.db_path}"
+            ) from error
 
     def get_state_size(self) -> int:
         """Return total disk size of the library state database including WAL files."""
@@ -248,10 +304,11 @@ class LibraryStateVault:
             self.db_path.with_name(f"{self.db_path.name}-shm"),
         ):
             try:
-                if p.exists():
-                    total += p.stat().st_size
-            except OSError:
-                pass
+                total += p.stat().st_size
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise OSError(f"Cannot read library state size: {p}") from error
         return total
 
     def clear_state(self, purge: bool = False) -> int:
@@ -267,34 +324,26 @@ class LibraryStateVault:
                     self.db_path.with_name(f"{self.db_path.name}-wal"),
                     self.db_path.with_name(f"{self.db_path.name}-shm"),
                 ):
-                    try:
-                        if p.exists():
-                            p.unlink()
-                    except OSError as error:
-                        LOG.debug(f"Failed to unlink {p}: {error}")
+                    p.unlink(missing_ok=True)
                 return count
-            else:
-                try:
-                    conn = sqlite3.connect(
-                        str(self.db_path), timeout=30.0, check_same_thread=False
-                    )
-                    try:
-                        conn.execute("DELETE FROM track_state;")
-                        conn.commit()
-                        conn.isolation_level = None
-                        conn.execute("VACUUM;")
-                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-                    finally:
-                        conn.close()
-                    return count
-                except (sqlite3.Error, OSError) as error:
-                    LOG.debug(f"Failed to clear state DB: {error}")
-                    return 0
+            conn = sqlite3.connect(
+                str(self.db_path), timeout=30.0, check_same_thread=False
+            )
+            try:
+                removed_count = conn.execute("DELETE FROM track_state;").rowcount
+                conn.commit()
+                conn.isolation_level = None
+                conn.execute("VACUUM;")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            finally:
+                conn.close()
+            return removed_count
 
     def close(self) -> None:
         """Cleanly close all connections opened by this vault across all threads."""
         with self._connections_lock:
             open_connections = list(self._all_connections)
+            self._generation += 1
             self._all_connections.clear()
         for open_conn in open_connections:
             with contextlib.suppress(sqlite3.Error, OSError):
@@ -309,6 +358,19 @@ def get_library_state() -> LibraryStateVault:
             if _STATE_INSTANCE is None:
                 _STATE_INSTANCE = LibraryStateVault()
     return _STATE_INSTANCE
+
+
+def get_state_storage_stats() -> tuple[int, int]:
+    """Return entry count and bytes without creating an unused state database."""
+    if _STATE_INSTANCE is None:
+        try:
+            get_default_state_db_path().stat()
+        except FileNotFoundError:
+            return 0, 0
+        except OSError as error:
+            raise OSError("Cannot inspect the library state database") from error
+    library_state = get_library_state()
+    return library_state.get_state_count(), library_state.get_state_size()
 
 
 def reset_library_state() -> None:

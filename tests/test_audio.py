@@ -3,8 +3,7 @@ Unit and integration tests for Sonora audio engine modules.
 """
 
 import io
-import sys
-import tempfile
+import unittest
 import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,21 +12,17 @@ import numpy as np
 import soundfile
 from PIL import Image
 
-# Guarantee src/ is in sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-import unittest
-
 from sonora.audio.art import _find_artist_directory, process_album_cover_art
-from sonora.audio.bpm import calculate_bpm
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.metadata import (
+    clear_metadata_cache,
     read_track_metadata,
     write_track_metadata,
 )
 from sonora.audio.replaygain import calculate_album_replaygain
 from sonora.audio.spectral import detect_fake_lossless
 from sonora.core.models import TrackInfo
+from tests.support import IsolatedTestCase
 
 
 def create_dummy_wav_file(dest_path: Path) -> Path:
@@ -44,14 +39,11 @@ def create_dummy_wav_file(dest_path: Path) -> Path:
     return dest_path
 
 
-class TestAudioEngine(unittest.TestCase):
+class TestAudioEngine(IsolatedTestCase):
     def setUp(self) -> None:
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self.tmp_dir.name)
-        self.dummy_audio_path = create_dummy_wav_file(self.tmp_path / "dummy_audio.wav")
-
-    def tearDown(self) -> None:
-        self.tmp_dir.cleanup()
+        self.dummy_audio_path = create_dummy_wav_file(
+            self.test_directory / "dummy_audio.wav"
+        )
 
     def test_read_real_audio_metadata(self) -> None:
         track_info = read_track_metadata(self.dummy_audio_path)
@@ -62,10 +54,11 @@ class TestAudioEngine(unittest.TestCase):
     @patch("taglib.File")
     def test_write_flac_audio_metadata(self, mock_taglib_cls: MagicMock) -> None:
         mock_file_instance = MagicMock()
+        mock_file_instance.save.return_value = {}
         mock_file_instance.tags = {}
         mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
 
-        flac_path = self.tmp_path / "test_track.flac"
+        flac_path = self.test_directory / "test_track.flac"
         flac_path.write_bytes(b"dummy flac data")
 
         track_info = TrackInfo(
@@ -89,6 +82,7 @@ class TestAudioEngine(unittest.TestCase):
         self, mock_taglib_cls: MagicMock
     ) -> None:
         mock_file_instance = MagicMock()
+        mock_file_instance.save.return_value = {}
         mock_file_instance.tags = {
             "ARTIST": ["Old Artist"],
             "TITLE": ["Old Title"],
@@ -102,7 +96,7 @@ class TestAudioEngine(unittest.TestCase):
         }
         mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
 
-        flac_path = self.tmp_path / "test_purge.flac"
+        flac_path = self.test_directory / "test_purge.flac"
         flac_path.write_bytes(b"dummy flac data")
 
         track_info = TrackInfo(
@@ -134,7 +128,7 @@ class TestAudioEngine(unittest.TestCase):
         self, mock_access: MagicMock
     ) -> None:
         mock_access.return_value = False
-        flac_path = self.tmp_path / "test_readonly.flac"
+        flac_path = self.test_directory / "test_readonly.flac"
         flac_path.write_bytes(b"dummy flac data")
         track_info = TrackInfo(
             file_path=flac_path,
@@ -146,62 +140,56 @@ class TestAudioEngine(unittest.TestCase):
             write_track_metadata(track_info)
 
     def test_read_nonexistent_file_raises_metadata_error(self) -> None:
-        bogus_path = self.tmp_path / "nonexistent_audio_track_9999.flac"
+        bogus_path = self.test_directory / "nonexistent_audio_track_9999.flac"
         with self.assertRaises(FileNotFoundError):
             read_track_metadata(bogus_path)
 
     def test_verify_nonexistent_file_raises_audio_error(self) -> None:
-        bogus_path = self.tmp_path / "nonexistent_audio_track_9999.flac"
+        bogus_path = self.test_directory / "nonexistent_audio_track_9999.flac"
         with self.assertRaises(FileNotFoundError):
             verify_flac_checksum(bogus_path)
 
     def test_verify_non_flac_returns_true(self) -> None:
         self.assertTrue(verify_flac_checksum(self.dummy_audio_path))
 
-    def test_calculate_track_replaygain_success(self) -> None:
-        replaygain_success = calculate_album_replaygain(
-            [self.dummy_audio_path], force=True
-        )
-        self.assertTrue(replaygain_success)
-        reloaded_info = read_track_metadata(self.dummy_audio_path)
-        self.assertIsNotNone(reloaded_info.replaygain_track_gain)
-
     def test_calculate_album_replaygain_success(self) -> None:
-        track1_path = self.tmp_path / "1.wav"
-        track2_path = self.tmp_path / "2.wav"
+        track1_path = self.test_directory / "1.wav"
+        track2_path = self.test_directory / "2.wav"
         create_dummy_wav_file(track1_path)
         create_dummy_wav_file(track2_path)
 
         result = calculate_album_replaygain([track1_path, track2_path], force=True)
         self.assertTrue(result)
 
-        info1 = read_track_metadata(track1_path)
-        self.assertIsNotNone(info1.replaygain_track_gain)
-        self.assertIsNotNone(info1.replaygain_album_gain)
-        self.assertIsNotNone(info1.replaygain_track_peak)
-        self.assertIsNotNone(info1.replaygain_album_peak)
-
-    def test_calculate_bpm_with_scipy(self) -> None:
-        with (
-            patch(
-                "sonora.audio.bpm.load_audio",
-                return_value=(np.random.rand(44100 * 10).astype(np.float32), 44100),
-            ),
-            patch(
-                "scipy.signal.spectrogram",
-                return_value=(None, None, np.tile(np.linspace(1, 10, 100), (10, 1))),
-            ),
-        ):
-            bpm = calculate_bpm(self.dummy_audio_path)
-            self.assertIsNotNone(bpm)
-            self.assertIsInstance(bpm, float)
-            if bpm:
-                self.assertTrue(40.0 <= bpm <= 220.0)
+        measurements = [
+            read_track_metadata(path) for path in (track1_path, track2_path)
+        ]
+        for recording in measurements:
+            with self.subTest(path=recording.file_path):
+                for field in (
+                    "replaygain_track_gain",
+                    "replaygain_album_gain",
+                    "replaygain_track_peak",
+                    "replaygain_album_peak",
+                ):
+                    self.assertIsInstance(getattr(recording, field), float)
+                self.assertEqual(
+                    recording.replaygain_track_gain, recording.replaygain_album_gain
+                )
+                self.assertEqual(
+                    recording.replaygain_track_peak, recording.replaygain_album_peak
+                )
+        self.assertEqual(
+            measurements[0].replaygain_album_gain, measurements[1].replaygain_album_gain
+        )
+        self.assertEqual(
+            measurements[0].replaygain_album_peak, measurements[1].replaygain_album_peak
+        )
 
     @patch("taglib.File")
     def test_read_metadata_unsupported_format(self, mock_file: MagicMock) -> None:
         mock_file.return_value = None
-        dummy_path = self.tmp_path / "song.xyz"
+        dummy_path = self.test_directory / "song.xyz"
         dummy_path.write_bytes(b"dummy")
 
         with self.assertRaises(ValueError):
@@ -210,9 +198,9 @@ class TestAudioEngine(unittest.TestCase):
     @patch("subprocess.run")
     def test_checksum_binary_not_found(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = FileNotFoundError()
-        flac_path = self.tmp_path / "dummy_flac_check_99.flac"
+        flac_path = self.test_directory / "dummy_flac_check_99.flac"
         flac_path.write_bytes(b"dummy")
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(OSError):
             verify_flac_checksum(flac_path)
 
     def test_calculate_album_replaygain_failure_empty(self) -> None:
@@ -220,17 +208,18 @@ class TestAudioEngine(unittest.TestCase):
         self.assertFalse(result)
 
     def test_calculate_album_replaygain_corrupted_file(self) -> None:
-        fail_wav = self.tmp_path / "corrupt.wav"
+        fail_wav = self.test_directory / "corrupt.wav"
         fail_wav.write_bytes(b"not an audio file")
         result = calculate_album_replaygain([fail_wav])
         self.assertFalse(result)
 
     def test_metadata_in_memory_cache(self) -> None:
-        wav_path = self.tmp_path / "cached_track.wav"
+        wav_path = self.test_directory / "cached_track.wav"
         create_dummy_wav_file(wav_path)
 
         with patch("taglib.File") as mock_taglib_file:
             mock_song = MagicMock()
+            mock_song.save.return_value = {}
             mock_song.tags = {"ARTIST": ["Cached Artist"], "TITLE": ["Cached Title"]}
             mock_song.sampleRate = 44100
             mock_song.bitrate = 1411
@@ -248,7 +237,7 @@ class TestAudioEngine(unittest.TestCase):
             self.assertEqual(mock_taglib_file.call_count, 1)
 
     def test_find_artist_directory_singles_hierarchy(self) -> None:
-        artist_dir = self.tmp_path / "3 Doors Down"
+        artist_dir = self.test_directory / "3 Doors Down"
         singles_dir = artist_dir / "Singles"
         track_folder = singles_dir / "3 Doors Down - Here Without You"
         track_folder.mkdir(parents=True)
@@ -257,17 +246,18 @@ class TestAudioEngine(unittest.TestCase):
         self.assertEqual(found.resolve(), artist_dir.resolve())
 
     def test_find_artist_directory_fallback(self) -> None:
-        folder = self.tmp_path / "Other Artist" / "Album"
+        folder = self.test_directory / "Other Artist" / "Album"
         folder.mkdir(parents=True)
         found = _find_artist_directory(folder, "Unknown Artist")
         self.assertEqual(found.resolve(), folder.resolve())
 
     def test_metadata_safe_numeric_parsing(self) -> None:
-        wav_path = self.tmp_path / "safe_numeric.wav"
+        wav_path = self.test_directory / "safe_numeric.wav"
         create_dummy_wav_file(wav_path)
 
         with patch("taglib.File") as mock_taglib_file:
             mock_song = MagicMock()
+            mock_song.save.return_value = {}
             mock_song.tags = {
                 "ARTIST": ["Artist"],
                 "TITLE": ["Title"],
@@ -281,26 +271,25 @@ class TestAudioEngine(unittest.TestCase):
             mock_song.pictures = []
             mock_taglib_file.return_value.__enter__.return_value = mock_song
 
-            info = read_track_metadata(wav_path)
-            self.assertEqual(info.total_tracks, 12)
-            self.assertEqual(info.total_discs, 2)
-            self.assertIsNone(info.rating)
+            track_metadata = read_track_metadata(wav_path)
+            self.assertEqual(track_metadata.total_tracks, 12)
+            self.assertEqual(track_metadata.total_discs, 2)
+            self.assertIsNone(track_metadata.rating)
 
     def test_process_album_cover_art_disc_folder(self) -> None:
-        album_dir = self.tmp_path / "The Wall"
+        album_dir = self.test_directory / "The Wall"
         disc_dir = album_dir / "CD1"
         disc_dir.mkdir(parents=True)
         cover_path = album_dir / "cover.jpg"
-        cover_path.write_bytes(b"dummy image data")
+        Image.new("RGB", (600, 600)).save(cover_path)
 
         # Looking up art for CD1 should discover existing cover.jpg in the parent album folder
         found = process_album_cover_art(disc_dir, "Pink Floyd", "The Wall")
-        self.assertIsNotNone(found)
-        if found:
-            self.assertEqual(found.resolve(), cover_path.resolve())
+        assert found is not None
+        self.assertEqual(found.resolve(), cover_path.resolve())
 
     def test_process_album_cover_art_low_resolution_upgrade(self) -> None:
-        album_dir = self.tmp_path / "LowResAlbum"
+        album_dir = self.test_directory / "LowResAlbum"
         album_dir.mkdir(parents=True)
         cover_path = album_dir / "cover.jpg"
 
@@ -327,7 +316,6 @@ class TestAudioEngine(unittest.TestCase):
             patch("sonora.core.http.SESSION.get", return_value=mock_resp),
         ):
             found = process_album_cover_art(album_dir, "Artist", "Album", force=False)
-            self.assertIsNotNone(found)
             assert found is not None
             with Image.open(found) as img:
                 self.assertEqual(img.size, (1400, 1400))
@@ -335,7 +323,7 @@ class TestAudioEngine(unittest.TestCase):
     def test_process_album_cover_art_caa_low_res_falls_back_to_itunes_hi_res(
         self,
     ) -> None:
-        album_dir = self.tmp_path / "CaaLowResAlbum"
+        album_dir = self.test_directory / "CaaLowResAlbum"
         album_dir.mkdir(parents=True)
 
         caa_low = Image.new("RGB", (400, 400), color="red")
@@ -376,7 +364,6 @@ class TestAudioEngine(unittest.TestCase):
                 musicbrainz_album_id="123",
                 force=True,
             )
-            self.assertIsNotNone(found)
             assert found is not None
             with Image.open(found) as img:
                 self.assertEqual(img.size, (1400, 1400))
@@ -384,7 +371,7 @@ class TestAudioEngine(unittest.TestCase):
     def test_process_album_cover_art_caa_low_res_preserved_when_no_higher_source(
         self,
     ) -> None:
-        album_dir = self.tmp_path / "CaaOnlyAlbum"
+        album_dir = self.test_directory / "CaaOnlyAlbum"
         album_dir.mkdir(parents=True)
 
         caa_low = Image.new("RGB", (400, 400), color="red")
@@ -413,13 +400,12 @@ class TestAudioEngine(unittest.TestCase):
                 musicbrainz_album_id="456",
                 force=True,
             )
-            self.assertIsNotNone(found)
             assert found is not None
             with Image.open(found) as img:
                 self.assertEqual(img.size, (400, 400))
 
     def test_process_album_cover_art_quality_downgrade_protection(self) -> None:
-        album_dir = self.tmp_path / "HighResAlbum"
+        album_dir = self.test_directory / "HighResAlbum"
         album_dir.mkdir(parents=True)
         cover_path = album_dir / "cover.jpg"
 
@@ -446,7 +432,6 @@ class TestAudioEngine(unittest.TestCase):
             patch("sonora.core.http.SESSION.get", return_value=mock_resp),
         ):
             found = process_album_cover_art(album_dir, "Artist", "Album", force=True)
-            self.assertIsNotNone(found)
             assert found is not None
             with Image.open(found) as img:
                 self.assertEqual(img.size, (1400, 1400))
@@ -456,39 +441,43 @@ class TestAudioEngine(unittest.TestCase):
         lossy_exts = [".mp3", ".ogg", ".opus", ".mpc", ".wma"]
 
         for ext in lossless_exts:
-            p = self.tmp_path / f"track{ext}"
+            p = self.test_directory / f"track{ext}"
             p.write_bytes(b"dummy")
             with patch("taglib.File") as mock_taglib:
                 mock_song = MagicMock()
+                mock_song.save.return_value = {}
                 mock_song.tags = {"ARTIST": ["A"], "TITLE": ["T"]}
                 mock_song.sampleRate = 44100
                 mock_song.bitrate = 1411
                 mock_song.channels = 2
                 mock_song.pictures = []
                 mock_taglib.return_value.__enter__.return_value = mock_song
-                info = read_track_metadata(p)
+                track_metadata = read_track_metadata(p)
                 self.assertTrue(
-                    info.is_lossless, f"Expected {ext} to be classified as lossless"
+                    track_metadata.is_lossless,
+                    f"Expected {ext} to be classified as lossless",
                 )
 
         for ext in lossy_exts:
-            p = self.tmp_path / f"track{ext}"
+            p = self.test_directory / f"track{ext}"
             p.write_bytes(b"dummy")
             with patch("taglib.File") as mock_taglib:
                 mock_song = MagicMock()
+                mock_song.save.return_value = {}
                 mock_song.tags = {"ARTIST": ["A"], "TITLE": ["T"]}
                 mock_song.sampleRate = 44100
                 mock_song.bitrate = 320
                 mock_song.channels = 2
                 mock_song.pictures = []
                 mock_taglib.return_value.__enter__.return_value = mock_song
-                info = read_track_metadata(p)
+                track_metadata = read_track_metadata(p)
                 self.assertFalse(
-                    info.is_lossless, f"Expected {ext} to be classified as lossy"
+                    track_metadata.is_lossless,
+                    f"Expected {ext} to be classified as lossy",
                 )
 
     def test_detect_fake_lossless_authentic_audio(self) -> None:
-        authentic_path = self.tmp_path / "authentic.wav"
+        authentic_path = self.test_directory / "authentic.wav"
         rng = np.random.default_rng(42)
         samples = rng.normal(0.0, 0.15, int(44100 * 25.0)).astype(np.float32)
         soundfile.write(str(authentic_path), samples, 44100)
@@ -499,7 +488,7 @@ class TestAudioEngine(unittest.TestCase):
         self.assertIsNone(description)
 
     def test_detect_fake_lossless_brickwall_transcode(self) -> None:
-        fake_path = self.tmp_path / "transcode_128k.wav"
+        fake_path = self.test_directory / "transcode_128k.wav"
         rng = np.random.default_rng(42)
         time_axis = np.linspace(0, 25.0, int(44100 * 25.0), endpoint=False)
         audio_signal = (
@@ -520,14 +509,15 @@ class TestAudioEngine(unittest.TestCase):
         self.assertGreaterEqual(cutoff_khz, 14.5)
         self.assertLessEqual(cutoff_khz, 16.5)
         assert description is not None
-        self.assertIn("128kbps", description)
+        self.assertIn("Source quality requires review", description)
+        self.assertNotIn("kbps", description)
 
     def test_detect_fake_lossless_nonexistent_file(self) -> None:
         with self.assertRaises(FileNotFoundError):
-            detect_fake_lossless(self.tmp_path / "nonexistent.flac")
+            detect_fake_lossless(self.test_directory / "nonexistent.flac")
 
     def test_detect_fake_lossless_short_audio(self) -> None:
-        short_path = self.tmp_path / "short.wav"
+        short_path = self.test_directory / "short.wav"
         rng = np.random.default_rng(42)
         samples = rng.normal(0.0, 0.15, int(44100 * 1.0)).astype(np.float32)
         soundfile.write(str(short_path), samples, 44100)
@@ -536,6 +526,192 @@ class TestAudioEngine(unittest.TestCase):
         self.assertFalse(is_fake)
         self.assertEqual(cutoff_khz, 0.0)
         self.assertIsNone(description)
+
+    def test_spectral_fallback_retries_from_start_for_short_tracks(self) -> None:
+        path = self.test_directory / "unsupported-short.m4a"
+        path.touch()
+        samples = np.ones(44100 * 5, dtype=np.float32)
+        with (
+            patch("soundfile.SoundFile", side_effect=OSError("unsupported")),
+            patch(
+                "sonora.audio.spectral.load_audio",
+                side_effect=[(np.array([], dtype=np.float32), 44100), (samples, 44100)],
+            ) as load_audio,
+        ):
+            detect_fake_lossless(path)
+
+        self.assertEqual(
+            [call.kwargs["offset_seconds"] for call in load_audio.call_args_list],
+            [30.0, 0.0],
+        )
+
+    @patch("taglib.File")
+    def test_advisory_metadata_explicit_and_clean_purging(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.save.return_value = {}
+        mock_file_instance.tags = {
+            "ITUNESADVISORY": ["2"],
+            "ADVISORY": ["Clean"],
+        }
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.test_directory / "test_advisory.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        # 1. Non-explicit track must purge ITUNESADVISORY and ADVISORY (no Clean spam)
+        clean_track = TrackInfo(
+            file_path=flac_path,
+            artist="Artist",
+            title="Clean Song",
+            advisory=None,
+        )
+        write_track_metadata(clean_track)
+        self.assertNotIn("ITUNESADVISORY", mock_file_instance.tags)
+        self.assertNotIn("ADVISORY", mock_file_instance.tags)
+
+        # 2. Explicit track must write ITUNESADVISORY="1" and ADVISORY="Explicit"
+        explicit_track = TrackInfo(
+            file_path=flac_path,
+            artist="Artist",
+            title="Explicit Song",
+            advisory="Explicit",
+        )
+        write_track_metadata(explicit_track)
+        self.assertEqual(mock_file_instance.tags["ITUNESADVISORY"], ["1"])
+        self.assertEqual(mock_file_instance.tags["ADVISORY"], ["Explicit"])
+
+    @patch("taglib.File")
+    def test_featured_artists_and_multi_artists_tag(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.save.return_value = {}
+        mock_file_instance.tags = {}
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.test_directory / "test_featured.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        track_with_feat = TrackInfo(
+            file_path=flac_path,
+            artist="Armin",
+            title="Melodie",
+            featured_artists="Nane, Super ED",
+        )
+        write_track_metadata(track_with_feat)
+        self.assertEqual(
+            mock_file_instance.tags["ARTISTS"], ["Armin", "Nane", "Super ED"]
+        )
+
+        track_without_feat = TrackInfo(
+            file_path=flac_path,
+            artist="Armin",
+            title="Melodie",
+            featured_artists=None,
+        )
+        write_track_metadata(track_without_feat)
+        self.assertNotIn("ARTISTS", mock_file_instance.tags)
+
+    @patch("taglib.File")
+    def test_collaborative_release_multi_artists_and_album_artists(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.save.return_value = {}
+        mock_file_instance.tags = {}
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.test_directory / "test_collab.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        # 1. Collaborative primary artist and album artist (e.g. 21 Savage & Metro Boomin)
+        collab_track = TrackInfo(
+            file_path=flac_path,
+            artist="21 Savage & Metro Boomin",
+            album_artist="21 Savage & Metro Boomin",
+            title="No Heart",
+            album="Savage Mode",
+            featured_artists=None,
+            lyrics="Sample lyrics text",
+        )
+        write_track_metadata(collab_track)
+        self.assertEqual(
+            mock_file_instance.tags["ARTIST"], ["21 Savage & Metro Boomin"]
+        )
+        self.assertEqual(
+            mock_file_instance.tags["ARTISTS"], ["21 Savage", "Metro Boomin"]
+        )
+        self.assertEqual(
+            mock_file_instance.tags["ALBUMARTIST"], ["21 Savage & Metro Boomin"]
+        )
+        self.assertEqual(
+            mock_file_instance.tags["ALBUMARTISTS"], ["21 Savage", "Metro Boomin"]
+        )
+        self.assertEqual(mock_file_instance.tags["LYRICS"], ["Sample lyrics text"])
+        self.assertEqual(
+            mock_file_instance.tags["UNSYNCEDLYRICS"], ["Sample lyrics text"]
+        )
+
+        # 2. Collaborative artist with additional featured artist
+        collab_with_feat = TrackInfo(
+            file_path=flac_path,
+            artist="21 Savage & Metro Boomin",
+            album_artist="21 Savage & Metro Boomin",
+            title="X",
+            album="Savage Mode",
+            featured_artists="Future",
+        )
+        write_track_metadata(collab_with_feat)
+        self.assertEqual(
+            mock_file_instance.tags["ARTISTS"],
+            ["21 Savage", "Metro Boomin", "Future"],
+        )
+
+        # 3. Various Artists compilation auto-flag
+        compilation_track = TrackInfo(
+            file_path=flac_path,
+            artist="Individual Artist",
+            album_artist="Various Artists",
+            title="Hits Track",
+            album="Top Hits 2026",
+        )
+        write_track_metadata(compilation_track)
+        self.assertEqual(mock_file_instance.tags["COMPILATION"], ["1"])
+
+    @patch("taglib.File")
+    def test_read_track_metadata_filters_primary_artists_from_artists_tag(
+        self, mock_taglib_cls: MagicMock
+    ) -> None:
+        mock_file_instance = MagicMock()
+        mock_file_instance.save.return_value = {}
+        # Tags has collaborative ARTIST and multi-valued ARTISTS
+        mock_file_instance.tags = {
+            "ARTIST": ["21 Savage & Metro Boomin"],
+            "TITLE": ["No Heart"],
+            "ALBUM": ["Savage Mode"],
+            "ARTISTS": ["21 Savage", "Metro Boomin"],
+        }
+        mock_file_instance.sampleRate = 44100
+        mock_file_instance.channels = 2
+        mock_file_instance.bitrate = 1411
+        mock_file_instance.length = 180
+        mock_file_instance.pictures = []
+        mock_taglib_cls.return_value.__enter__.return_value = mock_file_instance
+
+        flac_path = self.test_directory / "test_read_collab.flac"
+        flac_path.write_bytes(b"dummy flac data")
+
+        track_info = read_track_metadata(flac_path)
+        # Must NOT classify primary artists 21 Savage or Metro Boomin as featured artists
+        self.assertIsNone(track_info.featured_artists)
+
+        # Case with genuine extra artist in ARTISTS tag
+        clear_metadata_cache()
+        mock_file_instance.tags["ARTISTS"] = ["21 Savage", "Metro Boomin", "Future"]
+        track_info_with_feat = read_track_metadata(flac_path)
+        self.assertEqual(track_info_with_feat.featured_artists, "Future")
 
 
 if __name__ == "__main__":
