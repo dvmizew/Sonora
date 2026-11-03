@@ -788,7 +788,7 @@ def process_track_lyrics(
         return other_song_bodies
 
     if existing_content and any(
-        fuzz.ratio(lyrics_word_body(existing_content), body) >= 98
+        fuzz.ratio(lyrics_word_body(existing_content), body, score_cutoff=98) >= 98
         for body in get_other_song_bodies()
     ):
         LOG.warning(
@@ -906,7 +906,7 @@ def process_track_lyrics(
             details["reason"] = "Returned lyric headers conflict with the recording."
 
     if lyrics_text and any(
-        fuzz.ratio(lyrics_word_body(lyrics_text), body) >= 98
+        fuzz.ratio(lyrics_word_body(lyrics_text), body, score_cutoff=98) >= 98
         for body in get_other_song_bodies()
     ):
         LOG.warning(

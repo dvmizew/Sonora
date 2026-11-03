@@ -152,6 +152,21 @@ class TestRenameWorkflows(ModuleTestCase):
         self.assertEqual(preserved, renamed_folder)
         self.assertEqual(preserved.name, "Alex Velea - Minim Doi")
 
+    def test_rename_single_folder_preserves_collaborative_artists(self) -> None:
+        singles_dir = self.tmp_path / "Singles"
+        singles_dir.mkdir(parents=True, exist_ok=True)
+        single_folder = singles_dir / "Temporary Folder"
+        single_folder.mkdir()
+
+        track_info = TrackInfo(
+            file_path=single_folder / "01 - The Monster.wav",
+            artist="Eminem & Rihanna",
+            title="The Monster",
+            album="The Monster - Single",
+        )
+        renamed = rename_single_folder(single_folder, track_info)
+        self.assertEqual(renamed.name, "Eminem & Rihanna - The Monster")
+
     @patch("sonora.modules.renamer.read_track_metadata")
     def test_rename_track_file_in_singles_forces_01(self, mock_read: Any) -> None:
         singles_folder = self.tmp_path / "Artist" / "Singles" / "Artist - Song"

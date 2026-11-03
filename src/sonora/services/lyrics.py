@@ -1,6 +1,7 @@
 import hashlib
 import json
 import math
+import time
 import urllib.parse
 from typing import Any
 
@@ -12,7 +13,7 @@ from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.constants import RATE_LIMIT_LYRICS, USER_AGENT
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import API_RESPONSE_ERRORS, SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION, parse_retry_delay
 from sonora.core.logger import LOG
 from sonora.core.rate_limit import RateLimiter
 from sonora.core.retry import retry_network_call
@@ -110,11 +111,18 @@ def _query_lrclib(
             params["album_name"] = album_name
         if duration is not None:
             params["duration"] = duration
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Lrclib-Client": USER_AGENT,
+        }
+        lrclib_app_id = get_config().lrclib_app_id
+        if lrclib_app_id:
+            headers["Lrclib-App-Id"] = lrclib_app_id
         response = SESSION.get(
             "https://lrclib.net/api/get",
             params=params,
-            timeout=5.0,
-            headers={"User-Agent": USER_AGENT},
+            timeout=10.0,
+            headers=headers,
         )
         if response.status_code != 200:
             if response.status_code != 404:
@@ -380,7 +388,10 @@ def fetch_synced_lyrics(
 
     if lookup_state is not None:
         with lookup_state["lock"]:
-            suspended = lookup_state["suspended"]
+            now = time.monotonic()
+            suspended = lookup_state.get("suspended", False) or (
+                now < lookup_state.get("suspended_until", 0.0)
+            )
     else:
         suspended = False
     if suspended:
@@ -459,6 +470,9 @@ def fetch_synced_lyrics(
                 or last_exception.response.status_code >= 500
             )
         )
+        is_dns_lockout = isinstance(
+            last_exception, httpx.ConnectError
+        ) and "DNS lookup temporarily suspended" in str(last_exception)
         lookup_details.update(
             cache_hit=False,
             lookup_status="failed",
@@ -471,17 +485,27 @@ def fetch_synced_lyrics(
         if lookup_state is not None:
             with lookup_state["lock"]:
                 if transient:
-                    lookup_state["failures"] += 1
-                    if lookup_state["failures"] >= 3 or (
-                        isinstance(last_exception, httpx.HTTPStatusError)
-                        and (
-                            last_exception.response.status_code == 429
-                            or bool(last_exception.response.headers.get("Retry-After"))
+                    if not is_dns_lockout:
+                        lookup_state["failures"] += 1
+                    cooldown = 0.0
+                    if isinstance(last_exception, httpx.HTTPStatusError):
+                        retry_after_hdr = last_exception.response.headers.get(
+                            "Retry-After"
                         )
-                    ):
+                        if (
+                            last_exception.response.status_code == 429
+                            or retry_after_hdr
+                        ):
+                            cooldown = parse_retry_delay(retry_after_hdr, 30.0)
+                    if cooldown > 60.0 or lookup_state["failures"] >= 3:
                         lookup_state["suspended"] = True
                         LOG.warning(
                             "Lyrics provider is unavailable or rate-limited; network lookups are suspended for this run. Cached and local lyrics remain available."
+                        )
+                    elif cooldown > 0:
+                        lookup_state["suspended_until"] = max(
+                            lookup_state.get("suspended_until", 0.0),
+                            time.monotonic() + cooldown,
                         )
                 else:
                     lookup_state["failures"] = 0

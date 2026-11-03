@@ -53,7 +53,7 @@ _HOST_LIMITERS = {
 }
 
 
-def _retry_delay(retry_after: str | None, fallback: float) -> float:
+def parse_retry_delay(retry_after: str | None, fallback: float) -> float:
     if not retry_after:
         return fallback
     try:
@@ -66,6 +66,9 @@ def _retry_delay(retry_after: str | None, fallback: float) -> float:
         if deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=timezone.utc)
         return max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+
+
+_retry_delay = parse_retry_delay
 
 
 class RetryTransport(httpx.HTTPTransport):

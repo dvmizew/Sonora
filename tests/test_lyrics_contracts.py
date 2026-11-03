@@ -981,6 +981,76 @@ class TestLyricsLookupState(IsolatedTestCase):
             self.assertEqual(query.call_count, 1)
             cache.assert_not_called()
 
+    def test_rate_limit_short_cooldown_resumes_after_expiry(self) -> None:
+        state: dict[str, Any] = {
+            "lock": threading.Lock(),
+            "failures": 0,
+            "suspended": False,
+        }
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+        response_429 = httpx.Response(
+            429, request=request, headers={"Retry-After": "5"}
+        )
+        error_429 = httpx.HTTPStatusError(
+            "slow down", request=request, response=response_429
+        )
+
+        with (
+            patch.object(lyrics, "_query_syncedlyrics", side_effect=error_429),
+            patch.object(lyrics, "set_cached_api"),
+            patch("time.monotonic", return_value=100.0),
+            self.assertRaisesRegex(RuntimeError, "HTTP 429"),
+        ):
+            lyrics.fetch_synced_lyrics("Primary", "Limited", lookup_state=state)
+
+        # Permanent suspension was NOT engaged because cooldown was <= 60s
+        self.assertFalse(state["suspended"])
+        self.assertGreater(state.get("suspended_until", 0.0), 100.0)
+
+        # Immediate follow-up while still within cooldown window is deferred
+        with patch("time.monotonic", return_value=102.0):
+            details: dict[str, Any] = {}
+            self.assertIsNone(
+                lyrics.fetch_synced_lyrics(
+                    "Primary", "Next", lookup_state=state, details=details
+                )
+            )
+            self.assertEqual(details["lookup_status"], "deferred")
+
+        # After cooldown timestamp expires, lookups proceed
+        with (
+            patch("time.monotonic", return_value=110.0),
+            patch.object(lyrics, "_query_syncedlyrics", return_value=SYNCED),
+        ):
+            res = lyrics.fetch_synced_lyrics("Primary", "Recovered", lookup_state=state)
+            self.assertEqual(res, SYNCED)
+
+    def test_dns_lockout_does_not_count_towards_failure_threshold(self) -> None:
+        state: dict[str, Any] = {
+            "lock": threading.Lock(),
+            "failures": 0,
+            "suspended": False,
+        }
+        request = httpx.Request("GET", "https://example.com")
+        dns_lockout_error = httpx.ConnectError(
+            "DNS lookup temporarily suspended after a resolver failure",
+            request=request,
+        )
+
+        with (
+            patch.object(lyrics, "_query_syncedlyrics", side_effect=dns_lockout_error),
+            patch.object(lyrics, "set_cached_api"),
+        ):
+            for _ in range(5):
+                with self.assertRaisesRegex(
+                    RuntimeError, "DNS lookup temporarily suspended"
+                ):
+                    lyrics.fetch_synced_lyrics("Primary", "Track", lookup_state=state)
+
+        # 5 fast-fails during DNS suspension must NOT trip failures counter or suspended flag
+        self.assertEqual(state["failures"], 0)
+        self.assertFalse(state["suspended"])
+
     def test_definitive_miss_resets_consecutive_failure_count(self) -> None:
         state: dict[str, Any] = {
             "lock": threading.Lock(),

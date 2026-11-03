@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import threading
+from collections import Counter
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -396,6 +397,7 @@ def lyrics(
     token = parse_musixmatch_token(musixmatch_token or get_config().musixmatch_token)
     lookup_state: dict[str, Any] = {
         "lock": threading.Lock(),
+        "request_slots": threading.BoundedSemaphore(min(3, threads)),
         "failures": 0,
         "suspended": False,
     }
@@ -414,18 +416,17 @@ def lyrics(
     if not results and not interrupted:
         return 0
 
+    status_counts = Counter(lyrics_status for _, _, lyrics_status in results)
     saved_count = sum(
         1
         for _, content, lyrics_status in results
         if lyrics_status in {"plain", "synced", "enhanced", "cleaned", "restored"}
         and content
     )
-    skipped_count = sum(
-        1 for _, _, lyrics_status in results if lyrics_status == "existing"
-    )
-    review_count = sum(status == "review" for _, _, status in results)
-    failed_count = sum(status in {"failed", "partial"} for _, _, status in results)
-    deferred_count = sum(status == "deferred" for _, _, status in results)
+    skipped_count = status_counts["existing"]
+    review_count = status_counts["review"]
+    failed_count = status_counts["failed"] + status_counts["partial"]
+    deferred_count = status_counts["deferred"]
     lookup_failed_count = sum(
         detail.get("lookup_status") == "failed" for detail in file_details.values()
     )

@@ -630,44 +630,60 @@ def _resolve_album_metadata_context(
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"Pre-fetching MusicBrainz album metadata failed: {error}")
 
-    try:
-        album_context.deezer_details = deezer_service.fetch_deezer_album_details(
-            sample_artist, sample_album, expected_track_count=len(audio_files)
-        )
-    except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"Pre-fetching Deezer album metadata failed: {error}")
-
-    try:
-        most_common_collection = existing_itunes_collection_ids.most_common(1)
-        collection_id = (
-            most_common_collection[0][0]
-            if most_common_collection
-            and most_common_collection[0][1] > len(audio_files) / 2
-            else None
-        )
-        album_context.itunes_details = itunes_service.fetch_itunes_album_details(
-            sample_artist,
-            sample_album,
-            expected_track_count=len(audio_files),
-            collection_id=collection_id,
-        )
-        if album_context.itunes_details:
-            album_context.itunes_layout_verified = _release_matches_album_tracks(
-                album_context.itunes_details, audio_files, track_metadata
+    def _fetch_deezer() -> dict[str, Any] | None:
+        try:
+            return deezer_service.fetch_deezer_album_details(
+                sample_artist, sample_album, expected_track_count=len(audio_files)
             )
-    except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"Pre-fetching Apple album metadata failed: {error}")
+        except _NETWORK_EXCEPTIONS as error:
+            LOG.debug(f"Pre-fetching Deezer album metadata failed: {error}")
+            return None
 
-    try:
-        if discogs_user_token:
-            album_context.discogs_release = discogs_service.search_discogs_release(
+    def _fetch_itunes() -> dict[str, Any] | None:
+        try:
+            most_common_collection = existing_itunes_collection_ids.most_common(1)
+            collection_id = (
+                most_common_collection[0][0]
+                if most_common_collection
+                and most_common_collection[0][1] > len(audio_files) / 2
+                else None
+            )
+            return itunes_service.fetch_itunes_album_details(
+                sample_artist,
+                sample_album,
+                expected_track_count=len(audio_files),
+                collection_id=collection_id,
+            )
+        except _NETWORK_EXCEPTIONS as error:
+            LOG.debug(f"Pre-fetching Apple album metadata failed: {error}")
+            return None
+
+    def _fetch_discogs() -> dict[str, Any] | None:
+        if not discogs_user_token:
+            return None
+        try:
+            return discogs_service.search_discogs_release(
                 sample_artist,
                 sample_album,
                 user_token=discogs_user_token,
                 expected_track_count=len(audio_files),
             )
-    except _NETWORK_EXCEPTIONS as error:
-        LOG.debug(f"Pre-fetching Discogs album metadata failed: {error}")
+        except _NETWORK_EXCEPTIONS as error:
+            LOG.debug(f"Pre-fetching Discogs album metadata failed: {error}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        d_future = pool.submit(_fetch_deezer)
+        i_future = pool.submit(_fetch_itunes)
+        disc_future = pool.submit(_fetch_discogs)
+        album_context.deezer_details = d_future.result()
+        album_context.itunes_details = i_future.result()
+        album_context.discogs_release = disc_future.result()
+
+    if album_context.itunes_details:
+        album_context.itunes_layout_verified = _release_matches_album_tracks(
+            album_context.itunes_details, audio_files, track_metadata
+        )
 
     try:
         if fetch_itunes_art:

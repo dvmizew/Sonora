@@ -1,6 +1,7 @@
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 
 from rich.markup import escape
@@ -34,6 +35,7 @@ from sonora.core.sidecars import (
 )
 from sonora.core.text import normalize_str, safe_int, sanitize_name
 from sonora.core.titles import clean_title, strip_corrupt_brackets
+from sonora.modules.normalization import normalize_track_metadata
 
 
 def sync_lrc_metadata(lrc_path: Path, artist: str, title: str) -> bool:
@@ -241,17 +243,20 @@ def rename_single_folder(
     except OSError:
         return folder_path
 
-    primary_artist = get_primary_artist(track_info.artist)
-    single_title = get_single_release_title(track_info)
+    normalized_track = normalize_track_metadata(replace(track_info))
+    artist_credit = normalized_track.artist or get_primary_artist(track_info.artist)
+    single_title = get_single_release_title(normalized_track)
+    has_feat_in_title = bool(
+        re.search(r"\b(?:feat|ft|featuring)\b", single_title, re.IGNORECASE)
+    )
     canonical_with_feat = (
         sanitize_name(
-            f"{primary_artist} - {single_title} (feat. {track_info.featured_artists})"
+            f"{artist_credit} - {single_title} (feat. {normalized_track.featured_artists})"
         )
-        if track_info.featured_artists
-        and not re.search(r"\b(?:feat|ft|featuring)\b", single_title, re.IGNORECASE)
+        if normalized_track.featured_artists and not has_feat_in_title
         else None
     )
-    canonical_without_feat = sanitize_name(f"{primary_artist} - {single_title}")
+    canonical_without_feat = sanitize_name(f"{artist_credit} - {single_title}")
 
     if current_folder_name in (canonical_with_feat, canonical_without_feat):
         return folder_path

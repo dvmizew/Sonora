@@ -86,6 +86,22 @@ class TestLibraryState(IsolatedTestCase):
         )
         self.assertEqual(outdated_modified, [self.test_file1])
 
+    def test_is_track_up_to_date_supports_hash_status(self) -> None:
+        self.state_mgr.record_tracks_state_batch(
+            [self.test_file1], status="TAGGED_OK:abcdef123456"
+        )
+        self.assertTrue(self.state_mgr.is_track_up_to_date(self.test_file1))
+        self.assertTrue(
+            self.state_mgr.is_track_up_to_date(
+                self.test_file1, expected_status="TAGGED_OK:abcdef123456"
+            )
+        )
+        self.assertFalse(
+            self.state_mgr.is_track_up_to_date(
+                self.test_file1, expected_status="TAGGED_OK:different_hash"
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

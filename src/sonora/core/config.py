@@ -142,6 +142,7 @@ class SonoraConfig:
     genius_api_token: str | None = None
     lastfm_api_key: str | None = None
     musixmatch_token: str | None = None
+    lrclib_app_id: str | None = None
     fanart_api_key: str | None = None
     fanart_client_key: str | None = None
     enable_shazam: bool = True
@@ -438,6 +439,11 @@ def get_config() -> SonoraConfig:
             "musixmatch_token",
             ("musixmatch_token",),
             ("MUSIXMATCH_TOKEN", "MUSIXMATCH_USER_TOKEN"),
+        ),
+        (
+            "lrclib_app_id",
+            ("lrclib_app_id", "lrclib_id"),
+            ("LRCLIB_APP_ID", "SONORA_LRCLIB_APP_ID"),
         ),
         (
             "fanart_api_key",

@@ -534,8 +534,12 @@ def organize_library_singles(
                                 failures.append(str(path))
                             progress.advance(task_organize)
                             continue
+                        companion_lyrics = find_companion_lyrics(path)
                         target_file.parent.mkdir(parents=True, exist_ok=True)
-                        if path.parent != target_file.parent:
+                        if (
+                            path.parent != target_file.parent
+                            and not get_config().is_generic_container(path.parent.name)
+                        ):
                             relocate_companion_artwork(
                                 path.parent, target_file.parent, dry_run=False
                             )
@@ -544,12 +548,15 @@ def organize_library_singles(
                             f"   ∟ Moved single: {escape(path.name)} -> {escape(target_file.parent.name)}/"
                         )
                     else:
+                        companion_lyrics = find_companion_lyrics(path)
                         LOG.detail(
                             f"[DRY-RUN] Would move {escape(str(path))} -> {escape(str(target_file))}"
                         )
 
                     playlist_renames[path] = target_file
-                    relocate_companion_lyrics(path, target_file, dry_run=dry_run)
+                    relocate_companion_lyrics(
+                        path, target_file, dry_run=dry_run, sidecars=companion_lyrics
+                    )
                     deduplicator.register(track_info, target_file)
                     moved_count += 1
                     progress.advance(task_organize)
@@ -596,7 +603,7 @@ def organize_library_singles(
         LOG.detail(f"{action} {removed_dupes} duplicate single(s).")
 
     if not dry_run:
-        cleanup_empty_dirs(source_dir)
+        cleanup_empty_dirs(source_dir, target_singles_dir=target_singles_dir)
 
     return moved_count
 

@@ -130,7 +130,9 @@ class LibraryStateVault:
         finally:
             init_conn.close()
 
-    def is_track_up_to_date(self, file_path: Path) -> bool:
+    def is_track_up_to_date(
+        self, file_path: Path, expected_status: str | None = None
+    ) -> bool:
         """Check if file on disk has not changed since it was last successfully tagged."""
         try:
             stat = file_path.stat()
@@ -146,10 +148,15 @@ class LibraryStateVault:
                 row = cursor.fetchone()
                 if row:
                     mtime_ns, file_size, status = row
+                    status_valid = (
+                        status == expected_status
+                        if expected_status is not None
+                        else (status == "TAGGED_OK" or status.startswith("TAGGED_OK:"))
+                    )
                     return bool(
                         mtime_ns == current_mtime
                         and file_size == current_size
-                        and status == "TAGGED_OK"
+                        and status_valid
                     )
         except (OSError, sqlite3.Error) as error:
             LOG.debug(f"State check failed for {file_path}: {error}")
