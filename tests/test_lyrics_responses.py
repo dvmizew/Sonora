@@ -331,11 +331,14 @@ class TestLyricsResponses(ServiceResponseTestCase):
         self.assertAlmostEqual(max_ts, 195.2, places=1)
 
         self.assertFalse(is_lyrics_duration_valid(lrc_text, 141.0))
-        self.assertFalse(is_lyrics_duration_valid(lrc_text, 190.0))
+        self.assertFalse(is_lyrics_duration_valid(lrc_text, 175.0))
+        self.assertFalse(is_lyrics_duration_valid(lrc_text, 190.0, 2.0))
+        self.assertTrue(is_lyrics_duration_valid(lrc_text, 190.0))
         self.assertTrue(is_lyrics_duration_valid(lrc_text, 195.0))
         self.assertTrue(is_lyrics_duration_valid(lrc_text, 190.0, 15.0))
+        self.assertFalse(is_lyrics_duration_valid("[02:34.34]And around we go", 135.0))
         self.assertFalse(
-            is_lyrics_duration_valid("[02:34.34]And around we go", 140.811)
+            is_lyrics_duration_valid("[02:34.34]And around we go", 140.811, 2.0)
         )
 
     def test_get_lyrics_quality_filters_empty_headers(self) -> None:

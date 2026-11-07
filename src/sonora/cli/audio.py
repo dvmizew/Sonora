@@ -345,6 +345,24 @@ def _process_lyrics_file(
             details=details,
             lookup_state=lookup_state,
         )
+        if tag_type == "purged":
+            if not dry_run:
+                if track_info.lyrics or track_info.synced_lyrics:
+                    updated = dataclasses.replace(
+                        track_info, lyrics=None, synced_lyrics=None
+                    )
+                    write_track_metadata(updated, lyrics_only=True)
+                if lrc_path.exists():
+                    try:
+                        lrc_path.unlink()
+                    except OSError:
+                        pass
+            details["changes"] = {
+                "embedded": bool(track_info.lyrics or track_info.synced_lyrics),
+                "sidecar": bool(previous_sidecar),
+            }
+            details["action"] = "purge"
+            return audio_path, None, "purged"
         if "lyrics" in conflicts:
             details["action"] = "review"
             details.setdefault("reason", conflicts["lyrics"])
@@ -436,6 +454,7 @@ def lyrics(
     incomplete = bool(
         interrupted or failed_count or lookup_failed_count or lookup_deferred_count
     )
+    purged_count = sum(1 for _, _, status in results if status == "purged")
     missing_count = (
         len(results)
         - saved_count
@@ -443,6 +462,7 @@ def lyrics(
         - review_count
         - failed_count
         - deferred_count
+        - purged_count
     )
 
     summary_rows = [
@@ -453,6 +473,11 @@ def lyrics(
             "green" if saved_count else "white",
         ),
         ("Already Had Lyrics", str(skipped_count), None),
+        (
+            "Corrupt Lyrics Purged (preview)" if dry_run else "Corrupt Lyrics Purged",
+            str(purged_count),
+            "yellow" if purged_count else None,
+        ),
         (
             "Provider Lookups Failed",
             str(lookup_failed_count),
@@ -484,6 +509,7 @@ def lyrics(
             "dry_run": dry_run,
             "saved": 0 if dry_run else saved_count,
             "would_update": saved_count if dry_run else 0,
+            "purged": purged_count,
             "already_had": skipped_count,
             "unavailable": missing_count,
             "needs_review": review_count,

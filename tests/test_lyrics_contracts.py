@@ -1170,6 +1170,69 @@ class TestLocalLyricsContracts(IsolatedTestCase):
             )
         self.assertEqual(self.lrc_path.read_text(), ENHANCED)
 
+    def test_lyrics_duration_valid_default_tolerance_fifteen_seconds(self) -> None:
+        """Verify default overrun tolerance is 15.0s conforming to GEMINI.md."""
+        audio_duration = 180.0
+        lyrics_14s_overrun = "[03:14.00] Final lyric within 15s overrun"
+        self.assertTrue(
+            sidecars.is_lyrics_duration_valid(lyrics_14s_overrun, audio_duration)
+        )
+        lyrics_exact_boundary = "[03:15.00] Exactly 15s overrun"
+        self.assertTrue(
+            sidecars.is_lyrics_duration_valid(lyrics_exact_boundary, audio_duration)
+        )
+        lyrics_15_1s_overrun = "[03:15.10] Over 15s overrun"
+        self.assertFalse(
+            sidecars.is_lyrics_duration_valid(lyrics_15_1s_overrun, audio_duration)
+        )
+        lyrics_20s_overrun = "[03:20.00] Severely overlong lyrics"
+        self.assertFalse(
+            sidecars.is_lyrics_duration_valid(lyrics_20s_overrun, audio_duration)
+        )
+
+    def test_lyrics_duration_valid_explicit_tolerance_override(self) -> None:
+        """Verify passing an explicit tolerance_seconds overrides the 15.0s default."""
+        audio_duration = 100.0
+        lyrics_5s_overrun = "[01:45.00] 5s overrun"
+        self.assertFalse(
+            sidecars.is_lyrics_duration_valid(
+                lyrics_5s_overrun, audio_duration, tolerance_seconds=2.0
+            )
+        )
+        self.assertTrue(
+            sidecars.is_lyrics_duration_valid(
+                lyrics_5s_overrun, audio_duration, tolerance_seconds=10.0
+            )
+        )
+
+    def test_lyrics_duration_valid_offset_adjustment_with_default_tolerance(
+        self,
+    ) -> None:
+        """Verify [offset:ms] metadata adjusts effective timestamp against duration."""
+        audio_duration = 100.0
+        lyrics_pos_offset = "[offset:1000]\n[01:54.00] Words"
+        self.assertTrue(
+            sidecars.is_lyrics_duration_valid(lyrics_pos_offset, audio_duration)
+        )
+        lyrics_neg_offset = "[offset:-2000]\n[01:54.00] Words"
+        self.assertFalse(
+            sidecars.is_lyrics_duration_valid(lyrics_neg_offset, audio_duration)
+        )
+
+    def test_process_track_lyrics_accepts_companion_within_fifteen_second_overrun(
+        self,
+    ) -> None:
+        """End-to-end processing preserves companion lyrics within 15s overrun without re-fetching."""
+        lyrics_content = "[01:52.00] Words ending 12s after audio"
+        self.lrc_path.write_text(lyrics_content)
+        with patch.object(lyrics, "fetch_synced_lyrics") as lookup:
+            text, status = track_processing.process_track_lyrics(
+                self.audio_path, "Primary", "Recording", duration=100.0
+            )
+        lookup.assert_not_called()
+        self.assertEqual(text, lyrics_content)
+        self.assertEqual(status, "existing")
+
 
 class TestLyricsHeaderIdentity(IsolatedTestCase):
     def test_matching_headers_features_and_missing_headers_are_accepted(self) -> None:
@@ -1251,6 +1314,42 @@ class TestLyricsHeaderIdentity(IsolatedTestCase):
         self.assertTrue(
             sidecars.lyrics_identity_matches("[00:01.00] Lyrics", "Alpha", "Recording")
         )
+
+    def test_bracket_stripped_candidate_title_header_matches_clean_title(
+        self,
+    ) -> None:
+        """Candidate title headers containing bracketed subtitles match clean track titles."""
+        scenarios = (
+            "[ti:Capu' sus (Viața noastră)]\n[00:01.00] Versuri",
+            "Capu' sus (Viața noastră) Lyrics\n[00:01.00] Versuri",
+            "[Versurile piesei „Capu' sus (Viața noastră)” cu B.U.G. Mafia]\n[00:01.00] Versuri",
+            "[Versuri „Capu' sus (Viața noastră)”]\n[00:01.00] Versuri",
+            "[ti:Recording (Official Audio)]\n[00:01.00] Words",
+            "[ti:Recording (Bonus Track)]\n[00:01.00] Words",
+        )
+        for content in scenarios:
+            expected_title = "Capu' sus" if "Capu" in content else "Recording"
+            with self.subTest(content=content, expected_title=expected_title):
+                self.assertTrue(
+                    sidecars.lyrics_identity_matches(
+                        content, "B.U.G. Mafia", expected_title
+                    )
+                )
+
+    def test_different_songs_are_strictly_rejected_even_with_brackets(self) -> None:
+        """Prefixes and similar words representing distinct songs must never match."""
+        conflicting_cases = (
+            ("[ti:Homies]\n[00:01.00] Words", "Alpha", "Home"),
+            ("[ti:Home]\n[00:01.00] Words", "Alpha", "Homies"),
+            ("[ti:Homies (Remix)]\n[00:01.00] Words", "Alpha", "Home"),
+            ("[ti:Different Song]\n[00:01.00] Words", "Alpha", "Recording"),
+            ("[ti:Stand by You]\n[00:01.00] Words", "Alpha", "Stand by Me"),
+        )
+        for content, artist, title in conflicting_cases:
+            with self.subTest(content=content, title=title):
+                self.assertFalse(
+                    sidecars.lyrics_identity_matches(content, artist, title)
+                )
 
 
 class TestExistingLyricsValidation(IsolatedTestCase):
@@ -1896,3 +1995,166 @@ class TestLyricsHeaderRepair(IsolatedTestCase):
             )
         self.assertEqual(result, ("Correct words", "plain"))
         self.assertEqual(self.lrc_path.read_text(), "Correct words")
+
+    def test_script_concordance_rejects_foreign_alphabets(self) -> None:
+        self.assertFalse(
+            sidecars.is_script_concordant("Samurai - Loial", "НЕМНОГО ГРУСТНЫЙ самураЙ")
+        )
+        self.assertFalse(
+            sidecars.is_script_concordant("Shift - Vecina", "Вампирский щит")
+        )
+        self.assertFalse(
+            sidecars.is_script_concordant("Augxst - LV", "[Август '20] (August '20)")
+        )
+        self.assertTrue(
+            sidecars.is_script_concordant("Samurai - Loial", "Sunt loial pana la capat")
+        )
+        self.assertTrue(
+            sidecars.is_script_concordant("Стресс - Интро", "Стресс начинается здесь")
+        )
+        self.assertTrue(
+            sidecars.is_script_concordant(
+                "21 Savage - Glock in My Lap",
+                "Millionaire, still shakin' kill\u0435rs hand (woah)",
+            )
+        )
+        self.assertTrue(
+            sidecars.is_script_concordant(
+                "$kinny - Tamam",
+                "Opening the track with my squad Salaam Alaikum (\u200fاَلسَلامُ عَلَيْكُم) we ride out",
+            )
+        )
+        self.assertTrue(
+            sidecars.is_script_concordant(
+                "Connect-R - Am Sosul Ăla",
+                "\u0410m \u0455\u043e\u0455ul \u0430l\u0430, uuh-uuh",
+            )
+        )
+        self.assertTrue(
+            sidecars.is_script_concordant(
+                "Andro - Bolen tvoey ulybkoy",
+                "Факел разжег я во тьме... Болен твоей улыбкой",
+                title="Bolen tvoey ulybkoy",
+            )
+        )
+        self.assertTrue(
+            sidecars.is_script_concordant(
+                "Andro - Krasivaja",
+                "Красивая моя девочка...",
+                title="Krasivaja",
+            )
+        )
+        self.assertFalse(
+            sidecars.is_script_concordant(
+                "B.U.G. Mafia - Un 2 și trei de 0",
+                "baby 너여야만 해 너 없인 평소와 같ul 순 없어",
+                title="Un 2 și trei de 0",
+            )
+        )
+        self.assertFalse(
+            sidecars.is_script_concordant(
+                "Connect-R - Baby Don't Cry",
+                "看着我们 困倦眼神",
+                title="Baby Don't Cry",
+            )
+        )
+        self.assertTrue(
+            sidecars.lyrics_identity_matches(
+                '[ti:Legea Gravitației]\nLegea gravitației Lyrics\n[Versuri "Secretul din atom (Remix)"]',
+                "C.T.C.",
+                "Legea Gravitației",
+            )
+        )
+
+    def test_evaluate_lyrics_quality_scoring_and_rejections(self) -> None:
+        self.assertEqual(sidecars.evaluate_lyrics_quality(None), 0.0)
+        self.assertEqual(sidecars.evaluate_lyrics_quality("   "), 0.0)
+
+        # Identity rejection (wrong song title)
+        wrong_song = "[ar:2Scratch]\n[ti:Home]\nHomies Lyrics\n[00:10.00] Chilling with my homies"
+        self.assertEqual(
+            sidecars.evaluate_lyrics_quality(wrong_song, "2Scratch", "Home", 120.0),
+            0.0,
+        )
+
+        # Script mismatch rejection
+        cyrillic_lyrics = "[ar:Minzie]\n[ti:Rose]\n[00:10.00] Пиковару канон"
+        self.assertEqual(
+            sidecars.evaluate_lyrics_quality(cyrillic_lyrics, "Minzie", "Rose", 120.0),
+            0.0,
+        )
+
+        # Bilingual track on Cyrillic album is concordant when album context is provided
+        jony_lyrics = "[ar:JONY]\n[ti:Love Your Voice]\n[00:20.00] My baby I love your voice\n[00:40.00] Без тебя мне холодно"
+        self.assertGreater(
+            sidecars.evaluate_lyrics_quality(
+                jony_lyrics,
+                artist="JONY",
+                title="Love Your Voice",
+                album="Список твоих мыслей",
+                audio_duration=150.0,
+            ),
+            0.0,
+        )
+
+        # Duration overrun rejection (> 15s overrun)
+        overrun_lyrics = "[00:10.00] Line one\n[02:30.00] Line two"
+        self.assertEqual(
+            sidecars.evaluate_lyrics_quality(overrun_lyrics, "Artist", "Song", 100.0),
+            0.0,
+        )
+
+        # Synced with good word density and coverage
+        lines = [
+            f"[{i // 60:02d}:{i % 60:02d}.00] Word line {i} with several lyrics tokens"
+            for i in range(5, 95, 5)
+        ]
+        good_synced = "\n".join(lines)
+        score = sidecars.evaluate_lyrics_quality(good_synced, "Artist", "Song", 100.0)
+        self.assertGreaterEqual(score, 70.0)
+
+    def test_lyrics_consensus_awards_bonus_for_independent_agreement(self) -> None:
+        candidate = "[00:10.00] We will rock you and stand together all night long"
+        matching = "[00:10.50] We will rock you and stand together all night long"
+        different = "[00:10.00] Completely different lyrics from another track"
+
+        self.assertGreater(
+            sidecars.score_lyrics_consensus(candidate, [matching]),
+            0.0,
+        )
+        self.assertEqual(
+            sidecars.score_lyrics_consensus(candidate, [different]),
+            0.0,
+        )
+
+    def test_force_purges_corrupt_mismatched_lyrics_when_no_remote_found(self) -> None:
+        self.lrc_path.write_text(
+            "[ar:2Scratch]\n[ti:Home]\nHomies Lyrics\n[00:10.00] Chilling with my homies"
+        )
+        track_info = TrackInfo(
+            self.audio_path,
+            artist="2Scratch",
+            title="Home",
+            lyrics=self.lrc_path.read_text(),
+            duration=160.0,
+        )
+        with patch.object(lyrics, "fetch_synced_lyrics", return_value=None):
+            result, status = track_processing.process_track_lyrics(
+                self.audio_path,
+                "2Scratch",
+                "Home",
+                force=True,
+                duration=160.0,
+                existing_lyrics=track_info.lyrics,
+            )
+            self.assertEqual(status, "purged")
+            self.assertEqual(result, "")
+            self.assertFalse(self.lrc_path.exists())
+
+            track_processing._update_lyrics(
+                track_info,
+                self.audio_path,
+                fetch_lyrics=True,
+                force=True,
+            )
+            self.assertIsNone(track_info.lyrics)

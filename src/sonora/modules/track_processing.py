@@ -37,6 +37,7 @@ from sonora.core.logger import (
 from sonora.core.models import NormalizeReport, TrackInfo
 from sonora.core.sidecars import (
     clean_lyrics_text,
+    evaluate_lyrics_quality,
     extract_max_timestamp,
     get_lyrics_quality,
     is_lyrics_duration_valid,
@@ -208,7 +209,19 @@ def _update_lyrics(
             lookup_state=lyrics_lookup_state,
             sibling_metadata=sibling_metadata,
         )
-        if lyrics_text and tag_type:
+        if tag_type == "purged":
+            track_info.lyrics = None
+            track_info.synced_lyrics = None
+            track_info.metadata_conflicts.pop("lyrics", None)
+            if dry_run:
+                LOG.info(
+                    f"   ∟ [yellow][DRY-RUN][/] Would remove corrupt mismatched lyrics for {escape(file_path.name)}"
+                )
+            else:
+                LOG.info(
+                    f"   ∟ [yellow]Removed corrupt mismatched lyrics for {escape(file_path.name)}[/]"
+                )
+        elif lyrics_text and tag_type:
             track_info.lyrics = lyrics_text
             track_info.metadata_conflicts.pop("lyrics", None)
             if not had_lrc:
@@ -283,17 +296,25 @@ def _describe_tag_diffs(diff_entries: list[tuple[str, Any, Any]]) -> list[str]:
 def _render_tag_diffs(diff_entries: list[tuple[str, Any, Any]]) -> list[str]:
     diff_lines: list[str] = []
     for field_name, old_clean, new_clean in diff_entries:
+        if field_name == "lyrics":
+            old_desc = f"{len(str(old_clean or ''))} characters"
+            new_desc = f"{len(str(new_clean or ''))} characters"
+        else:
+            old_desc = str(old_clean)
+            new_desc = str(new_clean)
+
         if old_clean is None:
             color, change_symbol = "green", "+"
+            diff_text = escape(new_desc)
         elif new_clean is None:
             color, change_symbol = "red", "-"
+            diff_text = escape(old_desc)
         else:
             color, change_symbol = "yellow", "*"
-        if field_name == "lyrics":
-            old_clean = f"{len(str(old_clean or ''))} characters"
-            new_clean = f"{len(str(new_clean or ''))} characters"
+            diff_text = f"{escape(old_desc)} -> {escape(new_desc)}"
+
         diff_lines.append(
-            f"\n       [{color}][{change_symbol}] {field_name}: {escape(str(old_clean))} -> {escape(str(new_clean))}[/]"
+            f"\n       [{color}][{change_symbol}] {field_name}: {diff_text}[/]"
         )
     return diff_lines
 
@@ -372,11 +393,13 @@ def _process_audio_and_save_tags(
     if diff_lines or force:
         if not dry_run:
             metadata_module.write_track_metadata(track_info, cover_art_path=cover_image)
-            LOG.detail(
-                f"   ∟ [green]✓[/] {escape(file_path.name)}: {len(diff_lines)} tag(s) updated.{''.join(diff_lines)}"
+            LOG.info(
+                f"   ∟ [green]✓[/] [bold]{escape(file_path.name)}[/]: [green]{len(diff_lines)} tag(s) updated[/]{''.join(diff_lines)}"
             )
         else:
-            LOG.detail(f"   ∟ [DRY-RUN] {escape(file_path.name)}{''.join(diff_lines)}")
+            LOG.info(
+                f"   ∟ [yellow][DRY-RUN][/] [bold]{escape(file_path.name)}[/]: [cyan]{len(diff_lines)} tag(s) to update[/]{''.join(diff_lines)}"
+            )
     else:
         LOG.detail(
             f"   ∟ [bold dim]Unchanged:[/] [dim]{escape(file_path.name)}[/] [dim]tags are unchanged.[/]"
@@ -428,12 +451,12 @@ def normalize_single_track(
                     f"Failed to save normalized tags for {escape(file_path.name)}: {escape(str(error))}"
                 )
                 return None
-            LOG.detail(
-                f"   ∟ [green]✓[/] {escape(file_path.name)}: {len(diff_entries)} tag(s) normalized.{''.join(rendered_diffs)}"
+            LOG.info(
+                f"   ∟ [green]✓[/] [bold]{escape(file_path.name)}[/]: [green]{len(diff_entries)} tag(s) normalized[/]{''.join(rendered_diffs)}"
             )
         else:
-            LOG.detail(
-                f"   ∟ [DRY-RUN] {escape(file_path.name)}: {len(diff_entries)} tag(s) to normalize.{''.join(rendered_diffs)}"
+            LOG.info(
+                f"   ∟ [yellow][DRY-RUN][/] [bold]{escape(file_path.name)}[/]: [cyan]{len(diff_entries)} tag(s) to normalize[/]{''.join(rendered_diffs)}"
             )
     else:
         LOG.debug(f"Track {escape(file_path.name)} is already normalized.")
@@ -629,12 +652,15 @@ def process_track_lyrics(
         current_quality = get_lyrics_quality(existing_content)
 
     if existing_content and (
-        not lyrics_identity_matches(existing_content, artist, title)
+        evaluate_lyrics_quality(
+            existing_content, artist, title, resolved_duration, album=album_name
+        )
+        <= 0
         or not sidecar_duration_valid
     ):
         LOG.warning(
             f"Local lyrics require review for {escape(file_path.name)}: "
-            "headers or timestamps conflict with the requested recording; reuse withheld."
+            "headers, script, or timestamps conflict with the requested recording; reuse withheld."
         )
         rejected_content = existing_content
         existing_content = None
@@ -642,12 +668,15 @@ def process_track_lyrics(
         review_required = True
         if details is not None:
             details["reason"] = (
-                "Local lyric headers or timestamps conflict with the recording."
+                "Local lyric headers, script, or timestamps conflict with the recording."
             )
 
     embedded_quality = get_lyrics_quality(existing_lyrics)
     if existing_lyrics and (
-        not lyrics_identity_matches(existing_lyrics, artist, title)
+        evaluate_lyrics_quality(
+            existing_lyrics, artist, title, resolved_duration, album=album_name
+        )
+        <= 0
         or (
             rejected_content is not None
             and strip_lyrics_headers(existing_lyrics)
@@ -656,7 +685,7 @@ def process_track_lyrics(
     ):
         LOG.warning(
             f"Embedded lyrics require review for {escape(file_path.name)}: "
-            "headers, timestamps, or recording identity conflict with local evidence; "
+            "headers, timestamps, script, or recording identity conflict with local evidence; "
             "reuse withheld."
         )
         embedded_quality = 0
@@ -822,6 +851,19 @@ def process_track_lyrics(
             if existing_content != raw_sidecar and not dry_run:
                 atomic_write_bytes(lrc_path, existing_content.encode("utf-8"))
             return existing_content, status
+        if force and (
+            rejected_content is not None or (raw_embedded and embedded_quality == 0)
+        ):
+            if conflicts is not None:
+                conflicts.pop("lyrics", None)
+            if lrc_path.exists() and not dry_run:
+                try:
+                    lrc_path.unlink()
+                except OSError as error:
+                    LOG.warning(
+                        f"Cannot remove corrupt lyrics file {escape(lrc_path.name)}: {error}"
+                    )
+            return "", "purged"
         return None, "failed" if lookup_failed else None
 
     if not force and (
@@ -895,15 +937,23 @@ def process_track_lyrics(
             details["reason"] = (
                 "Returned lyric timestamps exceed the recording duration."
             )
-    if lyrics_text and not lyrics_identity_matches(lyrics_text, artist, title):
+    if (
+        lyrics_text
+        and evaluate_lyrics_quality(
+            lyrics_text, artist, title, resolved_duration, album=album_name
+        )
+        <= 0
+    ):
         LOG.warning(
             f"Fetched lyrics require review for {escape(file_path.name)}: "
-            "returned headers conflict with the requested recording."
+            "returned headers, script, or timestamps conflict with the requested recording."
         )
         review_required = True
         lyrics_text = None
         if details is not None:
-            details["reason"] = "Returned lyric headers conflict with the recording."
+            details["reason"] = (
+                "Returned lyrics conflict with the recording headers, script, or duration."
+            )
 
     if lyrics_text and any(
         fuzz.ratio(lyrics_word_body(lyrics_text), body, score_cutoff=98) >= 98

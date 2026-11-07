@@ -19,9 +19,11 @@ from sonora.core.rate_limit import RateLimiter
 from sonora.core.retry import retry_network_call
 from sonora.core.sidecars import (
     clean_lyrics_text,
+    evaluate_lyrics_quality,
     get_lyrics_quality,
     is_lyrics_duration_valid,
     lyrics_identity_matches,
+    score_lyrics_consensus,
 )
 from sonora.core.text import normalize_str
 from sonora.core.titles import clean_title, score_artist_title_match
@@ -413,10 +415,10 @@ def fetch_synced_lyrics(
             if alternative != queries[0]:
                 queries.append(alternative)
     last_exception: Exception | None = None
-    lyrics_content = None
+    candidates: list[str] = []
     for query in queries:
         try:
-            lyrics_content = _query_syncedlyrics(
+            content = _query_syncedlyrics(
                 query,
                 plain_only,
                 synced_only,
@@ -428,6 +430,14 @@ def fetch_synced_lyrics(
                 musixmatch_token=token,
                 details=lookup_details,
             )
+            if (
+                content
+                and evaluate_lyrics_quality(
+                    content, artist, title, duration, album=album_name
+                )
+                > 0
+            ):
+                candidates.append(content)
         except (
             httpx.HTTPError,
             OSError,
@@ -436,11 +446,20 @@ def fetch_synced_lyrics(
             TimeoutError,
         ) as error:
             last_exception = error
-        if lyrics_content or last_exception is not None:
+        if candidates or last_exception is not None:
             break
 
-    if lyrics_content and not lyrics_identity_matches(lyrics_content, artist, title):
-        lyrics_content = None
+    lyrics_content = (
+        max(
+            candidates,
+            key=lambda c: (
+                evaluate_lyrics_quality(c, artist, title, duration, album=album_name)
+                + score_lyrics_consensus(c, candidates)
+            ),
+        )
+        if candidates
+        else None
+    )
 
     if lyrics_content:
         if lookup_state is not None:

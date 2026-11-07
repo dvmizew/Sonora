@@ -6,7 +6,9 @@ from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 
+import anyascii
 import ftfy
+from rapidfuzz import fuzz
 
 from sonora.core.artists import get_primary_artist, normalize_artist_name
 from sonora.core.constants import ALBUM_COVER_NAMES, COMPANION_LYRICS_EXTS
@@ -154,6 +156,60 @@ _LRC_METADATA_HEADER_PATTERN = re.compile(
 _LYRICS_TITLE_HEADER_REGEX = re.compile(
     r'(.+?) Lyrics|\[(?:Versuri(?:le piesei| pentru)?|Paroles de)\s+["“„](.+?)["”“](?: cu .+)?\]'
 )
+_CYRILLIC_TO_LATIN_HOMOGLYPHS = str.maketrans(
+    {
+        "\u0430": "a",
+        "\u0410": "A",
+        "\u0432": "b",
+        "\u0412": "B",
+        "\u0441": "c",
+        "\u0421": "C",
+        "\u0434": "d",
+        "\u0435": "e",
+        "\u0415": "E",
+        "\u0451": "e",
+        "\u0401": "E",
+        "\u0456": "i",
+        "\u0406": "I",
+        "\u0458": "j",
+        "\u0408": "J",
+        "\u043a": "k",
+        "\u041a": "K",
+        "\u043c": "m",
+        "\u041c": "M",
+        "\u043d": "h",
+        "\u041d": "H",
+        "\u043e": "o",
+        "\u041e": "O",
+        "\u0440": "p",
+        "\u0420": "P",
+        "\u0455": "s",
+        "\u0405": "S",
+        "\u0442": "t",
+        "\u0422": "T",
+        "\u0443": "y",
+        "\u0423": "Y",
+        "\u0445": "x",
+        "\u0425": "X",
+    }
+)
+
+
+def _normalize_mixed_script_word(word: str) -> str:
+    has_lat = any("a" <= c.lower() <= "z" for c in word)
+    has_cyr = any("\u0400" <= c <= "\u04ff" for c in word)
+    if (has_lat and has_cyr) or any(c in "\u0455\u0405" for c in word):
+        return word.translate(_CYRILLIC_TO_LATIN_HOMOGLYPHS)
+    return word
+
+
+def normalize_lyrics_homoglyphs(text: str) -> str:
+    """Normalize Cyrillic lookalike homoglyphs in mixed-script words."""
+    return re.sub(
+        r"[\w\u0400-\u04ff]+",
+        lambda m: _normalize_mixed_script_word(m.group(0)),
+        text,
+    )
 
 
 def lyrics_identity_matches(
@@ -162,6 +218,7 @@ def lyrics_identity_matches(
     """Reject conflicting available LRC headers; missing headers establish no identity."""
     if not lyrics_text:
         return True
+    matched_plain_title = False
     for line in lyrics_text.splitlines():
         header_line = line.lstrip("\ufeff \t")
         plain_title = (
@@ -170,7 +227,10 @@ def lyrics_identity_matches(
             else _LYRICS_TITLE_HEADER_REGEX.fullmatch(header_line)
         )
         if plain_title:
-            header_line = f"[ti:{plain_title[1] or plain_title[2]}]"
+            extracted_title = plain_title[1] or plain_title[2]
+            if title and score_artist_title_match("", title, "", extracted_title) > 0:
+                matched_plain_title = True
+            header_line = f"[ti:{extracted_title}]"
         header_matches = list(_LRC_METADATA_HEADER_PATTERN.finditer(header_line))
         if not header_matches or header_matches[0].start() != 0:
             continue
@@ -206,11 +266,25 @@ def lyrics_identity_matches(
                 header_artist = get_primary_artist(normalize_artist_name(header_value))
                 if normalize_str(expected_artist) != normalize_str(header_artist):
                     return False
-            elif (
-                score_artist_title_match("", expected_value or "", "", header_value)
-                <= 0
-            ):
-                return False
+            elif field_name == "ti":
+                clean_expected = re.sub(
+                    r"\s*[\(\[\{].*?[\)\]\}]", "", expected_value or ""
+                ).strip()
+                clean_header = re.sub(
+                    r"\s*[\(\[\{].*?[\)\]\}]", "", header_value or ""
+                ).strip()
+                match_ok = score_artist_title_match(
+                    "", expected_value or "", "", header_value
+                ) > 0 or (
+                    clean_expected
+                    and clean_header
+                    and score_artist_title_match("", clean_expected, "", clean_header)
+                    > 0
+                )
+                if not match_ok:
+                    if matched_plain_title and plain_title and plain_title[2]:
+                        continue
+                    return False
     return True
 
 
@@ -263,7 +337,7 @@ def clean_lyrics_text(text: str | None) -> str | None:
     if not text.strip():
         return ""
 
-    decoded = html.unescape(ftfy.fix_text(str(text)))
+    decoded = normalize_lyrics_homoglyphs(html.unescape(ftfy.fix_text(str(text))))
     decoded = re.sub(
         r"<(script|style|noscript|head)\b[^>]*>.*?</\1\s*>",
         "",
@@ -354,7 +428,7 @@ def extract_max_timestamp(lyrics_text: str | None) -> float | None:
 def is_lyrics_duration_valid(
     lyrics_text: str | None,
     audio_duration: float | None,
-    tolerance_seconds: float = 2.0,
+    tolerance_seconds: float = 15.0,
 ) -> bool:
     """
     Validates that lyrics timestamps do not significantly exceed audio duration.
@@ -412,6 +486,122 @@ def get_lyrics_quality(lyrics_text: str | None) -> int:
     if re.search(r"^\[\d{1,3}:[0-5]\d(?:[\.:]\d{1,6})?\]", cleaned, re.MULTILINE):
         return 2
     return 1
+
+
+_NON_LATIN_SCRIPT_REGEX = re.compile(
+    r"[\u0400-\u04ff\u0600-\u06ff\u4e00-\u9fff\uac00-\ud7af]"
+)
+_CYRILLIC_SCRIPT_REGEX = re.compile(r"[\u0400-\u04ff]")
+_SLAVIC_MARKERS_REGEX = re.compile(
+    r"\b(?:russia|russian|rossiya|raava|zhara)\b", re.IGNORECASE
+)
+
+
+def is_script_concordant(
+    reference_text: str, lyrics_text: str, title: str | None = None
+) -> bool:
+    """Require lyrics to avoid predominantly foreign non-Latin scripts unless present in reference metadata."""
+    if _NON_LATIN_SCRIPT_REGEX.search(reference_text) or _SLAVIC_MARKERS_REGEX.search(
+        reference_text
+    ):
+        return True
+    cleaned_lyrics = normalize_lyrics_homoglyphs(lyrics_text)
+    letters = [char for char in cleaned_lyrics if char.isalpha()]
+    if not letters:
+        return True
+    non_latin_count = sum(1 for char in letters if _NON_LATIN_SCRIPT_REGEX.search(char))
+    if (non_latin_count / len(letters)) < 0.20:
+        return True
+    # Transliterated script concordance applies exclusively to Slavic Cyrillic releases
+    cyrillic_count = sum(1 for char in letters if _CYRILLIC_SCRIPT_REGEX.search(char))
+    if title and cyrillic_count > 0 and (cyrillic_count / non_latin_count) >= 0.80:
+        body = lyrics_word_body(cleaned_lyrics)
+        trans_body = normalize_str(anyascii.anyascii(body))
+        norm_title = normalize_str(title)
+        tokens = [tok for tok in norm_title.split() if len(tok) >= 3] or [
+            tok for tok in norm_title.split() if tok
+        ]
+        if tokens:
+            trans_words = trans_body.split()
+            if any(
+                tok in trans_body
+                or any(
+                    score_artist_title_match("", tok, "", w) >= 80 for w in trans_words
+                )
+                for tok in tokens
+            ):
+                return True
+        digits = re.findall(r"\d+", norm_title)
+        if digits and any(d in trans_body.split() or d in trans_body for d in digits):
+            return True
+    return False
+
+
+def evaluate_lyrics_quality(
+    lyrics_text: str | None,
+    artist: str | None = None,
+    title: str | None = None,
+    audio_duration: float | None = None,
+    album: str | None = None,
+) -> float:
+    """Score lyrics quality on a 0.0-100.0 scale; returns 0.0 for rejected or corrupt lyrics."""
+    if not lyrics_text:
+        return 0.0
+    cleaned = clean_lyrics_text(lyrics_text)
+    if not cleaned:
+        return 0.0
+    tier = get_lyrics_quality(cleaned)
+    if tier <= 0:
+        return 0.0
+    if artist and title and not lyrics_identity_matches(cleaned, artist, title):
+        return 0.0
+    ref = f"{artist or ''} {album or ''} {title or ''}".strip()
+    body = lyrics_word_body(cleaned)
+    if (artist or title) and not is_script_concordant(ref, cleaned, title=title):
+        return 0.0
+    if not is_lyrics_duration_valid(cleaned, audio_duration):
+        return 0.0
+
+    score = 40.0 if tier == 3 else (30.0 if tier == 2 else 15.0)
+    words = len(body.split())
+    if words >= 80:
+        score += 30.0
+    elif words >= 40:
+        score += 20.0
+    elif words >= 15:
+        score += 10.0
+
+    if tier >= 2 and audio_duration and audio_duration > 0:
+        max_ts = extract_max_timestamp(cleaned)
+        if max_ts is not None:
+            coverage = min(1.0, max_ts / audio_duration)
+            if coverage >= 0.70:
+                score += 30.0
+            elif coverage >= 0.40:
+                score += 20.0
+            else:
+                score += 10.0
+    elif tier == 1:
+        if words >= 80:
+            score += 20.0
+        elif words >= 40:
+            score += 10.0
+
+    return min(100.0, score)
+
+
+def score_lyrics_consensus(candidate_text: str, candidate_pool: Sequence[str]) -> float:
+    """Bonus score [0.0-25.0] when candidate matches independent lyric sources."""
+    candidate_body = lyrics_word_body(candidate_text)
+    if not candidate_body:
+        return 0.0
+    agreeing = sum(
+        1
+        for other in candidate_pool
+        if other is not candidate_text
+        and fuzz.token_set_ratio(candidate_body, lyrics_word_body(other)) >= 85
+    )
+    return min(25.0, agreeing * 12.5)
 
 
 def strip_lyrics_headers(lyrics_text: str) -> str:
