@@ -338,6 +338,29 @@ class TestRenameFailureContracts(IsolatedTestCase):
         self.assertFalse(renamed.with_suffix(".lrc").exists())
         self.assertEqual(companion.read_text(), "[00:01] Verified lyrics")
 
+    def test_multidisc_album_preserves_disc_prefix_for_disc_one_tracks(
+        self,
+    ) -> None:
+        album_dir = self.test_directory / "Artist - MultiDisc Album"
+        album_dir.mkdir(parents=True)
+        disc1_track = album_dir / "1-05 - Song.flac"
+        disc1_track.touch()
+        disc2_track = album_dir / "2-01 - Another.flac"
+        disc2_track.touch()
+
+        renamed = renamer.rename_track_file(
+            disc1_track,
+            track_info=TrackInfo(
+                disc1_track,
+                title="Song",
+                track_number=5,
+                disc_number=1,
+                total_discs=1,
+            ),
+            dry_run=True,
+        )
+        self.assertEqual(renamed.name, "1-05 - Song.flac")
+
     def test_single_hierarchy_failures_and_canonical_folder_identity_are_reported(
         self,
     ) -> None:

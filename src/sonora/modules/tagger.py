@@ -586,6 +586,14 @@ def _resolve_album_metadata_context(
                 expected_advisory = "Explicit"
             if is_valid_uuid(existing_metadata.musicbrainz_albumid):
                 existing_release_ids[str(existing_metadata.musicbrainz_albumid)] += 1
+        max_disc = max(
+            (t.disc_number for t in track_metadata if t and t.disc_number),
+            default=1,
+        )
+        total_discs = max(
+            (t.total_discs for t in track_metadata if t and t.total_discs),
+            default=max_disc,
+        )
         most_common_release = existing_release_ids.most_common(1)
         if most_common_release and most_common_release[0][1] > len(audio_files) / 2:
             release_info: dict[str, object] | None = {"id": most_common_release[0][0]}
@@ -594,6 +602,7 @@ def _resolve_album_metadata_context(
                 sample_artist,
                 sample_album,
                 expected_track_count=len(audio_files),
+                expected_medium_count=total_discs,
                 expected_advisory=expected_advisory,
             )
         if release_info and release_info.get("id"):

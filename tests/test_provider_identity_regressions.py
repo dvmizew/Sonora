@@ -1480,3 +1480,33 @@ class TestAudioDBRecordingEvidence(IsolatedTestCase):
                     "Alpha", "Original Song", recording_mbid=RECORDING_MBID
                 )
             self.assertEqual(result is not None, accepted)
+
+    def test_romanian_trailing_cu_feature_with_multiple_cu(self) -> None:
+        self.assertTrue(
+            recording_identity_matches(
+                "Cedry2k",
+                "In lupta cu conditia cu Bitza",
+                "Cedry2k",
+                "In Lupta Cu Conditia",
+            )
+        )
+
+    def test_artist_initialism_dots_matching(self) -> None:
+        self.assertTrue(
+            recording_identity_matches(
+                "DOC & Motzu",
+                "Doc Quijote",
+                "D.O.C & Motzu",
+                "Doc Quijote",
+            )
+        )
+
+    def test_movie_soundtrack_bracket_with_quotes(self) -> None:
+        self.assertTrue(
+            recording_identity_matches(
+                "Kendrick Lamar",
+                "All the Stars",
+                "Kendrick Lamar",
+                'All The Stars (From "Black Panther: The Album")',
+            )
+        )

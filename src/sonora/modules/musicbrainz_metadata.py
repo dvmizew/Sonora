@@ -204,10 +204,14 @@ def _resolve_musicbrainz_album_id(
             track_info.musicbrainz_albumid = str(album_mbid)
     elif not is_valid_uuid(track_info.musicbrainz_albumid):
         search_artist = track_info.album_artist or track_info.artist
+        expected_mediums = track_info.total_discs or (
+            1 if track_info.disc_number else None
+        )
         release = musicbrainz_service.search_musicbrainz_release(
             search_artist,
             track_info.album,
             expected_track_count=track_info.total_tracks,
+            expected_medium_count=expected_mediums,
             expected_advisory=track_info.advisory,
         )
         if release and _validate_mb_release_title(

@@ -121,6 +121,7 @@ def _score_musicbrainz_candidate(
     artist: str,
     album: str,
     expected_track_count: int | None = None,
+    expected_medium_count: int | None = None,
     expected_advisory: str | None = None,
 ) -> float:
     release_title = str(release.get("title", ""))
@@ -186,6 +187,32 @@ def _score_musicbrainz_candidate(
                 else:
                     score -= min(40.0, diff * 5.0)
 
+    if expected_medium_count is not None and expected_medium_count > 0:
+        candidate_med_count = safe_int(release.get("medium-count"))
+        if candidate_med_count is not None:
+            if candidate_med_count == expected_medium_count:
+                score += 25.0
+            else:
+                score -= 30.0
+
+    medium_list = release.get("medium-list")
+    if isinstance(medium_list, list) and medium_list:
+        formats = {
+            str(m.get("format") or "").strip().lower()
+            for m in medium_list
+            if isinstance(m, dict)
+        }
+        if "digital media" in formats:
+            score += 6.0
+        elif "cd" in formats:
+            score += 4.0
+        elif any("vinyl" in f for f in formats):
+            score += 1.0
+
+    country = str(release.get("country") or "").upper()
+    if country in ("XW", "US", "XE", "GB", "DE"):
+        score += 2.0
+
     status = str(release.get("status") or "").strip().lower()
     if status == "official":
         score += 10.0
@@ -195,11 +222,42 @@ def _score_musicbrainz_candidate(
     return score
 
 
+def _tiebreak_same_release_group(
+    releases: list[dict[str, object]],
+) -> dict[str, object]:
+    """Select the most representative release among tied candidates of the same release group."""
+
+    def _rank_key(rel: dict[str, object]) -> tuple[int, int, int]:
+        medium_list = rel.get("medium-list")
+        formats: set[str] = set()
+        if isinstance(medium_list, list):
+            formats = {
+                str(m.get("format") or "").strip().lower()
+                for m in medium_list
+                if isinstance(m, dict)
+            }
+        fmt_priority = (
+            3 if "digital media" in formats else (2 if "cd" in formats else 1)
+        )
+        country = str(rel.get("country") or "").upper()
+        country_priority = (
+            3
+            if country in ("XW", "US")
+            else (2 if country in ("XE", "GB", "DE") else 1)
+        )
+        date_str = str(rel.get("date") or "9999").replace("-", "")[:8]
+        date_num = int(date_str) if date_str.isdigit() else 99999999
+        return (fmt_priority, country_priority, -date_num)
+
+    return max(releases, key=_rank_key)
+
+
 @coalesce_lookup
 def search_musicbrainz_release(
     artist: str,
     album: str,
     expected_track_count: int | None = None,
+    expected_medium_count: int | None = None,
     *,
     expected_advisory: str | None = None,
 ) -> dict[str, object] | None:
@@ -208,7 +266,8 @@ def search_musicbrainz_release(
         return None
 
     count_suffix = f":{expected_track_count}" if expected_track_count else ""
-    cache_key = f"mb_release:v5:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}:{expected_advisory or ''}"
+    med_suffix = f":m{expected_medium_count}" if expected_medium_count else ""
+    cache_key = f"mb_release:v6:{normalize_str(artist)}:{normalize_str(album)}{count_suffix}{med_suffix}:{expected_advisory or ''}"
     cached = get_cached_api(cache_key)
     if isinstance(cached, dict):
         return cached
@@ -220,7 +279,12 @@ def search_musicbrainz_release(
     def consider(release: dict[str, object]) -> None:
         release_id = str(release.get("id") or "")
         score = _score_musicbrainz_candidate(
-            release, artist, album, expected_track_count, expected_advisory
+            release,
+            artist,
+            album,
+            expected_track_count,
+            expected_medium_count,
+            expected_advisory,
         )
         if release_id and score >= get_config().catalog_candidate_rank_threshold:
             previous = candidates.get(release_id)
@@ -276,10 +340,20 @@ def search_musicbrainz_release(
         ranked = sorted(candidates.values(), key=lambda entry: entry[0], reverse=True)
         target_release = ranked[0][1] if ranked else None
         if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
-            LOG.detail(
-                f"Ambiguous MusicBrainz release for {escape(artist)} - {escape(album)}; no edition selected"
-            )
-            target_release = None
+            top_score = ranked[0][0]
+            tied_releases = [r[1] for r in ranked if r[0] == top_score]
+            top_rg_ids: set[str] = set()
+            for r in tied_releases:
+                rg = r.get("release-group")
+                rg_id = str(rg.get("id") or "") if isinstance(rg, dict) else ""
+                top_rg_ids.add(rg_id)
+            if len(top_rg_ids) == 1 and "" not in top_rg_ids:
+                target_release = _tiebreak_same_release_group(tied_releases)
+            else:
+                LOG.detail(
+                    f"Ambiguous MusicBrainz release for {escape(artist)} - {escape(album)}; no edition selected"
+                )
+                target_release = None
         set_cached_api(cache_key, target_release)
         return target_release
     except (

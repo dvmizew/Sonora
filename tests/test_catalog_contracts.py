@@ -173,6 +173,50 @@ class TestMetadataMappingContracts(IsolatedTestCase):
         )
         self.assertEqual(recording.label, "Different")
 
+    def test_deezer_localized_genre_aliases_normalize(self) -> None:
+        """Verify localized Deezer genre aliases map to canonical English genre names."""
+        from sonora.core.text import normalize_genre
+
+        expected_mappings = {
+            "dans": "Dance",
+            "Dans": "Dance",
+            "DANS": "Dance",
+            "latino": "Latin",
+            "Latino": "Latin",
+            "LATINO": "Latin",
+            "muzică asiatică": "Asian Music",
+            "muzica asiatica": "Asian Music",
+            "Muzică Asiatică": "Asian Music",
+            "muzică electronică": "Electronic",
+            "muzica electronica": "Electronic",
+            "Muzică Electronică": "Electronic",
+        }
+
+        for raw_genre, expected in expected_mappings.items():
+            with self.subTest(raw_genre=raw_genre, expected=expected):
+                self.assertEqual(normalize_genre(raw_genre), expected)
+
+    def test_deezer_metadata_mapping_with_localized_genres(self) -> None:
+        """Deezer provider proposals with localized genres normalize properly onto TrackInfo."""
+        genres_to_test = (
+            ("dans", "Dance"),
+            ("latino", "Latin"),
+            ("muzică asiatică", "Asian Music"),
+            ("muzică electronică", "Electronic"),
+        )
+        for raw_genre, expected_genre in genres_to_test:
+            with self.subTest(raw_genre=raw_genre):
+                track = TrackInfo(Path("song.flac"), artist="Artist", title="Song")
+                metadata_merge.apply_metadata_mapping(
+                    track,
+                    {"genre": raw_genre},
+                    {"genre": "genre"},
+                    source="Deezer",
+                    force=True,
+                )
+                self.assertEqual(track.genre, expected_genre)
+                self.assertEqual(track.metadata_sources["genre"], "Deezer")
+
 
 class TestCatalogMetadataContracts(IsolatedTestCase):
     def test_shazam_cannot_invent_an_album_when_recognition_has_none(self) -> None:

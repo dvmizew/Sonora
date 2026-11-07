@@ -153,6 +153,20 @@ def rename_track_file(
             filename_track_number = track_info.track_number
             filename_disc_number = track_info.disc_number
             total_discs = track_info.total_discs
+            if (
+                (not total_discs or total_discs <= 1)
+                and not in_singles
+                and folder.is_dir()
+            ):
+                try:
+                    if any(
+                        re.match(r"^[2-9]-\d+", sibling.name)
+                        for sibling in folder.iterdir()
+                        if sibling.is_file()
+                    ):
+                        total_discs = 2
+                except OSError:
+                    pass
 
         new_name = build_new_filename(
             track_number=filename_track_number,
