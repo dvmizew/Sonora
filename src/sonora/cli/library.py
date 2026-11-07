@@ -436,7 +436,9 @@ def organize(
     """
     Organize single tracks into a Singles directory structure.
     """
-    destination_directory = target_singles or (path / "Singles")
+    destination_directory = target_singles or (
+        path if path.name.lower() in ("singles", "single") else (path / "Singles")
+    )
     LOG.info(
         f"Organizing single tracks from {escape(str(path))} to {escape(str(destination_directory))}"
     )

@@ -750,3 +750,137 @@ class TestOrganizationWorkflows(ModuleTestCase):
             duration=200.0,
         )
         self.assertFalse(deduplicator.is_duplicate(track_version_two))
+
+    def test_organize_mixed_artist_folder_moves_singles_and_preserves_albums(
+        self,
+    ) -> None:
+        artist_dir = self.tmp_path / "Artist"
+        artist_dir.mkdir(parents=True)
+        single_1 = artist_dir / "Single One.wav"
+        single_2 = artist_dir / "Single Two.wav"
+        album_t1 = artist_dir / "01 - Album Intro.wav"
+        album_t2 = artist_dir / "02 - Album Song.wav"
+        album_t3 = artist_dir / "03 - Album Outro.wav"
+
+        for f in [single_1, single_2, album_t1, album_t2, album_t3]:
+            write_silent_wav(f)
+
+        def mock_read_metadata(path: Path) -> TrackInfo:
+            if path == single_1:
+                return TrackInfo(
+                    file_path=single_1,
+                    artist="Artist",
+                    title="Single One",
+                    album="Single One",
+                    track_number=1,
+                    total_tracks=1,
+                )
+            if path == single_2:
+                return TrackInfo(
+                    file_path=single_2,
+                    artist="Artist",
+                    title="Single Two",
+                    album="Single Two",
+                    track_number=1,
+                    total_tracks=1,
+                )
+            if path == album_t1:
+                return TrackInfo(
+                    file_path=album_t1,
+                    artist="Artist",
+                    title="Album Intro",
+                    album="Full Album",
+                    track_number=1,
+                    total_tracks=3,
+                )
+            if path == album_t2:
+                return TrackInfo(
+                    file_path=album_t2,
+                    artist="Artist",
+                    title="Album Song",
+                    album="Full Album",
+                    track_number=2,
+                    total_tracks=3,
+                )
+            if path == album_t3:
+                return TrackInfo(
+                    file_path=album_t3,
+                    artist="Artist",
+                    title="Album Outro",
+                    album="Full Album",
+                    track_number=3,
+                    total_tracks=3,
+                )
+            return TrackInfo(file_path=path)
+
+        target_singles = self.tmp_path / "Singles"
+        with patch(
+            "sonora.modules.organizer.read_track_metadata",
+            side_effect=mock_read_metadata,
+        ):
+            moved = organize_library_singles(self.tmp_path, target_singles)
+
+        self.assertEqual(moved, 2)
+        self.assertTrue(
+            (target_singles / "Artist - Single One" / "01 - Single One.wav").exists()
+        )
+        self.assertTrue(
+            (target_singles / "Artist - Single Two" / "01 - Single Two.wav").exists()
+        )
+        # Album tracks remain intact in the artist folder
+        self.assertTrue(album_t1.exists())
+        self.assertTrue(album_t2.exists())
+        self.assertTrue(album_t3.exists())
+
+    def test_organize_cli_destination_scoped_to_singles_directory(self) -> None:
+        from sonora.cli.library import organize
+
+        singles_dir = self.tmp_path / "Singles"
+        singles_dir.mkdir(parents=True)
+        track_file = singles_dir / "Hit Song.wav"
+        write_silent_wav(track_file)
+
+        with (
+            patch(
+                "sonora.modules.organizer.read_track_metadata",
+                return_value=TrackInfo(
+                    file_path=track_file,
+                    artist="Artist",
+                    title="Hit Song",
+                    album="Hit Song",
+                    track_number=1,
+                    total_tracks=1,
+                ),
+            ),
+            patch("sonora.cli.library.organize_library_singles") as mock_organize,
+        ):
+            mock_organize.return_value = 1
+            ret = organize(path=singles_dir, dry_run=True)
+            self.assertEqual(ret, 0)
+            mock_organize.assert_called_once()
+            called_source, called_dest = mock_organize.call_args[0][:2]
+            self.assertEqual(called_source, singles_dir)
+            self.assertEqual(called_dest, singles_dir)
+
+    def test_cleanup_empty_dirs_prunes_abandoned_singles_folders_with_only_artwork(
+        self,
+    ) -> None:
+        from sonora.modules.organizer import cleanup_empty_dirs
+
+        singles_dir = self.tmp_path / "Singles"
+        abandoned_folder = singles_dir / "Artist - Abandoned Single"
+        abandoned_folder.mkdir(parents=True)
+        (abandoned_folder / "artist.jpg").write_bytes(b"image")
+        (abandoned_folder / "label.png").write_bytes(b"image")
+
+        active_folder = singles_dir / "Artist - Active Single"
+        active_folder.mkdir(parents=True)
+        active_audio = active_folder / "01 - Active Single.wav"
+        write_silent_wav(active_audio)
+        (active_folder / "cover.jpg").write_bytes(b"image")
+
+        removed = cleanup_empty_dirs(self.tmp_path)
+        self.assertEqual(removed, 1)
+        self.assertFalse(abandoned_folder.exists())
+        self.assertTrue(active_folder.exists())
+        self.assertTrue(active_audio.exists())

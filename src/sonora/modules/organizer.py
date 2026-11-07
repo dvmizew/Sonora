@@ -291,6 +291,70 @@ def _is_single_folder(
     return True
 
 
+def _is_album_folder(
+    folder: Path,
+    files: list[Path],
+    folder_track_infos: list[tuple[Path, TrackInfo]],
+) -> bool:
+    """Determine if a folder is a dedicated album container that should not be dismantled."""
+    if get_config().is_disc_folder(folder.name):
+        return True
+
+    if not folder_track_infos:
+        return False
+
+    cleaned_albums: Counter[str] = Counter()
+    for _, track_metadata in folder_track_infos:
+        if track_metadata.album and not get_config().is_generic_container(
+            track_metadata.album
+        ):
+            cleaned_album = normalize_str(clean_title(track_metadata.album))
+            if cleaned_album:
+                cleaned_albums[cleaned_album] += 1
+
+    norm_folder = normalize_str(folder.name)
+    for album in cleaned_albums:
+        if (album in norm_folder or norm_folder in album) and len(album) > 2:
+            return True
+
+    file_count = len(files)
+    if file_count >= 3 and cleaned_albums:
+        _, top_count = cleaned_albums.most_common(1)[0]
+        if top_count >= (file_count * 0.8):
+            return True
+
+    return False
+
+
+def _is_standalone_single_track(
+    track_info: TrackInfo,
+    multi_track_albums: set[str],
+) -> bool:
+    """Check if an individual track in a non-album folder represents a standalone single."""
+    track_num = track_info.track_number
+    if track_num is not None and track_num > 1:
+        return False
+
+    total_tracks = track_info.total_tracks
+    if total_tracks is not None and total_tracks > 1:
+        return False
+
+    album = track_info.album.strip() if track_info.album else ""
+    cleaned_album = normalize_str(clean_title(album)) if album else ""
+    if cleaned_album in multi_track_albums:
+        return False
+
+    if total_tracks == 1:
+        return True
+
+    if not album or get_config().is_generic_container(album):
+        return True
+
+    title = track_info.title.strip() if track_info.title else ""
+    cleaned_title = normalize_str(clean_title(title)) if title else ""
+    return bool(cleaned_album and cleaned_title and cleaned_album == cleaned_title)
+
+
 def _resolve_single_target_file(
     path: Path,
     track_info: TrackInfo,
@@ -461,6 +525,39 @@ def organize_library_singles(
 
                     if is_single:
                         singles_to_process.extend(folder_track_infos)
+                    elif not _is_album_folder(
+                        folder=folder,
+                        files=files,
+                        folder_track_infos=folder_track_infos,
+                    ):
+                        multi_track_albums: set[str] = set()
+                        for _, track_meta in folder_track_infos:
+                            if (
+                                track_meta.album
+                                and not get_config().is_generic_container(
+                                    track_meta.album
+                                )
+                                and (
+                                    (
+                                        track_meta.track_number
+                                        and track_meta.track_number > 1
+                                    )
+                                    or (
+                                        track_meta.total_tracks
+                                        and track_meta.total_tracks > 1
+                                    )
+                                )
+                            ):
+                                cleaned = normalize_str(clean_title(track_meta.album))
+                                if cleaned:
+                                    multi_track_albums.add(cleaned)
+
+                        for item in folder_track_infos:
+                            _, track_info = item
+                            if _is_standalone_single_track(
+                                track_info, multi_track_albums
+                            ):
+                                singles_to_process.append(item)
             except (KeyboardInterrupt, RuntimeError) as exc:
                 if not is_interruption(exc):
                     raise
@@ -826,6 +923,27 @@ def cleanup_empty_dirs(path: Path, target_singles_dir: Path | None = None) -> in
         ):
             continue
         try:
+            if (
+                is_in_singles_hierarchy(child)
+                and child.name.lower() not in ("singles", "single")
+                and not find_audio_files(child)
+            ):
+                for orphan in list(child.iterdir()):
+                    if orphan.is_file() and orphan.suffix.lower() in (
+                        ".jpg",
+                        ".jpeg",
+                        ".png",
+                        ".webp",
+                        ".bmp",
+                        ".gif",
+                        ".txt",
+                        ".nfo",
+                        ".ini",
+                        ".db",
+                    ):
+                        with contextlib.suppress(OSError):
+                            orphan.unlink()
+
             for junk in child.iterdir():
                 if junk.is_file() and junk.name in (
                     ".DS_Store",
