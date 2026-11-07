@@ -261,6 +261,96 @@ class TestGeniusSongIdentity(IsolatedTestCase):
                     self.assertIsNone(result["description"])
                 request.assert_not_called()
 
+    def test_score_genius_song_match_alphanumeric_title_equivalence(self) -> None:
+        """Alphanumeric equivalence (e.g. 'DEVILEYES' vs 'Devil Eyes.') matches with high confidence."""
+        song: dict[str, object] = {
+            "artist": "Zack Bia",
+            "title": "Devil Eyes.",
+            "genius_song_id": 8941012,
+        }
+        score = genius.score_genius_song_match("Zack Bia", "DEVILEYES", song)
+        self.assertGreaterEqual(score, 70.0)
+
+        reverse_song: dict[str, object] = {
+            "artist": "Zack Bia",
+            "title": "DEVILEYES",
+            "genius_song_id": 8941012,
+        }
+        score_reverse = genius.score_genius_song_match(
+            "Zack Bia", "Devil Eyes.", reverse_song
+        )
+        self.assertGreaterEqual(score_reverse, 70.0)
+
+        xray_song: dict[str, object] = {
+            "artist": "Tommy",
+            "title": "Xray",
+            "genius_song_id": 1234,
+        }
+        score_xray = genius.score_genius_song_match("Tommy", "X-RAY", xray_song)
+        self.assertGreaterEqual(score_xray, 70.0)
+
+    def test_score_genius_song_match_alphanumeric_mismatch_strictly_rejected(
+        self,
+    ) -> None:
+        """Titles with discordant alphanumeric characters must return 0.0."""
+        mismatched_cases = (
+            ("DEVILEYES", "Devil Eye"),
+            ("DEVILEYES", "Devil Eyes 2"),
+            ("DEVILEYES", "Angel Eyes"),
+            ("Home", "Homies"),
+        )
+        for title, candidate_title in mismatched_cases:
+            with self.subTest(title=title, candidate_title=candidate_title):
+                song: dict[str, object] = {
+                    "artist": "Zack Bia",
+                    "title": candidate_title,
+                    "genius_song_id": 9999,
+                }
+                self.assertEqual(
+                    genius.score_genius_song_match("Zack Bia", title, song),
+                    0.0,
+                )
+
+    def test_fetch_genius_song_details_alphanumeric_title_matching(self) -> None:
+        """Genius search hit with punctuation/spacing variance resolves to details."""
+        search_response = MagicMock()
+        search_response.json.return_value = {
+            "response": {
+                "hits": [
+                    {
+                        "result": {
+                            "api_path": "/songs/8941012",
+                            "title": "Devil Eyes.",
+                            "primary_artist": {"name": "Zack Bia"},
+                        }
+                    }
+                ]
+            }
+        }
+        song_response = MagicMock()
+        song_response.json.return_value = {
+            "response": {
+                "song": {
+                    "id": 8941012,
+                    "title": "Devil Eyes.",
+                    "primary_artist": {"name": "Zack Bia"},
+                    "description": {"plain": "Song breakdown"},
+                }
+            }
+        }
+        with (
+            patch.object(genius, "get_cached_api", return_value=None),
+            patch.object(genius, "set_cached_api"),
+            patch.object(SESSION, "get", side_effect=[search_response, song_response]),
+        ):
+            details = genius.fetch_genius_song_details(
+                "Zack Bia", "DEVILEYES", api_token="test-token"
+            )
+        self.assertIsNotNone(details)
+        assert details is not None
+        self.assertEqual(details["genius_song_id"], 8941012)
+        self.assertEqual(details["title"], "Devil Eyes.")
+
 
 class TestGeniusDirectLookup(IsolatedTestCase):
     def test_specific_song_lookup_returns_identity_and_caches_original_evidence(

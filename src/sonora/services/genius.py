@@ -1,3 +1,5 @@
+import re
+
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.artists import extract_featured_artist_tokens
 from sonora.core.cache import get_cached_api, set_cached_api
@@ -18,9 +20,14 @@ def score_genius_song_match(
 ) -> float:
     """Validate title and complete collaboration credits regardless of billing order."""
     candidate_title = str(song.get("title") or "")
-    if normalize_str(clean_title(title)) != normalize_str(clean_title(candidate_title)):
+    norm_title = normalize_str(clean_title(title))
+    norm_candidate = normalize_str(clean_title(candidate_title))
+    alphanumeric_match = norm_title == norm_candidate or re.sub(
+        r"[^a-z0-9]", "", norm_title
+    ) == re.sub(r"[^a-z0-9]", "", norm_candidate)
+    if not alphanumeric_match:
         return 0.0
-    structural_title = normalize_str(clean_title(title)) in {
+    structural_title = norm_title in {
         "intro",
         "introduction",
         "outro",
@@ -64,7 +71,7 @@ def score_genius_song_match(
         artist,
         title,
         candidate_artist,
-        candidate_title,
+        title if alphanumeric_match else candidate_title,
     )
 
 
@@ -230,11 +237,15 @@ def fetch_genius_song_details(
         return None
     if isinstance(cached, dict):
         cached_score = score_genius_song_match(artist, title, cached, album=album)
+        cached_title = normalize_str(clean_title(str(cached.get("title") or "")))
         if (
             cached_score <= 0
             or cached_score < get_config().genius_match_threshold
-            or normalize_str(clean_title(str(cached.get("title") or "")))
-            != normalized_title
+            or (
+                cached_title != normalized_title
+                and re.sub(r"[^a-z0-9]", "", cached_title)
+                != re.sub(r"[^a-z0-9]", "", normalized_title)
+            )
         ):
             return None
         return {
@@ -282,11 +293,15 @@ def fetch_genius_song_details(
             )
             score = score_artist_title_match(artist, title, search_artist, hit_title)
             candidate_path = str(song_candidate.get("api_path") or "")
+            hit_title_norm = normalize_str(clean_title(hit_title))
+            title_matches = hit_title_norm == normalized_title or re.sub(
+                r"[^a-z0-9]", "", hit_title_norm
+            ) == re.sub(r"[^a-z0-9]", "", normalized_title)
             if (
                 candidate_path
                 and score > 0
                 and score >= get_config().genius_match_threshold
-                and normalize_str(clean_title(hit_title)) == normalized_title
+                and title_matches
             ):
                 previous_score = scored_hits.get(candidate_path, (0.0, {}))[0]
                 if score > previous_score:
