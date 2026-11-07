@@ -1,4 +1,5 @@
 import datetime
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,12 @@ def _emit_tag_summary_and_report(
         metric: (count / total_tracks * 100) if total_tracks > 0 else 0.0
         for metric, count in counts.items()
     }
+    modified_tracks = sum(1 for track in tagged_tracks if track._diff_descriptions)
+    total_tag_changes = sum(len(track._diff_descriptions) for track in tagged_tracks)
+    unchanged_tracks = total_tracks - modified_tracks
+    mod_pct = (modified_tracks / total_tracks * 100) if total_tracks > 0 else 0.0
+    unchanged_pct = (unchanged_tracks / total_tracks * 100) if total_tracks > 0 else 0.0
+
     tracks_with_conflicts = [
         track for track in tagged_tracks if track.metadata_conflicts
     ]
@@ -104,11 +111,69 @@ def _emit_tag_summary_and_report(
         "genius": "Tracks with Genius ID",
         "advisory": "Parental Advisory",
     }
+    tag_mod_counts: Counter[str] = Counter()
+    for track in tagged_tracks:
+        for change in track._diff_descriptions:
+            tag_name = change.split(":")[0].strip()
+            tag_mod_counts[tag_name] += 1
+
+    tag_display_names = {
+        "bpm": "BPM",
+        "initial_key": "Key",
+        "advisory": "Advisory",
+        "musicbrainz_trackid": "MB TrackID",
+        "musicbrainz_albumid": "MB AlbumID",
+        "musicbrainz_artistid": "MB ArtistID",
+        "musicbrainz_releasegroupid": "MB ReleaseGroupID",
+        "genius_song_id": "Genius",
+        "producers": "Producers",
+        "lyricist": "Lyricist",
+        "lyrics": "Lyrics",
+        "cover_art": "Artwork",
+        "genre": "Genre",
+        "artist_sort": "Sort Artist",
+        "release_status": "Release Status",
+        "release_country": "Country",
+        "catalog_number": "Catalog No",
+        "media": "Media",
+        "label": "Label",
+    }
+    top_mods_str = ", ".join(
+        f"{tag_display_names.get(k, k)} (+{v})"
+        for k, v in tag_mod_counts.most_common(6)
+    )
+
     tag_summary_rows: list[tuple[str, str, str | None]] = [
         (
             "Total Tracks Previewed" if dry_run else "Total Tracks Processed",
             str(total_tracks),
             None,
+        ),
+        (
+            "Tracks That Would Be Updated" if dry_run else "Tracks Updated / Tagged",
+            f"{modified_tracks}/{total_tracks} ({mod_pct:.1f}%)"
+            if total_tracks
+            else "0",
+            "green" if modified_tracks > 0 else None,
+        ),
+        (
+            "Total Tag Changes Previewed"
+            if dry_run
+            else "Total Tags Written / Updated",
+            f"{total_tag_changes:,}",
+            "cyan" if total_tag_changes > 0 else None,
+        ),
+        *(
+            [("Top Tags Modified", top_mods_str, "cyan")]
+            if top_mods_str and total_tag_changes > 0
+            else []
+        ),
+        (
+            "Tracks Already Compliant",
+            f"{unchanged_tracks}/{total_tracks} ({unchanged_pct:.1f}%)"
+            if total_tracks
+            else "0",
+            "dim" if unchanged_tracks > 0 else None,
         ),
         *(
             (
@@ -134,6 +199,17 @@ def _emit_tag_summary_and_report(
             None,
         ),
     ]
+    if not interrupted:
+        if dry_run:
+            LOG.success(
+                f"Tagging preview completed: {total_tracks} tracks evaluated, "
+                f"{modified_tracks} tracks would be updated ({total_tag_changes:,} tags)."
+            )
+        else:
+            LOG.success(
+                f"Tagging completed: {total_tracks} tracks processed, "
+                f"{modified_tracks} tracks updated ({total_tag_changes:,} tags written)."
+            )
     LOG.summary_table("Tagging Summary", tag_summary_rows)
 
     if json_report:
@@ -178,6 +254,9 @@ def _emit_tag_summary_and_report(
             },
             "statistics": {
                 "total_tracks": total_tracks,
+                "tracks_modified": modified_tracks,
+                "tags_modified": total_tag_changes,
+                "tracks_unchanged": unchanged_tracks,
                 "total_failures": len(failures),
                 "metadata_coverage": coverage_statistics,
                 "audio_formats": {

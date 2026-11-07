@@ -1,6 +1,7 @@
 import re
 from functools import lru_cache
 
+import anyascii
 import ftfy
 from music_metadata_filter.filter import MetadataFilter
 from music_metadata_filter.functions import (
@@ -16,6 +17,7 @@ from music_metadata_filter.functions import (
 from rapidfuzz import fuzz
 
 from sonora.core.artists import (
+    _split_artist_credits,
     extract_artist_features,
     extract_balanced_features,
     extract_featured_artist_tokens,
@@ -111,8 +113,19 @@ _METADATA_FILTER = MetadataFilter(
 )
 
 _TITLE_EDITION_PATTERN = re.compile(
-    r"\s*[\(\[\{](?:\d{4}\s+)?(?:deluxe|bonus\s+track|mono|stereo|hq|hd|album\s+version|clean\s+version|explicit\s+version|parody|official\s+(?:music\s+)?video|official\s+audio)\b.*?[\)\]\}]",
+    r"\s*[\(\[\{](?:\d{4}\s+)?(?:"
+    r"deluxe|bonus(?:\s+track)?|\bmono\b|\bstereo\b|hq|hd|"
+    r"album\s+version(?:\s+explicit)?|clean\s+version|explicit\s+version|parody|"
+    r"official\s+(?:music\s+)?video|official\s+audio|"
+    r"(?:play\s+&\s+win\s+)?radio\s+(?:edit|version|mix)|video\s+edit|interlude|interludiu|"
+    r"(?:music\s+)?from\s+[\"'].*?[\"']|"
+    r"(?:music\s+)?from\s+(?:the\s+)?(?:motion\s+picture|film|soundtrack|movie|original\s+soundtrack|series|album)\b.*?|"
+    r"soundtrack\s+version).*?[\)\]\}]",
     re.IGNORECASE,
+)
+
+_BRACKETED_WITH_PATTERN = re.compile(
+    r"\s*[\(\[\{]\s*(?:with|cu)\s+([^\)\]\}]+)[\)\]\}]", re.IGNORECASE
 )
 
 _UNBRACKETED_FEAT_PATTERN = re.compile(
@@ -138,6 +151,10 @@ def extract_title_features(
     clean_base, bracket_feats, _, _ = extract_balanced_features(deduped_title)
 
     unbracketed_feats: list[str] = []
+    with_m = _BRACKETED_WITH_PATTERN.search(clean_base)
+    if with_m:
+        unbracketed_feats.append(with_m.group(1).strip())
+        clean_base = clean_base[: with_m.start()].strip() + clean_base[with_m.end() :]
     feat_m = _UNBRACKETED_FEAT_PATTERN.search(clean_base)
     if feat_m:
         unbracketed_feats.append(feat_m.group(1).strip())
@@ -170,7 +187,7 @@ _VERSION_OR_REMIX_PATTERN = re.compile(
 )
 
 _ALBUM_VERSION_PATTERN = re.compile(
-    r"[\(\[\{]\s*album\s+version\s*[\)\]\}]", re.IGNORECASE
+    r"[\(\[\{]\s*album\s+version(?:\s+explicit)?\s*[\)\]\}]", re.IGNORECASE
 )
 
 _REMIX_MODIFIER_PATTERN = re.compile(
@@ -243,6 +260,73 @@ def strip_corrupt_brackets(text: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
+def _is_censored_word_match(word_a: str, word_b: str) -> bool:
+    """Check if one word is an asterisk-censored representation of the other."""
+    if "*" not in word_a and "*" not in word_b:
+        return False
+    if len(word_a) == len(word_b):
+        return all(ca == cb or ca == "*" or cb == "*" for ca, cb in zip(word_a, word_b))
+    if "*" in word_b and "*" not in word_a:
+        pattern = "^" + re.sub(r"\*+", r"[a-z]+", re.escape(word_b)) + "$"
+        return bool(re.match(pattern, word_a, re.IGNORECASE))
+    if "*" in word_a and "*" not in word_b:
+        pattern = "^" + re.sub(r"\*+", r"[a-z]+", re.escape(word_a)) + "$"
+        return bool(re.match(pattern, word_b, re.IGNORECASE))
+    return False
+
+
+def _unmask_censored_title(query: str, candidate: str) -> tuple[str, str]:
+    """Align asterisk-censored tokens between query and candidate titles."""
+    if "*" not in query and "*" not in candidate:
+        return query, candidate
+    new_q, new_c = query, candidate
+    if "*" in candidate:
+        q_tokens = re.findall(r"\w+", query)
+        for cand_match in re.finditer(r"[\w\*]*\*[\w\*]*", candidate):
+            cw = cand_match.group(0)
+            for qw in q_tokens:
+                if _is_censored_word_match(qw.lower(), cw.lower()):
+                    new_c = new_c.replace(cw, qw)
+                    break
+    if "*" in query:
+        c_tokens = re.findall(r"\w+", candidate)
+        for q_match in re.finditer(r"[\w\*]*\*[\w\*]*", query):
+            qw = q_match.group(0)
+            for cw in c_tokens:
+                if _is_censored_word_match(qw.lower(), cw.lower()):
+                    new_q = new_q.replace(qw, cw)
+                    break
+    return new_q, new_c
+
+
+_CYRILLIC_PATTERN = re.compile(r"[\u0400-\u04FF]")
+
+
+def _transliterate_cyrillic(text: str) -> str:
+    res = anyascii.anyascii(text)
+    return re.sub(r"j([aeou])", r"y\1", res, flags=re.IGNORECASE)
+
+
+_ROMANIAN_NON_ARTIST_TOKENS = frozenset(
+    {
+        "tine",
+        "mine",
+        "noi",
+        "voi",
+        "el",
+        "ea",
+        "ei",
+        "ele",
+        "toti",
+        "toate",
+        "putin",
+        "mult",
+        "sine",
+        "umbra",
+    }
+)
+
+
 def _title_identity_score(query_title: str, candidate_title: str) -> float:
     config = get_config()
     # Production credits describe contributors, not a distinct recording version.
@@ -266,6 +350,33 @@ def _title_identity_score(query_title: str, candidate_title: str) -> float:
     query_title_clean = clean_title(query_title).lower()
     candidate_title_clean = clean_title(candidate_title).lower()
 
+    for t_with_feat, t_base in (
+        (query_title_clean, candidate_title_clean),
+        (candidate_title_clean, query_title_clean),
+    ):
+        cu_m = re.match(r"^(.*)\s+\bcu\s+([^\)\]\}\n]+)$", t_with_feat, re.IGNORECASE)
+        if cu_m:
+            feat_token = cu_m.group(2).strip().lower()
+            if feat_token not in _ROMANIAN_NON_ARTIST_TOKENS and not any(
+                feat_token.startswith(p + " ") for p in _ROMANIAN_NON_ARTIST_TOKENS
+            ):
+                base_part = cu_m.group(1).strip()
+                if base_part == t_base or normalize_str(base_part) == normalize_str(
+                    t_base
+                ):
+                    return 100.0
+
+    if _CYRILLIC_PATTERN.search(query_title) or _CYRILLIC_PATTERN.search(
+        candidate_title
+    ):
+        q_trans = _transliterate_cyrillic(query_title)
+        c_trans = _transliterate_cyrillic(candidate_title)
+        if (
+            fuzz.ratio(normalize_str(q_trans), normalize_str(c_trans))
+            >= config.title_match_threshold
+        ):
+            return 100.0
+
     query_series = extract_series_number(query_title_clean)
     candidate_series = extract_series_number(candidate_title_clean)
     if (
@@ -281,16 +392,56 @@ def _title_identity_score(query_title: str, candidate_title: str) -> float:
 
     normalized_query_title = normalize_str(query_title_clean)
     normalized_candidate_title = normalize_str(candidate_title_clean)
-    if query_title_clean == candidate_title_clean or (
-        normalized_query_title and normalized_query_title == normalized_candidate_title
+    q_alnum = "".join(c for c in normalized_query_title if c.isalnum())
+    c_alnum = "".join(c for c in normalized_candidate_title if c.isalnum())
+    if (
+        query_title_clean == candidate_title_clean
+        or (
+            normalized_query_title
+            and normalized_query_title == normalized_candidate_title
+        )
+        or (q_alnum and q_alnum == c_alnum and len(q_alnum) >= 3)
     ):
         title_score = 100.0
     else:
+        for full_bracket, _ in extract_bracket_tokens(query_title):
+            inner = full_bracket[1:-1].strip()
+            if (
+                len(inner) >= 4
+                and not is_version_or_remix(full_bracket)
+                and not re.search(FEAT_KEYWORDS, full_bracket, re.IGNORECASE)
+                and normalize_str(inner) == normalized_candidate_title
+            ):
+                return 100.0
+        for full_bracket, _ in extract_bracket_tokens(candidate_title):
+            inner = full_bracket[1:-1].strip()
+            if (
+                len(inner) >= 4
+                and not is_version_or_remix(full_bracket)
+                and not re.search(FEAT_KEYWORDS, full_bracket, re.IGNORECASE)
+                and normalize_str(inner) == normalized_query_title
+            ):
+                return 100.0
+
         title_ratio = float(fuzz.ratio(query_title_clean, candidate_title_clean))
         title_token_sort = float(
             fuzz.token_sort_ratio(query_title_clean, candidate_title_clean)
         )
-        title_score = max(title_ratio, title_token_sort)
+        norm_ratio = (
+            float(fuzz.ratio(normalized_query_title, normalized_candidate_title))
+            if normalized_query_title and normalized_candidate_title
+            else 0.0
+        )
+        norm_token_sort = (
+            float(
+                fuzz.token_sort_ratio(
+                    normalized_query_title, normalized_candidate_title
+                )
+            )
+            if normalized_query_title and normalized_candidate_title
+            else 0.0
+        )
+        title_score = max(title_ratio, title_token_sort, norm_ratio, norm_token_sort)
 
         query_word = _NON_WORD_SPACES_PATTERN.sub(" ", query_title_clean).strip()
         candidate_word = _NON_WORD_SPACES_PATTERN.sub(
@@ -398,7 +549,16 @@ def score_artist_title_match(
     candidate_features = _credited_feature_artists(candidate_artist, candidate_title)
     # Providers may omit credits; two different explicit credit sets are conflicting evidence.
     if query_features and candidate_features and query_features != candidate_features:
-        return 0.0
+        q_members = {normalize_str(a) for a in _split_artist_credits(query_artist) if a}
+        c_members = {
+            normalize_str(a) for a in _split_artist_credits(candidate_artist) if a
+        }
+        all_collab_artists = q_members | c_members
+        if not (
+            query_features.issubset(all_collab_artists)
+            and candidate_features.issubset(all_collab_artists)
+        ):
+            return 0.0
 
     config = get_config()
     query_artist_clean = clean_title(query_artist).lower()
@@ -431,6 +591,10 @@ def score_artist_title_match(
                 and normalized_query_artist == normalized_candidate_artist
             )
             or (
+                re.sub(r"\.(?=\s|[a-zA-Z]|$)", "", query_artist_clean).lower()
+                == re.sub(r"\.(?=\s|[a-zA-Z]|$)", "", candidate_artist_clean).lower()
+            )
+            or (
                 (
                     _DOTTED_INITIALISM_PATTERN.fullmatch(query_artist_clean)
                     or _DOTTED_INITIALISM_PATTERN.fullmatch(candidate_artist_clean)
@@ -440,12 +604,18 @@ def score_artist_title_match(
             )
         ):
             artist_score = 100.0
+        elif query_artist_clean.replace(".", "") == candidate_artist_clean.replace(
+            ".", ""
+        ):
+            artist_score = 0.0
         else:
             query_primary = clean_title(get_primary_artist(query_artist_clean)).lower()
             candidate_primary = clean_title(
                 get_primary_artist(candidate_artist_clean)
             ).lower()
-            if query_primary == candidate_primary:
+            if query_primary == candidate_primary or query_primary.replace(
+                ".", ""
+            ).replace(" ", "") == candidate_primary.replace(".", "").replace(" ", ""):
                 artist_score = 100.0
             else:
                 query_artist_core = re.sub(
@@ -454,8 +624,16 @@ def score_artist_title_match(
                 candidate_artist_core = re.sub(
                     r"^(?:the|a|an)\s+", "", candidate_primary
                 ).strip()
-                if query_artist_core == candidate_artist_core:
+                if (
+                    query_artist_core == candidate_artist_core
+                    or query_artist_core.replace(".", "").replace(" ", "")
+                    == candidate_artist_core.replace(".", "").replace(" ", "")
+                ):
                     artist_score = 100.0
+                elif query_artist_core.replace(
+                    ".", ""
+                ) == candidate_artist_core.replace(".", ""):
+                    artist_score = 0.0
                 else:
                     min_len = min(len(query_artist_core), len(candidate_artist_core))
                     if min_len <= 3:
@@ -470,6 +648,28 @@ def score_artist_title_match(
                             )
                         )
                         artist_score = max(core_ratio, core_sort)
+
+        if artist_score < 100.0:
+            query_members = {
+                normalize_str(re.sub(r"\.(?=\s|[a-zA-Z]|$)", "", a))
+                for a in _split_artist_credits(query_artist_clean)
+                if a
+            }
+            candidate_members = {
+                normalize_str(re.sub(r"\.(?=\s|[a-zA-Z]|$)", "", a))
+                for a in _split_artist_credits(candidate_artist_clean)
+                if a
+            }
+            if (
+                query_members
+                and candidate_members
+                and (
+                    query_members.issubset(candidate_members)
+                    or candidate_members.issubset(query_members)
+                )
+                and title_score >= title_thresh
+            ):
+                artist_score = 100.0
 
         if artist_score < 100 and (
             artist_score <= config.title_match_threshold
@@ -492,6 +692,7 @@ def recording_identity_matches(
     *,
     expected_duration: float | None = None,
     candidate_duration: float | None = None,
+    duration_tolerance: float | None = None,
 ) -> bool:
     """Require recording text and available duration evidence to agree."""
     if (
@@ -504,11 +705,15 @@ def recording_identity_matches(
         <= 0
     ):
         return False
+    tolerance = (
+        duration_tolerance
+        if duration_tolerance is not None
+        else get_config().single_duration_tolerance_seconds
+    )
     return not (
         expected_duration is not None
         and candidate_duration is not None
-        and abs(expected_duration - candidate_duration)
-        > get_config().single_duration_tolerance_seconds
+        and abs(expected_duration - candidate_duration) > tolerance
     )
 
 

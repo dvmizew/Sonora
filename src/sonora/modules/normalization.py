@@ -61,6 +61,19 @@ def normalize_track_metadata(
                 primary_artist=track_info.artist,
             )
         track_info.title = clean_unicode_punct(clean_base)
+        if track_info.featured_artists and track_info.title:
+            feats = [
+                f.strip()
+                for f in re.split(r"[,/;&]", track_info.featured_artists)
+                if f.strip()
+            ]
+            for feat in feats:
+                cu_pat = re.compile(
+                    rf"\s+\b(?:cu|feat\.?|ft\.?)\s+{re.escape(feat)}$",
+                    re.IGNORECASE,
+                )
+                if cu_pat.search(track_info.title):
+                    track_info.title = cu_pat.sub("", track_info.title).strip()
 
     if track_info.artist:
         track_info.artist = strip_corrupt_brackets(track_info.artist)
