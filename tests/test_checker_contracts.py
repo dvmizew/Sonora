@@ -791,3 +791,251 @@ class TestCheckerIssueCategories(IsolatedTestCase):
                 report = checker.check_library(self.test_directory)
             self.assertEqual(report.missing_lrc, missing)
             self.assertEqual(report.corrupt_files, 0)
+
+    def test_missing_musicbrainz_trackid_is_optional(self) -> None:
+        """Missing MUSICBRAINZ_TRACKID tag must not flag missing metadata issue."""
+        path = self.test_directory / "01 - Track.flac"
+        path.touch()
+        track = TrackInfo(
+            path,
+            artist="Artist",
+            title="Track",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            total_tracks=10,
+            date="2020",
+            bpm=120.0,
+            replaygain_track_gain=-6.0,
+            replaygain_track_peak=0.9,
+            musicbrainz_trackid=None,
+        )
+        issues = checker.check_file(path, track_metadata=track)
+        self.assertFalse(any("MUSICBRAINZ_TRACKID" in iss for iss in issues))
+
+    def test_script_mismatch_in_lyrics_flagged_by_checker(self) -> None:
+        """Cyrillic lyrics on Latin track metadata are flagged as recording identity conflict."""
+        path = self.test_directory / "02 - Track.flac"
+        path.touch()
+        track = TrackInfo(
+            path,
+            artist="Samurai",
+            title="Loial",
+            album="Album",
+            album_artist="Samurai",
+            track_number=2,
+            total_tracks=10,
+            date="2020",
+            bpm=120.0,
+            replaygain_track_gain=-6.0,
+            replaygain_track_peak=0.9,
+            lyrics="[00:10.00] НЕМНОГО ГРУСТНЫЙ самураЙ",
+        )
+        issues = checker.check_file(path, track_metadata=track)
+        self.assertTrue(
+            any(
+                "Embedded lyrics language or script appears discordant" in iss
+                for iss in issues
+            )
+        )
+
+    def test_shared_isrc_duration_tolerance_allows_compilation_gaps(self) -> None:
+        """Shared ISRC between studio album and Greatest Hits allows up to 5.5s duration difference."""
+        report = CheckReport()
+        path1 = self.test_directory / "Album" / "03 - Hit.flac"
+        path2 = self.test_directory / "Greatest Hits" / "01 - Hit.flac"
+
+        track1 = TrackInfo(
+            path1,
+            artist="Queen",
+            title="Bohemian Rhapsody",
+            duration=354.0,
+            isrc="GBUM71029606",
+        )
+        track2 = TrackInfo(
+            path2,
+            artist="Queen",
+            title="Bohemian Rhapsody",
+            duration=359.3,
+            isrc="GBUM71029606",
+        )
+
+        folder_tracks = {
+            path1.parent: [(path1, track1)],
+            path2.parent: [(path2, track2)],
+        }
+        checker._check_identifier_conflicts(folder_tracks, report)
+
+        self.assertNotIn(str(path1), report.issues)
+        self.assertNotIn(str(path2), report.issues)
+
+    def test_shared_isrc_soundtrack_subtitle_agrees_with_album_title(self) -> None:
+        """Shared ISRC between studio album and soundtrack/compilation with subtitle matches recording identity."""
+        report = CheckReport()
+        path1 = self.test_directory / "Soundtrack" / "01 - Venom.flac"
+        path2 = self.test_directory / "Album" / "13 - Venom.flac"
+
+        track1 = TrackInfo(
+            path1,
+            artist="Eminem",
+            title="Venom (music from the motion picture)",
+            duration=269.5,
+            isrc="USUM71813345",
+        )
+        track2 = TrackInfo(
+            path2,
+            artist="Eminem",
+            title="Venom",
+            duration=269.5,
+            isrc="USUM71813345",
+        )
+
+        folder_tracks = {
+            path1.parent: [(path1, track1)],
+            path2.parent: [(path2, track2)],
+        }
+        checker._check_identifier_conflicts(folder_tracks, report)
+
+        self.assertNotIn(str(path1), report.issues)
+        self.assertNotIn(str(path2), report.issues)
+
+    def test_censored_asterisk_titles_do_not_produce_false_checker_conflicts(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(
+            self.recording,
+            artist="21 Savage & Metro Boomin",
+            title="Real Nigga",
+            duration=185.4667,
+            itunes_trackid="1133782487",
+        )
+        payload = {
+            "results": [
+                {
+                    "trackId": 1133782487,
+                    "artistName": "21 Savage & Metro Boomin",
+                    "trackName": "Real Ni**a",
+                    "trackTimeMillis": 185467,
+                }
+            ]
+        }
+        with patch.object(checker, "get_cached_api", return_value=payload):
+            issues = check_file(self.path, track_metadata=recording)
+        self.assertFalse(
+            any("conflicting with ARTIST or TITLE" in issue for issue in issues)
+        )
+
+    def test_romanian_cu_feature_matches_and_preserves_non_features(self) -> None:
+        from sonora.core.titles import recording_identity_matches
+
+        self.assertTrue(
+            recording_identity_matches(
+                "Cedry2k", "Istorii secrete cu Deliric1", "Cedry2k", "Istorii Secrete"
+            )
+        )
+        self.assertTrue(
+            recording_identity_matches(
+                "Cedry2k",
+                "Istorii secrete cu Deliric1",
+                "Cedry2k & Deliric",
+                "Istorii Secrete",
+            )
+        )
+        self.assertFalse(
+            recording_identity_matches(
+                "Alex Velea", "Cand Sunt Cu Tine", "Alex Velea", "Cand Sunt"
+            )
+        )
+
+    def test_parenthetical_with_and_collaborative_artists_match(self) -> None:
+        from sonora.core.titles import recording_identity_matches
+
+        self.assertTrue(
+            recording_identity_matches(
+                "Offset & Metro Boomin",
+                "Ric Flair Drip",
+                "Offset",
+                "Ric Flair Drip (with Metro Boomin)",
+            )
+        )
+        self.assertTrue(
+            recording_identity_matches(
+                "Gridan & Killa Fonic", "Kali Yuga", "Killa Fonic", "Kali Yuga"
+            )
+        )
+        self.assertTrue(
+            recording_identity_matches(
+                "ELIO",
+                "hurts 2 hate somebody (feat. Chase Atlantic, No Rome)",
+                "Elio",
+                "hurts 2 hate somebody (with Chase Atlantic & No Rome)",
+            )
+        )
+
+    def test_cyrillic_transliteration_matches_latin(self) -> None:
+        from sonora.core.titles import recording_identity_matches
+
+        self.assertTrue(
+            recording_identity_matches(
+                "Andro", "Инопланетянин", "Andro", "Inoplanetjanin"
+            )
+        )
+        self.assertTrue(recording_identity_matches("JONY", "Аллея", "JONY", "Alleja"))
+
+    def test_folder_audio_quality_consistency_detects_mixed_profiles(self) -> None:
+        folder = self.test_directory / "MixedQualityAlbum"
+        folder.mkdir(parents=True, exist_ok=True)
+        report = CheckReport()
+        folder_issues: list[str] = []
+
+        track1 = dataclasses.replace(
+            self.recording,
+            file_path=folder / "01 - Track1.flac",
+            track_number=1,
+            bits_per_sample=24,
+            sample_rate=44100,
+            is_lossless=True,
+        )
+        track2 = dataclasses.replace(
+            self.recording,
+            file_path=folder / "02 - Track2.flac",
+            track_number=2,
+            bits_per_sample=24,
+            sample_rate=44100,
+            is_lossless=True,
+        )
+        track3 = dataclasses.replace(
+            self.recording,
+            file_path=folder / "03 - Track3.flac",
+            track_number=3,
+            bits_per_sample=16,
+            sample_rate=44100,
+            is_lossless=True,
+        )
+
+        tracks_in_folder = [
+            (track1.file_path, track1),
+            (track2.file_path, track2),
+            (track3.file_path, track3),
+        ]
+
+        checker._check_folder_audio_quality_consistency(
+            folder=folder,
+            tracks_in_folder=tracks_in_folder,
+            folder_path=self.test_directory,
+            report=report,
+            folder_issues=folder_issues,
+        )
+
+        self.assertEqual(len(folder_issues), 1)
+        self.assertIn("Inconsistent audio quality in album folder", folder_issues[0])
+        self.assertIn("24-bit / 44100 Hz (2 tracks)", folder_issues[0])
+        self.assertIn("16-bit / 44100 Hz (1 track)", folder_issues[0])
+        # Diverging track 3 is flagged
+        self.assertIn(str(track3.file_path), report.issues)
+        self.assertTrue(
+            any(
+                "16-bit / 44100 Hz" in iss
+                for iss in report.issues[str(track3.file_path)]
+            )
+        )
