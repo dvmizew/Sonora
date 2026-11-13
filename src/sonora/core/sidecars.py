@@ -465,6 +465,32 @@ def is_lyrics_duration_valid(
     return max_timestamp - offset <= audio_duration + tolerance_seconds
 
 
+def are_lyrics_timestamps_monotonic(lyrics_text: str | None) -> bool:
+    """
+    Validates that line-level timestamps in lyrics do not decrease chronologically.
+    Allows repeated timestamps for backing vocals or simultaneous lines.
+    """
+    if not lyrics_text:
+        return True
+    prev_timestamp: float = -1.0
+    for line in lyrics_text.splitlines():
+        trimmed = line.lstrip("\ufeff \t")
+        if _LRC_METADATA_HEADER_PATTERN.match(trimmed):
+            continue
+        matches = list(_LYRICS_EXTRACT_TS_REGEX.finditer(line))
+        if not matches:
+            continue
+        if len(matches) == 1 and "<" not in line:
+            _, minutes, seconds, fraction = matches[0].groups()
+            timestamp = int(minutes) * 60.0 + int(seconds)
+            if fraction:
+                timestamp += float(f"0.{fraction}")
+            if timestamp < prev_timestamp - 0.001:
+                return False
+            prev_timestamp = timestamp
+    return True
+
+
 def get_lyrics_quality(lyrics_text: str | None) -> int:
     """
     Determines quality tier of LRC lyrics string:
@@ -489,7 +515,21 @@ def get_lyrics_quality(lyrics_text: str | None) -> int:
 
 
 _NON_LATIN_SCRIPT_REGEX = re.compile(
-    r"[\u0400-\u04ff\u0600-\u06ff\u4e00-\u9fff\uac00-\ud7af]"
+    r"["
+    r"\u0370-\u03ff"  # Greek and Coptic
+    r"\u0400-\u04ff"  # Cyrillic
+    r"\u0530-\u058f"  # Armenian
+    r"\u0590-\u05ff"  # Hebrew
+    r"\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff"  # Arabic
+    r"\u0900-\u0d7f"  # Indic scripts (Devanagari, Bengali, Tamil, etc.)
+    r"\u0e00-\u0eff"  # Thai, Lao
+    r"\u0f00-\u0fff"  # Tibetan
+    r"\u1000-\u109f"  # Myanmar (Burmese)
+    r"\u10a0-\u10ff"  # Georgian
+    r"\u1100-\u11ff\u3130-\u318f\uac00-\ud7af"  # Hangul
+    r"\u3040-\u30ff"  # Hiragana, Katakana
+    r"\u3400-\u4dbf\u4e00-\u9fff"  # CJK Unified Ideographs
+    r"]"
 )
 _CYRILLIC_SCRIPT_REGEX = re.compile(r"[\u0400-\u04ff]")
 _SLAVIC_MARKERS_REGEX = re.compile(
@@ -512,9 +552,7 @@ def is_script_concordant(
     non_latin_count = sum(1 for char in letters if _NON_LATIN_SCRIPT_REGEX.search(char))
     if (non_latin_count / len(letters)) < 0.20:
         return True
-    # Transliterated script concordance applies exclusively to Slavic Cyrillic releases
-    cyrillic_count = sum(1 for char in letters if _CYRILLIC_SCRIPT_REGEX.search(char))
-    if title and cyrillic_count > 0 and (cyrillic_count / non_latin_count) >= 0.80:
+    if title:
         body = lyrics_word_body(cleaned_lyrics)
         trans_body = normalize_str(anyascii.anyascii(body))
         norm_title = normalize_str(title)
@@ -543,6 +581,7 @@ def evaluate_lyrics_quality(
     title: str | None = None,
     audio_duration: float | None = None,
     album: str | None = None,
+    label: str | None = None,
 ) -> float:
     """Score lyrics quality on a 0.0-100.0 scale; returns 0.0 for rejected or corrupt lyrics."""
     if not lyrics_text:
@@ -555,7 +594,7 @@ def evaluate_lyrics_quality(
         return 0.0
     if artist and title and not lyrics_identity_matches(cleaned, artist, title):
         return 0.0
-    ref = f"{artist or ''} {album or ''} {title or ''}".strip()
+    ref = f"{artist or ''} {album or ''} {title or ''} {label or ''}".strip()
     body = lyrics_word_body(cleaned)
     if (artist or title) and not is_script_concordant(ref, cleaned, title=title):
         return 0.0

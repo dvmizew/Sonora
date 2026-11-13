@@ -2158,3 +2158,72 @@ class TestLyricsHeaderRepair(IsolatedTestCase):
                 force=True,
             )
             self.assertIsNone(track_info.lyrics)
+
+    def test_are_lyrics_timestamps_monotonic_detects_non_chronological_lines(
+        self,
+    ) -> None:
+        valid_monotonic = (
+            "[00:01.00] Line one\n"
+            "[00:05.50] Line two\n"
+            "[00:05.50] Line two harmony\n"
+            "[00:10.00] Line three\n"
+        )
+        self.assertTrue(sidecars.are_lyrics_timestamps_monotonic(valid_monotonic))
+
+        non_monotonic = (
+            "[00:01.00] Line one\n[00:10.00] Line two\n[00:05.00] Out of order line\n"
+        )
+        self.assertFalse(sidecars.are_lyrics_timestamps_monotonic(non_monotonic))
+
+    def test_evaluate_lyrics_quality_considers_record_label_for_script_concordance(
+        self,
+    ) -> None:
+        cyrillic_lyrics = (
+            "[ar:Andro]\n"
+            "[ti:Krasivaja]\n"
+            "[00:10.00] Задержи дыхание\n"
+            "[00:15.00] Поцелуи в губы\n"
+            "[00:20.00] Я смогу понять тогда\n"
+            "[00:25.00] Понять понять всё\n"
+        )
+        score_without_label = sidecars.evaluate_lyrics_quality(
+            cyrillic_lyrics,
+            artist="Andro",
+            title="Krasivaja",
+            audio_duration=140.0,
+            album="MOON FLAME",
+        )
+        self.assertEqual(score_without_label, 0.0)
+
+        score_with_label = sidecars.evaluate_lyrics_quality(
+            cyrillic_lyrics,
+            artist="Andro",
+            title="Krasivaja",
+            audio_duration=140.0,
+            album="MOON FLAME",
+            label="Atlantic Records Russia (Distribution)",
+        )
+        self.assertGreater(score_with_label, 0.0)
+
+    def test_script_concordance_supports_transliterated_bilingual_titles(
+        self,
+    ) -> None:
+        bilingual_japanese = (
+            "[00:10.00] このままどこか遠くに To where the noise doesn't reach\n"
+            "[00:20.00] どこか近くに There must be peace in your mind\n"
+        )
+        self.assertTrue(
+            sidecars.is_script_concordant(
+                "Tyga; Saqai Without noise",
+                bilingual_japanese,
+                title="Without noise",
+            )
+        )
+        burmese_mismatch = "[00:10.00] မင်္ဂလာပါ ခင်ဗျာ\n[00:20.00] နေကောင်းလား ခင်ဗျာ\n"
+        self.assertFalse(
+            sidecars.is_script_concordant(
+                "2Scratch Feelings of a Pensive Sadness Cigarette Talks",
+                burmese_mismatch,
+                title="Cigarette Talks",
+            )
+        )

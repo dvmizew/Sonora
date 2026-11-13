@@ -208,6 +208,7 @@ def _update_lyrics(
             conflicts=track_info.metadata_conflicts,
             lookup_state=lyrics_lookup_state,
             sibling_metadata=sibling_metadata,
+            label=track_info.label,
         )
         if tag_type == "purged":
             track_info.lyrics = None
@@ -597,6 +598,7 @@ def process_track_lyrics(
     details: dict[str, Any] | None = None,
     lookup_state: dict[str, Any] | None = None,
     sibling_metadata: Mapping[Path, TrackInfo] | None = None,
+    label: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Validate and upgrade sidecar/embedded lyrics without lowering sync quality.
 
@@ -653,7 +655,12 @@ def process_track_lyrics(
 
     if existing_content and (
         evaluate_lyrics_quality(
-            existing_content, artist, title, resolved_duration, album=album_name
+            existing_content,
+            artist,
+            title,
+            resolved_duration,
+            album=album_name,
+            label=label,
         )
         <= 0
         or not sidecar_duration_valid
@@ -674,7 +681,12 @@ def process_track_lyrics(
     embedded_quality = get_lyrics_quality(existing_lyrics)
     if existing_lyrics and (
         evaluate_lyrics_quality(
-            existing_lyrics, artist, title, resolved_duration, album=album_name
+            existing_lyrics,
+            artist,
+            title,
+            resolved_duration,
+            album=album_name,
+            label=label,
         )
         <= 0
         or (
