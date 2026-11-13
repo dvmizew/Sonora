@@ -102,6 +102,42 @@ class TestLibraryState(IsolatedTestCase):
             )
         )
 
+    def test_artist_alias_storage_lifecycle(self) -> None:
+        self.assertEqual(self.state_mgr.get_artist_alias_count(), 0)
+        self.assertIsNone(self.state_mgr.get_artist_alias("k-dot"))
+
+        # Single alias record
+        self.state_mgr.record_artist_alias(
+            "k-dot", "Kendrick Lamar", source="musicbrainz"
+        )
+        self.assertEqual(self.state_mgr.get_artist_alias_count(), 2)
+        self.assertEqual(self.state_mgr.get_artist_alias("k-dot"), "Kendrick Lamar")
+        self.assertEqual(self.state_mgr.get_artist_alias("kdot"), "Kendrick Lamar")
+
+        # Batch record
+        self.state_mgr.record_artist_aliases(
+            [
+                ("colson baker", "Machine Gun Kelly"),
+                ("mgk", "Machine Gun Kelly"),
+            ],
+            source="musicbrainz",
+        )
+        self.assertEqual(self.state_mgr.get_artist_alias_count(), 5)
+        self.assertEqual(self.state_mgr.get_artist_alias("mgk"), "Machine Gun Kelly")
+        self.assertEqual(
+            self.state_mgr.get_artist_alias("colson baker"), "Machine Gun Kelly"
+        )
+
+        all_aliases = self.state_mgr.get_all_artist_aliases()
+        self.assertIn("kdot", all_aliases)
+        self.assertIn("mgk", all_aliases)
+
+        # Clear artist aliases
+        cleared = self.state_mgr.clear_artist_aliases()
+        self.assertEqual(cleared, 5)
+        self.assertEqual(self.state_mgr.get_artist_alias_count(), 0)
+        self.assertIsNone(self.state_mgr.get_artist_alias("k-dot"))
+
 
 if __name__ == "__main__":
     unittest.main()

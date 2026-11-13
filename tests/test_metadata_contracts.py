@@ -229,11 +229,14 @@ class TestMetadataContracts(IsolatedTestCase):
                 Path("recording.flac"),
                 disc_number=2,
                 track_number=3,
+                date="2020-05-12",
                 original_date="1999-01-02",
             ),
         )
         self.assertEqual(tags["DISCNUMBER"], ["2"])
         self.assertEqual(tags["TRACKNUMBER"], ["3"])
+        self.assertEqual(tags["DATE"], ["2020-05-12"])
+        self.assertEqual(tags["YEAR"], ["2020"])
         self.assertEqual(tags["ORIGINALYEAR"], ["1999"])
         self.assertNotIn("TRACKTOTAL", tags)
         self.assertNotIn("DISCTOTAL", tags)

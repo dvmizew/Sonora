@@ -42,7 +42,7 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
         write_track_metadata(track)
         with taglib.File(str(path)) as song:
             self.assertEqual(song.tags["DATE"], ["2009"])
-            self.assertNotIn("YEAR", song.tags)
+            self.assertEqual(song.tags["YEAR"], ["2009"])
             self.assertEqual(song.tags["ORIGINALDATE"], ["2007"])
             self.assertEqual(song.tags["ORIGINALYEAR"], ["2007"])
             self.assertEqual(song.tags["COMMENT"], ["Preserve this comment"])
