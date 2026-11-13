@@ -117,7 +117,7 @@ _TITLE_EDITION_PATTERN = re.compile(
     r"deluxe|bonus(?:\s+track)?|\bmono\b|\bstereo\b|hq|hd|"
     r"album\s+version(?:\s+explicit)?|clean\s+version|explicit\s+version|parody|"
     r"official\s+(?:music\s+)?video|official\s+audio|"
-    r"(?:play\s+&\s+win\s+)?radio\s+(?:edit|version|mix)|video\s+edit|interlude|interludiu|"
+    r"(?:play\s+&\s+win\s+)?radio\s+(?:edit|version|mix)|video\s+edit|"
     r"(?:music\s+)?from\s+[\"'].*?[\"']|"
     r"(?:music\s+)?from\s+(?:the\s+)?(?:motion\s+picture|film|soundtrack|movie|original\s+soundtrack|series|album)\b.*?|"
     r"soundtrack\s+version).*?[\)\]\}]",
@@ -162,7 +162,10 @@ def extract_title_features(
 
     cleaned = _METADATA_FILTER.filter_field("track", clean_base)
     cleaned = get_bracket_feat_pattern().sub("", cleaned)
+    before_edition = cleaned
     cleaned = _TITLE_EDITION_PATTERN.sub("", cleaned)
+    if cleaned != before_edition:
+        cleaned = re.sub(r"[\s\-_–—]+$", "", cleaned)
     cleaned_title = " ".join(cleaned.split())
 
     all_raw_feats = bracket_feats + unbracketed_feats
