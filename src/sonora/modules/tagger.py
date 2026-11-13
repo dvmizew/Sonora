@@ -224,7 +224,14 @@ def _update_metadata(
         track_info.musicbrainz_trackid != previous_recording_id
         and track_info.metadata_sources.get("musicbrainz_trackid") == "AcoustID"
     ):
-        _update_musicbrainz(track_info, None, None, None, force=force)
+        _update_musicbrainz(
+            track_info,
+            album_context.musicbrainz_id,
+            album_context.track_mbids,
+            album_context.mb_release_details,
+            target_album_artist=album_context.sample_artist,
+            force=force,
+        )
     providers = [
         partial(
             _update_itunes,

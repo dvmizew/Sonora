@@ -1,14 +1,14 @@
 import os
 import shutil
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO
 
 
 @contextmanager
-def atomic_audio_edit(audio_path: Path) -> Iterator[Path]:
+def atomic_audio_edit(audio_path: Path) -> Generator[Path, None, None]:
     """Keep the original audio intact until every tag operation has succeeded."""
     original_stat = audio_path.stat()
     with tempfile.NamedTemporaryFile(
@@ -42,7 +42,7 @@ def atomic_audio_edit(audio_path: Path) -> Iterator[Path]:
 
 
 @contextmanager
-def atomic_write_file(destination: Path) -> Iterator[IO[bytes]]:
+def atomic_write_file(destination: Path) -> Generator[IO[bytes], None, None]:
     """Publish streamed output only after writing, flushing and syncing succeeds."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, staging_name = tempfile.mkstemp(

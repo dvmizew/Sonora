@@ -4,7 +4,7 @@ import shutil
 import sqlite3
 import threading
 import warnings
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -132,7 +132,7 @@ def _open_api_cache(api_cache_dir: Path) -> diskcache.Cache | None:
 
 
 @contextmanager
-def api_cache_session() -> Iterator[None]:
+def api_cache_session() -> Generator[None, None, None]:
     """Own each worker's cache connections without closing the main thread's cache."""
     if (
         threading.current_thread() is threading.main_thread()

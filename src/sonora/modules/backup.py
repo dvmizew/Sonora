@@ -4,7 +4,7 @@ import gzip
 import os
 import zlib
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -229,7 +229,9 @@ class _BackupManifest:
 
 
 @contextmanager
-def _open_backup_stream(backup_file: Path) -> Iterator[BinaryIO | gzip.GzipFile]:
+def _open_backup_stream(
+    backup_file: Path,
+) -> Generator[BinaryIO | gzip.GzipFile, None, None]:
     with backup_file.open("rb") as archive_file:
         compressed = archive_file.read(2) == _GZIP_MAGIC_HEADER
         archive_file.seek(0)

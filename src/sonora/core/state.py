@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from pathlib import Path
 
 from sonora.core.config import SonoraConfig
@@ -82,6 +82,16 @@ class LibraryStateVault:
                 file_size INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 last_tagged_timestamp REAL NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS artist_aliases (
+                alias_normalized TEXT PRIMARY KEY,
+                canonical_name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                updated_at REAL NOT NULL
             );
             """
         )
@@ -280,6 +290,154 @@ class LibraryStateVault:
                 )
         except sqlite3.Error as error:
             LOG.debug(f"Failed to batch record state: {error}")
+
+    def record_artist_alias(
+        self, alias: str, canonical_name: str, source: str = "musicbrainz"
+    ) -> None:
+        """Persist a single artist alias mapping to the local knowledge base."""
+        alias_clean = alias.strip()
+        canonical_clean = canonical_name.strip()
+        if not alias_clean or not canonical_clean:
+            return
+        from sonora.core.text import normalize_str
+
+        alias_norm = normalize_str(alias_clean)
+        if not alias_norm:
+            return
+
+        now = time.time()
+        compact = alias_norm.replace(" ", "")
+        try:
+            with self._connection() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO artist_aliases (
+                        alias_normalized, canonical_name, source, updated_at
+                    ) VALUES (?, ?, ?, ?);
+                    """,
+                    (alias_norm, canonical_clean, source, now),
+                )
+                if compact and compact != alias_norm:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO artist_aliases (
+                            alias_normalized, canonical_name, source, updated_at
+                        ) VALUES (?, ?, ?, ?);
+                        """,
+                        (compact, canonical_clean, source, now),
+                    )
+        except sqlite3.Error as error:
+            LOG.debug(f"Failed to record artist alias '{alias}': {error}")
+
+    def record_artist_aliases(
+        self,
+        mappings: Sequence[tuple[str, str]],
+        source: str = "musicbrainz",
+    ) -> None:
+        """Persist multiple artist alias mappings in a single transaction."""
+        if not mappings:
+            return
+        from sonora.core.text import normalize_str
+
+        records: list[tuple[str, str, str, float]] = []
+        now = time.time()
+        for alias, canonical in mappings:
+            alias_clean = alias.strip()
+            canonical_clean = canonical.strip()
+            if not alias_clean or not canonical_clean:
+                continue
+            alias_norm = normalize_str(alias_clean)
+            if not alias_norm:
+                continue
+            records.append((alias_norm, canonical_clean, source, now))
+            compact = alias_norm.replace(" ", "")
+            if compact and compact != alias_norm:
+                records.append((compact, canonical_clean, source, now))
+
+        if not records:
+            return
+        try:
+            with self._connection() as conn:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO artist_aliases (
+                        alias_normalized, canonical_name, source, updated_at
+                    ) VALUES (?, ?, ?, ?);
+                    """,
+                    records,
+                )
+        except sqlite3.Error as error:
+            LOG.debug(f"Failed to batch record artist aliases: {error}")
+
+    def get_artist_alias(self, alias: str) -> str | None:
+        """Retrieve persisted canonical artist name for an alias."""
+        if not alias or not self.db_path.exists():
+            return None
+        from sonora.core.text import normalize_str
+
+        alias_norm = normalize_str(alias)
+        if not alias_norm:
+            return None
+        compact = alias_norm.replace(" ", "")
+        try:
+            with self._connection() as conn:
+                cursor = conn.execute(
+                    "SELECT canonical_name FROM artist_aliases WHERE alias_normalized = ?;",
+                    (alias_norm,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    return str(row[0])
+                if compact and compact != alias_norm:
+                    cursor = conn.execute(
+                        "SELECT canonical_name FROM artist_aliases WHERE alias_normalized = ?;",
+                        (compact,),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        return str(row[0])
+                return None
+        except sqlite3.Error as error:
+            LOG.debug(f"Failed to query artist alias '{alias}': {error}")
+            return None
+
+    def get_all_artist_aliases(self) -> dict[str, str]:
+        """Retrieve all persisted artist aliases."""
+        if not self.db_path.exists():
+            return {}
+        try:
+            with self._connection() as conn:
+                cursor = conn.execute(
+                    "SELECT alias_normalized, canonical_name FROM artist_aliases;"
+                )
+                return {str(row[0]): str(row[1]) for row in cursor.fetchall()}
+        except sqlite3.Error as error:
+            LOG.debug(f"Failed to query all artist aliases: {error}")
+            return {}
+
+    def get_artist_alias_count(self) -> int:
+        """Return total number of recorded artist aliases."""
+        if not self.db_path.exists():
+            return 0
+        try:
+            with self._connection() as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM artist_aliases;")
+                return int(next(cursor)[0])
+        except sqlite3.Error as error:
+            LOG.debug(f"Failed to count artist aliases: {error}")
+            return 0
+
+    def clear_artist_aliases(self) -> int:
+        """Clear recorded artist aliases from the database."""
+        if not self.db_path.exists():
+            return 0
+        try:
+            with self._connection() as conn:
+                removed = conn.execute("DELETE FROM artist_aliases;").rowcount
+                return int(removed)
+        except sqlite3.Error as error:
+            LOG.debug(f"Failed to clear artist aliases: {error}")
+            return 0
 
     def get_state_count(self) -> int:
         """Return total number of tracked files in the library state database."""

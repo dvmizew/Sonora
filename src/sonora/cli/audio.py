@@ -344,6 +344,7 @@ def _process_lyrics_file(
             musixmatch_token=musixmatch_token,
             details=details,
             lookup_state=lookup_state,
+            label=track_info.label,
         )
         if tag_type == "purged":
             if not dry_run:
