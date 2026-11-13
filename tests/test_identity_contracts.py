@@ -55,6 +55,106 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         self.assertEqual(artists.harmonize_artist_casing("ABC", "abc"), "abc")
         self.assertEqual(artists.harmonize_artist_casing("Artist", "artist"), "artist")
 
+    def test_algorithmic_artist_normalization_rules(self) -> None:
+        cases = {
+            # Acronyms (consonant-only)
+            "pnl": "PNL",
+            "mgl": "MGL",
+            "dmx": "DMX",
+            "ctc": "CTC",
+            "dzws": "DZWS",
+            # Dotted initials
+            "m.g.l.": "M.G.L.",
+            "m.g.l": "M.G.L.",
+            "t.i.": "T.I.",
+            "t.i": "T.I.",
+            "d.o.c.": "D.O.C.",
+            # Currency signs and leetspeak ($)
+            "asap rocky": "A$AP Rocky",
+            "a$ap ferg": "A$AP Ferg",
+            "asap mob": "A$AP Mob",
+            "joey badass": "Joey Bada$$",
+            "currensy": "Curren$y",
+            "suicideboys": "$uicideboy$",
+            "ty dolla sign": "Ty Dolla $ign",
+            # Romanian hip-hop band formats & diacritics
+            "satra benz": "ȘATRA B.E.N.Z.",
+            "bug mafia": "B.U.G. Mafia",
+            "parazitii": "Paraziții",
+            "subcarpati": "Subcarpați",
+            "sisu tudor": "Sișu Tudor",
+            "dragonu ak47": "Dragonu'",
+            "deliric 1": "Deliric",
+            "albert nbn": "Albert Nbn",
+            # Known algorithmic stylizations
+            "6lack": "6LACK",
+            "nf": "NF",
+            "idk": "IDK",
+            "atb": "ATB",
+            "nosfe": "NOSFE",
+            "rava": "RAVA",
+            "renvto": "RENVTØ",
+            "noua unspe": "NOUA UNSPE",
+            "911": "NOUA UNSPE",
+            # Normal names preserved
+            "Kendrick Lamar": "Kendrick Lamar",
+            "Mario": "Mario",
+            "The Game": "The Game",
+            "Eminem": "Eminem",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(artists.normalize_artist_name(raw), expected)
+
+    def test_persisted_sqlite_artist_aliases_and_precedence(self) -> None:
+        from sonora.core.state import get_library_state
+
+        state_mgr = get_library_state()
+        state_mgr.record_artist_alias("k-dot", "Kendrick Lamar", source="musicbrainz")
+
+        artists.clear_artist_cache()
+        # Persisted alias used when no user override exists
+        self.assertEqual(artists.normalize_artist_name("K-Dot"), "Kendrick Lamar")
+
+        # User override takes precedence over persisted alias
+        alias_path = DIRS.user_config_path / "aliases.json"
+        alias_path.parent.mkdir(parents=True, exist_ok=True)
+        alias_path.write_text(json.dumps({"k-dot": "Custom King"}))
+        artists.clear_artist_cache()
+        self.assertEqual(artists.normalize_artist_name("K-Dot"), "Custom King")
+
+    def test_artist_resolution_persists_discovered_aliases_to_library_state(
+        self,
+    ) -> None:
+        from sonora.core.state import get_library_state
+
+        mb_payload = [
+            {
+                "name": "Kendrick Lamar",
+                "alias-list": [
+                    {"alias": "K-Dot", "type": "Artist name"},
+                    {"alias": "Kung Fu Kenny", "type": "Artist name"},
+                ],
+            }
+        ]
+        with (
+            patch.object(
+                musicbrainz, "search_musicbrainz_artists", return_value=mb_payload
+            ),
+            patch.object(artist_resolution, "SESSION") as mock_session,
+        ):
+            mock_session.get.return_value.status_code = 200
+            mock_session.get.return_value.json.return_value = {"data": []}
+
+            resolved = artist_resolution.resolve_artist_name("k-dot")
+            self.assertEqual(resolved, "Kendrick Lamar")
+
+            state_mgr = get_library_state()
+            self.assertEqual(state_mgr.get_artist_alias("k-dot"), "Kendrick Lamar")
+            self.assertEqual(
+                state_mgr.get_artist_alias("kung fu kenny"), "Kendrick Lamar"
+            )
+
     def test_balanced_features_preserve_unclosed_brackets(self) -> None:
         self.assertEqual(
             artists.extract_balanced_features("Recording (feat. Guest"),

@@ -137,6 +137,39 @@ class TestProviderIdentityRegressions(AudioRegressionTestCase):
                     accepted,
                 )
 
+    def test_shared_identifier_with_identical_duration_and_title_variant_does_not_conflict(
+        self,
+    ) -> None:
+        from sonora.audio.metadata import write_track_metadata
+        from sonora.modules.checker import check_library
+
+        f1 = self.audio("Album1/01 - Drugs & Money (New Mix).flac")
+        f2 = self.audio("Album2/01 - Drugs & Money.flac")
+        trk1 = TrackInfo(
+            f1,
+            artist="Chase Atlantic",
+            title="Drugs & Money (New Mix)",
+            isrc="USWB11701727",
+            duration=240.0,
+        )
+        trk2 = TrackInfo(
+            f2,
+            artist="Chase Atlantic",
+            title="Drugs & Money",
+            isrc="USWB11701727",
+            duration=240.0,
+        )
+        write_track_metadata(trk1)
+        write_track_metadata(trk2)
+        report = check_library(self.root)
+        shared_conflicts = [
+            issue
+            for issues in report.issues.values()
+            for issue in issues
+            if "Shared ISRC" in issue
+        ]
+        self.assertEqual(shared_conflicts, [])
+
     def test_verified_apple_advisory_clears_stale_explicit_and_keeps_unknown(
         self,
     ) -> None:

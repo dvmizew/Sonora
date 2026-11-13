@@ -77,9 +77,15 @@ _TAG_SCHEMA: dict[str, tuple[str, ...]] = {
     "acoustid_id": ("ACOUSTID_ID", "ACOUSTID ID"),
     "discogs_release_id": ("DISCOGS_RELEASE_ID", "DISCOGS RELEASE ID"),
     "discogs_artist_id": ("DISCOGS_ARTIST_ID", "DISCOGS ARTIST ID"),
-    "itunes_trackid": ("ITUNESTRACKID", "ITUNES_TRACK_ID"),
-    "itunes_collectionid": ("ITUNESCOLLECTIONID", "ITUNES_COLLECTION_ID"),
-    "itunes_artistid": ("ITUNESARTISTID", "ITUNES_ARTIST_ID"),
+    "itunes_trackid": ("ITUNESTRACKID", "ITUNES_TRACK_ID", "ITUNES_TRACKID"),
+    "itunes_collectionid": (
+        "ITUNESCOLLECTIONID",
+        "ITUNES_COLLECTION_ID",
+        "ITUNES_COLLECTIONID",
+        "ITUNESALBUMID",
+        "ITUNES_ALBUM_ID",
+    ),
+    "itunes_artistid": ("ITUNESARTISTID", "ITUNES_ARTIST_ID", "ITUNES_ARTISTID"),
     "spotify_trackid": (
         "SPOTIFY_TRACK_ID",
         "SPOTIFY_ID",
@@ -546,9 +552,13 @@ def _write_numbering_and_dates(
 
     if track_info.date:
         tags["DATE"] = [track_info.date]
+        if len(track_info.date) >= 4 and track_info.date[:4].isdigit():
+            tags["YEAR"] = [track_info.date[:4]]
+        else:
+            tags.pop("YEAR", None)
     else:
         tags.pop("DATE", None)
-    tags.pop("YEAR", None)
+        tags.pop("YEAR", None)
 
     if track_info.original_date:
         tags["ORIGINALDATE"] = [track_info.original_date]
@@ -721,6 +731,23 @@ def write_track_metadata(
 
                 if not lyrics_only and cover_art_path and cover_art_path.exists():
                     cover_bytes = cover_art_path.read_bytes()
+                    # Windows Media Foundation parser has a strict 4 MiB buffer limit (0xC00D36C4).
+                    # Compress oversized embedded pictures safely below 3.5 MiB.
+                    if len(cover_bytes) >= 3_800_000:
+                        try:
+                            with Image.open(io.BytesIO(cover_bytes)) as oversized_img:
+                                rgb_img = oversized_img.convert("RGB")
+                                if rgb_img.width > 1600 or rgb_img.height > 1600:
+                                    rgb_img.thumbnail(
+                                        (1600, 1600), Image.Resampling.LANCZOS
+                                    )
+                                out_buf = io.BytesIO()
+                                rgb_img.save(
+                                    out_buf, format="JPEG", quality=85, optimize=True
+                                )
+                                cover_bytes = out_buf.getvalue()
+                        except OSError:
+                            pass
                     with Image.open(io.BytesIO(cover_bytes)) as cover_image:
                         cover_image.load()
                         cover_dimensions = cover_image.size

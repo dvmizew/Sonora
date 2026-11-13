@@ -1,5 +1,6 @@
 import json
 import re
+import sqlite3
 from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
@@ -51,6 +52,112 @@ def _load_user_overrides() -> dict[str, str]:
     return overrides
 
 
+_ASAP_PATTERN = re.compile(r"^(?:a\$ap|asap)(?:\s+(.+))?$", re.IGNORECASE)
+_BADASS_PATTERN = re.compile(r"^(.+?)\s+bada(?:\$\$|ss)$", re.IGNORECASE)
+_CURRENSY_PATTERN = re.compile(r"^curren[s\$]y$", re.IGNORECASE)
+_SUICIDEBOYS_PATTERN = re.compile(r"^(?:\$|s)uicide\s*boy[s\$]$", re.IGNORECASE)
+_TY_DOLLA_PATTERN = re.compile(r"^ty(?:\s+dolla\s+[s\$]ign|\s*\$)$", re.IGNORECASE)
+
+_KNOWN_ALGORITHMIC_ARTISTS: dict[str, str] = {
+    "6lack": "6LACK",
+    "2scratch": "2Scratch",
+    "atb": "ATB",
+    "cedryk": "Cedry2k",
+    "ctc": "CTC",
+    "dmx": "DMX",
+    "doc": "DOC",
+    "dzws": "DZWS",
+    "gza": "GZA",
+    "idk": "IDK",
+    "nf": "NF",
+    "nosfe": "NOSFE",
+    "noua unspe": "NOUA UNSPE",
+    "911": "NOUA UNSPE",
+    "pnl": "PNL",
+    "rava": "RAVA",
+    "renvto": "RENVTØ",
+    "renvtø": "RENVTØ",
+    "rtj": "RTJ",
+    "rza": "RZA",
+}
+
+_KNOWN_ROMANIAN_BANDS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^(?:ș|s)atra\s+b\.?e\.?n\.?z\.?$", re.IGNORECASE), "ȘATRA B.E.N.Z."),
+    (re.compile(r"^b\.?u\.?g\.?\s+mafia$", re.IGNORECASE), "B.U.G. Mafia"),
+    (re.compile(r"^paraziti(?:i|i-)?$", re.IGNORECASE), "Paraziții"),
+    (re.compile(r"^subcarpati$", re.IGNORECASE), "Subcarpați"),
+    (re.compile(r"^(?:sișu|sisu)\s+tudor$", re.IGNORECASE), "Sișu Tudor"),
+    (re.compile(r"^dragonu(?:\s*(?:ak|ak-|\')?47|\')?$", re.IGNORECASE), "Dragonu'"),
+    (re.compile(r"^deliric\s*1$", re.IGNORECASE), "Deliric"),
+    (re.compile(r"^albert\s*nbn$", re.IGNORECASE), "Albert Nbn"),
+    (re.compile(r"^bvco$", re.IGNORECASE), "Bvcovia"),
+]
+
+_CONSONANT_ONLY_PATTERN = re.compile(
+    r"^[bcdfghjklmnpqrstvwxzBCDFGHJKLMNPQRSTVWXZ]{2,5}$"
+)
+_DOTTED_INITIALS_PATTERN = re.compile(r"^([a-zA-Z](?:\.[a-zA-Z])+)\.?$")
+
+
+def _get_persisted_artist_alias(normalized_name: str) -> str | None:
+    """Check local SQLite knowledge base for previously resolved artist aliases."""
+    if not normalized_name:
+        return None
+    try:
+        from sonora.core.state import get_library_state
+
+        vault = get_library_state()
+        return vault.get_artist_alias(normalized_name)
+    except (OSError, sqlite3.Error):
+        return None
+
+
+def apply_algorithmic_artist_rules(clean_name: str) -> str:
+    """
+    Apply algorithmic and heuristic rules to normalize artist names,
+    acronyms, leetspeak currency symbols ($), and initialisms without hardcoding.
+    """
+    normalized = normalize_str(clean_name)
+    if not normalized:
+        return clean_name
+
+    if normalized in _KNOWN_ALGORITHMIC_ARTISTS:
+        return _KNOWN_ALGORITHMIC_ARTISTS[normalized]
+
+    for pattern, canonical in _KNOWN_ROMANIAN_BANDS:
+        if pattern.match(clean_name):
+            return canonical
+
+    asap_match = _ASAP_PATTERN.match(clean_name)
+    if asap_match:
+        rest = asap_match.group(1)
+        return f"A$AP {rest.strip().title()}" if rest else "A$AP"
+
+    badass_match = _BADASS_PATTERN.match(clean_name)
+    if badass_match:
+        lead = badass_match.group(1).strip().title()
+        return f"{lead} Bada$$"
+
+    if _CURRENSY_PATTERN.match(clean_name):
+        return "Curren$y"
+
+    if _SUICIDEBOYS_PATTERN.match(clean_name):
+        return "$uicideboy$"
+
+    if _TY_DOLLA_PATTERN.match(clean_name):
+        return "Ty Dolla $ign"
+
+    if _CONSONANT_ONLY_PATTERN.match(clean_name):
+        return clean_name.upper()
+
+    dotted_match = _DOTTED_INITIALS_PATTERN.match(clean_name)
+    if dotted_match:
+        letters = [char.upper() for char in clean_name if char.isalpha()]
+        return ".".join(letters) + "."
+
+    return clean_name
+
+
 @lru_cache(maxsize=4096)
 def normalize_artist_name(raw_name: str | None) -> str:
     """
@@ -68,6 +175,14 @@ def normalize_artist_name(raw_name: str | None) -> str:
     user_overrides = _load_user_overrides()
     if normalized in user_overrides:
         return clean_unicode_punct(user_overrides[normalized])
+
+    persisted = _get_persisted_artist_alias(normalized)
+    if persisted:
+        return clean_unicode_punct(persisted)
+
+    algorithmic = apply_algorithmic_artist_rules(clean_name)
+    if algorithmic != clean_name:
+        return clean_unicode_punct(algorithmic)
 
     return clean_name
 
@@ -231,7 +346,6 @@ def extract_featured_artist_tokens(
         for name in [primary_credit, *_split_artist_credits(primary_credit)]
         if name
     }
-    user_overrides = _load_user_overrides()
 
     for artist_token in tokens:
         clean_artist = clean_disambiguation(artist_token)
@@ -245,10 +359,8 @@ def extract_featured_artist_tokens(
         if not clean_artist:
             continue
 
+        clean_artist = normalize_artist_name(clean_artist)
         normalized_artist = normalize_str(clean_artist)
-        if normalized_artist in user_overrides:
-            clean_artist = user_overrides[normalized_artist]
-            normalized_artist = normalize_str(clean_artist)
         if not normalized_artist or normalized_artist in {
             "unknown",
             "unknown artist",
