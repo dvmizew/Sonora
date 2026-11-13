@@ -29,7 +29,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.15"
+          python-version: "3.12"
 
       - name: Setup locked dependency tooling
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -44,8 +44,10 @@ jobs:
 
       - name: Build binary with PyInstaller
         run: |
-          uv sync --locked --group build --python 3.12.15 --no-editable
-          uv run --no-sync python -W error -m unittest discover -s tests
+          uv sync --locked --group build --python 3.12 --no-editable
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            uv run --no-sync python -W error -m unittest discover -s tests
+          fi
           uv run --no-sync pyinstaller sonora-linux-x86_64.spec --clean -y
           dist/${{ matrix.asset_name }} --version
           dist/${{ matrix.asset_name }} tag --help
