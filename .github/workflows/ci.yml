@@ -6,10 +6,17 @@ on:
   pull_request:
     branches: [ main, "feature/*" ]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -17,8 +24,12 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          python-version: ${{ matrix.python }}
+
+      - name: Setup locked dependency tooling
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
 
       - name: Install system packages
         run: |
@@ -26,25 +37,38 @@ jobs:
           sudo apt-get install -y libtag1-dev ffmpeg flac sox libchromaprint-dev libchromaprint-tools
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff pyflakes mypy bandit
-          pip install .
+        run: uv sync --locked --extra dev --python ${{ matrix.python }}
 
       - name: Lint & type check
         run: |
-          ruff check src/ tests/
-          pyflakes src/ tests/
-          mypy src/ tests/
+          uv run --no-sync ruff check src/ tests/
+          uv run --no-sync ruff format --check src/ tests/
+          uv run --no-sync mypy --strict src/ tests/
 
       - name: Security scan
         run: |
-          bandit -r src/ -s B404,B603,B310
+          uv run --no-sync bandit -r src/ -s B404,B603,B310
 
-      - name: Run tests
+      - name: Run regression tests with coverage
         run: |
-          python -m unittest discover -s tests
+          uv run --no-sync python -W error -m coverage run -m unittest discover -s tests
+          uv run --no-sync python -m coverage report
+
+      - name: Generate coverage reports
+        run: |
+          uv run --no-sync python -m coverage html
+          uv run --no-sync python -m coverage xml
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-python-${{ matrix.python }}
+          path: |
+            htmlcov/
+            coverage.xml
+          if-no-files-found: error
 
       - name: Smoke test CLI
         run: |
-          sonora
+          uv run --no-sync sonora --version
+          uv run --no-sync sonora tag --help

@@ -1,0 +1,1754 @@
+import dataclasses
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from sonora.core.models import CheckReport, TrackInfo
+from sonora.core.text import is_valid_uuid
+from sonora.modules import checker
+from sonora.modules.checker import (
+    check_brackets_corruption,
+    check_file,
+    check_library,
+)
+from tests.fixtures import write_silent_wav
+from tests.module_support import ModuleTestCase
+from tests.support import IsolatedTestCase
+
+
+class TestCheckerContracts(IsolatedTestCase):
+    def test_embedded_provider_duration_is_evidence_not_a_corruption_verdict(
+        self,
+    ) -> None:
+        path = self.path.with_suffix(".flac")
+        path.touch()
+        for snapshot, expected in (
+            ('{"duration":137}', True),
+            ('{"duration":197}', False),
+            ('{"duration":null}', False),
+            ("broken", True),
+        ):
+            with (
+                self.subTest(snapshot=snapshot),
+                patch.object(checker, "verify_flac_checksum", return_value=True),
+                patch.object(
+                    checker,
+                    "FLAC",
+                    return_value=SimpleNamespace(
+                        tags={"tidal_data": [snapshot]},
+                        pictures=[],
+                        info=SimpleNamespace(length=197.206),
+                    ),
+                ),
+            ):
+                categories: set[checker._IssueCategory] = set()
+                issues = checker.check_file(
+                    path, track_metadata=self.recording, categories=categories
+                )
+                self.assertEqual(
+                    any("Embedded TIDAL_DATA" in issue for issue in issues), expected
+                )
+                self.assertNotIn(checker._IssueCategory.CORRUPT, categories)
+
+    def test_single_filename_one_can_keep_its_published_release_position(self) -> None:
+        folder = self.test_directory / "Singles" / "Recording"
+        folder.mkdir(parents=True)
+        path = folder / "01 - Recording.wav"
+        path.touch()
+        track = dataclasses.replace(self.recording, track_number=26)
+        issues = checker.check_file(path, track_metadata=track)
+        self.assertFalse(any("Filename track number" in issue for issue in issues))
+        (folder / "02 - Another recording.wav").touch()
+        issues = checker.check_file(path, track_metadata=track)
+        self.assertTrue(any("Filename track number" in issue for issue in issues))
+
+    def test_conflicting_raw_date_aliases_are_reported_without_rewriting(self) -> None:
+        path = self.path.with_suffix(".flac")
+        path.touch()
+        for tags, expected in (
+            ({"date": ["2021-07-01"], "year": ["2019"]}, 1),
+            ({"originaldate": ["2009"], "originalyear": ["2020"]}, 1),
+            ({"date": ["2021-07-01"], "year": ["2021"]}, 0),
+            ({"date": ["2021-07-01"]}, 0),
+        ):
+            original = {key: list(value) for key, value in tags.items()}
+            with (
+                self.subTest(tags=tags),
+                patch.object(checker, "verify_flac_checksum", return_value=True),
+                patch.object(
+                    checker,
+                    "FLAC",
+                    return_value=SimpleNamespace(tags=tags, pictures=[]),
+                ),
+            ):
+                issues = checker.check_file(path, track_metadata=self.recording)
+            self.assertEqual(
+                sum(issue.startswith("Conflicting date aliases:") for issue in issues),
+                expected,
+            )
+            self.assertEqual(tags, original)
+
+    def test_supplied_reports_count_worker_outcomes_without_false_issue_categories(
+        self,
+    ) -> None:
+        for issues, recording, expected_corrupt in (
+            ([], dataclasses.replace(self.recording, track_number=None), 0),
+            (["Metadata read error: broken"], None, 0),
+            (["Checksum check failed: corrupted stream"], None, 1),
+        ):
+            report = CheckReport()
+            with (
+                self.subTest(issues=issues),
+                patch.object(
+                    checker,
+                    "_check_single_file",
+                    return_value=(
+                        self.path,
+                        issues,
+                        recording,
+                        {checker._IssueCategory.CORRUPT} if expected_corrupt else set(),
+                    ),
+                ),
+            ):
+                self.assertIs(
+                    checker.check_library(self.test_directory, report=report), report
+                )
+            self.assertEqual(report.total_files, 1)
+            self.assertEqual(
+                (report.corrupt_files, report.missing_metadata, report.missing_lrc),
+                (expected_corrupt, 0, 0),
+            )
+            self.assertEqual(report.issues.get(str(self.path), []), issues)
+
+    def test_valid_pictures_and_audio_do_not_report_corruption(
+        self,
+    ) -> None:
+        path = self.path.with_suffix(".flac")
+        path.touch()
+        for is_lossless in (False, True):
+            with (
+                self.subTest(is_lossless=is_lossless),
+                patch.object(checker, "verify_flac_checksum", return_value=True),
+                patch.object(
+                    checker,
+                    "FLAC",
+                    return_value=SimpleNamespace(
+                        pictures=[SimpleNamespace(data=b"image")]
+                    ),
+                ),
+                patch.object(
+                    checker, "detect_fake_lossless", return_value=(False, 0, None)
+                ) as spectral,
+            ):
+                issues = checker.check_file(
+                    path,
+                    check_spectral=True,
+                    track_metadata=dataclasses.replace(
+                        self.recording, is_lossless=is_lossless
+                    ),
+                )
+            self.assertFalse(
+                any(
+                    "picture" in issue
+                    or "checksum" in issue
+                    or "fake lossless" in issue
+                    for issue in issues
+                )
+            )
+            self.assertEqual(spectral.call_count, int(is_lossless))
+
+    def test_missing_track_numbers_do_not_count_as_extreme_positions(self) -> None:
+        folder_issues: list[str] = []
+        checker._check_folder_alien_tracks(
+            self.test_directory,
+            [
+                (self.path, self.recording),
+                (
+                    self.path.with_name("missing.wav"),
+                    dataclasses.replace(self.recording, track_number=None),
+                ),
+            ],
+            "Record",
+            "Primary",
+            {},
+            self.test_directory,
+            CheckReport(),
+            folder_issues,
+        )
+        self.assertEqual(folder_issues, [])
+
+    def test_generic_containers_do_not_require_album_sequence(self) -> None:
+        folder = self.test_directory / "Singles"
+        folder.mkdir()
+        path = folder / "recording.wav"
+        path.touch()
+        with patch.object(
+            checker,
+            "read_track_metadata",
+            return_value=TrackInfo(
+                path, title="Recording", artist="Primary", track_number=3
+            ),
+        ):
+            report = checker.check_library(folder)
+        self.assertEqual(report.total_files, 1)
+        self.assertNotIn(str(folder), report.issues)
+
+    def test_cached_identifier_duration_detects_a_truncated_recording(self) -> None:
+        recording = dataclasses.replace(
+            self.recording,
+            artist="The Weeknd",
+            title="Earned It (Fifty Shades of Grey)",
+            duration=30.093,
+            itunes_trackid="1440822253",
+        )
+        payload = {
+            "results": [
+                {
+                    "trackId": 1440822253,
+                    "artistName": "The Weeknd",
+                    "trackName": "Earned It (Fifty Shades of Grey)",
+                    "trackTimeMillis": 277724,
+                }
+            ]
+        }
+        with patch.object(checker, "get_cached_api", return_value=payload):
+            issues = check_file(self.path, track_metadata=recording)
+        self.assertTrue(
+            any("Audio duration 30.093s conflicts" in issue for issue in issues)
+        )
+
+    def test_cached_identity_conflicts_are_reported_without_rewriting_tags(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(self.recording, isrc="US83W0500050")
+        with patch.object(
+            checker,
+            "get_cached_api",
+            return_value={
+                "artist": "Aventura",
+                "title": "Si Me Dejas Muero",
+                "duration": 225,
+            },
+        ):
+            issues = check_file(self.path, track_metadata=recording)
+        self.assertTrue(
+            any("Cached Deezer ISRC identifier" in issue for issue in issues)
+        )
+        self.assertEqual(recording.artist, "Primary")
+        self.assertEqual(recording.isrc, "US83W0500050")
+
+    def test_verified_cached_artist_alias_still_requires_title_and_duration(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(
+            self.recording,
+            artist="NF",
+            title="Overdose",
+            duration=200,
+            isrc="USX9P1010892",
+        )
+        for title, duration in (("Overdose", 200), ("Overdose", 225), ("Mansion", 200)):
+            cache = {
+                "deezer_isrc:v2:USX9P1010892": {
+                    "artist": "Nathan Feuerstein",
+                    "title": title,
+                    "duration": duration,
+                },
+                "canonical_artist:v2:nathan feuerstein": "NF",
+            }
+            with (
+                self.subTest(title=title, duration=duration),
+                patch.object(checker, "get_cached_api", side_effect=cache.get),
+            ):
+                issues = check_file(self.path, track_metadata=recording)
+            conflicts = [issue for issue in issues if "cached" in issue.lower()]
+            self.assertEqual(bool(conflicts), title != "Overdose" or duration != 200)
+
+    def test_unavailable_or_wrong_id_cached_results_do_not_validate_recordings(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(
+            self.recording, itunes_trackid="123", duration=30
+        )
+        for payload in (
+            None,
+            "",
+            {},
+            {"results": None},
+            *(
+                {
+                    "results": [
+                        {
+                            "trackId": 123,
+                            "artistName": "Primary",
+                            "trackName": "Recording",
+                            "trackTimeMillis": duration,
+                        }
+                    ]
+                }
+                for duration in (None, 0, -1, "invalid", float("nan"))
+            ),
+            {
+                "results": [
+                    {
+                        "trackId": 456,
+                        "artistName": "Other",
+                        "trackName": "Other",
+                        "trackTimeMillis": 277000,
+                    }
+                ]
+            },
+        ):
+            with (
+                self.subTest(payload=payload),
+                patch.object(checker, "get_cached_api", return_value=payload),
+            ):
+                issues = check_file(self.path, track_metadata=recording)
+            self.assertFalse(
+                any("Cached " in issue or "cached " in issue for issue in issues)
+            )
+
+    def test_cached_duration_accepts_small_mastering_differences(self) -> None:
+        recording = dataclasses.replace(
+            self.recording, duration=200, isrc="AA1234567890"
+        )
+        with patch.object(
+            checker,
+            "get_cached_api",
+            return_value={
+                "artist": "Primary",
+                "title": "Recording",
+                "duration": 202,
+            },
+        ):
+            issues = check_file(self.path, track_metadata=recording)
+        self.assertFalse(any("cached " in issue for issue in issues))
+
+    def test_filename_and_nonpositive_positions_are_reported(self) -> None:
+        recording = dataclasses.replace(
+            self.recording, track_number=2, disc_number=0, total_tracks=-1
+        )
+        issues = check_file(self.path, track_metadata=recording)
+        self.assertIn("Filename track number 1 differs from TRACKNUMBER 2.", issues)
+        self.assertIn("Invalid DISCNUMBER 0; positions start at 1.", issues)
+        self.assertIn("Invalid TRACKTOTAL -1; totals must be positive.", issues)
+
+    def test_known_consistent_totals_reveal_missing_trailing_tracks(self) -> None:
+        with patch.object(
+            checker,
+            "read_track_metadata",
+            return_value=dataclasses.replace(
+                self.recording,
+                total_tracks=3,
+            ),
+        ):
+            report = checker.check_library(self.test_directory)
+        self.assertTrue(
+            any("[2-3]" in issue for issue in report.issues[str(self.test_directory)])
+        )
+
+    def setUp(self) -> None:
+        self.path = self.test_directory / "01 - Recording.wav"
+        self.path.touch()
+        self.recording = TrackInfo(
+            self.path,
+            artist="Primary",
+            title="Recording",
+            album="Record",
+            album_artist="Primary",
+            track_number=1,
+            genre="Rock",
+        )
+
+    def test_placeholder_artist_does_not_become_a_folder_agreement(self) -> None:
+        report = CheckReport()
+        folder_issues: list[str] = []
+        recording = dataclasses.replace(
+            self.recording, artist="Unknown Artist", album_artist=None
+        )
+        self.assertEqual(
+            checker._check_folder_album_consistency(
+                self.test_directory,
+                [(self.path, recording)],
+                self.test_directory,
+                report,
+                folder_issues,
+            ),
+            ("Record", None),
+        )
+
+    def test_unreadable_worker_metadata_is_reported_without_a_false_track(self) -> None:
+        with patch.object(
+            checker, "read_track_metadata", side_effect=OSError("broken audio")
+        ):
+            path, issues, recording, _ = checker._check_single_file(self.path)
+        self.assertEqual(path, self.path)
+        self.assertIsNone(recording)
+        self.assertTrue(issues)
+
+    def test_displaced_tracks_and_position_collisions_are_reported_once(self) -> None:
+        recordings = [
+            dataclasses.replace(
+                self.recording,
+                file_path=self.path.with_name(f"{number}.wav"),
+                track_number=number,
+            )
+            for number in (1, 2, 3)
+        ]
+        displaced = dataclasses.replace(
+            self.recording,
+            file_path=self.path.with_name("15.wav"),
+            track_number=15,
+            album="Other Record",
+            artist="Unrelated",
+        )
+        recordings.append(displaced)
+        report = CheckReport()
+        folder_issues: list[str] = []
+        tracks = [(recording.file_path, recording) for recording in recordings]
+        for _ in range(2):
+            checker._check_folder_alien_tracks(
+                self.test_directory,
+                tracks,
+                "Record",
+                "Primary",
+                {(1, 15): ["15.wav", "other.wav"]},
+                self.test_directory / "different-root",
+                report,
+                folder_issues,
+            )
+        issues = report.issues[str(displaced.file_path)]
+        self.assertTrue(any("Displaced" in issue for issue in issues), issues)
+        self.assertTrue(any("Alien single" in issue for issue in issues), issues)
+        self.assertEqual(len(issues), len(set(issues)))
+        self.assertEqual(len(folder_issues), len(issues))
+
+    def test_bonus_titles_do_not_trigger_extreme_position_warnings(self) -> None:
+        recordings = [
+            dataclasses.replace(self.recording, track_number=number)
+            for number in (1, 2, 3, 15)
+        ]
+        recordings[-1].title = "Recording (Bonus)"
+        report = CheckReport()
+        folder_issues: list[str] = []
+        checker._check_folder_alien_tracks(
+            self.test_directory,
+            [(recording.file_path, recording) for recording in recordings],
+            "Record",
+            "Primary",
+            {},
+            self.test_directory,
+            report,
+            folder_issues,
+        )
+        self.assertEqual(folder_issues, [])
+
+    def test_large_track_number_uses_compact_missing_ranges(self) -> None:
+        recording = dataclasses.replace(self.recording, track_number=10**9)
+        with patch.object(checker, "read_track_metadata", return_value=recording):
+            report = checker.check_library(self.test_directory)
+        self.assertIn(
+            "Missing track numbers in sequence for Disc 1: [1-999999999]",
+            report.issues[str(self.test_directory)],
+        )
+
+    def test_library_reports_missing_sequence_in_the_album_folder(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(self.recording, track_number=3)
+        with patch.object(checker, "read_track_metadata", return_value=recording):
+            report = checker.check_library(self.test_directory)
+        self.assertEqual(report.total_files, 1)
+        self.assertTrue(
+            any(
+                "Missing track numbers" in issue
+                for issue in report.issues[str(self.test_directory)]
+            )
+        )
+
+    def test_missing_and_unsupported_files_have_explicit_outcomes(self) -> None:
+        self.assertEqual(
+            checker.check_file(self.path.with_name("missing.wav")),
+            [f"File not found: {self.path.with_name('missing.wav')}"],
+        )
+        unsupported = self.path.with_suffix(".txt")
+        unsupported.touch()
+        self.assertEqual(checker.check_file(unsupported), [])
+
+    def test_checksum_picture_and_spectral_corruption_are_reported(self) -> None:
+        path = self.path.with_suffix(".flac")
+        path.touch()
+        with (
+            patch.object(checker, "verify_flac_checksum", return_value=False),
+            patch.object(
+                checker,
+                "FLAC",
+                return_value=SimpleNamespace(pictures=[SimpleNamespace(data=b"")]),
+            ),
+            patch.object(
+                checker, "detect_fake_lossless", return_value=(True, 16, None)
+            ),
+        ):
+            issues = checker.check_file(
+                path, check_spectral=True, track_metadata=self.recording
+            )
+        self.assertIn(
+            "FLAC audio stream MD5 checksum verification failed (corrupted FLAC).",
+            issues,
+        )
+        self.assertIn("Corrupt 0-byte picture block at index 0.", issues)
+        self.assertIn(
+            "Spectral cutoff below 16 kHz; source quality requires review.", issues
+        )
+        with (
+            patch.object(
+                checker, "verify_flac_checksum", side_effect=OSError("flac unavailable")
+            ),
+            patch.object(checker, "FLAC", side_effect=OSError("bad stream")),
+            patch.object(
+                checker, "detect_fake_lossless", side_effect=OSError("bad stream")
+            ),
+        ):
+            issues = checker.check_file(
+                path, check_spectral=True, track_metadata=self.recording
+            )
+        self.assertIn("Checksum check failed: flac unavailable", issues)
+
+    def test_invalid_metadata_features_and_low_bitrate_are_actionable(self) -> None:
+        path = self.test_directory / "01 - Recording (feat. Guest).mp3"
+        path.touch()
+        recording = dataclasses.replace(
+            self.recording,
+            file_path=path,
+            artist="Primary / Guest",
+            album_artist=None,
+            title="Recording (feat. Guest)",
+            genre="unknown",
+            musicbrainz_trackid="invalid",
+            initial_key="invalid",
+            art_width=100,
+            art_height=100,
+            sample_rate=22050,
+            bitrate=128,
+            is_lossless=False,
+        )
+        issues = checker.check_file(path, track_metadata=recording)
+        for fragment in (
+            "Blacklisted genre",
+            "Invalid INITIALKEY",
+            "Invalid UUID",
+            "Low resolution cover",
+            "seems unsplit",
+            "TITLE tag",
+            "Filename contains 'feat'",
+            "Sub-standard sample rate",
+            "Sub-standard lossy bitrate",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertTrue(any(fragment in issue for issue in issues), issues)
+
+    def test_supplied_metadata_and_unreadable_companions_keep_issue_categories(
+        self,
+    ) -> None:
+        self.path.with_suffix(".lrc").touch()
+        issues = checker.check_file(self.path, track_metadata=self.recording)
+        self.assertIn("Corrupt 0-byte synchronized lyrics (.lrc) file.", issues)
+        self.assertNotIn("Missing synchronized lyrics (.lrc) file.", issues)
+        artist_feature = dataclasses.replace(
+            self.recording, artist="Primary feat. Guest"
+        )
+        issues = checker.check_file(self.path, track_metadata=artist_feature)
+        self.assertTrue(any("ARTIST entry" in issue for issue in issues))
+        self.assertFalse(any("seems unsplit" in issue for issue in issues))
+
+    def test_folder_agreement_flags_specific_outliers_and_empty_input(self) -> None:
+        report = CheckReport()
+        folder_issues: list[str] = []
+        self.assertEqual(
+            checker._check_folder_album_consistency(
+                self.test_directory, [], self.test_directory, report, folder_issues
+            ),
+            (None, None),
+        )
+        recordings = [
+            self.recording,
+            dataclasses.replace(
+                self.recording, file_path=self.path.with_name("02 - Recording.wav")
+            ),
+            dataclasses.replace(
+                self.recording,
+                file_path=self.path.with_name("03 - Other.wav"),
+                album="Other Record",
+                album_artist="Other",
+            ),
+            dataclasses.replace(
+                self.recording,
+                file_path=self.path.with_name("04 - Missing.wav"),
+                album="Unknown Album",
+                album_artist=None,
+            ),
+        ]
+        album, artist = checker._check_folder_album_consistency(
+            self.test_directory,
+            [(recording.file_path, recording) for recording in recordings],
+            self.test_directory / "different-root",
+            report,
+            folder_issues,
+        )
+        self.assertEqual((album, artist), ("Record", "Primary"))
+        outlier = report.issues[str(recordings[2].file_path)]
+        self.assertTrue(any("Mismatched ALBUM tag" in issue for issue in outlier))
+        self.assertTrue(any("Mismatched ALBUMARTIST" in issue for issue in outlier))
+        self.assertNotIn(str(recordings[3].file_path), report.issues)
+
+    def test_worker_programming_failures_are_not_masked_as_audio_issues(self) -> None:
+        with (
+            patch.object(
+                checker, "_check_single_file", side_effect=RuntimeError("checker bug")
+            ),
+            self.assertRaisesRegex(RuntimeError, "checker bug"),
+        ):
+            checker.check_library(self.test_directory)
+
+
+class TestCheckerMetadataValidation(IsolatedTestCase):
+    def test_unresolved_musicbrainz_release_edition_is_not_missing_metadata(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        track = TrackInfo(
+            audio_path,
+            artist="Artist",
+            title="Song",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            date="2010",
+            bpm=90,
+            replaygain_track_gain=-1.0,
+            replaygain_track_peak=0.9,
+            musicbrainz_trackid="ada798cb-ba04-48f4-b553-135438fe3f6c",
+            musicbrainz_releasegroupid="a5056c3b-730f-493b-b10e-52f678d72b85",
+        )
+        categories: set[checker._IssueCategory] = set()
+
+        issues = check_file(audio_path, track_metadata=track, categories=categories)
+
+        self.assertFalse(any("MUSICBRAINZ_ALBUMID" in issue for issue in issues))
+        self.assertNotIn(checker._IssueCategory.MISSING_METADATA, categories)
+
+    def test_conflicting_lyrics_headers_and_timestamps_are_reported(self) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        track = TrackInfo(
+            audio_path,
+            artist="Artist",
+            title="Song",
+            duration=60,
+            lyrics="[ar:Artist]\n[ti:Unrelated Song]\n[00:01.00] words",
+        )
+        audio_path.with_suffix(".lrc").write_text(
+            "[ar:Artist]\n[ti:Song]\n[02:00.00] words"
+        )
+        issues = check_file(audio_path, track_metadata=track)
+        self.assertIn(
+            "Embedded lyrics headers conflict with ARTIST or TITLE; verify recording identity.",
+            issues,
+        )
+        self.assertIn(
+            "Lyrics timestamps exceed audio duration: '01 - Song.lrc'.", issues
+        )
+
+    def test_matching_and_headerless_lyrics_are_not_reported_as_mismatches(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        for lyrics in (
+            "[ar:Artist]\n[ti:Song]\n[00:01.00] words",
+            "[00:01.00] words",
+            "",
+        ):
+            with self.subTest(lyrics=lyrics):
+                track = TrackInfo(
+                    audio_path,
+                    artist="Artist",
+                    title="Song",
+                    duration=60,
+                    lyrics=lyrics,
+                )
+                audio_path.with_suffix(".lrc").write_text(lyrics or "[00:01.00] words")
+                issues = check_file(audio_path, track_metadata=track)
+                self.assertFalse(
+                    any(
+                        "headers conflict" in issue or "timestamps exceed" in issue
+                        for issue in issues
+                    )
+                )
+
+    def test_invalid_utf8_lyrics_are_reported(self) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        audio_path.with_suffix(".lrc").write_bytes(b"\xff\xfe")
+        issues = check_file(audio_path, track_metadata=TrackInfo(audio_path))
+        self.assertTrue(
+            any("Cannot read synchronized lyrics" in issue for issue in issues)
+        )
+
+    def test_positions_exceeding_declared_release_totals_are_reported(self) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        track = TrackInfo(
+            audio_path, track_number=14, total_tracks=12, disc_number=2, total_discs=1
+        )
+        issues = check_file(audio_path, track_metadata=track)
+        self.assertIn(
+            "TRACKNUMBER 14 exceeds TRACKTOTAL 12; verify the release edition.", issues
+        )
+        self.assertIn(
+            "DISCNUMBER 2 exceeds DISCTOTAL 1; verify the release edition.", issues
+        )
+
+    def test_consistent_missing_and_pregap_positions_are_not_out_of_bounds(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "01 - Song.mp3"
+        audio_path.touch()
+        for position, total in ((None, None), (1, None), (None, 12), (12, 12), (0, 12)):
+            with self.subTest(position=position, total=total):
+                track = dataclasses.replace(
+                    TrackInfo(audio_path),
+                    track_number=position,
+                    total_tracks=total,
+                    disc_number=1,
+                    total_discs=1,
+                )
+                issues = check_file(audio_path, track_metadata=track)
+                self.assertFalse(any("exceeds" in issue for issue in issues))
+
+
+class TestCheckerIssueCategories(IsolatedTestCase):
+    def setUp(self) -> None:
+        self.path = self.test_directory / "01 - Recording.wav"
+        self.path.touch()
+        self.recording = TrackInfo(
+            self.path,
+            artist="Primary",
+            title="Recording",
+            album="Record",
+            album_artist="Primary",
+            track_number=1,
+        )
+
+    def test_asset_and_spectral_warnings_do_not_count_as_audio_corruption(
+        self,
+    ) -> None:
+        audio_path = self.test_directory / "01 - Recording.flac"
+        audio_path.touch()
+        lyrics_path = audio_path.with_suffix(".lrc")
+        for picture_bytes, lyrics_text, checksum_valid in (
+            (b"", "[00:01.00]Words", True),
+            (b"picture", "", True),
+            (b"picture", "[00:01.00]Words", True),
+            (b"", "", True),
+            (b"picture", "[00:01.00]Words", False),
+        ):
+            lyrics_path.write_text(lyrics_text)
+            with (
+                self.subTest(picture=picture_bytes, lyrics=lyrics_text),
+                patch.object(checker, "find_audio_files", return_value=[audio_path]),
+                patch.object(
+                    checker, "read_track_metadata", return_value=self.recording
+                ),
+                patch.object(
+                    checker, "verify_flac_checksum", return_value=checksum_valid
+                ),
+                patch.object(
+                    checker,
+                    "detect_fake_lossless",
+                    return_value=(True, 16, "Source quality requires review."),
+                ),
+                patch.object(
+                    checker,
+                    "FLAC",
+                    return_value=SimpleNamespace(
+                        pictures=[SimpleNamespace(data=picture_bytes)]
+                    ),
+                ),
+            ):
+                report = checker.check_library(self.test_directory, check_spectral=True)
+            self.assertEqual(report.corrupt_files, int(not checksum_valid))
+            self.assertIn(
+                "Source quality requires review.", report.issues[str(audio_path)]
+            )
+            self.assertEqual(report.missing_lrc, 0)
+
+    def test_missing_lyrics_are_distinct_from_corruption(self) -> None:
+        for title, album, missing in (
+            ("Recording", "Album", 1),
+            ("Recording (Instrumental)", "Album", 0),
+            ("Recording", "Album Instrumentals", 0),
+            ("Instrumental Love", "Album", 1),
+        ):
+            track = dataclasses.replace(self.recording, title=title, album=album)
+            with (
+                self.subTest(title=title, album=album),
+                patch.object(checker, "read_track_metadata", return_value=track),
+            ):
+                report = checker.check_library(self.test_directory)
+            self.assertEqual(report.missing_lrc, missing)
+            self.assertEqual(report.corrupt_files, 0)
+
+    def test_missing_musicbrainz_trackid_is_optional(self) -> None:
+        """Missing MUSICBRAINZ_TRACKID tag must not flag missing metadata issue."""
+        path = self.test_directory / "01 - Track.flac"
+        path.touch()
+        track = TrackInfo(
+            path,
+            artist="Artist",
+            title="Track",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            total_tracks=10,
+            date="2020",
+            bpm=120.0,
+            replaygain_track_gain=-6.0,
+            replaygain_track_peak=0.9,
+            musicbrainz_trackid=None,
+        )
+        issues = checker.check_file(path, track_metadata=track)
+        self.assertFalse(any("MUSICBRAINZ_TRACKID" in iss for iss in issues))
+
+    def test_script_mismatch_in_lyrics_flagged_by_checker(self) -> None:
+        """Cyrillic lyrics on Latin track metadata are flagged as recording identity conflict."""
+        path = self.test_directory / "02 - Track.flac"
+        path.touch()
+        track = TrackInfo(
+            path,
+            artist="Samurai",
+            title="Loial",
+            album="Album",
+            album_artist="Samurai",
+            track_number=2,
+            total_tracks=10,
+            date="2020",
+            bpm=120.0,
+            replaygain_track_gain=-6.0,
+            replaygain_track_peak=0.9,
+            lyrics="[00:10.00] НЕМНОГО ГРУСТНЫЙ самураЙ",
+        )
+        issues = checker.check_file(path, track_metadata=track)
+        self.assertTrue(
+            any(
+                "Embedded lyrics language or script appears discordant" in iss
+                for iss in issues
+            )
+        )
+
+    def test_shared_isrc_duration_tolerance_allows_compilation_gaps(self) -> None:
+        """Shared ISRC between studio album and Greatest Hits allows up to 5.5s duration difference."""
+        report = CheckReport()
+        path1 = self.test_directory / "Album" / "03 - Hit.flac"
+        path2 = self.test_directory / "Greatest Hits" / "01 - Hit.flac"
+
+        track1 = TrackInfo(
+            path1,
+            artist="Queen",
+            title="Bohemian Rhapsody",
+            duration=354.0,
+            isrc="GBUM71029606",
+        )
+        track2 = TrackInfo(
+            path2,
+            artist="Queen",
+            title="Bohemian Rhapsody",
+            duration=359.3,
+            isrc="GBUM71029606",
+        )
+
+        folder_tracks = {
+            path1.parent: [(path1, track1)],
+            path2.parent: [(path2, track2)],
+        }
+        checker._check_identifier_conflicts(folder_tracks, report)
+
+        self.assertNotIn(str(path1), report.issues)
+        self.assertNotIn(str(path2), report.issues)
+
+    def test_shared_isrc_soundtrack_subtitle_agrees_with_album_title(self) -> None:
+        """Shared ISRC between studio album and soundtrack/compilation with subtitle matches recording identity."""
+        report = CheckReport()
+        path1 = self.test_directory / "Soundtrack" / "01 - Venom.flac"
+        path2 = self.test_directory / "Album" / "13 - Venom.flac"
+
+        track1 = TrackInfo(
+            path1,
+            artist="Eminem",
+            title="Venom (music from the motion picture)",
+            duration=269.5,
+            isrc="USUM71813345",
+        )
+        track2 = TrackInfo(
+            path2,
+            artist="Eminem",
+            title="Venom",
+            duration=269.5,
+            isrc="USUM71813345",
+        )
+
+        folder_tracks = {
+            path1.parent: [(path1, track1)],
+            path2.parent: [(path2, track2)],
+        }
+        checker._check_identifier_conflicts(folder_tracks, report)
+
+        self.assertNotIn(str(path1), report.issues)
+        self.assertNotIn(str(path2), report.issues)
+
+    def test_censored_asterisk_titles_do_not_produce_false_checker_conflicts(
+        self,
+    ) -> None:
+        recording = dataclasses.replace(
+            self.recording,
+            artist="21 Savage & Metro Boomin",
+            title="Real Nigga",
+            duration=185.4667,
+            itunes_trackid="1133782487",
+        )
+        payload = {
+            "results": [
+                {
+                    "trackId": 1133782487,
+                    "artistName": "21 Savage & Metro Boomin",
+                    "trackName": "Real Ni**a",
+                    "trackTimeMillis": 185467,
+                }
+            ]
+        }
+        with patch.object(checker, "get_cached_api", return_value=payload):
+            issues = check_file(self.path, track_metadata=recording)
+        self.assertFalse(
+            any("conflicting with ARTIST or TITLE" in issue for issue in issues)
+        )
+
+    def test_romanian_cu_feature_matches_and_preserves_non_features(self) -> None:
+        from sonora.core.titles import recording_identity_matches
+
+        self.assertTrue(
+            recording_identity_matches(
+                "Cedry2k", "Istorii secrete cu Deliric1", "Cedry2k", "Istorii Secrete"
+            )
+        )
+        self.assertTrue(
+            recording_identity_matches(
+                "Cedry2k",
+                "Istorii secrete cu Deliric1",
+                "Cedry2k & Deliric",
+                "Istorii Secrete",
+            )
+        )
+        self.assertFalse(
+            recording_identity_matches(
+                "Alex Velea", "Cand Sunt Cu Tine", "Alex Velea", "Cand Sunt"
+            )
+        )
+
+    def test_parenthetical_with_and_collaborative_artists_match(self) -> None:
+        from sonora.core.titles import recording_identity_matches
+
+        self.assertTrue(
+            recording_identity_matches(
+                "Offset & Metro Boomin",
+                "Ric Flair Drip",
+                "Offset",
+                "Ric Flair Drip (with Metro Boomin)",
+            )
+        )
+        self.assertTrue(
+            recording_identity_matches(
+                "Gridan & Killa Fonic", "Kali Yuga", "Killa Fonic", "Kali Yuga"
+            )
+        )
+        self.assertTrue(
+            recording_identity_matches(
+                "ELIO",
+                "hurts 2 hate somebody (feat. Chase Atlantic, No Rome)",
+                "Elio",
+                "hurts 2 hate somebody (with Chase Atlantic & No Rome)",
+            )
+        )
+
+    def test_cyrillic_transliteration_matches_latin(self) -> None:
+        from sonora.core.titles import recording_identity_matches
+
+        self.assertTrue(
+            recording_identity_matches(
+                "Andro", "Инопланетянин", "Andro", "Inoplanetjanin"
+            )
+        )
+        self.assertTrue(recording_identity_matches("JONY", "Аллея", "JONY", "Alleja"))
+
+    def test_folder_audio_quality_consistency_detects_mixed_profiles(self) -> None:
+        folder = self.test_directory / "MixedQualityAlbum"
+        folder.mkdir(parents=True, exist_ok=True)
+        report = CheckReport()
+        folder_issues: list[str] = []
+
+        track1 = dataclasses.replace(
+            self.recording,
+            file_path=folder / "01 - Track1.flac",
+            track_number=1,
+            bits_per_sample=24,
+            sample_rate=44100,
+            is_lossless=True,
+        )
+        track2 = dataclasses.replace(
+            self.recording,
+            file_path=folder / "02 - Track2.flac",
+            track_number=2,
+            bits_per_sample=24,
+            sample_rate=44100,
+            is_lossless=True,
+        )
+        track3 = dataclasses.replace(
+            self.recording,
+            file_path=folder / "03 - Track3.flac",
+            track_number=3,
+            bits_per_sample=16,
+            sample_rate=44100,
+            is_lossless=True,
+        )
+
+        tracks_in_folder = [
+            (track1.file_path, track1),
+            (track2.file_path, track2),
+            (track3.file_path, track3),
+        ]
+
+        checker._check_folder_audio_quality_consistency(
+            folder=folder,
+            tracks_in_folder=tracks_in_folder,
+            folder_path=self.test_directory,
+            report=report,
+            folder_issues=folder_issues,
+        )
+
+        self.assertEqual(len(folder_issues), 1)
+        self.assertIn("Inconsistent audio quality in album folder", folder_issues[0])
+        self.assertIn("24-bit / 44100 Hz (2 tracks)", folder_issues[0])
+        self.assertIn("16-bit / 44100 Hz (1 track)", folder_issues[0])
+        # Diverging track 3 is flagged
+        self.assertIn(str(track3.file_path), report.issues)
+        self.assertTrue(
+            any(
+                "16-bit / 44100 Hz" in iss
+                for iss in report.issues[str(track3.file_path)]
+            )
+        )
+
+
+class TestCheckingWorkflows(ModuleTestCase):
+    def test_check_brackets_corruption(self) -> None:
+        issues = check_brackets_corruption("Song Title [Official Video]")
+        self.assertTrue(any("Corrupt bracket" in issue for issue in issues))
+
+        no_issues = check_brackets_corruption("Song Title (Remix)")
+        self.assertEqual(no_issues, [])
+
+        # Ensure artist names containing keywords as substrings (e.g. Trippie -> rip, Claudio -> audio, MHD -> hd) are NOT flagged
+        self.assertEqual(check_brackets_corruption("Candy (feat. Trippie Redd)"), [])
+        self.assertEqual(
+            check_brackets_corruption("Que Dieu me pardonne (feat. Claudio Capéo)"), []
+        )
+        self.assertEqual(check_brackets_corruption("Versus (feat. MHD)"), [])
+        self.assertEqual(
+            check_brackets_corruption("MODERN JAM (feat. Teezo Touchdown)"), []
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library(self, mock_read: MagicMock) -> None:
+        audio_file_1 = self.tmp_path / "song.wav"
+        write_silent_wav(audio_file_1)
+
+        mock_read.return_value = TrackInfo(
+            file_path=audio_file_1, artist="Artist [Official]", title="Title"
+        )
+
+        report = check_library(self.tmp_path, output_json=self.tmp_path / "report.json")
+        self.assertEqual(report.total_files, 1)
+        self.assertTrue((self.tmp_path / "report.json").exists())
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_multi_file_and_folder_issues(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "AlbumFolder"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Song 1.wav"
+        file2 = album_dir / "02 - Song 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "01 - Song 1.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    title="Song 1",
+                    album="Album A",
+                    album_artist="Artist",
+                    track_number=1,
+                    disc_number=1,
+                )
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title="Song 2",
+                album="Album B",
+                album_artist="Artist",
+                track_number=1,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+
+        report = check_library(album_dir)
+        self.assertEqual(report.total_files, 2)
+        # Should detect inconsistent album name and duplicate track number 1 on Disc 1
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(any("Inconsistent ALBUM" in issue for issue in folder_issues))
+        self.assertTrue(
+            any("Duplicate track number" in issue for issue in folder_issues)
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_album_tag_mismatch(self, mock_read: MagicMock) -> None:
+        album_dir = self.tmp_path / "Artist - Album"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        file3 = album_dir / "03 - Track 3.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+        write_silent_wav(file3)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "03 - Track 3.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    title="Track 3",
+                    album="Album (Deluxe Edition)",
+                    album_artist="Artist",
+                    track_number=3,
+                    disc_number=1,
+                )
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        file3_issues = report.issues.get(str(file3), [])
+        self.assertTrue(any("Mismatched ALBUM tag" in issue for issue in file3_issues))
+        file1_issues = report.issues.get(str(file1), [])
+        self.assertFalse(any("Mismatched ALBUM tag" in issue for issue in file1_issues))
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_alien_track_detection(self, mock_read: MagicMock) -> None:
+        album_dir = self.tmp_path / "Main Artist - Main Album"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        alien_file = album_dir / "09 - Alien Song.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+        write_silent_wav(alien_file)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "09 - Alien Song.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Foreign Artist",
+                    title="Alien Song",
+                    album="Foreign Album",
+                    album_artist="Foreign Artist",
+                    track_number=9,
+                    disc_number=1,
+                )
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Main Artist",
+                title=f"Track {num}",
+                album="Main Album",
+                album_artist="Main Artist",
+                track_number=num,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        alien_issues = report.issues.get(str(alien_file), [])
+        self.assertTrue(
+            any(
+                "Alien track detected in album folder" in issue
+                for issue in alien_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_alien_single_duplicate_position(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Artist - Album"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Album Track.wav"
+        file2 = album_dir / "01 - Loose Single.wav"
+        file3 = album_dir / "02 - Second Track.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+        write_silent_wav(file3)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "01 - Loose Single.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    title="Loose Single",
+                    album="Loose Single",
+                    album_artist="Artist",
+                    track_number=1,
+                    disc_number=1,
+                )
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Album Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        single_issues = report.issues.get(str(file2), [])
+        self.assertTrue(
+            any(
+                "Alien single detected in album folder" in issue
+                for issue in single_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_compilation_preserved_from_alien(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Various Artists - OST"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Song by A.wav"
+        file2 = album_dir / "02 - Song by B.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if "01" in path.name:
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist A",
+                    title="Song A",
+                    album="Movie Soundtrack",
+                    album_artist="Various Artists",
+                    track_number=1,
+                    disc_number=1,
+                )
+            return TrackInfo(
+                file_path=path,
+                artist="Artist B",
+                title="Song B",
+                album="Movie Soundtrack",
+                album_artist="Various Artists",
+                track_number=2,
+                disc_number=1,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        for issues in report.issues.values():
+            self.assertFalse(any("Alien track detected" in issue for issue in issues))
+
+    def test_check_brackets_year_tolerance(self) -> None:
+        self.assertEqual(check_brackets_corruption("Rebirth (2016)"), [])
+        self.assertEqual(check_brackets_corruption("Marine Parade (2013)"), [])
+        corrupt_issues = check_brackets_corruption("Song (2011 Remaster)")
+        self.assertTrue(len(corrupt_issues) > 0)
+        self.assertIn("Corrupt bracket metadata", corrupt_issues[0])
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_unsplit_collaborative_artist_subset(
+        self, mock_read: MagicMock, mock_checksum: MagicMock
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "03 - Ric Flair Drip.wav"
+        write_silent_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Offset & Metro Boomin",
+            album_artist="21 Savage, Offset & Metro Boomin",
+            title="Ric Flair Drip",
+            album="Without Warning",
+            track_number=3,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2017",
+            bpm=134.0,
+            replaygain_track_gain=-7.8,
+            replaygain_track_peak=1.0,
+        )
+        issues = check_file(wav_path)
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_unsplit_collaborative_track_with_primary_artist(
+        self, mock_read: MagicMock, mock_checksum: MagicMock
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "03 - Stai.wav"
+        write_silent_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Killa Fonic & Nane",
+            album_artist="Killa Fonic",
+            title="Stai",
+            album="III",
+            track_number=3,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2019",
+            bpm=120.0,
+            replaygain_track_gain=-6.5,
+            replaygain_track_peak=0.98,
+        )
+        issues = check_file(wav_path)
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_feat_in_artist_no_double_unsplit_warning(
+        self, mock_read: MagicMock, mock_checksum: MagicMock
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "04 - Mr. Right Now.wav"
+        write_silent_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="21 Savage & Metro Boomin feat. Drake",
+            album_artist="21 Savage & Metro Boomin",
+            title="Mr. Right Now",
+            album="Savage Mode II",
+            track_number=4,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2020",
+            bpm=130.0,
+            replaygain_track_gain=-7.0,
+            replaygain_track_peak=0.99,
+        )
+        issues = check_file(wav_path)
+        self.assertTrue(any("contains 'feat' info" in issue for issue in issues))
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_unsplit_delimiter_true_positive(
+        self, mock_read: MagicMock, mock_checksum: MagicMock
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "01 - Intro.wav"
+        write_silent_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Artist 1 / Artist 2",
+            album_artist="Various Artists",
+            title="Intro",
+            album="Compilation",
+            track_number=1,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2024",
+            bpm=120.0,
+            replaygain_track_gain=-7.0,
+            replaygain_track_peak=0.99,
+        )
+        issues = check_file(wav_path)
+        self.assertTrue(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_diacritic_collaborative_track_alignment(
+        self, mock_read: MagicMock, mock_checksum: MagicMock
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "01 - LVL UP.wav"
+        write_silent_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Nane & Amuly",
+            album_artist="Nané",
+            title="LVL UP",
+            album="AVRAM",
+            track_number=1,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2023",
+            bpm=130.0,
+            replaygain_track_gain=-6.0,
+            replaygain_track_peak=0.98,
+        )
+        issues = check_file(wav_path)
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_collective_compilation_joint_billing_conjunction(
+        self, mock_read: MagicMock, mock_checksum: MagicMock
+    ) -> None:
+        mock_checksum.return_value = True
+        wav_path = self.tmp_path / "02 - CHAMPAIN & VACAY.wav"
+        write_silent_wav(wav_path)
+        mock_read.return_value = TrackInfo(
+            file_path=wav_path,
+            artist="Travis Scott & Don Toliver",
+            album_artist="JACKBOYS",
+            title="CHAMPAIN & VACAY",
+            album="JACKBOYS 2",
+            track_number=2,
+            disc_number=1,
+            musicbrainz_trackid="11111111-2222-3333-4444-555555555555",
+            musicbrainz_albumid="66666666-7777-8888-9999-000000000000",
+            date="2024",
+            bpm=125.0,
+            replaygain_track_gain=-6.8,
+            replaygain_track_peak=0.97,
+        )
+        issues = check_file(wav_path)
+        self.assertFalse(any("ARTIST tag seems unsplit" in issue for issue in issues))
+
+    def test_check_file_blacklisted_genre(self) -> None:
+        wav = self.tmp_path / "song.wav"
+        write_silent_wav(wav)
+
+        with patch("sonora.modules.checker.read_track_metadata") as mock_read:
+            mock_read.return_value = TrackInfo(
+                file_path=wav, artist="Artist", title="Title", genre="Top 40 Pop"
+            )
+            issues = check_file(wav)
+            self.assertTrue(any("Blacklisted genre" in issue for issue in issues))
+
+    def test_check_library_nonexistent_directory(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            check_library(self.tmp_path / "nonexistent_dir_999")
+
+    @patch("sonora.modules.checker.detect_fake_lossless")
+    @patch("sonora.modules.checker.verify_flac_checksum")
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_spectral_check_option(
+        self, mock_read: MagicMock, mock_checksum: MagicMock, mock_spectral: MagicMock
+    ) -> None:
+        flac_file = self.tmp_path / "song.flac"
+        flac_file.write_bytes(b"FLAC dummy content")
+
+        mock_checksum.return_value = True
+        mock_read.return_value = TrackInfo(
+            file_path=flac_file, artist="Artist", title="Title"
+        )
+        mock_spectral.return_value = (
+            True,
+            0.0001,
+            "Sharp spectral cutoff near 16.0 kHz; source quality requires review.",
+        )
+
+        report = check_library(self.tmp_path, check_spectral=True)
+        self.assertTrue(
+            any(
+                "source quality requires review" in issue.lower()
+                for issues in report.issues.values()
+                for issue in issues
+            )
+        )
+        self.assertEqual(report.corrupt_files, 0)
+        mock_spectral.assert_called_once()
+
+    def test_is_valid_uuid_multivalue(self) -> None:
+        uuid1 = "1c59ae05-207b-4fbd-9ee9-569489af6121"
+        uuid2 = "bd81ebc9-d1c4-4dc3-b48e-718bdc5fde50"
+
+        # Single UUID
+        self.assertTrue(is_valid_uuid(uuid1))
+        self.assertFalse(is_valid_uuid("invalid-uuid"))
+
+        # Multiple UUIDs with allow_multivalue
+        self.assertTrue(is_valid_uuid(f"{uuid1}; {uuid2}", allow_multivalue=True))
+        self.assertTrue(is_valid_uuid(f"{uuid1} / {uuid2}", allow_multivalue=True))
+        self.assertTrue(is_valid_uuid(f"{uuid1}, {uuid2}", allow_multivalue=True))
+        self.assertFalse(is_valid_uuid(f"{uuid1}; invalid", allow_multivalue=True))
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_musicbrainz_albumid(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Artist - Album"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        file3 = album_dir / "03 - Track 3.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+        write_silent_wav(file3)
+
+        mbid_a = "11111111-1111-1111-1111-111111111111"
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "03 - Track 3.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    title="Track 3",
+                    album="Album",
+                    album_artist="Artist",
+                    track_number=3,
+                    disc_number=1,
+                    musicbrainz_albumid=None,
+                )
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                musicbrainz_albumid=mbid_a,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        file3_issues = report.issues.get(str(file3), [])
+        self.assertTrue(
+            any("Missing MUSICBRAINZ_ALBUMID" in issue for issue in file3_issues)
+        )
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent MUSICBRAINZ_ALBUMID in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_total_discs(self, mock_read: MagicMock) -> None:
+        album_dir = self.tmp_path / "Artist - Album 2"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                total_discs=1 if num == 1 else 2,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent TOTALDISCS in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_release_year(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Artist - Album Years"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                date="2020-05-15" if num == 1 else "2018-01-01",
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent release year in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+        file2_issues = report.issues.get(str(file2), [])
+        self.assertTrue(
+            any("Mismatched release year" in issue for issue in file2_issues)
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_itunes_collectionid(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Artist - Album iTunes"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                itunes_collectionid="123456" if num == 1 else "987654",
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent ITUNESCOLLECTIONID in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_totaltracks(self, mock_read: MagicMock) -> None:
+        album_dir = self.tmp_path / "Artist - Album Totals"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                total_tracks=10 if num == 1 else 4,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent TOTALTRACKS for Disc 1 in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_orphan_lrc_files(self, mock_read: MagicMock) -> None:
+        album_dir = self.tmp_path / "Artist - Album Orphans"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        write_silent_wav(file1)
+        (album_dir / "01 - Track 1.lrc").write_text("[00:01.00]Valid lyrics")
+        orphan_lrc = album_dir / "02 - Old Track.lrc"
+        orphan_lrc.write_text("[00:01.00]Old lyrics")
+
+        mock_read.return_value = TrackInfo(
+            file_path=file1,
+            artist="Artist",
+            title="Track 1",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            disc_number=1,
+        )
+        report = check_library(album_dir)
+        orphan_issues = report.issues.get(str(orphan_lrc), [])
+        self.assertTrue(
+            any(
+                "Orphan synchronized lyrics (.lrc) file has no matching audio" in issue
+                for issue in orphan_issues
+            )
+        )
+
+    def test_check_file_non_chronological_lyrics(self) -> None:
+        wav_path = self.tmp_path / "01 - Track.wav"
+        write_silent_wav(wav_path)
+        lrc_path = self.tmp_path / "01 - Track.lrc"
+        lrc_path.write_text(
+            "[00:05.00]Line 1\n[00:07.00]Line 2\n[00:06.50]Line 3 out of order\n"
+        )
+        track = TrackInfo(
+            file_path=wav_path,
+            artist="Artist",
+            title="Track",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            disc_number=1,
+            duration=30.0,
+        )
+        issues = check_file(wav_path, track_metadata=track)
+        self.assertTrue(
+            any(
+                "Non-chronological timestamps in synchronized lyrics" in issue
+                for issue in issues
+            )
+        )

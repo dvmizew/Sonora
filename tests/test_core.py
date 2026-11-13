@@ -1,11 +1,21 @@
-import sys
+import os
+import socket
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import httpx
 
-import unittest
-from unittest.mock import MagicMock, patch
-
+from sonora.audio.replaygain import calculate_album_replaygain
+from sonora.core import (
+    audio_files,
+    library_paths,
+    sidecars,
+)
+from sonora.core.audio_files import group_files_by_parent
+from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import (
     SonoraConfig,
     _parse_config_data,
@@ -18,85 +28,117 @@ from sonora.core.config import (
     get_duplicate_feat_pattern,
     get_feat_tokens_pattern,
 )
-from sonora.core.models import TrackInfo
-from sonora.core.utils import (
-    InterruptedOperationError,
-    clean_disambiguation,
-    clean_title,
-    clean_unicode_punct,
-    deduplicate_title_features,
+from sonora.core.constants import RATE_LIMIT_DISCOGS_UNAUTHENTICATED
+from sonora.core.http import RetryTransport, _retry_delay
+from sonora.core.library_paths import (
     extract_disc_number_from_folder,
-    extract_featured_artist_tokens,
-    extract_version_modifier,
-    get_primary_artist,
     get_single_release_title,
     group_files_by_album_root,
-    group_files_by_parent,
     is_in_singles_hierarchy,
-    is_interruption,
-    is_single_group_artist,
+    parse_track_filename,
+    safe_case_rename,
+)
+from sonora.core.models import TrackInfo
+from sonora.core.rate_limit import RateLimiter
+from sonora.core.retry import retry_network_call
+from sonora.core.sidecars import relocate_companion_lyrics
+from sonora.core.text import (
+    clean_disambiguation,
+    clean_unicode_punct,
     is_valid_uuid,
-    match_score,
     normalize_country_name,
     normalize_date,
-    normalize_featured_artists,
     normalize_genre,
     normalize_language_name,
     normalize_legacy_diacritics,
     normalize_script_name,
     normalize_str,
-    parse_track_filename,
     preserve_unicode_repertoire,
-    relocate_companion_lyrics,
-    safe_case_rename,
     safe_float,
     safe_int,
     safe_int_pair,
     sanitize_name,
 )
+from sonora.core.titles import (
+    clean_title,
+    extract_title_features,
+    extract_version_modifier,
+    score_artist_title_match,
+)
+from sonora.modules.backup import backup_library_tags, restore_library_tags
+from sonora.modules.checker import check_library
+from sonora.modules.organizer import organize_library_singles
+from sonora.modules.renamer import rename_directory_files
+from sonora.modules.tagger import tag_album_folder
+from sonora.modules.track_processing import normalize_library
+from tests.fixtures import write_silent_wav
+from tests.module_support import OfflinePipelineTestCase
+from tests.support import IsolatedTestCase
 
 
-class TestCoreUtils(unittest.TestCase):
-    def test_normalize_str_basic(self) -> None:
-        self.assertEqual(normalize_str("Hello World"), "hello world")
-        self.assertEqual(normalize_str("$tring!"), "string")
-
-    def test_normalize_str_diacritics_and_symbols(self) -> None:
-        self.assertEqual(normalize_str("Beyoncé"), "beyonce")
-        self.assertEqual(normalize_str("Mötley Crüe"), "motley crue")
-
-    def test_sanitize_name_filesystem_chars(self) -> None:
-        self.assertEqual(sanitize_name("AC/DC"), "AC_DC")
-        self.assertEqual(sanitize_name("Artist: Album?"), "Artist Album")
-        self.assertEqual(sanitize_name("Track 01.flac."), "Track 01.flac")
-
-    def test_sanitize_name_empty(self) -> None:
-        self.assertEqual(sanitize_name(""), "Unknown")
-        self.assertEqual(sanitize_name(None), "Unknown")
-
-    def test_normalize_str_edge_cases(self) -> None:
-        self.assertEqual(normalize_str(None), "")
-        self.assertEqual(normalize_str(""), "")
-        self.assertEqual(normalize_str("   "), "")
-        self.assertEqual(normalize_str("A$AP Rocky!"), "asap rocky")
-        self.assertEqual(normalize_str("Beyoncé - Nöél"), "beyonce noel")
-        self.assertEqual(normalize_str("Nimeni Altu'"), "nimeni altu")
-        self.assertEqual(normalize_str("Satra B.E.N.Z."), "satra b e n z")
-        self.assertEqual(normalize_str("O.$.O.D. IV"), "o s o d iv")
-        self.assertEqual(normalize_str("M.G.L."), "m g l")
-        self.assertEqual(normalize_str("DEBANDADĂ FAC"), "debandada fac")
-        self.assertEqual(normalize_str("Nopți prea lungi"), "nopti prea lungi")
-
-    def test_sanitize_name_complex_edge_cases(self) -> None:
-        self.assertEqual(sanitize_name("Artist / Title <HQ>:"), "Artist _ Title HQ")
-        self.assertEqual(sanitize_name("CON"), "CON_")
-        self.assertEqual(sanitize_name("NUL"), "NUL_")
-        self.assertEqual(sanitize_name("Nimeni Altu'"), "Nimeni Altu'")
-        self.assertEqual(sanitize_name("M.G.L."), "M.G.L")
-        self.assertEqual(
-            sanitize_name("Satra B.E.N.Z. - O.$.O.D. IV"),
-            "Satra B.E.N.Z. - O.$.O.D. IV",
+class TestCoreModels(IsolatedTestCase):
+    def test_track_info_serialization(self) -> None:
+        track = TrackInfo(
+            file_path=Path("/music/song.flac"),
+            artist="Beyoncé",
+            title="HALO",
+            album="I Am... Sasha Fierce",
+            track_number=1,
+            bpm=120.0,
         )
+        serialized_track = track.to_dict()
+        self.assertEqual(serialized_track["artist"], "Beyoncé")
+        self.assertEqual(serialized_track["title"], "HALO")
+        self.assertEqual(serialized_track["track_number"], 1)
+        self.assertEqual(serialized_track["bpm"], 120.0)
+
+        empty_track = TrackInfo(file_path=Path("/music/empty.flac"))
+        empty_data = empty_track.to_dict()
+        self.assertEqual(empty_data["artist"], "Unknown Artist")
+        self.assertIsNone(empty_data["track_number"])
+        self.assertIsNone(empty_data["bpm"])
+
+
+class TestCoreUtils(IsolatedTestCase):
+    def test_normalize_str_contracts(self) -> None:
+        cases = (
+            ("Hello World", "hello world"),
+            ("$tring!", "string"),
+            ("Beyoncé", "beyonce"),
+            ("Mötley Crüe", "motley crue"),
+            (None, ""),
+            ("", ""),
+            ("   ", ""),
+            ("A$AP Rocky!", "asap rocky"),
+            ("Beyoncé - Nöél", "beyonce noel"),
+            ("Nimeni Altu'", "nimeni altu"),
+            ("Satra B.E.N.Z.", "satra b e n z"),
+            ("O.$.O.D. IV", "o s o d iv"),
+            ("M.G.L.", "m g l"),
+            ("DEBANDADĂ FAC", "debandada fac"),
+            ("Nopți prea lungi", "nopti prea lungi"),
+        )
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(normalize_str(original), expected)
+
+    def test_sanitize_name_contracts(self) -> None:
+        cases = (
+            ("AC/DC", "AC_DC"),
+            ("Artist: Album?", "Artist Album"),
+            ("Track 01.flac.", "Track 01.flac"),
+            ("", "Unknown"),
+            (None, "Unknown"),
+            ("Artist / Title <HQ>:", "Artist _ Title HQ"),
+            ("CON", "CON_"),
+            ("NUL", "NUL_"),
+            ("Nimeni Altu'", "Nimeni Altu'"),
+            ("M.G.L.", "M.G.L"),
+            ("Satra B.E.N.Z. - O.$.O.D. IV", "Satra B.E.N.Z. - O.$.O.D. IV"),
+        )
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(sanitize_name(original), expected)
 
     def test_is_valid_uuid(self) -> None:
         self.assertTrue(is_valid_uuid("c8b03190-306c-4125-9b32-3f9d86d60a12"))
@@ -111,7 +153,7 @@ class TestCoreUtils(unittest.TestCase):
         self.assertFalse(is_valid_uuid(""))
 
     def test_extract_series_number_all_formats(self) -> None:
-        from sonora.core.utils import extract_series_number
+        from sonora.core.titles import extract_series_number
 
         # Arabic numbers
         self.assertEqual(extract_series_number("Savage Mode 2"), 2)
@@ -156,14 +198,83 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(clean_title("Parody [Parody]"), "Parody")
         self.assertEqual(clean_title("Spaces\u200b\u00a0Track"), "Spaces Track")
         self.assertEqual(
-            clean_title("Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"),
-            "Melodie",
-        )
-        self.assertEqual(
             clean_title('R.I.P ROACH "EAST SIDE SOULJA"'),
             'R.I.P ROACH "EAST SIDE SOULJA"',
         )
-        self.assertEqual(clean_title(""), "")
+        self.assertEqual(clean_title("Mr. Right Now feat. Drake"), "Mr. Right Now")
+        self.assertEqual(clean_title("Stay With Me"), "Stay With Me")
+        self.assertEqual(clean_title("Ball w/o You"), "Ball w/o You")
+        self.assertEqual(
+            clean_title("Solo (Wideboys remix) (feat. Demi Lovato)"),
+            "Solo (Wideboys remix)",
+        )
+
+    def test_edition_markers_do_not_strip_remixer_names(self) -> None:
+        for version in (
+            "Monoir Remix",
+            "Monoir Remix Radio Edit",
+            "Monolink Remix",
+            "Stereophonics Remix",
+        ):
+            title = f"I Loved You ({version})"
+            with self.subTest(version=version):
+                self.assertEqual(clean_title(title), title)
+        self.assertEqual(clean_title("Song (Mono Version)"), "Song")
+        self.assertEqual(clean_title("Song (Stereo Mix)"), "Song")
+
+    def test_identical_recording_titles_ignore_remaster_capitalization(self) -> None:
+        self.assertGreater(
+            score_artist_title_match(
+                "Creed",
+                "What If (remastered 2024)",
+                "Creed",
+                "What If (Remastered 2024)",
+            ),
+            0,
+        )
+
+    def test_dotted_initialisms_match_without_merging_unrelated_artist_names(
+        self,
+    ) -> None:
+        for artist, candidate in (
+            ("C.T.C.", "CTC"),
+            ("CTC", "C.T.C."),
+            ("M.G.L.", "MGL"),
+        ):
+            with self.subTest(artist=artist, candidate=candidate):
+                self.assertGreater(
+                    score_artist_title_match(artist, "Intro", candidate, "Intro"), 0
+                )
+        for artist, candidate in (("C.T.C.", "CTL"),):
+            with self.subTest(artist=artist, candidate=candidate):
+                self.assertEqual(
+                    score_artist_title_match(artist, "Intro", candidate, "Intro"), 0
+                )
+
+    def test_extract_title_features(self) -> None:
+        clean_t, feats = extract_title_features("Rockstar (feat. 21 Savage)")
+        self.assertEqual(clean_t, "Rockstar")
+        self.assertEqual(feats, ["21 Savage"])
+
+        clean_t2, feats2 = extract_title_features(
+            "Mr. Right Now feat. Drake", primary_artist="21 Savage"
+        )
+        self.assertEqual(clean_t2, "Mr. Right Now")
+        self.assertEqual(feats2, ["Drake"])
+
+        clean_t3, feats3 = extract_title_features("Stay With Me")
+        self.assertEqual(clean_t3, "Stay With Me")
+        self.assertEqual(feats3, [])
+
+        clean_t4, feats4 = extract_title_features("Ball w/o You")
+        self.assertEqual(clean_t4, "Ball w/o You")
+        self.assertEqual(feats4, [])
+
+        clean_t5, feats5 = extract_title_features(
+            "Solo (Wideboys remix) (feat. Demi Lovato)"
+        )
+        self.assertEqual(clean_t5, "Solo (Wideboys remix)")
+        self.assertEqual(feats5, ["Demi Lovato"])
 
     def test_clean_disambiguation(self) -> None:
         self.assertEqual(clean_disambiguation("Armin (ROU)"), "Armin")
@@ -194,184 +305,81 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(safe_float(None))
         self.assertIsNone(safe_float("bad"))
 
-    def test_deduplicate_title_features(self) -> None:
+    def test_clean_title_featuring_removal(self) -> None:
         self.assertEqual(
-            deduplicate_title_features(
-                "Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"
+            clean_title("Melodie cu Vlad Dobrescu (feat. Vlad Dobrescu)"),
+            "Melodie",
+        )
+        self.assertEqual(
+            clean_title("Piesa cu Nane [feat. Nane]"),
+            "Piesa",
+        )
+        self.assertEqual(
+            clean_title("Dans cu Lupii (feat. Vlad Dobrescu)"),
+            "Dans cu Lupii",
+        )
+        self.assertEqual(
+            clean_title("În golul tău (feat. RAVA)"),
+            "În golul tău",
+        )
+        self.assertEqual(
+            clean_title("Capitanu' (feat. Amuly & RAVA)"),
+            "Capitanu'",
+        )
+        self.assertEqual(
+            clean_title("ZODIAC (feat. NOUA UNSPE & RAVA & BITTNER)"),
+            "ZODIAC",
+        )
+        self.assertEqual(
+            clean_title(
+                "MĂ AGITĂ (feat. RAVA & Armin & Ravisval & Super ED & Armin & RAVA)"
             ),
-            "Melodie (feat. Vlad Dobrescu)",
+            "MĂ AGITĂ",
         )
         self.assertEqual(
-            deduplicate_title_features("Piesa cu Nane [feat. Nane]"),
-            "Piesa [feat. Nane]",
+            clean_title("AX8 (feat. Lentile Blur, Ares (ROU))"),
+            "AX8",
         )
         self.assertEqual(
-            deduplicate_title_features("Dans cu Lupii (feat. Vlad Dobrescu)"),
-            "Dans cu Lupii (feat. Vlad Dobrescu)",
-        )
-        self.assertEqual(
-            deduplicate_title_features("În golul tău (feat. RAVA)"),
-            "În golul tău (feat. RAVA)",
-        )
-        self.assertEqual(
-            deduplicate_title_features(
-                "Capitanu' (feat. Amuly & RAVA)", primary_artist="Tussin"
-            ),
-            "Capitanu' (feat. Amuly & RAVA)",
-        )
-        self.assertEqual(
-            deduplicate_title_features(
-                "ZODIAC (feat. NOUA UNSPE & RAVA & BITTNER)",
-                primary_artist="NOUA UNSPE",
-            ),
-            "ZODIAC (feat. RAVA & BITTNER)",
-        )
-        self.assertEqual(
-            deduplicate_title_features(
-                "MĂ AGITĂ (feat. RAVA & Armin & Ravisval & Super ED & Armin & RAVA)",
-                primary_artist="4 226",
-            ),
-            "MĂ AGITĂ (feat. RAVA, Armin, Ravisval & Super ED)",
-        )
-        self.assertEqual(
-            deduplicate_title_features("AX8 (feat. Lentile Blur, Ares (ROU))"),
-            "AX8 (feat. Lentile Blur & Ares)",
-        )
-        self.assertEqual(
-            deduplicate_title_features(
+            clean_title(
                 "Undeva-n Balkani (Double L remix) (feat. Viper, Reptile (Rapper))"
             ),
-            "Undeva-n Balkani (Double L remix) (feat. Viper & Reptile)",
+            "Undeva-n Balkani (Double L remix)",
         )
         self.assertEqual(
-            deduplicate_title_features("Lately (feat. Bugus & Musa (KingofBabylon))"),
-            "Lately (feat. Bugus & Musa)",
+            clean_title("Lately (feat. Bugus & Musa (KingofBabylon))"),
+            "Lately",
         )
         self.assertEqual(
-            deduplicate_title_features("sex with my ex (og version) (feat. my ex)"),
-            "sex with my ex (og version) (feat. my ex)",
+            clean_title("sex with my ex (og version) (feat. my ex)"),
+            "sex with my ex (og version)",
         )
         self.assertEqual(
-            deduplicate_title_features("sex with my ex (feat. my ex)"),
-            "sex with my ex (feat. my ex)",
+            clean_title("sex with my ex (feat. my ex)"),
+            "sex with my ex",
         )
         self.assertEqual(
-            deduplicate_title_features("ball w/o you"),
+            clean_title("ball w/o you"),
             "ball w/o you",
         )
         self.assertEqual(
-            deduplicate_title_features("Track (w/o Drums)"),
+            clean_title("Track (w/o Drums)"),
             "Track (w/o Drums)",
         )
         self.assertEqual(
-            deduplicate_title_features("Song (w/ Drake)"),
-            "Song (feat. Drake)",
+            clean_title("Song (w/ Drake)"),
+            "Song",
         )
-        self.assertEqual(deduplicate_title_features(""), "")
-        self.assertEqual(deduplicate_title_features(None), "")
+        self.assertEqual(clean_title(""), "")
+        self.assertEqual(clean_title(None), "")
 
-    def test_deduplicate_title_features_with_user_aliases(self) -> None:
-        with patch(
-            "sonora.core.utils._load_user_overrides",
-            return_value={"ravi": "Ravisval"},
-        ):
-            self.assertEqual(
-                deduplicate_title_features("SEMAKA (feat. RAVi & Armin)"),
-                "SEMAKA (feat. Ravisval & Armin)",
-            )
-
-    def test_normalize_featured_artists(self) -> None:
-        self.assertIsNone(normalize_featured_artists(None))
-        self.assertIsNone(normalize_featured_artists(""))
-        self.assertIsNone(normalize_featured_artists([]))
-
-        # Composite conjunction string deduplication
-        self.assertEqual(
-            extract_featured_artist_tokens(
-                "Project Pat, ScHoolboy Q, Project Pat & ScHoolboy Q",
-                primary_artist="21 Savage",
-            ),
-            ["Project Pat", "ScHoolboy Q"],
-        )
-        self.assertEqual(
-            normalize_featured_artists(
-                "Project Pat, ScHoolboy Q, Project Pat & ScHoolboy Q",
-                primary_artist="21 Savage",
-            ),
-            "Project Pat, ScHoolboy Q",
-        )
-        self.assertEqual(
-            normalize_featured_artists(
-                ["Gunna, Lil Baby", "Gunna & Lil Baby"],
-                primary_artist="21 Savage",
-            ),
-            "Gunna, Lil Baby",
-        )
-
-        # Conjunction variants ('&' vs 'si' / 'și')
-        self.assertEqual(
-            normalize_featured_artists(
-                "Roxana & Puya, Roxana si Puya",
-                primary_artist="B.U.G. Mafia",
-            ),
-            "Roxana, Puya",
-        )
-        self.assertEqual(
-            normalize_featured_artists(
-                "Nico, Luchian, Luchian si Nico",
-                primary_artist="B.U.G. Mafia",
-            ),
-            "Nico, Luchian",
-        )
-
-        # Unicode diacritics / canonical repertoire reconciliation
-        self.assertEqual(
-            normalize_featured_artists("Dj Flama, DJ Flamă"),
-            "DJ Flamă",
-        )
-
-        # Registered duo/group entity preservation
-        with patch("sonora.core.utils.is_single_group_artist", return_value=True):
-            self.assertEqual(
-                normalize_featured_artists("Agnes, Vargas & Lagola"),
-                "Agnes, Vargas & Lagola",
-            )
-
-        # Primary artist self-feature exclusion
-        self.assertEqual(
-            normalize_featured_artists(
-                "21 Savage, Project Pat, ScHoolboy Q",
-                primary_artist="21 Savage",
-            ),
-            "Project Pat, ScHoolboy Q",
-        )
-
-        # Multilingual with / w. / w/ conjunctions
-        self.assertEqual(
-            normalize_featured_artists(
-                "Post Malone w. Swae Lee", primary_artist="Post Malone"
-            ),
-            "Swae Lee",
-        )
-        self.assertEqual(
-            normalize_featured_artists("Drake w/ 21 Savage", primary_artist="Drake"),
-            "21 Savage",
-        )
-        # Without (w/o) negative lookahead guarantee
-        self.assertEqual(
-            extract_featured_artist_tokens(
-                "21 Savage w/o Metro Boomin",
-                primary_artist="21 Savage",
-            ),
-            ["21 Savage w/o Metro Boomin"],
-        )
-        self.assertEqual(
-            normalize_featured_artists(
-                "21 Savage w/o Metro Boomin",
-                primary_artist="21 Savage",
-            ),
-            "21 Savage w/o Metro Boomin",
-        )
+    def test_extract_title_features_with_user_aliases(self) -> None:
+        alias_path = Path.home() / ".config" / "sonora" / "aliases.json"
+        alias_path.parent.mkdir(parents=True, exist_ok=True)
+        alias_path.write_text('{"RAVi": "Ravisval"}', encoding="utf-8")
+        clean_t, feats = extract_title_features("SEMAKA (feat. RAVi & Armin)")
+        self.assertEqual(clean_t, "SEMAKA")
+        self.assertEqual(feats, ["Ravisval", "Armin"])
 
     def test_safe_int_pair(self) -> None:
         self.assertEqual(safe_int_pair("1/2"), (1, 2))
@@ -419,20 +427,6 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIn(other_key, grouped)
         self.assertEqual(grouped[other_key], [file3])
 
-    def test_load_user_overrides_corrupt_json(self) -> None:
-        from sonora.core.utils import _load_user_overrides
-
-        _load_user_overrides.cache_clear()
-        with (
-            patch("pathlib.Path.exists", return_value=True),
-            patch("pathlib.Path.is_file", return_value=True),
-            patch("pathlib.Path.stat", return_value=MagicMock(st_size=100)),
-            patch("pathlib.Path.read_text", return_value="INVALID JSON {{"),
-        ):
-            overrides = _load_user_overrides()
-            self.assertEqual(overrides, {})
-        _load_user_overrides.cache_clear()
-
     def test_normalize_genre_mapping_and_filtering(self) -> None:
         self.assertEqual(normalize_genre("Hip Hop"), "Hip-Hop/Rap")
         self.assertEqual(normalize_genre("Rap"), "Hip-Hop/Rap")
@@ -459,6 +453,11 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(clean_unicode_punct("Saint‐Tropez"), "Saint-Tropez")
         self.assertEqual(clean_unicode_punct("Făt‐Frumos"), "Făt-Frumos")
         self.assertEqual(clean_unicode_punct("\u200bits me"), "its me")
+        for cleaner in (clean_unicode_punct, clean_title):
+            with self.subTest(cleaner=cleaner.__name__):
+                self.assertEqual(cleaner("MAI TII MINTE\u2060?"), "MAI TII MINTE?")
+                self.assertEqual(cleaner("می\u200cروم"), "می\u200cروم")
+                self.assertEqual(cleaner("👩\u200d🎤"), "👩\u200d🎤")
         self.assertEqual(clean_unicode_punct(""), "")
         self.assertEqual(clean_unicode_punct(None), "")
 
@@ -474,44 +473,11 @@ class TestCoreUtils(unittest.TestCase):
         self.assertIsNone(normalize_date("1899"))
         self.assertIsNone(normalize_date("2099"))
 
-    @patch("sonora.core.utils.get_cached_api", return_value=None)
-    def test_resolve_artist_name_exact_match(self, mock_get_cache: MagicMock) -> None:
-        from sonora.core.utils import resolve_artist_name
-
-        with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
-            # Simulate MusicBrainz returning Enrico Rava with score 100 and RAVA with score 90
-            mock_mb.return_value = [
-                {"name": "Enrico Rava", "ext:score": "100", "id": "uuid-1"},
-                {"name": "RAVA", "ext:score": "90", "id": "uuid-2"},
-            ]
-            # Must prioritize exact match RAVA over higher-scored Enrico Rava
-            self.assertEqual(resolve_artist_name("RAVA"), "RAVA")
-            self.assertEqual(resolve_artist_name("rava"), "RAVA")
-
-    @patch("sonora.core.utils.get_cached_api", return_value=None)
-    def test_resolve_artist_name_allow_network_false(
-        self, mock_get_cache: MagicMock
-    ) -> None:
-        from sonora.core.utils import get_primary_artist, resolve_artist_name
-
-        resolve_artist_name.cache_clear()
-        with patch("sonora.services.musicbrainz.search_musicbrainz_artists") as mock_mb:
-            # When allow_network is False, MusicBrainz search must NEVER be called
-            result = resolve_artist_name("Unknown Indierock Band", allow_network=False)
-            self.assertEqual(result, "Unknown Indierock Band")
-            mock_mb.assert_not_called()
-
-            # Similarly, get_primary_artist must never invoke network
-            primary = get_primary_artist("New Artist feat. Guest Singer")
-            self.assertEqual(primary, "New Artist")
-            mock_mb.assert_not_called()
-
     def test_match_score_series_and_version_disambiguation(self) -> None:
-        from sonora.core.utils import match_score
 
         # Series volumes must never match each other
         self.assertEqual(
-            match_score(
+            score_artist_title_match(
                 "B.U.G. Mafia",
                 "Viața noastră vol. 1",
                 "B.U.G. Mafia",
@@ -520,13 +486,15 @@ class TestCoreUtils(unittest.TestCase):
             0.0,
         )
         self.assertEqual(
-            match_score("Chase Atlantic", "Part One", "Chase Atlantic", "Part Two"),
+            score_artist_title_match(
+                "Chase Atlantic", "Part One", "Chase Atlantic", "Part Two"
+            ),
             0.0,
         )
 
         # Versions vs originals
         self.assertEqual(
-            match_score(
+            score_artist_title_match(
                 "Deliric",
                 "Deliric X Silent Strike (Instrumentals)",
                 "Deliric",
@@ -535,7 +503,7 @@ class TestCoreUtils(unittest.TestCase):
             0.0,
         )
         self.assertEqual(
-            match_score(
+            score_artist_title_match(
                 "Dennis Lloyd",
                 "Alien (Acoustic)",
                 "Dennis Lloyd",
@@ -544,13 +512,13 @@ class TestCoreUtils(unittest.TestCase):
             0.0,
         )
         self.assertGreaterEqual(
-            match_score(
+            score_artist_title_match(
                 "Dennis Lloyd", "Alien (Acoustic)", "Dennis Lloyd", "Alien Acoustic"
             ),
             90.0,
         )
         self.assertGreaterEqual(
-            match_score(
+            score_artist_title_match(
                 "B.U.G. Mafia",
                 "Viața noastră vol. 1",
                 "B.U.G. Mafia",
@@ -558,92 +526,6 @@ class TestCoreUtils(unittest.TestCase):
             ),
             90.0,
         )
-
-    @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
-    def test_is_single_group_artist(self, mock_search: MagicMock) -> None:
-        is_single_group_artist.cache_clear()
-        mock_search.return_value = [
-            {
-                "name": "Above & Beyond",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertTrue(is_single_group_artist("Above & Beyond"))
-
-        is_single_group_artist.cache_clear()
-        mock_search.return_value = [
-            {"name": "Drake", "type": "Person", "ext:score": "80"}
-        ]
-        self.assertFalse(is_single_group_artist("Drake & 21 Savage"))
-        self.assertFalse(is_single_group_artist("SingleArtist"))
-        self.assertFalse(is_single_group_artist(""))
-        self.assertFalse(is_single_group_artist(None))
-
-    @patch("sonora.services.musicbrainz.search_musicbrainz_artists")
-    def test_get_primary_artist(self, mock_search: MagicMock) -> None:
-        is_single_group_artist.cache_clear()
-        mock_search.return_value = [
-            {
-                "name": "Above & Beyond",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertEqual(
-            get_primary_artist("Above & Beyond", allow_network=True),
-            "Above & Beyond",
-        )
-
-        is_single_group_artist.cache_clear()
-        mock_search.return_value = [
-            {
-                "name": "Alan & Kepa",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertEqual(
-            get_primary_artist("Alan & Kepa", allow_network=True), "Alan & Kepa"
-        )
-
-        is_single_group_artist.cache_clear()
-        mock_search.return_value = [
-            {
-                "name": "Play & Win",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertEqual(
-            get_primary_artist("Play & Win", allow_network=True), "Play & Win"
-        )
-        self.assertEqual(
-            get_primary_artist("Play&Win", allow_network=True), "Play & Win"
-        )
-
-        is_single_group_artist.cache_clear()
-        mock_search.return_value = [
-            {
-                "name": "Simon & Garfunkel",
-                "type": "Group",
-                "ext:score": "100",
-            }
-        ]
-        self.assertEqual(
-            get_primary_artist("Simon & Garfunkel", allow_network=True),
-            "Simon & Garfunkel",
-        )
-
-        is_single_group_artist.cache_clear()
-        mock_search.return_value = []
-        self.assertEqual(
-            get_primary_artist("21 Savage feat. Metro Boomin"), "21 Savage"
-        )
-        self.assertEqual(get_primary_artist("Drake & Future"), "Drake")
-        self.assertEqual(get_primary_artist("Samurai & El Nino"), "Samurai")
-        self.assertEqual(get_primary_artist(""), "Unknown")
-        self.assertEqual(get_primary_artist(None), "Unknown")
 
     def test_group_files_by_parent(self) -> None:
         f1 = Path("/tmp/album1/01.flac")
@@ -655,56 +537,215 @@ class TestCoreUtils(unittest.TestCase):
         self.assertEqual(grouped[Path("/tmp/album2")], [f3])
 
     def test_safe_case_rename_and_relocate_companion_lyrics(self) -> None:
-        import tempfile
+        audio = self.test_directory / "Song.flac"
+        audio.write_bytes(b"audio")
+        lrc = self.test_directory / "Song.lrc"
+        lrc.write_text("[00:01.00] test", encoding="utf-8")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            audio = tmp_path / "Song.flac"
-            audio.write_bytes(b"audio")
-            lrc = tmp_path / "Song.lrc"
-            lrc.write_text("[00:01.00] test", encoding="utf-8")
+        target_audio = self.test_directory / "01 - Song.flac"
+        safe_case_rename(audio, target_audio)
+        self.assertTrue(target_audio.exists())
+        self.assertFalse(audio.exists())
 
-            target_audio = tmp_path / "01 - Song.flac"
-            safe_case_rename(audio, target_audio)
-            self.assertTrue(target_audio.exists())
-            self.assertFalse(audio.exists())
+        moved_lyrics = relocate_companion_lyrics(audio, target_audio)
+        self.assertEqual(len(moved_lyrics), 1)
+        target_lrc = self.test_directory / "01 - Song.lrc"
+        self.assertTrue(target_lrc.exists())
+        self.assertFalse(lrc.exists())
 
-            moved_lyrics = relocate_companion_lyrics(audio, target_audio)
-            self.assertEqual(len(moved_lyrics), 1)
-            target_lrc = tmp_path / "01 - Song.lrc"
-            self.assertTrue(target_lrc.exists())
-            self.assertFalse(lrc.exists())
+    def test_numeric_tags_reject_booleans_nondecimal_digits_and_overflow(self) -> None:
+        for value in (None, True, False, "²", "not a number"):
+            with self.subTest(value=value):
+                self.assertIsNone(safe_int(value))
+                self.assertEqual(safe_int_pair(value), (None, None))
+                self.assertIsNone(safe_float(value))
+        self.assertIsNone(safe_float(10**1000))
+        self.assertEqual(safe_int("٣"), 3)
+        self.assertEqual(safe_int_pair("03/12"), (3, 12))
+        self.assertEqual(safe_float("-7.5 dB"), -7.5)
 
+    def test_configured_disc_folders_without_numbers_have_no_invented_index(
+        self,
+    ) -> None:
+        with patch.object(
+            library_paths,
+            "get_config",
+            return_value=SonoraConfig(disc_folder_patterns=("Bonus",)),
+        ):
+            self.assertIsNone(library_paths.extract_disc_number_from_folder("Bonus"))
 
-class TestCoreModels(unittest.TestCase):
-    def test_track_info_serialization(self) -> None:
-        track = TrackInfo(
-            file_path=Path("/music/song.flac"),
-            artist="Beyoncé",
-            title="HALO",
-            album="I Am... Sasha Fierce",
-            track_number=1,
-            bpm=120.0,
+    def test_hard_link_aliases_are_safe_rename_targets(self) -> None:
+        source = self.test_directory / "recording.flac"
+        source.write_bytes(b"recording")
+        alternate = self.test_directory / "alternate.flac"
+        alternate.hardlink_to(source)
+        self.assertEqual(library_paths.safe_case_rename(source, alternate), alternate)
+        self.assertEqual(alternate.read_bytes(), b"recording")
+        other_directory = self.test_directory / "other"
+        other_directory.mkdir()
+        same_name = other_directory / source.name
+        same_name.hardlink_to(source)
+        self.assertEqual(library_paths.safe_case_rename(source, same_name), same_name)
+        self.assertEqual(same_name.read_bytes(), b"recording")
+
+    def test_companion_lyrics_can_be_relocated_in_a_preview(self) -> None:
+        source = self.test_directory / "recording.flac"
+        lyric = source.with_suffix(".lrc")
+        lyric.write_text("lyrics")
+        destination = self.test_directory / "renamed.flac"
+        self.assertEqual(
+            sidecars.relocate_companion_lyrics(source, destination, dry_run=True),
+            [destination.with_suffix(".lrc")],
         )
-        data = track.to_dict()
-        self.assertEqual(data["artist"], "Beyoncé")
-        self.assertEqual(data["title"], "HALO")
-        self.assertEqual(data["track_number"], 1)
-        self.assertEqual(data["bpm"], 120.0)
+        self.assertEqual(lyric.read_text(), "lyrics")
 
-        empty_track = TrackInfo(file_path=Path("/music/empty.flac"))
-        empty_data = empty_track.to_dict()
-        self.assertEqual(empty_data["artist"], "Unknown Artist")
-        self.assertIsNone(empty_data["track_number"])
-        self.assertIsNone(empty_data["bpm"])
+    def test_missing_directory_and_companion_lyric_search_fallbacks(self) -> None:
+        self.assertEqual(
+            audio_files.find_audio_files(self.test_directory / "absent"), []
+        )
+        audio = self.test_directory / "original.flac"
+        lyric = self.test_directory / "02 - Different Name.lrc"
+        lyric.touch()
+        self.assertEqual(sidecars.find_companion_lyrics(audio, track_number=2), [lyric])
+        self.assertEqual(
+            sidecars.find_companion_lyrics(
+                audio, track_number="invalid", in_singles=True
+            ),
+            [lyric],
+        )
+        (self.test_directory / "other.lrc").touch()
+        self.assertEqual(sidecars.find_companion_lyrics(audio, in_singles=True), [])
+        with patch.object(
+            Path, "iterdir", side_effect=PermissionError("locked directory")
+        ):
+            self.assertEqual(
+                sidecars.find_companion_lyrics(audio, track_number=2, in_singles=True),
+                [],
+            )
+
+    def test_artwork_moves_preserve_existing_destinations_and_dry_run(self) -> None:
+        source = self.test_directory / "source"
+        target = self.test_directory / "target"
+        source.mkdir()
+        target.mkdir()
+        cover = source / "cover.jpg"
+        cover.write_bytes(b"artwork")
+        self.assertEqual(sidecars.relocate_companion_artwork(source, source), [])
+        self.assertEqual(
+            sidecars.relocate_companion_artwork(source, target, dry_run=True),
+            [target / "cover.jpg"],
+        )
+        self.assertTrue(cover.exists())
+        with patch.object(
+            sidecars,
+            "safe_case_rename",
+            side_effect=PermissionError("destination locked"),
+        ):
+            self.assertEqual(sidecars.relocate_companion_artwork(source, target), [])
+        target_cover = target / "cover.jpg"
+        path_exists = Path.exists
+
+        def create_destination(path: Path) -> bool:
+            if path == target_cover and not path_exists(path):
+                path.write_bytes(b"existing artwork")
+                return False
+            return path_exists(path)
+
+        with patch.object(Path, "exists", create_destination):
+            self.assertEqual(sidecars.relocate_companion_artwork(source, target), [])
+        self.assertEqual(cover.read_bytes(), b"artwork")
+        self.assertEqual(target_cover.read_bytes(), b"existing artwork")
+        target_cover.unlink()
+        self.assertEqual(
+            sidecars.relocate_companion_artwork(source, target),
+            [target / "cover.jpg"],
+        )
+        self.assertEqual((target / "cover.jpg").read_bytes(), b"artwork")
+
+    def test_safe_rename_handles_identity_permissions_and_collision(self) -> None:
+        source = self.test_directory / "source.flac"
+        source.write_bytes(b"recording")
+        self.assertEqual(library_paths.safe_case_rename(source, source), source)
+        with (
+            patch.object(os, "access", return_value=False),
+            self.assertRaises(PermissionError),
+        ):
+            library_paths.safe_case_rename(source, self.test_directory / "target.flac")
+        destination = self.test_directory / "destination.flac"
+        destination.touch()
+        with self.assertRaises(FileExistsError):
+            library_paths.safe_case_rename(source, destination)
+        folder = self.test_directory / "folder"
+        folder.mkdir()
+        renamed = folder.with_name("renamed")
+        self.assertEqual(library_paths.safe_case_rename(folder, renamed), renamed)
+        self.assertTrue(renamed.is_dir())
+
+    def test_missing_companions_and_existing_lyrics_do_not_overwrite(self) -> None:
+        source = self.test_directory / "source.flac"
+        destination = self.test_directory / "destination.flac"
+        source_lrc = source.with_suffix(".lrc")
+        destination_lrc = destination.with_suffix(".lrc")
+        source_lrc.write_text("original")
+        destination_lrc.write_text("destination")
+        self.assertEqual(
+            sidecars.relocate_companion_lyrics(
+                source,
+                destination,
+                sidecars=[source_lrc, self.test_directory / "absent.lrc"],
+            ),
+            [],
+        )
+        self.assertEqual(destination_lrc.read_text(), "destination")
 
 
-class TestSonoraConfig(unittest.TestCase):
-    def setUp(self) -> None:
-        clear_config_cache()
-
-    def tearDown(self) -> None:
-        clear_config_cache()
+class TestCoreConfig(IsolatedTestCase):
+    def test_credentials_keep_config_alias_and_environment_precedence(self) -> None:
+        for credential, alias, environment_names in (
+            (
+                "discogs_token",
+                "discogs_user_token",
+                ("DISCOGS_TOKEN", "DISCOGS_USER_TOKEN"),
+            ),
+            ("acoustid_api_key", "acoustid_key", ("ACOUSTID_API_KEY",)),
+            ("genius_api_token", "genius_token", ("GENIUS_API_TOKEN", "GENIUS_TOKEN")),
+            ("lastfm_api_key", "lastfm_key", ("LASTFM_API_KEY",)),
+            (
+                "musixmatch_token",
+                "musixmatch_token",
+                ("MUSIXMATCH_TOKEN", "MUSIXMATCH_USER_TOKEN"),
+            ),
+            ("fanart_api_key", "fanart_key", ("FANART_API_KEY", "FANART_KEY")),
+            ("fanart_client_key", "fanart_client", ("FANART_CLIENT_KEY",)),
+        ):
+            for configured, expected in (
+                (
+                    {credential: " canonical ", alias: " alias "}
+                    if credential != alias
+                    else {credential: " canonical "},
+                    "canonical",
+                ),
+                ({alias: " alias "}, "alias"),
+                ({}, "environment"),
+            ):
+                with (
+                    self.subTest(credential=credential, configured=configured),
+                    patch("sonora.core.config.load_app_environment"),
+                    patch(
+                        "sonora.core.config._discover_config_file",
+                        return_value=Path("config.json"),
+                    ),
+                    patch(
+                        "sonora.core.config._parse_config_data", return_value=configured
+                    ),
+                    patch.dict(
+                        os.environ,
+                        {name: " environment " for name in environment_names},
+                        clear=True,
+                    ),
+                ):
+                    clear_config_cache()
+                    self.assertEqual(getattr(get_config(), credential), expected)
 
     def test_default_config_properties(self) -> None:
         cfg = get_config()
@@ -730,35 +771,30 @@ class TestSonoraConfig(unittest.TestCase):
         self.assertFalse(custom_cfg.is_generic_container("flac"))
 
     def test_config_parsing_toml_and_json(self) -> None:
-        import tempfile
+        toml_path = self.test_directory / "config.toml"
+        toml_path.write_text(
+            '[sonora]\nartist_match_threshold = 92.5\ndisc_folder_patterns = ["^disc_\\\\d+$"]\n',
+            encoding="utf-8",
+        )
+        parsed_toml = _parse_config_data(toml_path)
+        self.assertEqual(parsed_toml.get("artist_match_threshold"), 92.5)
+        self.assertEqual(parsed_toml.get("disc_folder_patterns"), ["^disc_\\d+$"])
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
+        json_path = self.test_directory / "config.json"
+        json_path.write_text(
+            '{"artist_match_threshold": 88.0, "featuring_conjunctions": ["feat", "ft"]}',
+            encoding="utf-8",
+        )
+        parsed_json = _parse_config_data(json_path)
+        self.assertEqual(parsed_json.get("artist_match_threshold"), 88.0)
 
-            toml_path = tmp_path / "config.toml"
-            toml_path.write_text(
-                '[sonora]\nartist_match_threshold = 92.5\ndisc_folder_patterns = ["^disc_\\\\d+$"]\n',
-                encoding="utf-8",
-            )
-            parsed_toml = _parse_config_data(toml_path)
-            self.assertEqual(parsed_toml.get("artist_match_threshold"), 92.5)
-            self.assertEqual(parsed_toml.get("disc_folder_patterns"), ["^disc_\\d+$"])
+        empty_path = self.test_directory / "empty.toml"
+        empty_path.write_text("", encoding="utf-8")
+        self.assertEqual(_parse_config_data(empty_path), {})
 
-            json_path = tmp_path / "config.json"
-            json_path.write_text(
-                '{"artist_match_threshold": 88.0, "featuring_conjunctions": ["feat", "ft"]}',
-                encoding="utf-8",
-            )
-            parsed_json = _parse_config_data(json_path)
-            self.assertEqual(parsed_json.get("artist_match_threshold"), 88.0)
-
-            empty_path = tmp_path / "empty.toml"
-            empty_path.write_text("", encoding="utf-8")
-            self.assertEqual(_parse_config_data(empty_path), {})
-
-            corrupt_path = tmp_path / "corrupt.toml"
-            corrupt_path.write_text("invalid [ [ toml", encoding="utf-8")
-            self.assertEqual(_parse_config_data(corrupt_path), {})
+        corrupt_path = self.test_directory / "corrupt.toml"
+        corrupt_path.write_text("invalid [ [ toml", encoding="utf-8")
+        self.assertEqual(_parse_config_data(corrupt_path), {})
 
     def test_dynamic_pattern_generation(self) -> None:
         split_pat = get_artist_split_pattern()
@@ -831,6 +867,7 @@ class TestSonoraConfig(unittest.TestCase):
 
     def test_normalize_language_name(self) -> None:
         self.assertEqual(normalize_language_name("en"), "English")
+        self.assertEqual(normalize_language_name("EN"), "English")
         self.assertEqual(normalize_language_name("eng"), "English")
         self.assertEqual(normalize_language_name("English"), "English")
         self.assertEqual(normalize_language_name("ro"), "Romanian")
@@ -839,6 +876,7 @@ class TestSonoraConfig(unittest.TestCase):
         self.assertEqual(normalize_language_name("de"), "German")
         self.assertEqual(normalize_language_name("deu"), "German")
         self.assertEqual(normalize_language_name("ger"), "German")
+        self.assertEqual(normalize_language_name("fre"), "French")
         self.assertEqual(normalize_language_name("ja"), "Japanese")
         self.assertEqual(normalize_language_name("jpn"), "Japanese")
         self.assertIsNone(normalize_language_name(None))
@@ -848,6 +886,7 @@ class TestSonoraConfig(unittest.TestCase):
             normalize_language_name("KlingonXYZ"),
             "KlingonXYZ",
         )
+        self.assertEqual(normalize_language_name("unknown"), "unknown")
 
     def test_normalize_script_name(self) -> None:
         self.assertEqual(normalize_script_name("Latn"), "Latin")
@@ -1019,11 +1058,13 @@ class TestSonoraConfig(unittest.TestCase):
     def test_match_score_penalties_and_remixes(self) -> None:
         # Stopword immunity: "The" in band names must not produce high match scores
         self.assertEqual(
-            match_score("The Motans", "Sangria", "The Re-Tards", "Sangria"),
+            score_artist_title_match(
+                "The Motans", "Sangria", "The Re-Tards", "Sangria"
+            ),
             0.0,
         )
         self.assertEqual(
-            match_score(
+            score_artist_title_match(
                 "The Motans",
                 "Sangria",
                 "But Then the Self in the Tree Fell Asleep",
@@ -1032,19 +1073,21 @@ class TestSonoraConfig(unittest.TestCase):
             0.0,
         )
         self.assertEqual(
-            match_score(
+            score_artist_title_match(
                 "The Motans", "Flagrant", "Audra The Rapper feat. Satasha", "Flagrant"
             ),
             0.0,
         )
         self.assertEqual(
-            match_score("The Motans", "Sativa", "The Body Rampant", "Sativa"),
+            score_artist_title_match(
+                "The Motans", "Sativa", "The Body Rampant", "Sativa"
+            ),
             0.0,
         )
 
         # Remix modifier penalty: Different remixers must score 0.0
         self.assertEqual(
-            match_score(
+            score_artist_title_match(
                 "Topic & A7S",
                 "Breaking Me (RetroVision remix)",
                 "Topic & A7S",
@@ -1053,7 +1096,7 @@ class TestSonoraConfig(unittest.TestCase):
             0.0,
         )
         self.assertEqual(
-            match_score(
+            score_artist_title_match(
                 "Topic & A7S",
                 "Breaking Me (Riton remix)",
                 "Topic & A7S",
@@ -1064,7 +1107,7 @@ class TestSonoraConfig(unittest.TestCase):
 
         # Identical remix modifier should match perfectly
         self.assertGreaterEqual(
-            match_score(
+            score_artist_title_match(
                 "Topic & A7S",
                 "Breaking Me (RetroVision remix)",
                 "Topic & A7S",
@@ -1076,7 +1119,7 @@ class TestSonoraConfig(unittest.TestCase):
     def test_is_interruption(self) -> None:
         self.assertTrue(is_interruption(KeyboardInterrupt()))
         self.assertTrue(is_interruption(InterruptedOperationError()))
-        self.assertTrue(is_interruption(RuntimeError("release unlocked lock")))
+        self.assertFalse(is_interruption(RuntimeError("release unlocked lock")))
 
         nested_exc = RuntimeError("wrapper error")
         nested_exc.__context__ = KeyboardInterrupt()
@@ -1143,5 +1186,641 @@ class TestSonoraConfig(unittest.TestCase):
         self.assertEqual(get_single_release_title(info4), "Tren De Noapte")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestCoreCancellation(OfflinePipelineTestCase):
+    def test_backup_handles_keyboard_interrupt(self) -> None:
+        wav = self.tmp_path / "test.wav"
+        write_silent_wav(wav)
+        with (
+            patch(
+                "sonora.modules.backup._read_track_for_backup",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            backup_library_tags(self.tmp_path, max_threads=2)
+
+    def test_restore_handles_keyboard_interrupt(self) -> None:
+        backup_file = self.tmp_path / "backup.json"
+        backup_file.write_text(
+            '{"schema":"sonora_backup_v2","root":"/tmp","tracks":{"test.wav":{"tags":{},"complex_tags":{}}}}',
+            encoding="utf-8",
+        )
+        with (
+            patch(
+                "sonora.modules.backup._restore_single_track",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            restore_library_tags(backup_file, max_threads=2)
+
+    def test_organize_handles_keyboard_interrupt(self) -> None:
+        wav1 = self.tmp_path / "test1.wav"
+        wav2 = self.tmp_path / "test2.wav"
+        write_silent_wav(wav1)
+        write_silent_wav(wav2)
+        with (
+            patch(
+                "sonora.modules.organizer.read_track_metadata",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            organize_library_singles(
+                self.tmp_path, self.tmp_path / "Singles", max_threads=2
+            )
+
+    def test_renamer_handles_keyboard_interrupt(self) -> None:
+        wav1 = self.tmp_path / "test1.wav"
+        wav2 = self.tmp_path / "test2.wav"
+        write_silent_wav(wav1)
+        write_silent_wav(wav2)
+        with (
+            patch(
+                "sonora.modules.renamer.read_track_metadata",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            rename_directory_files(self.tmp_path, max_threads=2)
+
+    def test_checker_handles_keyboard_interrupt(self) -> None:
+        wav = self.tmp_path / "test.wav"
+        write_silent_wav(wav)
+        with (
+            patch(
+                "sonora.modules.checker._check_single_file",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            check_library(self.tmp_path, max_threads=2)
+
+    def test_replaygain_handles_keyboard_interrupt(self) -> None:
+        wav1 = self.tmp_path / "test1.wav"
+        wav2 = self.tmp_path / "test2.wav"
+        write_silent_wav(wav1)
+        write_silent_wav(wav2)
+        with (
+            patch(
+                "sonora.audio.replaygain._measure_track_loudness",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            calculate_album_replaygain([wav1, wav2], max_threads=2)
+
+    def test_normalize_handles_keyboard_interrupt(self) -> None:
+        wav = self.tmp_path / "test.wav"
+        write_silent_wav(wav)
+        with (
+            patch(
+                "sonora.modules.track_processing.normalize_single_track",
+                side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            normalize_library(self.tmp_path, max_threads=2)
+
+    def test_tagger_handles_keyboard_interrupt(self) -> None:
+        wav = self.tmp_path / "test.wav"
+        write_silent_wav(wav)
+        with (
+            patch(
+                "sonora.modules.tagger.process_single_track",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch(
+                "sonora.services.musicbrainz.search_musicbrainz_release",
+                return_value=None,
+            ),
+            patch(
+                "sonora.services.deezer.fetch_deezer_album_details", return_value=None
+            ),
+            patch(
+                "sonora.services.itunes.fetch_itunes_album_details", return_value=None
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            tag_album_folder(
+                self.tmp_path,
+                max_threads=2,
+                fetch_bpm=False,
+                fetch_key=False,
+                fetch_replaygain=False,
+                fetch_lyrics=False,
+                fetch_itunes_art=False,
+            )
+
+
+class TestCoreHttpAndRetry(IsolatedTestCase):
+    def test_invalid_attempt_budget_is_rejected(self) -> None:
+        for attempts in (0, -1):
+            with self.subTest(attempts=attempts), self.assertRaises(ValueError):
+                RetryTransport(max_retries=attempts)
+
+    def test_discogs_rate_limit_depends_on_authentication(self) -> None:
+        limiter = Mock()
+        for headers, interval in (
+            ({}, RATE_LIMIT_DISCOGS_UNAUTHENTICATED),
+            ({"Authorization": "Discogs token=fixture"}, None),
+        ):
+            limiter.reset_mock()
+            with (
+                self.subTest(headers=headers),
+                patch("sonora.core.http._HOST_LIMITERS", {"api.discogs.com": limiter}),
+                patch(
+                    "httpx.HTTPTransport.handle_request",
+                    return_value=httpx.Response(200),
+                ),
+                RetryTransport() as transport,
+            ):
+                response = transport.handle_request(
+                    httpx.Request(
+                        "GET", "https://api.discogs.com/test", headers=headers
+                    )
+                )
+            self.assertEqual(response.status_code, 200)
+            limiter.wait.assert_called_once_with(interval)
+
+    def test_long_retry_after_returns_response_without_sleeping(self) -> None:
+        response = httpx.Response(429, headers={"Retry-After": "61"})
+        with (
+            patch("httpx.HTTPTransport.handle_request", return_value=response) as send,
+            patch("sonora.core.http.time.sleep") as sleep,
+            RetryTransport() as transport,
+        ):
+            self.assertIs(
+                transport.handle_request(httpx.Request("GET", "https://example.com")),
+                response,
+            )
+        send.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_exhausted_transport_failure_preserves_original_exception(self) -> None:
+        error = httpx.ReadTimeout("socket timed out")
+        with (
+            patch("httpx.HTTPTransport.handle_request", side_effect=error) as send,
+            patch("sonora.core.http.time.sleep") as sleep,
+            RetryTransport(max_retries=2, backoff_factor=0.25) as transport,
+            self.assertRaises(httpx.ReadTimeout) as raised,
+        ):
+            transport.handle_request(httpx.Request("GET", "https://example.com"))
+        self.assertIs(raised.exception, error)
+        self.assertEqual(send.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
+    def test_dns_lookup_failures_are_not_retried(self) -> None:
+        for code in (socket.EAI_AGAIN, socket.EAI_NONAME):
+            with self.subTest(code=code):
+                dns_error = socket.gaierror(code, "DNS lookup failed")
+                error = httpx.ConnectError("connection failed")
+                error.__cause__ = dns_error
+                with (
+                    patch("sonora.core.retry._DNS_UNAVAILABLE_UNTIL", 0.0),
+                    patch(
+                        "httpx.HTTPTransport.handle_request", side_effect=error
+                    ) as send,
+                    patch("sonora.core.http.time.sleep") as sleep,
+                    RetryTransport() as transport,
+                    self.assertRaises(httpx.ConnectError) as raised,
+                ):
+                    transport.handle_request(
+                        httpx.Request("GET", "https://example.com")
+                    )
+                self.assertIs(raised.exception, error)
+                send.assert_called_once()
+                sleep.assert_not_called()
+        send.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_unknown_host_does_not_suspend_other_http_requests(self) -> None:
+        import socket
+
+        request = httpx.Request("GET", "https://example.com")
+        error = httpx.ConnectError("connection failed", request=request)
+        error.__cause__ = socket.gaierror(socket.EAI_NONAME, "Unknown host")
+        responses = [error, httpx.Response(200, request=request)]
+        with (
+            patch("sonora.core.retry._DNS_UNAVAILABLE_UNTIL", 0.0),
+            patch("httpx.HTTPTransport.handle_request", side_effect=responses) as send,
+            patch("sonora.core.http.time.sleep") as sleep,
+            RetryTransport(max_retries=1) as transport,
+        ):
+            with self.assertRaises(httpx.ConnectError):
+                transport.handle_request(request)
+            response = transport.handle_request(request)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(send.call_count, 2)
+            sleep.assert_not_called()
+
+    def test_retry_dates_support_naive_utc_and_timezone_aware_deadlines(self) -> None:
+        instant = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
+        for deadline in (
+            instant + timedelta(seconds=7),
+            (instant + timedelta(seconds=7)).replace(tzinfo=None),
+        ):
+            with (
+                self.subTest(deadline=deadline),
+                patch("sonora.core.http.parsedate_to_datetime", return_value=deadline),
+                patch("sonora.core.http.datetime", wraps=datetime) as clock,
+            ):
+                clock.now.return_value = instant
+                self.assertEqual(_retry_delay("HTTP-date", 1.5), 7)
+
+    def test_lrclib_workers_wait_for_each_response_before_next_request(self) -> None:
+        import threading
+
+        import httpx
+
+        from sonora.core.http import _HOST_LIMITERS, RetryTransport
+
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+
+        def send(request: httpx.Request) -> httpx.Response:
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            try:
+                time.sleep(0.01)
+            finally:
+                with lock:
+                    active -= 1
+            return httpx.Response(200, request=request)
+
+        with (
+            RetryTransport() as transport,
+            patch.object(_HOST_LIMITERS["lrclib.net"], "wait") as pace_request,
+            patch.object(httpx.HTTPTransport, "handle_request", side_effect=send),
+            ThreadPoolExecutor(max_workers=4) as pool,
+        ):
+            responses = list(pool.map(transport.handle_request, [request] * 4))
+        self.assertEqual([response.status_code for response in responses], [200] * 4)
+        self.assertEqual(maximum, 1)
+        self.assertEqual(pace_request.call_count, 4)
+        self.assertEqual(_HOST_LIMITERS["lrclib.net"].interval, 0.3)
+
+    def test_provider_cooldown_is_shared_and_cannot_be_shortened(self) -> None:
+        from sonora.core.coordination import wait_for_provider
+
+        with (
+            patch(
+                "sonora.core.coordination.get_cache_dir",
+                return_value=self.test_directory,
+            ),
+            patch("sonora.core.coordination.time.time", return_value=100.0),
+            patch("sonora.core.coordination.time.sleep") as sleep,
+        ):
+            wait_for_provider("lrclib.net", 0, defer_seconds=30)
+            wait_for_provider("lrclib.net", 0, defer_seconds=1)
+            sleep.assert_not_called()
+            self.assertEqual(wait_for_provider("lrclib.net", 0.25), 30)
+            sleep.assert_called_once_with(30)
+
+    def test_long_provider_cooldown_defers_workers_without_waiting(self) -> None:
+        from sonora.core.coordination import (
+            ProviderDeferredError,
+            wait_for_provider,
+        )
+
+        with (
+            patch(
+                "sonora.core.coordination.get_cache_dir",
+                return_value=self.test_directory,
+            ),
+            patch("sonora.core.coordination.time.time", return_value=100.0),
+            patch("sonora.core.coordination.time.sleep") as sleep,
+        ):
+            wait_for_provider("lrclib.net", 0, defer_seconds=3600)
+            with self.assertRaises(ProviderDeferredError):
+                wait_for_provider("lrclib.net", 0.25)
+        sleep.assert_not_called()
+
+    def test_retry_transport_does_not_retry_a_deferred_provider(self) -> None:
+        import httpx
+
+        from sonora.core.coordination import ProviderDeferredError
+        from sonora.core.http import _HOST_LIMITERS, RetryTransport
+
+        with (
+            patch.object(
+                _HOST_LIMITERS["lrclib.net"],
+                "wait",
+                side_effect=ProviderDeferredError("provider cooling down"),
+            ),
+            patch.object(httpx.HTTPTransport, "handle_request") as send,
+            RetryTransport(max_retries=3) as transport,
+            self.assertRaises(ProviderDeferredError),
+        ):
+            transport.handle_request(httpx.Request("GET", "https://lrclib.net/api"))
+        send.assert_not_called()
+
+    def test_final_rate_limit_response_sets_shared_cooldown(self) -> None:
+        import httpx
+
+        from sonora.core.http import _HOST_LIMITERS, RetryTransport
+
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+        response = httpx.Response(429, headers={"Retry-After": "30"}, request=request)
+        with (
+            RetryTransport(max_retries=1) as transport,
+            patch.object(RateLimiter, "_disabled", False),
+            patch.object(_HOST_LIMITERS["lrclib.net"], "wait"),
+            patch.object(httpx.HTTPTransport, "handle_request", return_value=response),
+            patch("sonora.core.http.wait_for_provider") as defer,
+            patch("sonora.core.http.SystemRandom") as random,
+        ):
+            random.return_value.uniform.return_value = 3.0
+            self.assertIs(transport.handle_request(request), response)
+            defer.assert_called_once_with("lrclib.net", 0, defer_seconds=33)
+
+    def test_retry_network_call_success_on_first_try(self) -> None:
+
+        mock_func = MagicMock(return_value="ok")
+        result = retry_network_call(mock_func)
+        self.assertEqual(result, "ok")
+        self.assertEqual(mock_func.call_count, 1)
+
+    def test_retry_network_call_retries_and_succeeds(self) -> None:
+
+        limiter = RateLimiter(interval_seconds=0)
+        mock_func = MagicMock(
+            side_effect=[OSError("Connection lost"), OSError("Timeout"), "recovered"]
+        )
+        with patch("time.sleep") as mock_sleep:
+            result = retry_network_call(
+                mock_func,
+                max_retries=3,
+                initial_delay=0.01,
+                rate_limiter=limiter,
+            )
+        self.assertEqual(result, "recovered")
+        self.assertEqual(mock_func.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    def test_retry_network_call_exhausts_retries(self) -> None:
+
+        mock_func = MagicMock(side_effect=OSError("Permanent failure"))
+        with patch("time.sleep"), self.assertRaises(OSError):
+            retry_network_call(mock_func, max_retries=3, initial_delay=0.01)
+        self.assertEqual(mock_func.call_count, 3)
+
+    def test_retry_network_call_skips_non_retryable(self) -> None:
+
+        mock_func = MagicMock(side_effect=ValueError("Invalid parameter"))
+        with patch("time.sleep"), self.assertRaises(ValueError):
+            retry_network_call(
+                mock_func,
+                max_retries=3,
+                transient_exceptions=(OSError,),
+            )
+        self.assertEqual(mock_func.call_count, 1)
+
+    def test_retry_network_call_skips_dns_lookup_failures(self) -> None:
+        import socket
+
+        from musicbrainzngs import NetworkError
+
+        for code in (socket.EAI_AGAIN, socket.EAI_NONAME):
+            with self.subTest(code=code):
+                failure = NetworkError(
+                    "MusicBrainz network error",
+                    cause=socket.gaierror(code, "DNS lookup failed"),
+                )
+                mock_func = MagicMock(side_effect=failure)
+                with (
+                    patch("time.sleep") as sleep,
+                    patch(
+                        "sonora.core.retry._DNS_UNAVAILABLE_UNTIL",
+                        0.0,
+                        create=True,
+                    ),
+                    self.assertRaises(NetworkError),
+                ):
+                    retry_network_call(mock_func, transient_exceptions=(NetworkError,))
+                mock_func.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_dns_failure_suspends_repeated_network_calls_briefly(self) -> None:
+        import socket
+
+        first = MagicMock(side_effect=socket.gaierror(socket.EAI_AGAIN, "DNS failed"))
+        later = MagicMock(return_value="unexpected")
+        with self.assertRaises(socket.gaierror):
+            retry_network_call(first)
+        with self.assertRaises(socket.gaierror):
+            retry_network_call(later)
+        first.assert_called_once()
+        later.assert_not_called()
+
+    def test_retry_network_call_rechecks_dns_after_rate_limit_wait(self) -> None:
+        import socket
+
+        from sonora.core.retry import _suspend_dns_requests
+
+        limiter = RateLimiter(interval_seconds=0)
+        request = MagicMock(return_value="unexpected")
+        with (
+            patch("sonora.core.retry._DNS_UNAVAILABLE_UNTIL", 0.0),
+            patch.object(limiter, "wait", side_effect=_suspend_dns_requests),
+            self.assertRaises(socket.gaierror),
+        ):
+            retry_network_call(request, rate_limiter=limiter)
+        request.assert_not_called()
+
+    def test_permanent_dns_failure_does_not_suspend_other_lookups(self) -> None:
+        import socket
+
+        failure = MagicMock(
+            side_effect=socket.gaierror(socket.EAI_NONAME, "Unknown host")
+        )
+        available = MagicMock(return_value="available")
+        with self.assertRaises(socket.gaierror):
+            retry_network_call(failure)
+        self.assertEqual(retry_network_call(available), "available")
+        failure.assert_called_once()
+        available.assert_called_once()
+
+    def test_dns_cooldown_expires(self) -> None:
+        from sonora.core.retry import _dns_requests_suspended, _suspend_dns_requests
+
+        with (
+            patch("sonora.core.retry.time.monotonic", side_effect=[5.0, 34.9, 35.0]),
+        ):
+            _suspend_dns_requests()
+            self.assertTrue(_dns_requests_suspended())
+            self.assertFalse(_dns_requests_suspended())
+
+    def test_http_transport_skips_requests_during_dns_cooldown(self) -> None:
+        import socket
+
+        import httpx
+
+        from sonora.core.http import RetryTransport
+
+        request = httpx.Request("GET", "https://example.com")
+        failure = httpx.ConnectError("DNS failed", request=request)
+        failure.__cause__ = socket.gaierror(socket.EAI_AGAIN, "DNS failed")
+        with (
+            RetryTransport() as transport,
+            patch.object(
+                httpx.HTTPTransport, "handle_request", side_effect=failure
+            ) as send,
+        ):
+            with self.assertRaises(httpx.ConnectError):
+                transport.handle_request(request)
+            with self.assertRaises(httpx.ConnectError):
+                transport.handle_request(request)
+        self.assertEqual(send.call_count, 1)
+
+    def test_http_transport_rechecks_dns_after_rate_limit_wait(self) -> None:
+        import httpx
+
+        from sonora.core.http import _HOST_LIMITERS, RetryTransport
+        from sonora.core.retry import _suspend_dns_requests
+
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+        with (
+            RetryTransport() as transport,
+            patch("sonora.core.retry._DNS_UNAVAILABLE_UNTIL", 0.0),
+            patch.object(
+                _HOST_LIMITERS["lrclib.net"],
+                "wait",
+                side_effect=lambda *_args: _suspend_dns_requests(),
+            ),
+            patch.object(httpx.HTTPTransport, "handle_request") as send,
+            self.assertRaises(httpx.ConnectError),
+        ):
+            transport.handle_request(request)
+        send.assert_not_called()
+
+    def test_http_transport_does_not_retry_after_another_request_suspends_dns(
+        self,
+    ) -> None:
+        import httpx
+
+        from sonora.core.http import RetryTransport
+        from sonora.core.retry import _suspend_dns_requests
+
+        request = httpx.Request("GET", "https://example.com")
+
+        def fail_during_dns_outage(request: httpx.Request) -> httpx.Response:
+            _suspend_dns_requests()
+            raise httpx.ConnectTimeout("resolver unavailable", request=request)
+
+        with (
+            RetryTransport(max_retries=2) as transport,
+            patch.object(
+                httpx.HTTPTransport,
+                "handle_request",
+                side_effect=fail_during_dns_outage,
+            ) as send,
+            patch("sonora.core.http.time.sleep") as sleep,
+            self.assertRaises(httpx.ConnectTimeout),
+        ):
+            transport.handle_request(request)
+
+        send.assert_called_once_with(request)
+        sleep.assert_not_called()
+
+    def test_retry_network_call_respects_retry_condition(self) -> None:
+
+        mock_func = MagicMock(side_effect=OSError("Forbidden"))
+        with patch("time.sleep"), self.assertRaises(OSError):
+            retry_network_call(
+                mock_func,
+                max_retries=3,
+                retry_condition=lambda err: "Forbidden" not in str(err),
+            )
+        self.assertEqual(mock_func.call_count, 1)
+
+    def test_retry_transport_retries_on_429_and_503(self) -> None:
+        import httpx
+
+        from sonora.core.http import RetryTransport
+
+        resp_429 = httpx.Response(
+            429,
+            headers={"Retry-After": "2"},
+            request=httpx.Request("GET", "https://example.com"),
+        )
+        resp_503 = httpx.Response(
+            503, request=httpx.Request("GET", "https://example.com")
+        )
+        resp_200 = httpx.Response(
+            200,
+            json={"status": "ok"},
+            request=httpx.Request("GET", "https://example.com"),
+        )
+
+        with (
+            RetryTransport(max_retries=3, backoff_factor=0.01) as transport,
+            patch.object(
+                httpx.HTTPTransport,
+                "handle_request",
+                side_effect=[resp_429, resp_503, resp_200],
+            ) as mock_handle,
+            patch("time.sleep") as mock_sleep,
+        ):
+            response = transport.handle_request(
+                httpx.Request("GET", "https://example.com")
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_handle.call_count, 3)
+        mock_sleep.assert_any_call(2.0)
+
+    def test_lrclib_503_without_retry_after_uses_one_second_fallback(self) -> None:
+        import httpx
+
+        from sonora.core.http import _HOST_LIMITERS, RetryTransport
+
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+        responses = [
+            httpx.Response(503, request=request),
+            httpx.Response(200, request=request),
+        ]
+        with (
+            RetryTransport(max_retries=2) as transport,
+            patch.object(_HOST_LIMITERS["lrclib.net"], "wait"),
+            patch("sonora.core.http.wait_for_provider"),
+            patch.object(httpx.HTTPTransport, "handle_request", side_effect=responses),
+            patch("sonora.core.http.SystemRandom") as random,
+            patch("time.sleep") as sleep,
+        ):
+            random.return_value.uniform.return_value = 0
+            response = transport.handle_request(request)
+
+        self.assertEqual(response.status_code, 200)
+        sleep.assert_called_once_with(1.0)
+
+    def test_lrclib_stops_after_one_retry_for_repeated_server_errors(self) -> None:
+        import httpx
+
+        from sonora.core.http import _HOST_LIMITERS, RetryTransport
+
+        request = httpx.Request("GET", "https://lrclib.net/api/get")
+        responses = [
+            httpx.Response(502, request=request),
+            httpx.Response(502, request=request),
+            httpx.Response(200, request=request),
+        ]
+        with (
+            RetryTransport() as transport,
+            patch.object(_HOST_LIMITERS["lrclib.net"], "wait"),
+            patch("sonora.core.http.wait_for_provider"),
+            patch.object(
+                httpx.HTTPTransport, "handle_request", side_effect=responses
+            ) as request_handler,
+            patch("sonora.core.http.SystemRandom") as random,
+            patch("time.sleep"),
+        ):
+            random.return_value.uniform.return_value = 0
+            response = transport.handle_request(request)
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(request_handler.call_count, 2)
