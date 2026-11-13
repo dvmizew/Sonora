@@ -41,6 +41,7 @@ from sonora.core.logger import (
 )
 from sonora.core.models import CheckReport, TrackInfo
 from sonora.core.sidecars import (
+    are_lyrics_timestamps_monotonic,
     find_companion_lyrics,
     is_lyrics_duration_valid,
     is_script_concordant,
@@ -268,6 +269,21 @@ def check_file(
                                         itunes_duration_verified = True
                                 break
 
+            isrc_duration_verified = False
+            if track.isrc and track.duration is not None:
+                cached_deezer = get_cached_api(
+                    f"deezer_isrc:v2:{(track.isrc or '').strip().upper()}"
+                )
+                if isinstance(cached_deezer, dict):
+                    deezer_dur = safe_float(cached_deezer.get("duration"))
+                    if (
+                        deezer_dur is not None
+                        and deezer_dur > 0
+                        and abs(track.duration - deezer_dur)
+                        <= max(2.0, get_config().single_duration_tolerance_seconds)
+                    ):
+                        isrc_duration_verified = True
+
             for provider, identifier, cache_key in (
                 (
                     "MusicBrainz",
@@ -394,20 +410,28 @@ def check_file(
                                 8.0, get_config().single_duration_tolerance_seconds
                             )
                             if (
-                                track.duration is not None
-                                and cand_dur is not None
-                                and abs(track.duration - cand_dur) <= max_dur_tol
-                            ) or (
-                                track.album
-                                and cand_album
-                                and (
-                                    normalize_str(track.album)
-                                    == normalize_str(cand_album)
-                                    or _strip_title_variants(track.album)
-                                    == _strip_title_variants(cand_album)
+                                (
+                                    track.duration is not None
+                                    and cand_dur is not None
+                                    and abs(track.duration - cand_dur) <= max_dur_tol
                                 )
-                                and track.track_number is not None
-                                and cand_pos == track.track_number
+                                or (
+                                    track.album
+                                    and cand_album
+                                    and (
+                                        normalize_str(track.album)
+                                        == normalize_str(cand_album)
+                                        or _strip_title_variants(track.album)
+                                        == _strip_title_variants(cand_album)
+                                    )
+                                    and track.track_number is not None
+                                    and cand_pos == track.track_number
+                                )
+                                or (
+                                    cand_dur is None
+                                    and cand_album is None
+                                    and q_base == c_base
+                                )
                             ):
                                 matches_identity = True
 
@@ -420,6 +444,8 @@ def check_file(
                         provider in ("Deezer ISRC", "MusicBrainz")
                         and itunes_duration_verified
                     ):
+                        continue
+                    if provider == "MusicBrainz" and isrc_duration_verified:
                         continue
                     cand_dur = safe_float(candidate.get("duration"))
                     if track.duration is not None and cand_dur is not None:
@@ -625,6 +651,10 @@ def check_file(
                 issues.append(
                     f"Lyrics timestamps exceed audio duration: '{lrc_path.name}'."
                 )
+            if not are_lyrics_timestamps_monotonic(lyric_text):
+                issues.append(
+                    f"Non-chronological timestamps in synchronized lyrics: '{lrc_path.name}'."
+                )
 
     return issues
 
@@ -798,6 +828,182 @@ def _check_folder_album_consistency(
                     LOG.detail(f"   ∟ {escape(aa_issue)}")
     elif artist_counts:
         dominant_artist, _ = artist_counts.most_common(1)[0]
+
+    mb_album_counts: Counter[str] = Counter()
+    total_discs_counts: Counter[int] = Counter()
+    for _, track_metadata in tracks_in_folder:
+        if track_metadata.musicbrainz_albumid and is_valid_uuid(
+            track_metadata.musicbrainz_albumid
+        ):
+            mb_album_counts[track_metadata.musicbrainz_albumid] += 1
+        if track_metadata.total_discs is not None:
+            total_discs_counts[track_metadata.total_discs] += 1
+
+    if mb_album_counts:
+        dominant_mbid, dominant_mbid_count = mb_album_counts.most_common(1)[0]
+        if len(mb_album_counts) > 1:
+            folder_issues.append(
+                f"Inconsistent MUSICBRAINZ_ALBUMID in album folder: {set(mb_album_counts.keys())}"
+            )
+            for file_path, track_metadata in tracks_in_folder:
+                if (
+                    track_metadata.musicbrainz_albumid
+                    and track_metadata.musicbrainz_albumid != dominant_mbid
+                ):
+                    mb_issue = (
+                        f"Mismatched MUSICBRAINZ_ALBUMID '{track_metadata.musicbrainz_albumid}' "
+                        f"(most common folder album ID: '{dominant_mbid}')"
+                    )
+                    report.issues.setdefault(str(file_path), []).append(mb_issue)
+                    metadata_issue_paths.add(file_path)
+                    try:
+                        display_name = str(file_path.relative_to(folder_path))
+                    except ValueError:
+                        display_name = file_path.name
+                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                    LOG.detail(f"   ∟ {escape(mb_issue)}")
+        elif (
+            dominant_mbid_count >= max(2, int(total_tracks * 0.5))
+            and dominant_mbid_count < total_tracks
+        ):
+            missing_tracks = [
+                (file_path, track_metadata)
+                for file_path, track_metadata in tracks_in_folder
+                if not track_metadata.musicbrainz_albumid
+            ]
+            if missing_tracks:
+                folder_issues.append(
+                    f"Inconsistent MUSICBRAINZ_ALBUMID in album folder: present on {dominant_mbid_count}/{total_tracks} tracks"
+                )
+                for file_path, _ in missing_tracks:
+                    missing_mb_issue = f"Missing MUSICBRAINZ_ALBUMID (dominant folder album ID: '{dominant_mbid}')"
+                    report.issues.setdefault(str(file_path), []).append(
+                        missing_mb_issue
+                    )
+                    metadata_issue_paths.add(file_path)
+                    try:
+                        display_name = str(file_path.relative_to(folder_path))
+                    except ValueError:
+                        display_name = file_path.name
+                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                    LOG.detail(f"   ∟ {escape(missing_mb_issue)}")
+
+    if len(total_discs_counts) > 1:
+        dominant_discs, _ = total_discs_counts.most_common(1)[0]
+        folder_issues.append(
+            f"Inconsistent TOTALDISCS in album folder: {set(total_discs_counts.keys())}"
+        )
+        for file_path, track_metadata in tracks_in_folder:
+            if (
+                track_metadata.total_discs is not None
+                and track_metadata.total_discs != dominant_discs
+            ):
+                td_issue = (
+                    f"Mismatched TOTALDISCS '{track_metadata.total_discs}' "
+                    f"(most common folder total discs: '{dominant_discs}')"
+                )
+                report.issues.setdefault(str(file_path), []).append(td_issue)
+                metadata_issue_paths.add(file_path)
+                try:
+                    display_name = str(file_path.relative_to(folder_path))
+                except ValueError:
+                    display_name = file_path.name
+                LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                LOG.detail(f"   ∟ {escape(td_issue)}")
+
+    year_counts: Counter[str] = Counter()
+    for _, track_metadata in tracks_in_folder:
+        raw_year = (
+            track_metadata.date[:4]
+            if track_metadata.date and re.match(r"^\d{4}", track_metadata.date)
+            else None
+        )
+        if raw_year:
+            year_counts[raw_year] += 1
+
+    if len(year_counts) > 1:
+        dominant_year, _ = year_counts.most_common(1)[0]
+        folder_issues.append(
+            f"Inconsistent release year in album folder: {set(year_counts.keys())}"
+        )
+        for file_path, track_metadata in tracks_in_folder:
+            raw_year = (
+                track_metadata.date[:4]
+                if track_metadata.date and re.match(r"^\d{4}", track_metadata.date)
+                else None
+            )
+            if raw_year and raw_year != dominant_year:
+                yr_issue = (
+                    f"Mismatched release year '{raw_year}' "
+                    f"(most common folder year: '{dominant_year}')"
+                )
+                report.issues.setdefault(str(file_path), []).append(yr_issue)
+                metadata_issue_paths.add(file_path)
+                try:
+                    display_name = str(file_path.relative_to(folder_path))
+                except ValueError:
+                    display_name = file_path.name
+                LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                LOG.detail(f"   ∟ {escape(yr_issue)}")
+
+    itunes_col_counts: Counter[str] = Counter()
+    for _, track_metadata in tracks_in_folder:
+        if track_metadata.itunes_collectionid:
+            itunes_col_counts[str(track_metadata.itunes_collectionid)] += 1
+
+    if len(itunes_col_counts) > 1:
+        dominant_cid, _ = itunes_col_counts.most_common(1)[0]
+        folder_issues.append(
+            f"Inconsistent ITUNESCOLLECTIONID in album folder: {set(itunes_col_counts.keys())}"
+        )
+        for file_path, track_metadata in tracks_in_folder:
+            if (
+                track_metadata.itunes_collectionid
+                and str(track_metadata.itunes_collectionid) != dominant_cid
+            ):
+                cid_issue = (
+                    f"Mismatched ITUNESCOLLECTIONID '{track_metadata.itunes_collectionid}' "
+                    f"(most common folder collection ID: '{dominant_cid}')"
+                )
+                report.issues.setdefault(str(file_path), []).append(cid_issue)
+                metadata_issue_paths.add(file_path)
+                try:
+                    display_name = str(file_path.relative_to(folder_path))
+                except ValueError:
+                    display_name = file_path.name
+                LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                LOG.detail(f"   ∟ {escape(cid_issue)}")
+
+    disc_totals: dict[int, Counter[int]] = defaultdict(Counter)
+    for _, track_metadata in tracks_in_folder:
+        if track_metadata.total_tracks is not None and track_metadata.total_tracks > 0:
+            disc_idx = track_metadata.disc_number or 1
+            disc_totals[disc_idx][track_metadata.total_tracks] += 1
+
+    for disc_idx, total_counts in disc_totals.items():
+        if len(total_counts) > 1:
+            dominant_total, _ = total_counts.most_common(1)[0]
+            folder_issues.append(
+                f"Inconsistent TOTALTRACKS for Disc {disc_idx} in album folder: {set(total_counts.keys())}"
+            )
+            for file_path, track_metadata in tracks_in_folder:
+                if (
+                    (track_metadata.disc_number or 1) == disc_idx
+                    and track_metadata.total_tracks is not None
+                    and track_metadata.total_tracks != dominant_total
+                ):
+                    tt_issue = (
+                        f"Mismatched TOTALTRACKS '{track_metadata.total_tracks}' "
+                        f"(most common Disc {disc_idx} total: '{dominant_total}')"
+                    )
+                    report.issues.setdefault(str(file_path), []).append(tt_issue)
+                    metadata_issue_paths.add(file_path)
+                    try:
+                        display_name = str(file_path.relative_to(folder_path))
+                    except ValueError:
+                        display_name = file_path.name
+                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+                    LOG.detail(f"   ∟ {escape(tt_issue)}")
 
     return dominant_album, dominant_artist
 
@@ -1036,6 +1242,15 @@ def _check_identifier_conflicts(
                     5.5, get_config().single_duration_tolerance_seconds
                 ),
             )
+            or (
+                _artists_agree(reference.artist, track.artist)
+                and _strip_title_variants(reference.title or "")
+                == _strip_title_variants(track.title or "")
+                and reference.duration is not None
+                and track.duration is not None
+                and abs(reference.duration - track.duration)
+                <= max(5.5, get_config().single_duration_tolerance_seconds)
+            )
             for _, track in tracks[1:]
         ):
             continue
@@ -1118,6 +1333,7 @@ def check_library(
     for folder, tracks_in_folder in folder_tracks.items():
         if get_config().is_generic_container(folder.name):
             continue
+        tracks_in_folder.sort(key=lambda item: item[0])
         folder_issues: list[str] = []
         rel_parts = folder.relative_to(folder_path).parts
         is_singles_container = any(
@@ -1133,6 +1349,15 @@ def check_library(
                 folder_issues.append(
                     f"Duplicate track number {track_idx} (Disc {disc_idx}) found in files: {found_files}"
                 )
+
+        audio_stems = {path.stem for path, _ in tracks_in_folder}
+        for companion_lrc in sorted(folder.glob("*.lrc")):
+            if companion_lrc.stem not in audio_stems:
+                orphan_issue = f"Orphan synchronized lyrics (.lrc) file has no matching audio: '{companion_lrc.name}'"
+                folder_issues.append(orphan_issue)
+                report.issues.setdefault(str(companion_lrc), []).append(orphan_issue)
+                LOG.detail(f"🔍 [bold]{escape(companion_lrc.name)}[/bold]")
+                LOG.detail(f"   ∟ {escape(orphan_issue)}")
 
         if not is_singles_container:
             dominant_album, dominant_artist = _check_folder_album_consistency(

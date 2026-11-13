@@ -473,3 +473,245 @@ class TestCheckingWorkflows(ModuleTestCase):
         self.assertTrue(is_valid_uuid(f"{uuid1} / {uuid2}", allow_multivalue=True))
         self.assertTrue(is_valid_uuid(f"{uuid1}, {uuid2}", allow_multivalue=True))
         self.assertFalse(is_valid_uuid(f"{uuid1}; invalid", allow_multivalue=True))
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_musicbrainz_albumid(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Artist - Album"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        file3 = album_dir / "03 - Track 3.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+        write_silent_wav(file3)
+
+        mbid_a = "11111111-1111-1111-1111-111111111111"
+
+        def _side_effect(path: Path) -> TrackInfo:
+            if path.name == "03 - Track 3.wav":
+                return TrackInfo(
+                    file_path=path,
+                    artist="Artist",
+                    title="Track 3",
+                    album="Album",
+                    album_artist="Artist",
+                    track_number=3,
+                    disc_number=1,
+                    musicbrainz_albumid=None,
+                )
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                musicbrainz_albumid=mbid_a,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        file3_issues = report.issues.get(str(file3), [])
+        self.assertTrue(
+            any("Missing MUSICBRAINZ_ALBUMID" in issue for issue in file3_issues)
+        )
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent MUSICBRAINZ_ALBUMID in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_total_discs(self, mock_read: MagicMock) -> None:
+        album_dir = self.tmp_path / "Artist - Album 2"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                total_discs=1 if num == 1 else 2,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent TOTALDISCS in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_release_year(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Artist - Album Years"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                date="2020-05-15" if num == 1 else "2018-01-01",
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent release year in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+        file2_issues = report.issues.get(str(file2), [])
+        self.assertTrue(
+            any("Mismatched release year" in issue for issue in file2_issues)
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_itunes_collectionid(
+        self, mock_read: MagicMock
+    ) -> None:
+        album_dir = self.tmp_path / "Artist - Album iTunes"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                itunes_collectionid="123456" if num == 1 else "987654",
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent ITUNESCOLLECTIONID in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_inconsistent_totaltracks(self, mock_read: MagicMock) -> None:
+        album_dir = self.tmp_path / "Artist - Album Totals"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        file2 = album_dir / "02 - Track 2.wav"
+        write_silent_wav(file1)
+        write_silent_wav(file2)
+
+        def _side_effect(path: Path) -> TrackInfo:
+            num = 1 if "01" in path.name else 2
+            return TrackInfo(
+                file_path=path,
+                artist="Artist",
+                title=f"Track {num}",
+                album="Album",
+                album_artist="Artist",
+                track_number=num,
+                disc_number=1,
+                total_tracks=10 if num == 1 else 4,
+            )
+
+        mock_read.side_effect = _side_effect
+        report = check_library(album_dir)
+        folder_issues = report.issues.get(str(album_dir), [])
+        self.assertTrue(
+            any(
+                "Inconsistent TOTALTRACKS for Disc 1 in album folder" in issue
+                for issue in folder_issues
+            )
+        )
+
+    @patch("sonora.modules.checker.read_track_metadata")
+    def test_check_library_orphan_lrc_files(self, mock_read: MagicMock) -> None:
+        album_dir = self.tmp_path / "Artist - Album Orphans"
+        album_dir.mkdir(parents=True, exist_ok=True)
+        file1 = album_dir / "01 - Track 1.wav"
+        write_silent_wav(file1)
+        (album_dir / "01 - Track 1.lrc").write_text("[00:01.00]Valid lyrics")
+        orphan_lrc = album_dir / "02 - Old Track.lrc"
+        orphan_lrc.write_text("[00:01.00]Old lyrics")
+
+        mock_read.return_value = TrackInfo(
+            file_path=file1,
+            artist="Artist",
+            title="Track 1",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            disc_number=1,
+        )
+        report = check_library(album_dir)
+        orphan_issues = report.issues.get(str(orphan_lrc), [])
+        self.assertTrue(
+            any(
+                "Orphan synchronized lyrics (.lrc) file has no matching audio" in issue
+                for issue in orphan_issues
+            )
+        )
+
+    def test_check_file_non_chronological_lyrics(self) -> None:
+        wav_path = self.tmp_path / "01 - Track.wav"
+        write_silent_wav(wav_path)
+        lrc_path = self.tmp_path / "01 - Track.lrc"
+        lrc_path.write_text(
+            "[00:05.00]Line 1\n[00:07.00]Line 2\n[00:06.50]Line 3 out of order\n"
+        )
+        track = TrackInfo(
+            file_path=wav_path,
+            artist="Artist",
+            title="Track",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            disc_number=1,
+            duration=30.0,
+        )
+        issues = check_file(wav_path, track_metadata=track)
+        self.assertTrue(
+            any(
+                "Non-chronological timestamps in synchronized lyrics" in issue
+                for issue in issues
+            )
+        )
