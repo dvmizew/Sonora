@@ -2589,6 +2589,64 @@ class TestCatalogMetadataContracts(IsolatedTestCase):
         self.assertEqual(recording.isrc, "UKZGC2506039")
         self.assertIn("isrc", recording.metadata_conflicts)
 
+    def test_deezer_accepts_isrc_with_streaming_padding_tolerance(self) -> None:
+        recording = TrackInfo(
+            Path("Hollywood Whore.flac"),
+            artist="mgk",
+            title="Hollywood Whore",
+            isrc="USUM71908855",
+            duration=203.175,
+        )
+        deezer_candidate = {
+            "artist": "mgk",
+            "title": "Hollywood Whore",
+            "duration": 206.0,
+            "isrc": "USUM71908855",
+            "explicit_lyrics": True,
+            "producers": "Cooks Classics, Jake Troth",
+        }
+        with patch.object(
+            deezer_service,
+            "fetch_deezer_track_by_isrc",
+            return_value=deezer_candidate,
+        ):
+            catalog._update_deezer(recording, None, has_album_context=True)
+        self.assertEqual(recording.isrc, "USUM71908855")
+        self.assertNotIn("isrc", recording.metadata_conflicts)
+        self.assertEqual(recording.advisory, "Explicit")
+        self.assertEqual(recording.producers, "Cooks Classics, Jake Troth")
+
+    def test_deezer_album_mapping_matches_with_streaming_duration_padding(self) -> None:
+        album = {
+            "title": "Hotel Diablo: Floor 13 Edition",
+            "tracks_by_disc_and_position": {
+                (1, 3): {
+                    "artist": "mgk",
+                    "title": "Hollywood Whore",
+                    "duration": 206.0,
+                    "isrc": "USUM71908855",
+                    "track_position": 3,
+                    "disk_number": 1,
+                }
+            },
+            "tracks_by_title": {},
+        }
+        matched, from_album = matching._find_track_in_album_mapping(
+            album["tracks_by_title"],
+            album["tracks_by_disc_and_position"],
+            "Hollywood Whore",
+            3,
+            disc_number=1,
+            artist="mgk",
+            isrc="USUM71908855",
+            duration=203.175,
+            duration_tolerance=8.0,
+        )
+        self.assertTrue(from_album)
+        self.assertIsNotNone(matched)
+        assert matched is not None
+        self.assertEqual(matched.get("title"), "Hollywood Whore")
+
     def test_clean_title_index_matches_without_a_position(self) -> None:
         recording = {"title": "Recording"}
         self.assertEqual(

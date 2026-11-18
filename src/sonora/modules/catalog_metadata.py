@@ -168,6 +168,7 @@ def _update_itunes(
     force: bool = False,
 ) -> None:
     try:
+        provider_tolerance = max(8.0, get_config().single_duration_tolerance_seconds)
         api_payload: dict[str, Any] | None = None
         is_album_match = False
         if album_itunes_details:
@@ -181,6 +182,7 @@ def _update_itunes(
                 isrc=track_info.isrc,
                 itunes_trackid=track_info.itunes_trackid,
                 duration=track_info.duration,
+                duration_tolerance=provider_tolerance,
             )
 
         if (
@@ -203,6 +205,7 @@ def _update_itunes(
                     str(stored_recording.get("title") or ""),
                     expected_duration=track_info.duration,
                     candidate_duration=safe_float(stored_recording.get("duration")),
+                    duration_tolerance=provider_tolerance,
                 )
             ):
                 if (
@@ -220,6 +223,7 @@ def _update_itunes(
                         track_info.title,
                         expected_duration=track_info.duration,
                         candidate_duration=stored_duration,
+                        duration_tolerance=provider_tolerance,
                     )
                 ):
                     track_info.metadata_conflicts["itunes_trackid"] = (
@@ -283,6 +287,7 @@ def _update_itunes(
                     track_info.isrc,
                     None,
                     track_info.duration,
+                    duration_tolerance=provider_tolerance,
                 )
             ):
                 api_payload = explicit_recording
@@ -302,6 +307,7 @@ def _update_itunes(
             track_info.isrc,
             None if replacing_clean_itunes_id else track_info.itunes_trackid,
             track_info.duration,
+            duration_tolerance=provider_tolerance,
         ):
             LOG.detail(
                 f"Rejecting conflicting iTunes metadata for {escape(track_info.artist)} - {escape(track_info.title)}"
@@ -567,6 +573,9 @@ def _update_discogs(
                     None,
                     None,
                     track_info.duration,
+                    duration_tolerance=max(
+                        5.0, get_config().single_duration_tolerance_seconds
+                    ),
                 ):
                     specific = candidate_credits
                     break
@@ -687,6 +696,7 @@ def _update_deezer(
                     track_info.album, clean_unicode_punct(str(album["title"]))
                 )
 
+        provider_tolerance = max(8.0, get_config().single_duration_tolerance_seconds)
         track: dict[str, Any] | None = None
         track_is_from_album = False
         conflicting_isrc = False
@@ -700,6 +710,7 @@ def _update_deezer(
                 artist=track_info.artist,
                 isrc=track_info.isrc,
                 duration=track_info.duration,
+                duration_tolerance=provider_tolerance,
             )
 
         if not track and track_info.isrc:
@@ -711,6 +722,7 @@ def _update_deezer(
                 str(candidate.get("title") or ""),
                 expected_duration=track_info.duration,
                 candidate_duration=safe_float(candidate.get("duration")),
+                duration_tolerance=provider_tolerance,
             ):
                 track = candidate
             elif candidate:
@@ -739,6 +751,7 @@ def _update_deezer(
             track_info.isrc,
             None,
             track_info.duration,
+            duration_tolerance=provider_tolerance,
         ):
             return
 

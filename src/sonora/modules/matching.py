@@ -848,13 +848,19 @@ def _catalog_recording_matches_track(
     isrc: str | None,
     itunes_trackid: str | None,
     duration: float | None = None,
+    *,
+    duration_tolerance: float | None = None,
 ) -> bool:
     candidate_duration = safe_float(recording.get("duration"))
+    tolerance = (
+        duration_tolerance
+        if duration_tolerance is not None
+        else get_config().single_duration_tolerance_seconds
+    )
     if (
         duration is not None
         and candidate_duration is not None
-        and abs(duration - candidate_duration)
-        > get_config().single_duration_tolerance_seconds
+        and abs(duration - candidate_duration) > tolerance
     ):
         return False
     matched_identifier = False
@@ -889,6 +895,7 @@ def _catalog_recording_matches_track(
                 str(candidate_title),
                 expected_duration=duration,
                 candidate_duration=candidate_duration,
+                duration_tolerance=tolerance,
             )
         )
     return _is_strong_track_match(
@@ -910,6 +917,7 @@ def _find_track_in_album_mapping(
     isrc: str | None = None,
     itunes_trackid: str | None = None,
     duration: float | None = None,
+    duration_tolerance: float | None = None,
 ) -> tuple[dict[str, Any] | None, bool]:
     candidates: list[object] = []
     if isinstance(tracks_by_disc_and_position, dict) and track_number is not None:
@@ -937,7 +945,13 @@ def _find_track_in_album_mapping(
         recording = require_api_object(candidate, "Album recording")
         # Position is an edition-specific hint; it must not import another song's fields.
         if _catalog_recording_matches_track(
-            recording, title, artist, isrc, itunes_trackid, duration
+            recording,
+            title,
+            artist,
+            isrc,
+            itunes_trackid,
+            duration,
+            duration_tolerance=duration_tolerance,
         ):
             return recording, True
     return None, False
