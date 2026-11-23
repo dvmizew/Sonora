@@ -26,4 +26,11 @@ def find_companion_cuesheet(folder: Path) -> Path | None:
     """Find the primary .cue sheet file in a directory if present."""
     if not folder.is_dir():
         return None
-    return min(folder.glob("*.cue"), default=None)
+    return next(
+        (
+            path
+            for path in sorted(folder.iterdir())
+            if path.is_file() and path.suffix.lower() == ".cue"
+        ),
+        None,
+    )

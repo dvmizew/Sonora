@@ -6,6 +6,7 @@ import soundfile
 from numpy.typing import NDArray
 
 from sonora.audio.decode import load_audio
+from sonora.audio.metadata import get_audio_duration
 from sonora.core.logger import LOG
 
 
@@ -140,7 +141,17 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
             audio_data = None
 
         if audio_data is None:
-            loaded_audio = load_audio(file_path, max_seconds=20.0, offset_seconds=30.0)
+            duration_seconds = get_audio_duration(file_path) or 0.0
+            first_offset = (
+                min(45.0, duration_seconds * 0.30)
+                if duration_seconds > 60.0
+                else max(0.0, (duration_seconds - 20.0) / 2.0)
+                if duration_seconds > 0.0
+                else 30.0
+            )
+            loaded_audio = load_audio(
+                file_path, max_seconds=20.0, offset_seconds=first_offset
+            )
             if loaded_audio is not None and len(loaded_audio[0]) < loaded_audio[1] * 5:
                 loaded_audio = load_audio(
                     file_path, max_seconds=20.0, offset_seconds=0.0
@@ -160,6 +171,8 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
         # sample a second window (65% in) to avoid false alarms on acoustic intros or breakdowns.
         if is_fake and duration_seconds > 60.0:
             second_offset = duration_seconds * 0.65
+            second_samples: NDArray[np.float32] | None = None
+            second_sample_rate = sample_rate
             try:
                 with soundfile.SoundFile(str(file_path)) as audio_file:
                     audio_file.seek(int(sample_rate * second_offset))
@@ -171,16 +184,26 @@ def detect_fake_lossless(file_path: Path) -> tuple[bool, float, str | None]:
                             always_2d=True,
                         ),
                     )
-                    if len(second_samples) >= sample_rate * 5:
-                        is_second_fake, second_cutoff, _ = _analyze_audio_spectrum(
-                            second_samples, sample_rate
-                        )
-                        # If the second window has authentic full bandwidth, suppress the false alarm
-                        if not is_second_fake:
-                            return False, 0.0, None
-                        return True, max(detected_cutoff, second_cutoff), description
             except (soundfile.LibsndfileError, OSError):
-                pass
+                loaded_second = load_audio(
+                    file_path, max_seconds=20.0, offset_seconds=second_offset
+                )
+                if loaded_second is not None:
+                    second_samples, second_sample_rate = loaded_second
+
+            if (
+                second_samples is not None
+                and len(second_samples) >= second_sample_rate * 5
+            ):
+                is_second_fake, second_cutoff, second_description = (
+                    _analyze_audio_spectrum(second_samples, second_sample_rate)
+                )
+                # If the second window has authentic full bandwidth, suppress the false alarm
+                if not is_second_fake:
+                    return False, 0.0, None
+                if second_cutoff > detected_cutoff:
+                    return True, second_cutoff, second_description
+                return True, detected_cutoff, description
 
         return is_fake, detected_cutoff, description
 

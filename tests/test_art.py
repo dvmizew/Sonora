@@ -203,6 +203,39 @@ class TestArtistArtwork(IsolatedTestCase):
         found = _find_artist_directory(folder, "Unknown Artist")
         self.assertEqual(found.resolve(), folder.resolve())
 
+    def test_find_artist_directory_self_titled_album_prefers_artist_root(self) -> None:
+        artist_dir = self.test_directory / "Metallica"
+        album_dir = artist_dir / "Metallica"
+        disc_dir = album_dir / "CD1"
+        disc_dir.mkdir(parents=True)
+
+        self.assertEqual(
+            _find_artist_directory(album_dir, "Metallica").resolve(),
+            artist_dir.resolve(),
+        )
+        self.assertEqual(
+            _find_artist_directory(disc_dir, "Metallica").resolve(),
+            artist_dir.resolve(),
+        )
+
+    def test_repair_artist_image_copies_handles_readonly_and_oserror(self) -> None:
+        artist_dir = self.test_directory / "Metallica"
+        album_dir = artist_dir / "Master of Puppets"
+        album_dir.mkdir(parents=True)
+        (artist_dir / "artist.jpg").write_bytes(image_bytes())
+        corrupt_copy = album_dir / "artist.jpg"
+        corrupt_copy.write_bytes(b"corrupt")
+
+        with patch.object(os, "access", return_value=False):
+            art._repair_artist_image_copies(album_dir, artist_dir, dry_run=False)
+        self.assertEqual(corrupt_copy.read_bytes(), b"corrupt")
+
+        with patch.object(
+            art, "atomic_write_bytes", side_effect=PermissionError("read-only")
+        ):
+            art._repair_artist_image_copies(album_dir, artist_dir, dry_run=False)
+        self.assertEqual(corrupt_copy.read_bytes(), b"corrupt")
+
     def test_fanart_artist_downloads_complete_assets_and_skips_fallback(self) -> None:
         assets = fanart.FanartArtistArtwork(
             logo_urls=("logo",), background_urls=("background",), thumb_urls=("thumb",)

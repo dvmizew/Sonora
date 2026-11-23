@@ -50,6 +50,9 @@ def _save_image(destination: Path, payload: bytes | None) -> bool:
 def _repair_artist_image_copies(
     folder: Path, artist_dir: Path, *, dry_run: bool
 ) -> None:
+    if not dry_run and not os.access(folder, os.W_OK):
+        LOG.debug(f"Folder is read-only, skipping artist artwork repair: {folder}")
+        return
     for filenames in (
         ("artist.jpg", "artist.png", "folder.jpg"),
         ("banner.jpg", "banner.png", "fanart.jpg"),
@@ -74,7 +77,12 @@ def _repair_artist_image_copies(
                 if dry_run:
                     LOG.detail(f"[DRY-RUN] Would replace invalid artwork: {target}")
                 else:
-                    atomic_write_bytes(target, replacement.read_bytes())
+                    try:
+                        atomic_write_bytes(target, replacement.read_bytes())
+                    except OSError as error:
+                        LOG.debug(
+                            f"Failed to repair artist artwork copy {target}: {error}"
+                        )
 
 
 def _fetch_candidate_artwork(
@@ -246,18 +254,20 @@ def _find_artist_directory(folder_path: Path, artist_name: str) -> Path:
             break
         current = current.parent
 
-    for cand in candidates:
+    # Walk from highest ancestor downward so self-titled albums (Artist/Artist) pick the artist root.
+    for cand in reversed(candidates):
         if normalize_str(cand.name) == clean_artist:
             return cand
 
-    for cand in candidates:
+    config = get_config()
+    for cand in reversed(candidates):
+        norm_name = normalize_str(cand.name)
         if (
-            not get_config().is_generic_container(cand.name)
-            and not get_config().is_disc_folder(cand.name)
+            not config.is_generic_container(cand.name)
+            and not config.is_disc_folder(cand.name)
             and (
-                clean_artist in normalize_str(cand.name)
-                or fuzz.ratio(clean_artist, normalize_str(cand.name))
-                >= get_config().artist_match_threshold
+                clean_artist in norm_name
+                or fuzz.ratio(clean_artist, norm_name) >= config.artist_match_threshold
             )
         ):
             return cand

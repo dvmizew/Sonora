@@ -1,6 +1,6 @@
 import functools
 import re
-from math import gcd
+from math import ceil, gcd
 from pathlib import Path
 
 import numpy as np
@@ -250,6 +250,14 @@ def detect_key_from_chroma(
     return best_key, camelot, round(best_score, 3)
 
 
+def _has_enough_key_samples(sample_count: int, sample_rate: int) -> bool:
+    """Require at least one 4096-sample FFT window after resampling to 22,050 Hz."""
+    if sample_rate <= 0:
+        return False
+    min_samples = ceil(4096 * sample_rate / 22050) if sample_rate > 22050 else 4096
+    return sample_count >= min_samples
+
+
 def detect_key_details(
     file_path: Path,
     audio_data: tuple[NDArray[np.float32], int] | None = None,
@@ -266,7 +274,7 @@ def detect_key_details(
             loaded = load_audio(
                 file_path, mono=True, max_seconds=60.0, offset_seconds=10.0
             )
-            if loaded is None or len(loaded[0]) < 4096:
+            if loaded is None or not _has_enough_key_samples(len(loaded[0]), loaded[1]):
                 # Short tracks need the beginning for enough analysis samples.
                 loaded = load_audio(
                     file_path, mono=True, max_seconds=60.0, offset_seconds=0.0
@@ -275,7 +283,7 @@ def detect_key_details(
             audio_mono, sample_rate = audio_data
             offset = int(sample_rate * 10)
             key_audio = audio_mono[offset : offset + int(sample_rate * 60)]
-            if len(key_audio) < 4096:
+            if not _has_enough_key_samples(len(key_audio), sample_rate):
                 key_audio = audio_mono[: int(sample_rate * 60)]
             loaded = key_audio, sample_rate
 

@@ -4,6 +4,7 @@ BPM detection, musical key / Camelot wheel tonality, ReplayGain loudness, and sp
 """
 
 import dataclasses
+import subprocess
 import wave
 from pathlib import Path
 from unittest.mock import Mock, call, patch
@@ -12,6 +13,7 @@ import numpy as np
 import soundfile
 
 from sonora.audio import bpm, key, replaygain, spectral
+from sonora.audio.decode import load_audio
 from sonora.audio.key import (
     detect_key_details,
     detect_musical_key,
@@ -250,6 +252,25 @@ class TestMusicalKeyDetection(IsolatedTestCase):
         detected_key = detect_musical_key(a_minor_wav)
         self.assertEqual(detected_key, "Am")
 
+    def test_detect_key_just_over_ten_seconds_at_44100_falls_back(self) -> None:
+        wav_path = self.test_directory / "ten_point_twelve.wav"
+        create_chord_wav(
+            wav_path,
+            [261.63, 329.63, 392.00],
+            duration=10.12,
+            sample_rate=44100,
+        )
+        details = detect_key_details(wav_path)
+        assert details is not None
+        self.assertEqual(details[0], "C")
+
+        # Also verify the pre-decoded audio_data path at 44.1 kHz.
+        loaded = load_audio(wav_path, mono=True)
+        assert loaded is not None
+        preloaded_details = detect_key_details(wav_path, audio_data=loaded)
+        assert preloaded_details is not None
+        self.assertEqual(preloaded_details[0], "C")
+
 
 class TestReplayGain(IsolatedTestCase):
     def setUp(self) -> None:
@@ -314,6 +335,42 @@ class TestReplayGain(IsolatedTestCase):
             executor_factory.call_args_list,
             [call(max_workers=4), call(max_workers=4)],
         )
+
+    def test_mono_flac_and_mono_alac_replaygain_peaks_match(self) -> None:
+        sample_rate = 44100
+        time_axis = np.linspace(0, 1.0, sample_rate, endpoint=False)
+        mono_signal = (np.sin(2 * np.pi * 440.0 * time_axis) * 0.8).astype(np.float32)
+
+        flac_path = self.test_directory / "mono.flac"
+        alac_path = self.test_directory / "mono.m4a"
+        soundfile.write(flac_path, mono_signal, sample_rate)
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(flac_path),
+                "-c:a",
+                "alac",
+                str(alac_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        alac_loaded = load_audio(alac_path, mono=False)
+        assert alac_loaded is not None
+        self.assertEqual(alac_loaded[0].ndim, 2)
+        self.assertEqual(alac_loaded[0].shape[1], 1)
+
+        flac_m = replaygain._measure_track_loudness(flac_path)
+        alac_m = replaygain._measure_track_loudness(alac_path)
+        assert flac_m is not None
+        assert alac_m is not None
+        self.assertAlmostEqual(flac_m.track_peak, alac_m.track_peak, places=4)
+        self.assertAlmostEqual(flac_m.track_gain, alac_m.track_gain, places=2)
 
 
 class TestSpectralAnalysis(IsolatedTestCase):
@@ -392,3 +449,63 @@ class TestSpectralAnalysis(IsolatedTestCase):
     def test_detect_fake_lossless_nonexistent_file(self) -> None:
         with self.assertRaises(FileNotFoundError):
             detect_fake_lossless(self.test_directory / "nonexistent.flac")
+
+    def test_ffmpeg_fallback_runs_second_window_verification(self) -> None:
+        alac_path = self.test_directory / "long_alac.m4a"
+        alac_path.write_bytes(b"alac placeholder")
+        window = np.ones((44100 * 6, 2), dtype=np.float32)
+
+        with (
+            patch("soundfile.SoundFile", side_effect=OSError("unsupported")),
+            patch.object(spectral, "get_audio_duration", return_value=120.0),
+            patch.object(
+                spectral,
+                "load_audio",
+                side_effect=[(window, 44100), (window, 44100)],
+            ) as mock_load,
+            patch.object(
+                spectral,
+                "_analyze_audio_spectrum",
+                side_effect=[
+                    (True, 16.0, "Sharp spectral cutoff near 16.0 kHz"),
+                    (False, 0.0, None),
+                ],
+            ),
+        ):
+            is_fake, cutoff, description = detect_fake_lossless(alac_path)
+
+        self.assertFalse(is_fake)
+        self.assertEqual(cutoff, 0.0)
+        self.assertIsNone(description)
+        self.assertEqual(mock_load.call_count, 2)
+        self.assertAlmostEqual(
+            mock_load.call_args_list[1].kwargs["offset_seconds"], 120.0 * 0.65
+        )
+
+    def test_second_window_higher_cutoff_updates_description(self) -> None:
+        alac_path = self.test_directory / "two_cutoffs.m4a"
+        alac_path.write_bytes(b"alac placeholder")
+        window = np.ones((44100 * 6, 2), dtype=np.float32)
+
+        with (
+            patch("soundfile.SoundFile", side_effect=OSError("unsupported")),
+            patch.object(spectral, "get_audio_duration", return_value=120.0),
+            patch.object(
+                spectral,
+                "load_audio",
+                side_effect=[(window, 44100), (window, 44100)],
+            ),
+            patch.object(
+                spectral,
+                "_analyze_audio_spectrum",
+                side_effect=[
+                    (True, 15.0, "Sharp spectral cutoff near 15.0 kHz; review."),
+                    (True, 17.5, "Sharp spectral cutoff near 17.5 kHz; review."),
+                ],
+            ),
+        ):
+            is_fake, cutoff, description = detect_fake_lossless(alac_path)
+
+        self.assertTrue(is_fake)
+        self.assertEqual(cutoff, 17.5)
+        self.assertEqual(description, "Sharp spectral cutoff near 17.5 kHz; review.")

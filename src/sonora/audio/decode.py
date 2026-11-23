@@ -1,12 +1,55 @@
+import shutil
 import subprocess
 from pathlib import Path
 from typing import cast
 
+import mutagen
 import numpy as np
 import soundfile
+from mutagen import MutagenError
 from numpy.typing import NDArray
 
 from sonora.core.logger import LOG
+
+
+def _probe_channels(file_path: Path) -> int:
+    """Return native audio channel count for FFmpeg decoding, defaulting to stereo."""
+    try:
+        audio = mutagen.File(file_path)
+        channels = getattr(getattr(audio, "info", None), "channels", None)
+        if isinstance(channels, int) and channels > 0:
+            return channels
+    except (MutagenError, OSError):
+        pass
+
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        try:
+            probe_command = [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=channels",
+                "-of",
+                "default=nw=1:nk=1",
+                str(file_path),
+            ]
+            probe = subprocess.run(
+                probe_command,
+                capture_output=True,
+                check=True,
+                timeout=5.0,
+            )
+            raw = probe.stdout.decode("ascii", errors="ignore").strip()
+            if raw.isdigit() and int(raw) > 0:
+                return int(raw)
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+    return 2
 
 
 def load_audio(
@@ -45,6 +88,7 @@ def load_audio(
         LOG.debug(f"soundfile decode failed for {file_path}: {error}")
 
     try:
+        channels = 1 if mono else _probe_channels(file_path)
         command = [
             "ffmpeg",
             *(["-ss", str(offset_seconds)] if offset_seconds > 0 else []),
@@ -56,7 +100,7 @@ def load_audio(
             "-ar",
             "44100",
             "-ac",
-            "1" if mono else "2",
+            str(channels),
             "-v",
             "quiet",
             "-",
@@ -64,9 +108,11 @@ def load_audio(
         result = subprocess.run(command, capture_output=True, check=True, timeout=15.0)
         if result.stdout:
             buffer_data = np.frombuffer(result.stdout, dtype=np.float32)
-            audio_array: NDArray[np.float32] = (
-                buffer_data.reshape(-1, 2) if not mono else buffer_data
-            )
+            if mono:
+                audio_array: NDArray[np.float32] = buffer_data
+            else:
+                usable_samples = (len(buffer_data) // channels) * channels
+                audio_array = buffer_data[:usable_samples].reshape(-1, channels)
             return audio_array, 44100
     except (subprocess.SubprocessError, OSError) as error:
         LOG.debug(f"ffmpeg decode failed for {file_path}: {error}")

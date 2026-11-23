@@ -7,6 +7,7 @@ from typing import Any
 
 import taglib
 from mutagen import MutagenError
+from mutagen.asf import ASF
 from mutagen.flac import FLAC
 from mutagen.mp4 import MP4
 from mutagen.wave import WAVE
@@ -119,6 +120,88 @@ _TAG_SCHEMA: dict[str, tuple[str, ...]] = {
     "disc_subtitle": ("DISCSUBTITLE", "TSST", "SETSUBTITLE"),
 }
 
+# TagLib's ASF writer persists the canonical field (DATE, ORIGINALDATE, LYRICS, DISCSUBTITLE,
+# TRACKNUMBER/DISCNUMBER); these duplicate aliases are rejected by TagLib's ASF property map.
+_WMA_REDUNDANT_ALIASES: frozenset[str] = frozenset(
+    {
+        "YEAR",
+        "ORIGINALYEAR",
+        "UNSYNCEDLYRICS",
+        "TSST",
+        "SETSUBTITLE",
+        "TOTALTRACKS",
+        "TOTALDISCS",
+    }
+)
+_WMA_MANAGED_EXTRA_KEYS: frozenset[str] = frozenset(
+    {
+        *(key for keys in _TAG_SCHEMA.values() for key in keys),
+        "ALBUMARTISTS",
+        "TRACKTOTAL",
+        "TOTALTRACKS",
+        "DISCTOTAL",
+        "TOTALDISCS",
+        "YEAR",
+        "ORIGINALYEAR",
+        "RATING",
+        "COMPILATION",
+        "REPLAYGAIN_TRACK_GAIN",
+        "REPLAYGAIN_TRACK_PEAK",
+        "REPLAYGAIN_ALBUM_GAIN",
+        "REPLAYGAIN_ALBUM_PEAK",
+    }
+)
+_ASF_NATIVE_HEADER_KEYS: frozenset[str] = frozenset(
+    {"Title", "Author", "Copyright", "Description", "Rating"}
+)
+
+
+def _read_wma_extra_tags(file_path: Path, tags: dict[str, list[str]]) -> None:
+    """Merge custom ASF attributes not exposed by TagLib's fixed ASF property map."""
+    try:
+        asf_audio = ASF(file_path)
+    except (MutagenError, OSError):
+        return
+    if not asf_audio.tags:
+        return
+    for key, raw_values in asf_audio.tags.items():
+        if key in _ASF_NATIVE_HEADER_KEYS or key.startswith("WM/"):
+            continue
+        upper_key = key.upper()
+        if upper_key in tags:
+            continue
+        values = [
+            str(value).strip()
+            for value in raw_values
+            if not isinstance(getattr(value, "value", value), bytes)
+            and str(value).strip()
+        ]
+        if values:
+            tags[upper_key] = values
+
+
+def _write_wma_extra_tags(
+    file_path: Path,
+    extra_tags: dict[str, list[str]],
+    saved_keys: set[str],
+    *,
+    lyrics_only: bool,
+) -> None:
+    """Persist ASF custom attributes rejected by TagLib and purge cleared managed keys."""
+    asf_audio = ASF(file_path)
+    if asf_audio.tags is None:
+        asf_audio.add_tags()
+    asf_tags = asf_audio.tags
+    if asf_tags is None:
+        return
+    if not lyrics_only:
+        for key in _WMA_MANAGED_EXTRA_KEYS:
+            if key not in extra_tags and key not in saved_keys and key in asf_tags:
+                del asf_tags[key]
+    for key, values in extra_tags.items():
+        asf_tags[key] = list(values)
+    asf_audio.save()
+
 
 def _get_tag(tags: dict[str, list[str]], *keys: str) -> str | None:
     for key in keys:
@@ -137,7 +220,7 @@ def _read_advisory(
         # TagLib's property map does not expose the native MP4 content-rating atom.
         rating = (mp4_audio if mp4_audio is not None else MP4(file_path)).get("rtng")
         if rating is not None:
-            advisory = "Explicit" if rating == [4] else None
+            advisory = "Explicit" if rating in ([1], [4]) else None
         return advisory, bool(existing) or rating != ([4] if advisory else None)
     expected = {"ITUNESADVISORY": ["1"], "ADVISORY": ["Explicit"]} if advisory else {}
     return advisory, existing != expected
@@ -239,10 +322,11 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
 
     try:
         with taglib.File(str(file_path)) as song:
-            tags = song.tags
-            mp4_audio = (
-                MP4(file_path) if file_path.suffix.lower() in {".m4a", ".mp4"} else None
-            )
+            tags = dict(song.tags)
+            suffix = file_path.suffix.lower()
+            if suffix == ".wma":
+                _read_wma_extra_tags(file_path, tags)
+            mp4_audio = MP4(file_path) if suffix in {".m4a", ".mp4"} else None
 
             artist = _get_tag(tags, "ARTIST", "TPE1", "AUTHOR") or "Unknown Artist"
             title = _get_tag(tags, "TITLE", "TIT2") or "Unknown Title"
@@ -456,7 +540,7 @@ def read_track_metadata(file_path: Path) -> TrackInfo:
             return track_info
     except FileNotFoundError:
         raise
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, MutagenError) as error:
         raise OSError(f"Failed to read metadata for {file_path}: {error}") from error
 
 
@@ -531,7 +615,7 @@ def _write_numbering_and_dates(
         )
         if (
             unresolved
-            and number == stored_number
+            and (stored_number is None or number == stored_number)
             and total == stored_total
             and not any(
                 key in track_info.metadata_sources
@@ -705,14 +789,18 @@ def write_track_metadata(
         )
 
     try:
+        suffix = track_info.file_path.suffix.lower()
+        is_wma = suffix == ".wma"
         with atomic_audio_edit(track_info.file_path) as staging_path:
+            wma_extra_tags: dict[str, list[str]] = {}
+            saved_tag_keys: set[str] = set()
             with taglib.File(str(staging_path)) as song:
                 original_tags = {key: list(values) for key, values in song.tags.items()}
                 _write_artist_tags(song.tags, track_info)
                 _write_numbering_and_dates(song.tags, track_info)
                 _write_audio_properties_tags(song.tags, track_info)
                 _write_schema_tags(song.tags, track_info)
-                if track_info.file_path.suffix.lower() in {".m4a", ".mp4"}:
+                if suffix in {".m4a", ".mp4"}:
                     for key in _TAG_SCHEMA["advisory"]:
                         song.tags.pop(key, None)
                 _preserve_unchanged_multivalues(original_tags, song.tags)
@@ -728,6 +816,17 @@ def write_track_metadata(
                     for key in _TAG_SCHEMA["lyrics"]:
                         song.tags.pop(key, None)
                     song.tags.update(lyrics_tags)
+
+                if is_wma:
+                    for key in _WMA_REDUNDANT_ALIASES:
+                        song.tags.pop(key, None)
+                    for number_tag, total_tag in (
+                        ("TRACKNUMBER", "TRACKTOTAL"),
+                        ("DISCNUMBER", "DISCTOTAL"),
+                    ):
+                        values = song.tags.get(number_tag)
+                        if values and "/" in values[0]:
+                            song.tags.pop(total_tag, None)
 
                 if not lyrics_only and cover_art_path and cover_art_path.exists():
                     cover_bytes = cover_art_path.read_bytes()
@@ -783,14 +882,23 @@ def write_track_metadata(
                         ]
 
                 unsaved = song.save()
-                if unsaved:
+                if unsaved and not is_wma:
                     raise OSError(
                         f"Unsupported tags for {track_info.file_path}: {', '.join(unsaved)}"
                     )
-            if not lyrics_only and track_info.file_path.suffix.lower() in {
-                ".m4a",
-                ".mp4",
-            }:
+                if is_wma:
+                    wma_extra_tags = {
+                        key: list(values) for key, values in unsaved.items()
+                    }
+                    saved_tag_keys = set(song.tags) - set(unsaved)
+            if is_wma:
+                _write_wma_extra_tags(
+                    staging_path,
+                    wma_extra_tags,
+                    saved_tag_keys,
+                    lyrics_only=lyrics_only,
+                )
+            if not lyrics_only and suffix in {".m4a", ".mp4"}:
                 _write_mp4_advisory(staging_path, track_info.advisory)
         if not lyrics_only:
             track_info._advisory_needs_normalization = False

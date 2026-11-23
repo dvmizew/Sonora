@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import soundfile
+import taglib
+from mutagen import MutagenError
+from mutagen.mp4 import MP4
 
 from sonora.audio.checksum import verify_flac_checksum
 from sonora.audio.cuesheet import find_companion_cuesheet, read_cuesheet_content
@@ -466,6 +469,177 @@ class TestTrackMetadataIO(IsolatedTestCase):
         track_info_with_feat = read_track_metadata(flac_path)
         self.assertEqual(track_info_with_feat.featured_artists, "Future")
 
+    def test_wma_write_and_roundtrip_standard_and_custom_tags(self) -> None:
+        wma_path = self.test_directory / "track.wma"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=1",
+                "-c:a",
+                "wmav2",
+                str(wma_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        written = TrackInfo(
+            file_path=wma_path,
+            artist="Primary Artist",
+            album_artist="Primary Artist",
+            title="WMA Song",
+            album="WMA Album",
+            track_number=3,
+            total_tracks=12,
+            disc_number=1,
+            total_discs=2,
+            date="2024-05-01",
+            original_date="2023-11-15",
+            genre="Electronic",
+            bpm=128.0,
+            rating=4.5,
+            compilation=True,
+            advisory="Explicit",
+            lyrics="Line one\nLine two",
+            disc_subtitle="Disc One",
+            featured_artists="Guest Artist",
+            replaygain_track_gain=-4.25,
+            replaygain_track_peak=0.951234,
+        )
+        write_track_metadata(written)
+
+        loaded = read_track_metadata(wma_path)
+        self.assertEqual(loaded.artist, "Primary Artist")
+        self.assertEqual(loaded.title, "WMA Song")
+        self.assertEqual(loaded.album, "WMA Album")
+        self.assertEqual(loaded.track_number, 3)
+        self.assertEqual(loaded.total_tracks, 12)
+        self.assertEqual(loaded.disc_number, 1)
+        self.assertEqual(loaded.total_discs, 2)
+        self.assertEqual(loaded.date, "2024-05-01")
+        self.assertEqual(loaded.original_date, "2023-11-15")
+        self.assertEqual(loaded.genre, "Electronic")
+        self.assertEqual(loaded.bpm, 128.0)
+        self.assertEqual(loaded.rating, 4.5)
+        self.assertTrue(loaded.compilation)
+        self.assertEqual(loaded.advisory, "Explicit")
+        self.assertFalse(loaded._advisory_needs_normalization)
+        self.assertEqual(loaded.lyrics, "Line one\nLine two")
+        self.assertEqual(loaded.disc_subtitle, "Disc One")
+        self.assertEqual(loaded.featured_artists, "Guest Artist")
+        self.assertEqual(loaded.replaygain_track_gain, -4.25)
+        self.assertEqual(loaded.replaygain_track_peak, 0.951234)
+
+        # Lyrics-only update must preserve custom ASF attributes like ReplayGain.
+        loaded.lyrics = "Updated lyrics"
+        write_track_metadata(loaded, lyrics_only=True)
+        after_lyrics = read_track_metadata(wma_path)
+        self.assertEqual(after_lyrics.lyrics, "Updated lyrics")
+        self.assertEqual(after_lyrics.replaygain_track_gain, -4.25)
+        self.assertEqual(after_lyrics.advisory, "Explicit")
+
+        # Clearing custom ASF tags must remove them cleanly.
+        after_lyrics.advisory = None
+        after_lyrics.replaygain_track_gain = None
+        after_lyrics.replaygain_track_peak = None
+        write_track_metadata(after_lyrics)
+        cleared = read_track_metadata(wma_path)
+        self.assertIsNone(cleared.advisory)
+        self.assertIsNone(cleared.replaygain_track_gain)
+        self.assertIsNone(cleared.replaygain_track_peak)
+
+    def test_mp4_explicit_rating_one_preserved_and_normalized_idempotently(
+        self,
+    ) -> None:
+        m4a_path = self.test_directory / "explicit.m4a"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(self.dummy_audio_path),
+                "-c:a",
+                "aac",
+                str(m4a_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        mp4 = MP4(m4a_path)
+        mp4["rtng"] = [1]
+        mp4.save()
+
+        info = read_track_metadata(m4a_path)
+        self.assertEqual(info.advisory, "Explicit")
+        self.assertTrue(info._advisory_needs_normalization)
+
+        write_track_metadata(info)
+        self.assertEqual(MP4(m4a_path).get("rtng"), [4])
+
+        normalized = read_track_metadata(m4a_path)
+        self.assertEqual(normalized.advisory, "Explicit")
+        self.assertFalse(normalized._advisory_needs_normalization)
+
+    def test_read_track_metadata_wraps_mutagen_error_as_oserror(self) -> None:
+        misnamed = self.test_directory / "misnamed.m4a"
+        misnamed.write_bytes(self.dummy_audio_path.read_bytes())
+        with (
+            patch("taglib.File") as mock_taglib,
+            patch("sonora.audio.metadata.MP4", side_effect=MutagenError("bad moov")),
+        ):
+            mock_song = MagicMock()
+            mock_song.tags = {"ARTIST": ["A"], "TITLE": ["T"]}
+            mock_song.pictures = []
+            mock_taglib.return_value.__enter__.return_value = mock_song
+            with self.assertRaises(OSError):
+                read_track_metadata(misnamed)
+
+    def test_conflicting_disc_totals_preserved_when_disc_number_absent(self) -> None:
+        flac_path = self.test_directory / "01 - Track.flac"
+        soundfile.write(flac_path, np.zeros((4410, 2), dtype=np.float32), 44100)
+        with taglib.File(str(flac_path)) as song:
+            song.tags["ARTIST"] = ["Artist"]
+            song.tags["TITLE"] = ["Title"]
+            song.tags["DISCTOTAL"] = ["2"]
+            song.tags["TOTALDISCS"] = ["3"]
+            song.tags["TRACKTOTAL"] = ["10"]
+            song.tags["TOTALTRACKS"] = ["12"]
+            song.save()
+
+        info = read_track_metadata(flac_path)
+        self.assertIn("album_sequence", info.metadata_conflicts)
+        self.assertEqual(info.disc_number, 1)
+        self.assertEqual(info.track_number, 1)
+
+        # Unrelated update must not overwrite unresolved conflicting totals.
+        info.genre = "Rock"
+        write_track_metadata(info)
+        with taglib.File(str(flac_path)) as song:
+            self.assertEqual(song.tags["DISCTOTAL"], ["2"])
+            self.assertEqual(song.tags["TOTALDISCS"], ["3"])
+            self.assertEqual(song.tags["TRACKTOTAL"], ["10"])
+            self.assertEqual(song.tags["TOTALTRACKS"], ["12"])
+            self.assertNotIn("DISCNUMBER", song.tags)
+            self.assertNotIn("TRACKNUMBER", song.tags)
+
+        # Explicit resolution overwrites the conflict.
+        info.total_discs = 3
+        info.total_tracks = 12
+        write_track_metadata(info)
+        with taglib.File(str(flac_path)) as song:
+            self.assertEqual(song.tags["DISCTOTAL"], ["3"])
+            self.assertEqual(song.tags["TOTALDISCS"], ["3"])
+            self.assertEqual(song.tags["TRACKTOTAL"], ["12"])
+            self.assertEqual(song.tags["TOTALTRACKS"], ["12"])
+
 
 class TestCueSheet(IsolatedTestCase):
     def test_missing_unreadable_and_absent_cuesheets(self) -> None:
@@ -479,6 +653,11 @@ class TestCueSheet(IsolatedTestCase):
             Path, "read_bytes", side_effect=PermissionError("locked cue")
         ):
             self.assertIsNone(read_cuesheet_content(cue_path))
+
+    def test_find_companion_cuesheet_matches_case_insensitively(self) -> None:
+        upper_cue = self.test_directory / "ALBUM.CUE"
+        upper_cue.write_text('TITLE "Album"')
+        self.assertEqual(find_companion_cuesheet(self.test_directory), upper_cue)
 
     def test_cuesheet_encodings_preserve_metadata(self) -> None:
         for encoded, expected in (
