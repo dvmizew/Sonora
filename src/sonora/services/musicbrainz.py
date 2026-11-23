@@ -245,8 +245,15 @@ def _tiebreak_same_release_group(
             if country in ("XW", "US")
             else (2 if country in ("XE", "GB", "DE") else 1)
         )
-        date_str = str(rel.get("date") or "9999").replace("-", "")[:8]
-        date_num = int(date_str) if date_str.isdigit() else 99999999
+        date_digits = str(rel.get("date") or "").replace("-", "").strip()
+        if len(date_digits) == 8 and date_digits.isdigit():
+            date_num = int(date_digits)
+        elif len(date_digits) == 6 and date_digits.isdigit():
+            date_num = int(f"{date_digits}99")
+        elif len(date_digits) == 4 and date_digits.isdigit():
+            date_num = int(f"{date_digits}9999")
+        else:
+            date_num = 99999999
         return (fmt_priority, country_priority, -date_num)
 
     return max(releases, key=_rank_key)
@@ -514,9 +521,26 @@ def _parse_recording_credits(recording: dict[str, Any]) -> dict[str, object]:
         "MusicBrainz work relationships",
     )
     work_id = None
-    if work_rels:
-        work = work_rels[0].get("work")
-        work_id = work.get("id") if isinstance(work, dict) else None
+    for work_rel in work_rels:
+        work = work_rel.get("work")
+        if not isinstance(work, dict):
+            continue
+        if work_id is None and is_valid_uuid(work.get("id")):
+            work_id = work.get("id")
+        work_artist_rels = require_api_records(
+            work.get("artist-relation-list", []),
+            "MusicBrainz work artist relationships",
+        )
+        for relationship in work_artist_rels:
+            relationship_type = str(relationship.get("type", "")).lower()
+            artist = relationship.get("artist")
+            artist_name = artist.get("name") if isinstance(artist, dict) else None
+            if not isinstance(artist_name, str) or not artist_name:
+                continue
+            if relationship_type in ("composer", "writer"):
+                composers.append(artist_name)
+            if relationship_type in ("lyricist", "writer"):
+                lyricists.append(artist_name)
 
     return {
         "composer": ", ".join(dict.fromkeys(composers)) if composers else None,
@@ -843,7 +867,9 @@ def fetch_musicbrainz_release_details(
 
 
 @coalesce_lookup
-def search_musicbrainz_artists(query: str, limit: int = 5) -> list[dict[str, Any]]:
+def search_musicbrainz_artists(
+    query: str, limit: int = 5, *, raise_on_error: bool = False
+) -> list[dict[str, Any]]:
     """
     Search MusicBrainz for artists matching query with strict rate limiting and error resilience.
     Returns list of artist dictionaries.
@@ -870,4 +896,6 @@ def search_musicbrainz_artists(query: str, limit: int = 5) -> list[dict[str, Any
         OSError,
     ) as error:
         LOG.debug(f"MusicBrainz artist search failed for '{query}': {error}")
+        if raise_on_error:
+            raise
         return []

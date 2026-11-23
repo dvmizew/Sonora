@@ -1,3 +1,5 @@
+import httpx
+
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.coordination import coalesce_lookup
@@ -66,6 +68,12 @@ def fetch_lastfm_tags(
             if query_key != cache_key:
                 set_cached_api(cache_key, names)
             return names
+        except httpx.HTTPStatusError as error:
+            LOG.debug(
+                f"Last.fm tag fetch failed for {artist} - {title}: HTTP {error.response.status_code}"
+            )
         except API_RESPONSE_ERRORS as error:
-            LOG.debug(f"Last.fm tag fetch failed for {artist} - {title}: {error}")
+            LOG.debug(
+                f"Last.fm tag fetch failed for {artist} - {title}: {type(error).__name__}"
+            )
     return []

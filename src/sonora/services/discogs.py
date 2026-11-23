@@ -17,22 +17,32 @@ from sonora.core.text import clean_disambiguation, normalize_country_name, norma
 from sonora.core.titles import score_artist_title_match
 
 
-def _count_discogs_audio_tracks(tracklist: list[dict[str, Any]]) -> int:
-    """Count playable entries, excluding index headings and documented video positions."""
-    audio_track_count = 0
+def _flatten_discogs_tracks(
+    tracklist: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Flatten index sub-tracks while skipping non-playable heading/index containers."""
+    tracks: list[dict[str, Any]] = []
     for track in tracklist:
         sub_tracks = track.get("sub_tracks")
         if sub_tracks:
-            audio_track_count += _count_discogs_audio_tracks(
-                require_api_records(sub_tracks, "Discogs sub-tracks")
+            tracks.extend(
+                _flatten_discogs_tracks(
+                    require_api_records(sub_tracks, "Discogs sub-tracks")
+                )
             )
-        elif (
-            track.get("type_", "track") == "track"
-            and str(track.get("position") or "").strip()
-            and not str(track["position"]).casefold().startswith("video")
-        ):
-            audio_track_count += 1
-    return audio_track_count
+        elif track.get("type_", "track") == "track":
+            tracks.append(track)
+    return tracks
+
+
+def _count_discogs_audio_tracks(tracklist: list[dict[str, Any]]) -> int:
+    """Count playable entries, excluding index headings and documented video positions."""
+    return sum(
+        1
+        for track in _flatten_discogs_tracks(tracklist)
+        if str(track.get("position") or "").strip()
+        and not str(track["position"]).casefold().startswith("video")
+    )
 
 
 def _discogs_credit_positions(scope: str, positions: list[str]) -> set[str]:
@@ -171,9 +181,10 @@ def fetch_discogs_release_details(
         tracklist = require_api_records(
             discogs_payload.get("tracklist", []), "Discogs tracklist"
         )
+        playable_tracks = _flatten_discogs_tracks(tracklist)
         track_positions = [
             str(track.get("position") or "").strip()
-            for track in tracklist
+            for track in playable_tracks
             if str(track.get("position") or "").strip()
         ]
         scoped_credits: dict[str, list[dict[str, Any]]] = {}
@@ -191,9 +202,10 @@ def fetch_discogs_release_details(
                     continue
                 _add_discogs_credit(extra_artist, producers, remixers, composers)
 
-        track_credits: dict[str, dict[str, str]] = {}
+        position_credits: dict[str, dict[str, str]] = {}
+        title_credits: dict[str, dict[str, str]] = {}
         repeated_titles: set[str] = set()
-        for track in tracklist:
+        for track in playable_tracks:
             position = str(track.get("position", "")).strip()
             track_title = str(track.get("title", "")).strip()
             track_producers: list[str] = []
@@ -222,14 +234,15 @@ def fetch_discogs_release_details(
             if track_composers:
                 credits_dict["composer"] = ", ".join(track_composers)
             if position:
-                track_credits[position] = credits_dict
+                position_credits[position] = credits_dict
             if track_title:
                 title_key = track_title.lower()
-                if title_key in track_credits or title_key in repeated_titles:
+                if title_key in title_credits or title_key in repeated_titles:
                     repeated_titles.add(title_key)
-                    track_credits.pop(title_key, None)
+                    title_credits.pop(title_key, None)
                 else:
-                    track_credits[title_key] = credits_dict
+                    title_credits[title_key] = credits_dict
+        track_credits = {**title_credits, **position_credits}
 
         release_result: dict[str, Any] = {
             "id": discogs_payload.get("id"),
@@ -399,18 +412,22 @@ def search_discogs_release(
         if expected_track_count is not None:
             return None
 
-        # Fallback to search result fields if full fetch failed
+        # Fallback to search result fields if full fetch failed; do not cache degraded fallback
         labels = selected_release.get("label", [])
         label_name = _discogs_label_name(labels[0]) if labels else None
+        raw_catno = selected_release.get("catno")
         catalog_number = (
-            str(selected_release.get("catno"))
-            if selected_release.get("catno")
+            str(raw_catno)
+            if raw_catno and str(raw_catno).strip().lower() != "none"
             else None
         )
         barcodes = selected_release.get("barcode", [])
-        barcode_value = (
-            str(barcodes[0]) if isinstance(barcodes, list) and barcodes else None
+        raw_barcode = (
+            str(barcodes[0]).replace(" ", "").replace("-", "")
+            if isinstance(barcodes, list) and barcodes
+            else ""
         )
+        barcode_value = raw_barcode or None
         formats = selected_release.get("format", [])
         media_format = (
             ", ".join(str(format_entry) for format_entry in formats)
@@ -436,7 +453,6 @@ def search_discogs_release(
             "composer": None,
             "track_credits": {},
         }
-        set_cached_api(cache_key, release_result)
         return release_result
     except API_RESPONSE_ERRORS as error:
         LOG.debug(f"Discogs search failed for {artist} - {album}: {error}")

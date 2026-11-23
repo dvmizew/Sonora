@@ -159,6 +159,39 @@ class TestLyricsServiceRequests(IsolatedTestCase):
     ) -> None:
         self.assertIsNone(fetch_synced_lyrics("Nonexistent", "Track"))
 
+    @patch("sonora.services.lyrics.LOG.debug")
+    @patch("sonora.services.lyrics._query_lrclib", return_value=None)
+    @patch("syncedlyrics.providers.Musixmatch")
+    def test_musixmatch_usertoken_redacted_in_logs_and_errors(
+        self,
+        mock_mxm_cls: MagicMock,
+        mock_lrclib: MagicMock,
+        mock_log_debug: MagicMock,
+    ) -> None:
+        mock_client = MagicMock()
+        mock_client.get_lrc.side_effect = OSError(
+            "Request failed for https://apic-desktop.musixmatch.com/ws/1.1/track.search?usertoken=SECRET_TOKEN_XYZ&q=test"
+        )
+        mock_mxm_cls.return_value = mock_client
+
+        details: dict[str, object] = {}
+        with self.assertRaises(RuntimeError) as exc_ctx:
+            fetch_synced_lyrics(
+                "Artist",
+                "Title",
+                providers=["Musixmatch"],
+                musixmatch_token="SECRET_TOKEN_XYZ",
+                details=details,
+            )
+
+        self.assertNotIn("SECRET_TOKEN_XYZ", str(exc_ctx.exception))
+        self.assertIn("usertoken=[REDACTED]", str(exc_ctx.exception))
+        self.assertNotIn("SECRET_TOKEN_XYZ", str(details.get("lookup_reason", "")))
+        self.assertIn("usertoken=[REDACTED]", str(details.get("lookup_reason", "")))
+        self.assertTrue(mock_log_debug.called)
+        for debug_call in mock_log_debug.call_args_list:
+            self.assertNotIn("SECRET_TOKEN_XYZ", str(debug_call))
+
 
 class TestLyricsProcessingWorkflow(IsolatedTestCase):
     def test_process_track_lyrics_quality_upgrade_and_protection(self) -> None:

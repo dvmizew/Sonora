@@ -394,6 +394,9 @@ def fetch_itunes_album_details(
             ),
             None,
         )
+        if not raw_items and collection is None:
+            set_cached_api(cache_key, None)
+            return None
         if collection is not None:
             best_album = {**best_album, **collection}
 

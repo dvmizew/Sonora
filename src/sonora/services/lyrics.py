@@ -1,6 +1,7 @@
 import hashlib
 import json
 import math
+import re
 import time
 import urllib.parse
 from typing import Any
@@ -23,12 +24,16 @@ from sonora.core.sidecars import (
     get_lyrics_quality,
     is_lyrics_duration_valid,
     lyrics_identity_matches,
-    score_lyrics_consensus,
 )
 from sonora.core.text import normalize_str
 from sonora.core.titles import clean_title, score_artist_title_match
 
 _LYRICS_LIMITER = RateLimiter(interval_seconds=RATE_LIMIT_LYRICS)
+_USERTOKEN_PARAM_RE = re.compile(r"usertoken=[^&\s'\"]+", re.IGNORECASE)
+
+
+def _redact_lyrics_error(error: object) -> str:
+    return _USERTOKEN_PARAM_RE.sub("usertoken=[REDACTED]", str(error))
 
 
 def parse_musixmatch_token(raw_token: str | None) -> str | None:
@@ -87,7 +92,12 @@ def _query_authenticated_musixmatch(
             else None
         )
     except (OSError, ValueError) as error:
-        LOG.debug(f"Musixmatch lyrics request failed: {error}")
+        sanitized = _redact_lyrics_error(error)
+        LOG.debug(f"Musixmatch lyrics request failed: {sanitized}")
+        if sanitized != str(error):
+            if isinstance(error, OSError):
+                raise OSError(sanitized) from None
+            raise ValueError(sanitized) from None
         raise
     finally:
         client.session.close()
@@ -415,7 +425,7 @@ def fetch_synced_lyrics(
             if alternative != queries[0]:
                 queries.append(alternative)
     last_exception: Exception | None = None
-    candidates: list[str] = []
+    lyrics_content: str | None = None
     for query in queries:
         try:
             content = _query_syncedlyrics(
@@ -437,7 +447,7 @@ def fetch_synced_lyrics(
                 )
                 > 0
             ):
-                candidates.append(content)
+                lyrics_content = content
         except (
             httpx.HTTPError,
             OSError,
@@ -446,20 +456,8 @@ def fetch_synced_lyrics(
             TimeoutError,
         ) as error:
             last_exception = error
-        if candidates or last_exception is not None:
+        if lyrics_content is not None or last_exception is not None:
             break
-
-    lyrics_content = (
-        max(
-            candidates,
-            key=lambda c: (
-                evaluate_lyrics_quality(c, artist, title, duration, album=album_name)
-                + score_lyrics_consensus(c, candidates)
-            ),
-        )
-        if candidates
-        else None
-    )
 
     if lyrics_content:
         if lookup_state is not None:
@@ -492,13 +490,14 @@ def fetch_synced_lyrics(
         is_dns_lockout = isinstance(
             last_exception, httpx.ConnectError
         ) and "DNS lookup temporarily suspended" in str(last_exception)
+        sanitized_error = _redact_lyrics_error(last_exception)
         lookup_details.update(
             cache_hit=False,
             lookup_status="failed",
             lookup_reason=(
                 f"Lyrics provider returned HTTP {last_exception.response.status_code}"
                 if isinstance(last_exception, httpx.HTTPStatusError)
-                else str(last_exception)
+                else sanitized_error
             ),
         )
         if lookup_state is not None:
@@ -533,7 +532,7 @@ def fetch_synced_lyrics(
                 f"Lyrics provider returned HTTP {last_exception.response.status_code}; try again later"
             ) from last_exception
         raise RuntimeError(
-            f"Lyrics fetch failed for '{title}': {last_exception}"
+            f"Lyrics fetch failed for '{title}': {sanitized_error}"
         ) from last_exception
 
     if lookup_state is not None:

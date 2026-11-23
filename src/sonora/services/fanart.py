@@ -7,7 +7,7 @@ from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.config import get_config
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import API_RESPONSE_ERRORS, SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION, download_image_bytes
 from sonora.core.logger import LOG
 from sonora.core.text import is_valid_uuid, safe_int
 
@@ -54,16 +54,7 @@ def _extract_image_urls(raw_items: Any) -> list[str]:
 
 def download_fanart_image_bytes(url: str | None) -> bytes | None:
     """Download an image from Fanart.tv while respecting its rate limit."""
-    if not url:
-        return None
-
-    try:
-        response = SESSION.get(url, timeout=12)
-        if response.status_code == 200:
-            return response.content
-    except API_RESPONSE_ERRORS as error:
-        LOG.debug(f"Failed to download fanart image from {url}: {error}")
-    return None
+    return download_image_bytes(url, timeout=12.0)
 
 
 def _fetch_artwork_urls(
@@ -75,6 +66,7 @@ def _fetch_artwork_urls(
 ) -> dict[str, tuple[str, ...]] | None:
     if not is_valid_uuid(identifier):
         return None
+    identifier = identifier.strip().lower()
     config = get_config()
     effective_api_key = api_key or config.fanart_api_key
     effective_client_key = client_key or config.fanart_client_key
@@ -101,14 +93,18 @@ def _fetch_artwork_urls(
         if kind == "album":
             albums = payload.get("albums")
             if isinstance(albums, dict):
-                entry = albums.get(identifier)
+                normalized_albums = {
+                    str(key).strip().lower(): value for key, value in albums.items()
+                }
+                entry = normalized_albums.get(identifier)
                 entries = [entry] if isinstance(entry, dict) else []
             elif isinstance(albums, list):
                 entries = [
                     entry
                     for entry in albums
                     if isinstance(entry, dict)
-                    and entry.get("release_group_id") == identifier
+                    and str(entry.get("release_group_id") or "").strip().lower()
+                    == identifier
                 ]
         urls = {
             field: tuple(

@@ -4,6 +4,8 @@ import re
 import sqlite3
 from typing import Any
 
+from musicbrainzngs import MusicBrainzError
+
 from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.artists import (
     _load_user_overrides,
@@ -91,9 +93,13 @@ def resolve_artist_name(raw_name: str | None) -> str:
             return clean_unicode_punct(cached)
 
     artists: list[dict[str, Any]] = []
+    provider_failed = False
+    escaped_name = clean_name.replace("\\", "\\\\").replace('"', '\\"')
     try:
         artists = musicbrainz.search_musicbrainz_artists(
-            query=f'artist:"{clean_name}" OR alias:"{clean_name}"', limit=5
+            query=f'artist:"{escaped_name}" OR alias:"{escaped_name}"',
+            limit=5,
+            raise_on_error=True,
         )
         for artist in artists:
             candidate_artist = str(artist.get("name", "")).strip()
@@ -135,7 +141,8 @@ def resolve_artist_name(raw_name: str | None) -> str:
                 set_cached_api(cache_key, resolved_artist)
                 _persist_discovered_aliases(artists, resolved_artist, clean_name)
                 return resolved_artist
-    except API_RESPONSE_ERRORS as error:
+    except (*API_RESPONSE_ERRORS, MusicBrainzError) as error:
+        provider_failed = True
         LOG.debug(f"MusicBrainz API error during artist resolution: {error}")
 
     try:
@@ -144,17 +151,19 @@ def resolve_artist_name(raw_name: str | None) -> str:
             params={"q": clean_name},
             timeout=5,
         )
-        if response.status_code == 200:
+        if response.status_code != 200:
+            provider_failed = True
+        else:
             deezer_payload = require_api_object(
                 response.json(), "Deezer artist response"
             )
-            deezer_results = (
-                []
-                if deezer_payload.get("error")
-                else require_api_records(
+            if deezer_payload.get("error"):
+                provider_failed = True
+                deezer_results: list[dict[str, Any]] = []
+            else:
+                deezer_results = require_api_records(
                     deezer_payload.get("data"), "Deezer artist results"
                 )
-            )
             for deezer_entry in deezer_results[:10]:
                 candidate_artist = str(deezer_entry.get("name", "")).strip()
                 if candidate_artist == clean_name:
@@ -192,6 +201,7 @@ def resolve_artist_name(raw_name: str | None) -> str:
                     )
                     return resolved_artist
     except API_RESPONSE_ERRORS as error:
+        provider_failed = True
         LOG.debug(f"Deezer API error during artist resolution: {error}")
 
     clean_words = clean_name.split()
@@ -241,5 +251,6 @@ def resolve_artist_name(raw_name: str | None) -> str:
         return canonical_artist
 
     normalized_artist = clean_unicode_punct(clean_name)
-    set_cached_api(cache_key, normalized_artist)
+    if not provider_failed:
+        set_cached_api(cache_key, normalized_artist)
     return normalized_artist

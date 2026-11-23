@@ -6,23 +6,10 @@ from sonora.core.api_payloads import require_api_object, require_api_records
 from sonora.core.artists import get_primary_artist
 from sonora.core.cache import get_cached_api, set_cached_api
 from sonora.core.coordination import coalesce_lookup
-from sonora.core.http import API_RESPONSE_ERRORS, SESSION
+from sonora.core.http import API_RESPONSE_ERRORS, SESSION, download_image_bytes
 from sonora.core.logger import LOG
 from sonora.core.text import is_valid_uuid, normalize_str, safe_float
 from sonora.core.titles import recording_identity_matches
-
-
-def _download_artwork_bytes(url: str | None) -> bytes | None:
-    if not url:
-        return None
-
-    try:
-        response = SESSION.get(url, timeout=10)
-        if response.status_code == 200:
-            return response.content
-    except API_RESPONSE_ERRORS as error:
-        LOG.debug(f"Failed to fetch artwork from {url}: {error}")
-    return None
 
 
 @coalesce_lookup
@@ -87,9 +74,9 @@ def fetch_artist_images(
                 )
 
                 if thumbnail_url:
-                    thumbnail_bytes = _download_artwork_bytes(thumbnail_url)
+                    thumbnail_bytes = download_image_bytes(thumbnail_url)
                 if banner_url:
-                    banner_bytes = _download_artwork_bytes(banner_url)
+                    banner_bytes = download_image_bytes(banner_url)
 
                 result = (thumbnail_bytes, banner_bytes)
                 if thumbnail_bytes or banner_bytes:
