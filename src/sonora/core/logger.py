@@ -179,10 +179,14 @@ def interactive_pause_listener(
         try:
             import termios
             import tty
+        except ImportError:
+            return
 
+        termios_error: type[BaseException] = getattr(termios, "error", OSError)
+        try:
             orig_term = termios.tcgetattr(sys.stdin.fileno())
             tty.setcbreak(sys.stdin.fileno())
-        except (ImportError, OSError, ValueError):
+        except (OSError, ValueError, termios_error):
             return
 
         try:
@@ -190,6 +194,8 @@ def interactive_pause_listener(
                 rlist, _, _ = select.select([sys.stdin], [], [], 0.2)
                 if rlist and not stop_event.is_set():
                     char = sys.stdin.read(1)
+                    if char == "":
+                        break
                     if char in (" ", "p", "P"):
                         if _PAUSE_EVENT.is_set():
                             _PAUSE_EVENT.clear()
@@ -215,15 +221,15 @@ def interactive_pause_listener(
                             LOG.info(
                                 "▶️  [bold green]RESUMED[/] - Continuing execution..."
                             )
-                        while True:
+                        while not stop_event.is_set():
                             drain_list, _, _ = select.select([sys.stdin], [], [], 0.05)
-                            if drain_list:
-                                sys.stdin.read(1)
-                            else:
+                            if not drain_list or stop_event.is_set():
                                 break
+                            if sys.stdin.read(1) == "":
+                                return
         finally:
             _PAUSE_EVENT.set()
-            with contextlib.suppress(OSError, getattr(termios, "error", OSError)):
+            with contextlib.suppress(OSError, termios_error):
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, orig_term)
 
     listener = threading.Thread(

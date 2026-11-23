@@ -44,7 +44,6 @@ class TrackInfo:
     musicbrainz_artistid: str | None = None
     musicbrainz_workid: str | None = None
     acoustid_id: str | None = None
-    acoustid_fingerprint: str | None = None
     discogs_release_id: str | None = None
     itunes_trackid: str | None = None
     itunes_collectionid: str | None = None

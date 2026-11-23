@@ -8,7 +8,6 @@ from pathlib import Path
 
 import anyascii
 import ftfy
-from rapidfuzz import fuzz
 
 from sonora.core.artists import get_primary_artist, normalize_artist_name
 from sonora.core.constants import ALBUM_COVER_NAMES, COMPANION_LYRICS_EXTS
@@ -104,13 +103,23 @@ def relocate_companion_lyrics(
         suffix = companion.suffix
         target_companion = dst_audio.parent / f"{dst_audio.stem}{suffix}"
         if target_companion.exists() and target_companion != companion:
-            continue
+            try:
+                is_same_file = target_companion.samefile(companion)
+            except OSError:
+                is_same_file = False
+            if not is_same_file:
+                continue
 
         if not dry_run:
             safe_case_rename(companion, target_companion)
         moved_lyrics.append(target_companion)
     return moved_lyrics
 
+
+INSTRUMENTAL_PATTERN = re.compile(
+    r"[\[(]\s*instrumental\s*[\])]|\binstrumentals\s*$",
+    re.IGNORECASE,
+)
 
 _LYRICS_TIMESTAMP_REGEX = re.compile(
     r"^(?:\[\d{1,3}:[0-5]\d(?:[\.:]\d{1,6})?(?:[+-]\d+)?\]|<\d{1,3}:[0-5]\d(?:[\.:]\d{1,6})?>)+\s*(.*)$"
@@ -477,11 +486,13 @@ def are_lyrics_timestamps_monotonic(lyrics_text: str | None) -> bool:
         trimmed = line.lstrip("\ufeff \t")
         if _LRC_METADATA_HEADER_PATTERN.match(trimmed):
             continue
-        matches = list(_LYRICS_EXTRACT_TS_REGEX.finditer(line))
-        if not matches:
-            continue
-        if len(matches) == 1 and "<" not in line:
-            _, minutes, seconds, fraction = matches[0].groups()
+        line_matches = [
+            match
+            for match in _LYRICS_EXTRACT_TS_REGEX.finditer(line)
+            if match.group(1) == "["
+        ]
+        if len(line_matches) == 1:
+            _, minutes, seconds, fraction = line_matches[0].groups()
             timestamp = int(minutes) * 60.0 + int(seconds)
             if fraction:
                 timestamp += float(f"0.{fraction}")
@@ -531,7 +542,6 @@ _NON_LATIN_SCRIPT_REGEX = re.compile(
     r"\u3400-\u4dbf\u4e00-\u9fff"  # CJK Unified Ideographs
     r"]"
 )
-_CYRILLIC_SCRIPT_REGEX = re.compile(r"[\u0400-\u04ff]")
 _SLAVIC_MARKERS_REGEX = re.compile(
     r"\b(?:russia|russian|rossiya|raava|zhara)\b", re.IGNORECASE
 )
@@ -627,20 +637,6 @@ def evaluate_lyrics_quality(
             score += 10.0
 
     return min(100.0, score)
-
-
-def score_lyrics_consensus(candidate_text: str, candidate_pool: Sequence[str]) -> float:
-    """Bonus score [0.0-25.0] when candidate matches independent lyric sources."""
-    candidate_body = lyrics_word_body(candidate_text)
-    if not candidate_body:
-        return 0.0
-    agreeing = sum(
-        1
-        for other in candidate_pool
-        if other is not candidate_text
-        and fuzz.token_set_ratio(candidate_body, lyrics_word_body(other)) >= 85
-    )
-    return min(25.0, agreeing * 12.5)
 
 
 def strip_lyrics_headers(lyrics_text: str) -> str:

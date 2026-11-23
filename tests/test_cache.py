@@ -428,7 +428,7 @@ class TestCacheStatsAndResult(IsolatedTestCase):
                 vault = get_library_state()
                 track_path = Path(tmpdir) / "track1.flac"
                 track_path.write_bytes(b"FLACDATA")
-                vault.record_track_state(track_path, status="TAGGED_OK")
+                vault.record_tracks_state_batch([track_path], status="TAGGED_OK")
 
                 stats_obj = get_cache_stats()
                 self.assertIsInstance(stats_obj, CacheStats)
@@ -459,7 +459,7 @@ class TestClearCachePermutations(IsolatedTestCase):
                 vault = get_library_state()
                 dummy_track = Path(tmpdir) / "dummy.flac"
                 dummy_track.write_bytes(b"audio")
-                vault.record_track_state(dummy_track, status="TAGGED_OK")
+                vault.record_tracks_state_batch([dummy_track], status="TAGGED_OK")
 
                 res_all = clear_cache(
                     clear_api=True,
@@ -511,7 +511,7 @@ class TestClearCachePermutations(IsolatedTestCase):
                 vault = get_library_state()
                 dummy_track = Path(tmpdir) / "dummy.flac"
                 dummy_track.write_bytes(b"audio")
-                vault.record_track_state(dummy_track, status="TAGGED_OK")
+                vault.record_tracks_state_batch([dummy_track], status="TAGGED_OK")
 
                 cache_clear_result = clear_cache(
                     clear_api=False,
@@ -570,7 +570,7 @@ class TestClearCachePermutations(IsolatedTestCase):
                 vault = get_library_state()
                 dummy_track = Path(tmpdir) / "dummy.flac"
                 dummy_track.write_bytes(b"audio")
-                vault.record_track_state(dummy_track, status="TAGGED_OK")
+                vault.record_tracks_state_batch([dummy_track], status="TAGGED_OK")
 
                 cache_clear_result = clear_cache(
                     clear_api=True,
@@ -605,7 +605,7 @@ class TestClearCachePermutations(IsolatedTestCase):
                 vault = get_library_state()
                 dummy_track = Path(tmpdir) / "dummy.flac"
                 dummy_track.write_bytes(b"audio")
-                vault.record_track_state(dummy_track, status="TAGGED_OK")
+                vault.record_tracks_state_batch([dummy_track], status="TAGGED_OK")
 
                 api_dir = get_api_cache_dir()
                 self.assertTrue(api_dir.exists())
@@ -829,7 +829,7 @@ class TestSqliteVacuumAndCheckpoint(IsolatedTestCase):
             try:
                 track_path = Path(tmpdir) / "test.flac"
                 track_path.write_bytes(b"DATA")
-                vault.record_track_state(track_path, status="TAGGED_OK")
+                vault.record_tracks_state_batch([track_path], status="TAGGED_OK")
 
                 real_connect = sqlite3.connect
                 observed_isolation_levels: list[str | None] = []
@@ -998,7 +998,7 @@ class TestCacheMaintenanceAndSafety(IsolatedTestCase):
         vault = get_library_state()
         track = vault.db_path.parent / "track.flac"
         track.write_bytes(b"audio")
-        vault.record_track_state(track)
+        vault.record_tracks_state_batch([track])
         with (
             patch.object(Path, "unlink", side_effect=PermissionError("locked state")),
             self.assertRaises(PermissionError),
@@ -1293,7 +1293,7 @@ class TestLibraryStateVault(IsolatedTestCase):
         self,
     ) -> None:
         library_state = get_library_state()
-        library_state.record_track_state(self.test_file1, status="TAGGED_OK")
+        library_state.record_tracks_state_batch([self.test_file1], status="TAGGED_OK")
         for reopen in (False, True):
             with self.subTest(reopen=reopen):
                 if reopen:
@@ -1317,54 +1317,48 @@ class TestLibraryStateVault(IsolatedTestCase):
         self.assertIs(get_library_state(), library_state)
 
     def test_state_lifecycle(self) -> None:
-        self.assertFalse(self.vault.is_track_up_to_date(self.test_file1))
         outdated = self.vault.filter_outdated_tracks([self.test_file1, self.test_file2])
-        self.assertEqual(len(outdated), 2)
+        self.assertEqual(outdated, [self.test_file1, self.test_file2])
 
-        self.vault.record_track_state(self.test_file1, status="TAGGED_OK")
-        self.assertTrue(self.vault.is_track_up_to_date(self.test_file1))
-        self.assertFalse(self.vault.is_track_up_to_date(self.test_file2))
-
+        self.vault.record_tracks_state_batch([self.test_file1], status="TAGGED_OK")
         outdated = self.vault.filter_outdated_tracks([self.test_file1, self.test_file2])
         self.assertEqual(outdated, [self.test_file2])
 
         self.vault.record_tracks_state_batch([self.test_file2], status="TAGGED_OK")
-        self.assertTrue(self.vault.is_track_up_to_date(self.test_file2))
-
         outdated_empty = self.vault.filter_outdated_tracks(
             [self.test_file1, self.test_file2]
         )
-        self.assertEqual(len(outdated_empty), 0)
+        self.assertEqual(outdated_empty, [])
 
         self.test_file1.write_bytes(b"modified audio data")
-        self.assertFalse(self.vault.is_track_up_to_date(self.test_file1))
         outdated_modified = self.vault.filter_outdated_tracks(
             [self.test_file1, self.test_file2]
         )
         self.assertEqual(outdated_modified, [self.test_file1])
 
-    def test_is_track_up_to_date_supports_hash_status(self) -> None:
+    def test_filter_outdated_tracks_supports_hash_status(self) -> None:
         self.vault.record_tracks_state_batch(
             [self.test_file1], status="TAGGED_OK:abcdef123456"
         )
-        self.assertTrue(self.vault.is_track_up_to_date(self.test_file1))
-        self.assertTrue(
-            self.vault.is_track_up_to_date(
-                self.test_file1, expected_status="TAGGED_OK:abcdef123456"
-            )
+        self.assertEqual(
+            self.vault.filter_outdated_tracks(
+                [self.test_file1], expected_status="TAGGED_OK:abcdef123456"
+            ),
+            [],
         )
-        self.assertFalse(
-            self.vault.is_track_up_to_date(
-                self.test_file1, expected_status="TAGGED_OK:different_hash"
-            )
+        self.assertEqual(
+            self.vault.filter_outdated_tracks(
+                [self.test_file1], expected_status="TAGGED_OK:different_hash"
+            ),
+            [self.test_file1],
         )
 
     def test_artist_alias_storage_lifecycle(self) -> None:
-        self.assertEqual(self.vault.get_artist_alias_count(), 0)
         self.assertIsNone(self.vault.get_artist_alias("k-dot"))
 
-        self.vault.record_artist_alias("k-dot", "Kendrick Lamar", source="musicbrainz")
-        self.assertEqual(self.vault.get_artist_alias_count(), 2)
+        self.vault.record_artist_aliases(
+            [("k-dot", "Kendrick Lamar")], source="musicbrainz"
+        )
         self.assertEqual(self.vault.get_artist_alias("k-dot"), "Kendrick Lamar")
         self.assertEqual(self.vault.get_artist_alias("kdot"), "Kendrick Lamar")
 
@@ -1375,20 +1369,32 @@ class TestLibraryStateVault(IsolatedTestCase):
             ],
             source="musicbrainz",
         )
-        self.assertEqual(self.vault.get_artist_alias_count(), 5)
         self.assertEqual(self.vault.get_artist_alias("mgk"), "Machine Gun Kelly")
         self.assertEqual(
             self.vault.get_artist_alias("colson baker"), "Machine Gun Kelly"
         )
+        self.assertEqual(
+            self.vault.get_artist_alias("colsonbaker"), "Machine Gun Kelly"
+        )
 
-        all_aliases = self.vault.get_all_artist_aliases()
-        self.assertIn("kdot", all_aliases)
-        self.assertIn("mgk", all_aliases)
+    def test_record_artist_aliases_compact_does_not_clobber_explicit_alias(
+        self,
+    ) -> None:
+        self.vault.record_artist_aliases(
+            [("ab", "Explicit Artist")], source="musicbrainz"
+        )
+        self.vault.record_artist_aliases(
+            [("a b", "Spaced Artist")], source="musicbrainz"
+        )
+        self.assertEqual(self.vault.get_artist_alias("ab"), "Explicit Artist")
+        self.assertEqual(self.vault.get_artist_alias("a b"), "Spaced Artist")
 
-        cleared = self.vault.clear_artist_aliases()
-        self.assertEqual(cleared, 5)
-        self.assertEqual(self.vault.get_artist_alias_count(), 0)
-        self.assertIsNone(self.vault.get_artist_alias("k-dot"))
+        self.vault.record_artist_aliases(
+            [("x y", "Spaced Second"), ("xy", "Explicit Second")],
+            source="musicbrainz",
+        )
+        self.assertEqual(self.vault.get_artist_alias("xy"), "Explicit Second")
+        self.assertEqual(self.vault.get_artist_alias("x y"), "Spaced Second")
 
     def test_library_state_survives_clear_purge_and_reuse(self) -> None:
         self.assertEqual(self.vault.get_state_count(), 0)
@@ -1396,34 +1402,33 @@ class TestLibraryStateVault(IsolatedTestCase):
 
         dummy_track = self.test_directory / "song.mp3"
         dummy_track.write_text("dummy audio")
-        self.vault.record_track_state(dummy_track, status="TAGGED_OK")
+        self.vault.record_tracks_state_batch([dummy_track], status="TAGGED_OK")
 
         self.assertEqual(self.vault.get_state_count(), 1)
-        self.assertTrue(self.vault.is_track_up_to_date(dummy_track))
+        self.assertEqual(self.vault.filter_outdated_tracks([dummy_track]), [])
 
         cleared_count = self.vault.clear_state(purge=False)
         self.assertEqual(cleared_count, 1)
         self.assertEqual(self.vault.get_state_count(), 0)
         self.assertTrue(self.db_path.exists())
 
-        self.vault.record_track_state(dummy_track, status="TAGGED_OK")
+        self.vault.record_tracks_state_batch([dummy_track], status="TAGGED_OK")
         purged_count = self.vault.clear_state(purge=True)
         self.assertEqual(purged_count, 1)
         self.assertFalse(self.db_path.exists())
 
-        self.vault.record_track_state(dummy_track, status="TAGGED_OK")
+        self.vault.record_tracks_state_batch([dummy_track], status="TAGGED_OK")
         self.assertEqual(self.vault.get_state_count(), 1)
-        self.assertTrue(self.vault.is_track_up_to_date(dummy_track))
+        self.assertEqual(self.vault.filter_outdated_tracks([dummy_track]), [])
 
     def test_missing_and_changed_files_remain_outdated(self) -> None:
         missing = self.test_directory / "missing.flac"
-        self.assertFalse(self.vault.is_track_up_to_date(missing))
         self.assertEqual(self.vault.filter_outdated_tracks([missing]), [missing])
         self.assertEqual(self.vault.filter_outdated_tracks([]), [])
         self.vault.record_tracks_state_batch([missing])
         self.vault.record_tracks_state_batch([])
         self.assertEqual(self.vault.get_state_count(), 0)
-        self.vault.record_track_state(self.test_file1)
+        self.vault.record_tracks_state_batch([self.test_file1])
         self.test_file1.write_bytes(b"different audio")
         self.assertEqual(
             self.vault.filter_outdated_tracks([self.test_file1]), [self.test_file1]
@@ -1435,13 +1440,11 @@ class TestLibraryStateVault(IsolatedTestCase):
             "_get_connection",
             side_effect=sqlite3.OperationalError("locked database"),
         ):
-            self.assertFalse(self.vault.is_track_up_to_date(self.test_file1))
             self.assertEqual(
                 self.vault.filter_outdated_tracks([self.test_file1]), [self.test_file1]
             )
             with self.assertRaisesRegex(OSError, "Cannot count library state entries"):
                 self.vault.get_state_count()
-            self.vault.record_track_state(self.test_file1)
             self.vault.record_tracks_state_batch([self.test_file1])
         self.assertEqual(self.vault.get_state_count(), 0)
 
@@ -1453,8 +1456,8 @@ class TestLibraryStateVault(IsolatedTestCase):
         ):
             transaction.execute("SELECT * FROM missing_table")
         self.assertIsNot(self.vault._get_connection(), connection)
-        self.vault.record_track_state(self.test_file1)
-        self.assertTrue(self.vault.is_track_up_to_date(self.test_file1))
+        self.vault.record_tracks_state_batch([self.test_file1])
+        self.assertEqual(self.vault.filter_outdated_tracks([self.test_file1]), [])
 
     def test_simultaneous_first_calls_create_one_shared_vault(self) -> None:
         barrier = threading.Barrier(2)

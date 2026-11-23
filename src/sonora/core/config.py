@@ -555,7 +555,7 @@ def get_disambiguation_pattern() -> re.Pattern[str]:
             words.append(rf"{escaped}\b")
     words_expr = "|".join(words)
     return re.compile(
-        rf"\s*\([^()]{{1,40}}\)(?=\s*(?:[,;/&+-\\]|\b(?:{words_expr})|$))",
+        rf"\s*\([^()]{{1,40}}\)(?=\s*(?:[,;/&+\\-]|\b(?:{words_expr})|$))",
         re.IGNORECASE,
     )
 

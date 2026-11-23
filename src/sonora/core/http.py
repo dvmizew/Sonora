@@ -1,5 +1,6 @@
 import atexit
 import json
+import math
 import socket
 import threading
 import time
@@ -53,11 +54,14 @@ _HOST_LIMITERS = {
 }
 
 
+_MAX_RETRY_DELAY_SECONDS = 3600.0
+
+
 def parse_retry_delay(retry_after: str | None, fallback: float) -> float:
     if not retry_after:
         return fallback
     try:
-        return max(0.0, float(retry_after))
+        parsed = float(retry_after)
     except ValueError:
         try:
             deadline = parsedate_to_datetime(retry_after)
@@ -65,10 +69,29 @@ def parse_retry_delay(retry_after: str | None, fallback: float) -> float:
             return fallback
         if deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=timezone.utc)
-        return max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+        delay = (deadline - datetime.now(timezone.utc)).total_seconds()
+        if not math.isfinite(delay):
+            return fallback
+        return min(_MAX_RETRY_DELAY_SECONDS, max(0.0, delay))
+    if not math.isfinite(parsed):
+        return fallback
+    return min(_MAX_RETRY_DELAY_SECONDS, max(0.0, parsed))
 
 
 _retry_delay = parse_retry_delay
+
+
+def download_image_bytes(url: str | None, *, timeout: float = 10.0) -> bytes | None:
+    """Download image bytes from a URL, returning None on empty URL or HTTP failure."""
+    if not url:
+        return None
+    try:
+        response = SESSION.get(url, timeout=timeout)
+        if response.status_code == 200:
+            return response.content
+    except API_RESPONSE_ERRORS as error:
+        LOG.debug(f"Failed to download image from {url}: {error}")
+    return None
 
 
 class RetryTransport(httpx.HTTPTransport):

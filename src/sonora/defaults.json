@@ -236,8 +236,6 @@
   "key_confidence_threshold": 0.2,
   "bpm_search_min": 60.0,
   "bpm_search_max": 200.0,
-  "bpm_octave_min": null,
-  "bpm_octave_max": null,
   "artist_credit_match_threshold": 80.0,
   "related_artist_match_threshold": 65.0,
   "related_album_match_threshold": 70.0,

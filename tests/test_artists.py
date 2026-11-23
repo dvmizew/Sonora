@@ -108,7 +108,9 @@ class TestArtistNormalization(IsolatedTestCase):
     def test_persisted_sqlite_artist_aliases_and_precedence(self) -> None:
 
         state_mgr = get_library_state()
-        state_mgr.record_artist_alias("k-dot", "Kendrick Lamar", source="musicbrainz")
+        state_mgr.record_artist_aliases(
+            [("k-dot", "Kendrick Lamar")], source="musicbrainz"
+        )
 
         artists.clear_artist_cache()
         # Persisted alias used when no user override exists

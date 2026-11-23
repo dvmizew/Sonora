@@ -1824,3 +1824,201 @@ class TestCoreHttpAndRetry(IsolatedTestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(request_handler.call_count, 2)
+
+
+class TestCoreBugRegressions(IsolatedTestCase):
+    def test_disambiguation_preserves_leading_parenthesized_artist_names(self) -> None:
+        self.assertEqual(clean_disambiguation("(G)I-DLE"), "(G)I-DLE")
+        self.assertEqual(clean_disambiguation("(hed) p.e."), "(hed) p.e.")
+        self.assertEqual(clean_disambiguation("(Sandy) Alex G"), "(Sandy) Alex G")
+        self.assertEqual(
+            clean_disambiguation("Artist (UK) feat. Guest"), "Artist feat. Guest"
+        )
+        self.assertEqual(clean_disambiguation("Artist (2) - Other"), "Artist - Other")
+
+    def test_parse_retry_delay_rejects_non_finite_and_caps_extreme_values(self) -> None:
+        from sonora.core.http import parse_retry_delay
+
+        for raw in ("inf", "-inf", "nan", "NaN"):
+            with self.subTest(raw=raw):
+                self.assertEqual(parse_retry_delay(raw, 1.5), 1.5)
+        self.assertEqual(parse_retry_delay("-5", 1.5), 0.0)
+        self.assertEqual(parse_retry_delay("999999", 1.5), 3600.0)
+
+    def test_download_image_bytes_handles_success_and_failures(self) -> None:
+        from sonora.core.http import SESSION, download_image_bytes
+
+        self.assertIsNone(download_image_bytes(None))
+        self.assertIsNone(download_image_bytes(""))
+
+        ok_response = httpx.Response(200, content=b"png-bytes")
+        with patch.object(SESSION, "get", return_value=ok_response) as mock_get:
+            self.assertEqual(
+                download_image_bytes("https://example.com/a.png", timeout=12.0),
+                b"png-bytes",
+            )
+            mock_get.assert_called_once_with("https://example.com/a.png", timeout=12.0)
+
+        not_found = httpx.Response(404, content=b"")
+        with patch.object(SESSION, "get", return_value=not_found):
+            self.assertIsNone(download_image_bytes("https://example.com/missing.png"))
+
+        with patch.object(
+            SESSION, "get", side_effect=httpx.ConnectError("network down")
+        ):
+            self.assertIsNone(download_image_bytes("https://example.com/err.png"))
+
+    def test_censored_word_match_handles_variable_length_asterisks(self) -> None:
+        from sonora.core.titles import _is_censored_word_match
+
+        self.assertTrue(_is_censored_word_match("fuck", "f*k"))
+        self.assertTrue(_is_censored_word_match("f*k", "fuck"))
+        self.assertTrue(_is_censored_word_match("fucking", "f**king"))
+        self.assertFalse(_is_censored_word_match("duck", "f*k"))
+
+    def test_score_artist_title_match_uses_independent_thresholds(self) -> None:
+        strict_artist = SonoraConfig(
+            title_match_threshold=85.0,
+            artist_match_threshold=98.0,
+        )
+        with patch("sonora.core.titles.get_config", return_value=strict_artist):
+            score = score_artist_title_match(
+                "Kendrick Lamar",
+                "Money Trees Deluxe",
+                "Kendrick Lamar",
+                "Money Trees Delux",
+            )
+            self.assertGreater(score, 0.0)
+
+        strict_title = SonoraConfig(
+            title_match_threshold=98.0,
+            artist_match_threshold=85.0,
+        )
+        with patch("sonora.core.titles.get_config", return_value=strict_title):
+            score = score_artist_title_match(
+                "Kendrick Lamarr",
+                "Money Trees",
+                "Kendrick Lamar",
+                "Money Trees",
+            )
+            self.assertGreater(score, 0.0)
+
+    def test_interactive_pause_listener_handles_termios_error_and_eof(self) -> None:
+        import termios
+        import tty
+
+        from sonora.core.logger import interactive_pause_listener
+
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = True
+        fake_stdin.fileno.return_value = 0
+
+        with (
+            patch("sys.stdin", fake_stdin),
+            patch.object(termios, "tcgetattr", side_effect=termios.error("not a tty")),
+            interactive_pause_listener(),
+        ):
+            pass
+
+        eof_stdin = MagicMock()
+        eof_stdin.isatty.return_value = True
+        eof_stdin.fileno.return_value = 0
+        eof_stdin.read.side_effect = ["", ""]
+        with (
+            patch("sys.stdin", eof_stdin),
+            patch.object(termios, "tcgetattr", return_value=[]),
+            patch.object(termios, "tcsetattr"),
+            patch.object(tty, "setcbreak"),
+            patch("select.select", return_value=([eof_stdin], [], [])),
+            interactive_pause_listener(),
+        ):
+            time.sleep(0.05)
+        self.assertEqual(eof_stdin.read.call_count, 1)
+
+        drain_eof_stdin = MagicMock()
+        drain_eof_stdin.isatty.return_value = True
+        drain_eof_stdin.fileno.return_value = 0
+        drain_eof_stdin.read.side_effect = [" ", ""]
+        with (
+            patch("sys.stdin", drain_eof_stdin),
+            patch.object(termios, "tcgetattr", return_value=[]),
+            patch.object(termios, "tcsetattr"),
+            patch.object(tty, "setcbreak"),
+            patch("select.select", return_value=([drain_eof_stdin], [], [])),
+            interactive_pause_listener(),
+        ):
+            time.sleep(0.05)
+        self.assertEqual(drain_eof_stdin.read.call_count, 2)
+
+    def test_relocate_companion_lyrics_allows_case_only_rename_on_case_insensitive_fs(
+        self,
+    ) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            src_audio = root / "01 - song.flac"
+            dst_audio = root / "01 - Song.flac"
+            src_lrc = root / "01 - song.lrc"
+            dst_lrc = root / "01 - Song.lrc"
+            src_audio.write_bytes(b"audio")
+            src_lrc.write_text("[00:01.00] line", encoding="utf-8")
+
+            orig_exists = Path.exists
+            orig_samefile = Path.samefile
+
+            def fake_exists(path_self: Path) -> bool:
+                if path_self == dst_lrc:
+                    return True
+                return orig_exists(path_self)
+
+            def fake_samefile(path_self: Path, other: str | os.PathLike[str]) -> bool:
+                if path_self == dst_lrc and other == src_lrc:
+                    return True
+                return orig_samefile(path_self, other)
+
+            with (
+                patch.object(Path, "exists", fake_exists),
+                patch.object(Path, "samefile", fake_samefile),
+                patch("sonora.core.sidecars.safe_case_rename") as mock_rename,
+            ):
+                moved = relocate_companion_lyrics(
+                    src_audio, dst_audio, sidecars=[src_lrc]
+                )
+
+            self.assertEqual(moved, [dst_lrc])
+            mock_rename.assert_called_once_with(src_lrc, dst_lrc)
+
+    def test_are_lyrics_timestamps_monotonic_validates_enhanced_lrc(self) -> None:
+        from sonora.core.sidecars import are_lyrics_timestamps_monotonic
+
+        enhanced_ok = (
+            "[00:05.00] <00:05.10> First <00:05.50> line\n"
+            "[00:10.00] <00:10.10> Second <00:10.50> line\n"
+        )
+        enhanced_bad = (
+            "[00:10.00] <00:10.10> First <00:10.50> line\n"
+            "[00:05.00] <00:05.10> Earlier <00:05.50> line\n"
+        )
+        chorus_shorthand = (
+            "[00:10.00] Intro\n[00:15.00][01:20.00] Chorus\n[00:25.00] Verse\n"
+        )
+        self.assertTrue(are_lyrics_timestamps_monotonic(enhanced_ok))
+        self.assertFalse(are_lyrics_timestamps_monotonic(enhanced_bad))
+        self.assertTrue(are_lyrics_timestamps_monotonic(chorus_shorthand))
+
+    def test_instrumental_pattern_matches_instrumental_markers(self) -> None:
+        from sonora.core.sidecars import INSTRUMENTAL_PATTERN
+
+        self.assertIsNotNone(INSTRUMENTAL_PATTERN.search("Song (Instrumental)"))
+        self.assertIsNotNone(INSTRUMENTAL_PATTERN.search("Song [instrumental]"))
+        self.assertIsNotNone(INSTRUMENTAL_PATTERN.search("Album Instrumentals"))
+        self.assertIsNone(INSTRUMENTAL_PATTERN.search("Instrumental Music"))
+
+    def test_sanitize_name_strips_trailing_space_before_dots_and_reserved_names(
+        self,
+    ) -> None:
+        self.assertEqual(sanitize_name("I Don't Give A ..."), "I Don't Give A")
+        self.assertEqual(sanitize_name("CON"), "CON_")
+        self.assertEqual(sanitize_name("NUL.txt"), "NUL_.txt")
+        self.assertEqual(sanitize_name("A/B\\C:D*?<>|"), "A_B_CD")

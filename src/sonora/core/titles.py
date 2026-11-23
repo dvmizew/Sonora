@@ -270,10 +270,10 @@ def _is_censored_word_match(word_a: str, word_b: str) -> bool:
     if len(word_a) == len(word_b):
         return all(ca == cb or ca == "*" or cb == "*" for ca, cb in zip(word_a, word_b))
     if "*" in word_b and "*" not in word_a:
-        pattern = "^" + re.sub(r"\*+", r"[a-z]+", re.escape(word_b)) + "$"
+        pattern = "^" + re.sub(r"(?:\\\*)+", r"[a-z]+", re.escape(word_b)) + "$"
         return bool(re.match(pattern, word_a, re.IGNORECASE))
     if "*" in word_a and "*" not in word_b:
-        pattern = "^" + re.sub(r"\*+", r"[a-z]+", re.escape(word_a)) + "$"
+        pattern = "^" + re.sub(r"(?:\\\*)+", r"[a-z]+", re.escape(word_a)) + "$"
         return bool(re.match(pattern, word_b, re.IGNORECASE))
     return False
 
@@ -579,9 +579,7 @@ def score_artist_title_match(
         if min_title_len < config.short_title_length
         else config.title_match_threshold
     )
-    if title_score < 100 and (
-        title_score <= title_thresh or title_score < config.artist_match_threshold
-    ):
+    if title_score < 100 and title_score <= title_thresh:
         return 0.0
 
     if query_artist_clean:
@@ -674,10 +672,7 @@ def score_artist_title_match(
             ):
                 artist_score = 100.0
 
-        if artist_score < 100 and (
-            artist_score <= config.title_match_threshold
-            or artist_score < config.artist_match_threshold
-        ):
+        if artist_score < 100 and artist_score < config.artist_match_threshold:
             return 0.0
 
         return (title_score * config.title_score_weight) + (

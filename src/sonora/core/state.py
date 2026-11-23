@@ -140,38 +140,6 @@ class LibraryStateVault:
         finally:
             init_conn.close()
 
-    def is_track_up_to_date(
-        self, file_path: Path, expected_status: str | None = None
-    ) -> bool:
-        """Check if file on disk has not changed since it was last successfully tagged."""
-        try:
-            stat = file_path.stat()
-            current_mtime = stat.st_mtime_ns
-            current_size = stat.st_size
-            path_str = str(file_path.resolve())
-
-            with self._connection() as conn:
-                cursor = conn.execute(
-                    "SELECT mtime_ns, file_size, status FROM track_state WHERE file_path = ?;",
-                    (path_str,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    mtime_ns, file_size, status = row
-                    status_valid = (
-                        status == expected_status
-                        if expected_status is not None
-                        else (status == "TAGGED_OK" or status.startswith("TAGGED_OK:"))
-                    )
-                    return bool(
-                        mtime_ns == current_mtime
-                        and file_size == current_size
-                        and status_valid
-                    )
-        except (OSError, sqlite3.Error) as error:
-            LOG.debug(f"State check failed for {file_path}: {error}")
-        return False
-
     def filter_outdated_tracks(
         self, file_paths: list[Path], expected_status: str = "TAGGED_OK"
     ) -> list[Path]:
@@ -236,23 +204,6 @@ class LibraryStateVault:
 
         return outdated
 
-    def record_track_state(self, file_path: Path, status: str = "TAGGED_OK") -> None:
-        """Record successful tagging state for a single file."""
-        try:
-            stat = file_path.stat()
-            path_str = str(file_path.resolve())
-            now = time.time()
-            with self._connection() as conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO track_state (file_path, mtime_ns, file_size, status, last_tagged_timestamp)
-                    VALUES (?, ?, ?, ?, ?);
-                    """,
-                    (path_str, stat.st_mtime_ns, stat.st_size, status, now),
-                )
-        except (OSError, sqlite3.Error) as error:
-            LOG.debug(f"Failed to record state for {file_path}: {error}")
-
     def record_tracks_state_batch(
         self, file_paths: list[Path], status: str = "TAGGED_OK"
     ) -> None:
@@ -291,44 +242,6 @@ class LibraryStateVault:
         except sqlite3.Error as error:
             LOG.debug(f"Failed to batch record state: {error}")
 
-    def record_artist_alias(
-        self, alias: str, canonical_name: str, source: str = "musicbrainz"
-    ) -> None:
-        """Persist a single artist alias mapping to the local knowledge base."""
-        alias_clean = alias.strip()
-        canonical_clean = canonical_name.strip()
-        if not alias_clean or not canonical_clean:
-            return
-        from sonora.core.text import normalize_str
-
-        alias_norm = normalize_str(alias_clean)
-        if not alias_norm:
-            return
-
-        now = time.time()
-        compact = alias_norm.replace(" ", "")
-        try:
-            with self._connection() as conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO artist_aliases (
-                        alias_normalized, canonical_name, source, updated_at
-                    ) VALUES (?, ?, ?, ?);
-                    """,
-                    (alias_norm, canonical_clean, source, now),
-                )
-                if compact and compact != alias_norm:
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO artist_aliases (
-                            alias_normalized, canonical_name, source, updated_at
-                        ) VALUES (?, ?, ?, ?);
-                        """,
-                        (compact, canonical_clean, source, now),
-                    )
-        except sqlite3.Error as error:
-            LOG.debug(f"Failed to record artist alias '{alias}': {error}")
-
     def record_artist_aliases(
         self,
         mappings: Sequence[tuple[str, str]],
@@ -339,7 +252,8 @@ class LibraryStateVault:
             return
         from sonora.core.text import normalize_str
 
-        records: list[tuple[str, str, str, float]] = []
+        explicit_records: list[tuple[str, str, str, float]] = []
+        compact_records: list[tuple[str, str, str, float]] = []
         now = time.time()
         for alias, canonical in mappings:
             alias_clean = alias.strip()
@@ -349,12 +263,12 @@ class LibraryStateVault:
             alias_norm = normalize_str(alias_clean)
             if not alias_norm:
                 continue
-            records.append((alias_norm, canonical_clean, source, now))
+            explicit_records.append((alias_norm, canonical_clean, source, now))
             compact = alias_norm.replace(" ", "")
             if compact and compact != alias_norm:
-                records.append((compact, canonical_clean, source, now))
+                compact_records.append((compact, canonical_clean, source, now))
 
-        if not records:
+        if not explicit_records:
             return
         try:
             with self._connection() as conn:
@@ -364,8 +278,17 @@ class LibraryStateVault:
                         alias_normalized, canonical_name, source, updated_at
                     ) VALUES (?, ?, ?, ?);
                     """,
-                    records,
+                    explicit_records,
                 )
+                if compact_records:
+                    conn.executemany(
+                        """
+                        INSERT OR IGNORE INTO artist_aliases (
+                            alias_normalized, canonical_name, source, updated_at
+                        ) VALUES (?, ?, ?, ?);
+                        """,
+                        compact_records,
+                    )
         except sqlite3.Error as error:
             LOG.debug(f"Failed to batch record artist aliases: {error}")
 
@@ -400,44 +323,6 @@ class LibraryStateVault:
         except sqlite3.Error as error:
             LOG.debug(f"Failed to query artist alias '{alias}': {error}")
             return None
-
-    def get_all_artist_aliases(self) -> dict[str, str]:
-        """Retrieve all persisted artist aliases."""
-        if not self.db_path.exists():
-            return {}
-        try:
-            with self._connection() as conn:
-                cursor = conn.execute(
-                    "SELECT alias_normalized, canonical_name FROM artist_aliases;"
-                )
-                return {str(row[0]): str(row[1]) for row in cursor.fetchall()}
-        except sqlite3.Error as error:
-            LOG.debug(f"Failed to query all artist aliases: {error}")
-            return {}
-
-    def get_artist_alias_count(self) -> int:
-        """Return total number of recorded artist aliases."""
-        if not self.db_path.exists():
-            return 0
-        try:
-            with self._connection() as conn:
-                cursor = conn.execute("SELECT COUNT(*) FROM artist_aliases;")
-                return int(next(cursor)[0])
-        except sqlite3.Error as error:
-            LOG.debug(f"Failed to count artist aliases: {error}")
-            return 0
-
-    def clear_artist_aliases(self) -> int:
-        """Clear recorded artist aliases from the database."""
-        if not self.db_path.exists():
-            return 0
-        try:
-            with self._connection() as conn:
-                removed = conn.execute("DELETE FROM artist_aliases;").rowcount
-                return int(removed)
-        except sqlite3.Error as error:
-            LOG.debug(f"Failed to clear artist aliases: {error}")
-            return 0
 
     def get_state_count(self) -> int:
         """Return total number of tracked files in the library state database."""

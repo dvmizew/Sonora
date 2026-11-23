@@ -9,9 +9,13 @@ from typing import TypeGuard
 import anyascii
 import ftfy
 import pycountry
-from pathvalidate import sanitize_filename
 
 from sonora.core.config import get_config, get_disambiguation_pattern
+
+_INVALID_FILENAME_CHARS_RE = re.compile(r'[\x00-\x1f\x7f<>:"/\\|?*]+')
+_WINDOWS_RESERVED_NAME_RE = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.IGNORECASE
+)
 
 
 def safe_int(value: object) -> int | None:
@@ -355,9 +359,14 @@ def sanitize_name(name: str | None) -> str:
     if not name:
         return "Unknown"
     fixed_text = ftfy.fix_text(str(name)).replace("/", "_").replace("\\", "_")
-    sanitized = sanitize_filename(fixed_text, replacement_text="")
-    sanitized = " ".join(sanitized.split()).rstrip(".")
-    return sanitized or "Unknown"
+    sanitized = _INVALID_FILENAME_CHARS_RE.sub("", fixed_text)
+    sanitized = " ".join(sanitized.split()).rstrip(". ")
+    if not sanitized:
+        return "Unknown"
+    if _WINDOWS_RESERVED_NAME_RE.match(sanitized):
+        stem, dot, rest = sanitized.partition(".")
+        sanitized = f"{stem}_{dot}{rest}"
+    return sanitized
 
 
 def is_valid_uuid(
