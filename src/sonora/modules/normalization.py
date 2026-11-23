@@ -55,9 +55,9 @@ def normalize_track_metadata(
             track_info.title,
             primary_artist=track_info.artist,
         )
-        if title_feats and not track_info.featured_artists:
+        if title_feats:
             track_info.featured_artists = normalize_featured_artists(
-                title_feats,
+                [track_info.featured_artists, *title_feats],
                 primary_artist=track_info.artist,
             )
         track_info.title = clean_unicode_punct(clean_base)
@@ -67,22 +67,24 @@ def normalize_track_metadata(
                 for f in re.split(r"[,/;&]", track_info.featured_artists)
                 if f.strip()
             ]
-            for feat in feats:
+            if feats:
+                escaped_feats = "|".join(
+                    re.escape(feat) for feat in sorted(feats, key=len, reverse=True)
+                )
                 cu_pat = re.compile(
-                    rf"\s+\b(?:cu|feat\.?|ft\.?)\s+{re.escape(feat)}$",
+                    rf"(?:\s+\b(?:cu|feat\.?|ft\.?)\s+(?:{escaped_feats}))+$",
                     re.IGNORECASE,
                 )
-                if cu_pat.search(track_info.title):
-                    track_info.title = cu_pat.sub("", track_info.title).strip()
+                track_info.title = cu_pat.sub("", track_info.title).strip()
 
     if track_info.artist:
         track_info.artist = strip_corrupt_brackets(track_info.artist)
         base_artist, extracted_features = extract_artist_features(track_info.artist)
         if base_artist:
             track_info.artist = base_artist
-        if extracted_features and not track_info.featured_artists:
+        if extracted_features:
             track_info.featured_artists = normalize_featured_artists(
-                extracted_features,
+                [track_info.featured_artists, *extracted_features],
                 primary_artist=track_info.artist,
             )
         track_info.artist = clean_disambiguation(track_info.artist)
@@ -114,17 +116,21 @@ def normalize_track_metadata(
         track_info.artist = harmonized
         track_info.album_artist = harmonized
 
+    is_single_track_count = track_info.total_tracks == 1 or (
+        track_info.total_tracks is None
+        and (track_info.track_number is None or track_info.track_number == 1)
+    )
     is_singles_track = bool(
         (track_info.total_tracks == 1 and (track_info.track_number or 1) > 1)
         or (
             track_info.release_type
             and track_info.release_type.lower() == "single"
-            and (track_info.total_tracks or 1) <= 1
+            and is_single_track_count
         )
         or "singles" in [p.lower() for p in track_info.file_path.parts]
         or get_config().is_generic_container(track_info.file_path.parent.name)
     )
-    if is_singles_track and (track_info.total_tracks or 1) <= 1:
+    if is_singles_track and is_single_track_count:
         track_info.track_number = 1
         track_info.total_tracks = 1
 

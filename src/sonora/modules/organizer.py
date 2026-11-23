@@ -420,8 +420,15 @@ def _handle_single_deduplication(
             )
             return True, 1
 
-    if target_file.exists() and not (
-        dry_run and registered and registered.file_path == target_file and removed_count
+    if (
+        target_file.exists()
+        and path.resolve() != target_file.resolve()
+        and not (
+            dry_run
+            and registered
+            and registered.file_path == target_file
+            and removed_count
+        )
     ):
         target_meta = _read_file_info(target_file)[1]
         destination_registry = SingleDeduplicator()
@@ -477,6 +484,7 @@ def organize_library_singles(
     deduplicator = SingleDeduplicator()
     singles_to_process: list[tuple[Path, TrackInfo]] = []
     playlist_renames: dict[Path, Path] = {}
+    reserved_targets: set[Path] = set()
 
     with create_progress() as progress:
         task_scan = progress.add_task(
@@ -580,11 +588,7 @@ def organize_library_singles(
                     target_file = _resolve_single_target_file(
                         path, track_info, target_singles_dir
                     )
-                    if path.resolve() == target_file.resolve():
-                        deduplicator.register(track_info, target_file)
-                        progress.advance(task_organize)
-                        continue
-
+                    already_at_target = path.resolve() == target_file.resolve()
                     primary_artist = get_primary_artist(track_info.artist)
                     track_identity_key = f"{normalize_str(primary_artist)} - {normalize_str(clean_title(track_info.title))}"
                     should_skip, dup_count = _handle_single_deduplication(
@@ -601,8 +605,13 @@ def organize_library_singles(
                         progress.advance(task_organize)
                         continue
 
+                    if already_at_target:
+                        deduplicator.register(track_info, target_file)
+                        progress.advance(task_organize)
+                        continue
+
                     if (
-                        target_file.exists() or target_file in playlist_renames.values()
+                        target_file.exists() or target_file in reserved_targets
                     ) and target_file.resolve() != path.resolve():
                         edition_id = track_info.isrc or track_info.musicbrainz_trackid
                         edition_label = (
@@ -617,7 +626,7 @@ def organize_library_singles(
                         target_file = resolve_unique_path(
                             target_file,
                             current_path=path,
-                            reserved_paths=set(playlist_renames.values()),
+                            reserved_paths=reserved_targets,
                         )
 
                     if not dry_run:
@@ -651,6 +660,7 @@ def organize_library_singles(
                         )
 
                     playlist_renames[path] = target_file
+                    reserved_targets.add(target_file)
                     relocate_companion_lyrics(
                         path, target_file, dry_run=dry_run, sidecars=companion_lyrics
                     )
@@ -717,6 +727,11 @@ def _consolidate_directory_entries(
         return 0
     if renames is None:
         renames = {}
+
+    reserved_paths: set[Path] = set(renames.values())
+    target_to_originals: dict[Path, list[Path]] = {}
+    for original, target_path in renames.items():
+        target_to_originals.setdefault(target_path, []).append(original)
 
     consolidated_count = 0
     dir_groups: dict[str, list[Path]] = {}
@@ -793,10 +808,11 @@ def _consolidate_directory_entries(
 
             action = "[DRY-RUN] Would consolidate" if dry_run else "Consolidating"
             LOG.detail(
-                f"{action} duplicate directory: {cand_dir.name} -> {canonical_dir.name}"
+                f"{action} duplicate directory: {escape(cand_dir.name)} -> {escape(canonical_dir.name)}"
             )
             try:
                 audio_files = find_audio_files(cand_dir)
+                audio_file_set = set(audio_files)
                 companions = {
                     audio: find_companion_lyrics(audio) for audio in audio_files
                 }
@@ -805,18 +821,23 @@ def _consolidate_directory_entries(
                     path
                     for path in cand_dir.rglob("*")
                     if path.is_file()
-                    and path not in audio_files
+                    and path not in audio_file_set
                     and path not in lyric_files
                 )
                 for source_file in [*audio_files, *other_files]:
                     if dry_run and renames and source_file in renames:
                         continue
                     target = canonical_dir / source_file.relative_to(cand_dir)
-                    reserved_paths = set(renames.values())
                     sidecars = companions.get(source_file, [])
+                    rejected_paths: set[Path] = set()
                     while True:
                         destination_file = resolve_unique_path(
-                            target, reserved_paths=reserved_paths
+                            target,
+                            reserved_paths=(
+                                reserved_paths | rejected_paths
+                                if rejected_paths
+                                else reserved_paths
+                            ),
                         )
                         if all(
                             not destination_file.with_suffix(sidecar.suffix).exists()
@@ -825,7 +846,7 @@ def _consolidate_directory_entries(
                             for sidecar in sidecars
                         ):
                             break
-                        reserved_paths.add(destination_file)
+                        rejected_paths.add(destination_file)
                     if not dry_run:
                         destination_file.parent.mkdir(parents=True, exist_ok=True)
                         safe_case_rename(source_file, destination_file)
@@ -835,11 +856,20 @@ def _consolidate_directory_entries(
                         dry_run=dry_run,
                         sidecars=sidecars,
                     )
-                    for original, previous_target in tuple(renames.items()):
-                        if previous_target == source_file:
-                            renames[original] = destination_file
+                    chained_originals = target_to_originals.pop(source_file, [])
+                    for original in chained_originals:
+                        renames[original] = destination_file
                     renames[source_file] = destination_file
-                    renames.update(zip(sidecars, moved_sidecars))
+                    target_to_originals.setdefault(destination_file, []).extend(
+                        [*chained_originals, source_file]
+                    )
+                    reserved_paths.add(destination_file)
+                    for sidecar, moved_sidecar in zip(sidecars, moved_sidecars):
+                        renames[sidecar] = moved_sidecar
+                        target_to_originals.setdefault(moved_sidecar, []).append(
+                            sidecar
+                        )
+                        reserved_paths.add(moved_sidecar)
                 if not dry_run:
                     cleanup_empty_dirs(cand_dir)
                     cand_dir.rmdir()

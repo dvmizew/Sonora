@@ -485,13 +485,13 @@ def organize(
         )
 
     organization_summary_rows = [
-        ("Source Directory", str(path.resolve()), None),
+        ("Source Directory", escape(str(path.resolve())), None),
         (
             "Playlists Would Update" if dry_run else "Playlists Updated",
             str(len(updated_playlists)),
             None,
         ),
-        ("Target Directory", str(destination_directory.resolve()), None),
+        ("Target Directory", escape(str(destination_directory.resolve())), None),
         (
             "Single Tracks Would Move" if dry_run else "Single Tracks Organized",
             str(organized_count),
@@ -550,8 +550,8 @@ def backup(
 
     LOG.success(f"Backup created at: [bold]{escape(str(backup_path))}[/bold]")
     backup_summary_rows = [
-        ("Source Directory", str(path.resolve()), None),
-        ("Backup Archive", str(backup_path), "green"),
+        ("Source Directory", escape(str(path.resolve())), None),
+        ("Backup Archive", escape(str(backup_path)), "green"),
     ]
     LOG.summary_table("Backup Summary", backup_summary_rows)
     return 0
@@ -599,7 +599,7 @@ def restore(
         LOG.warning(f"Partially restored {restored_count} tracks before interruption.")
 
     restore_summary_rows = [
-        ("Backup File", str(backup_file.resolve()), None),
+        ("Backup File", escape(str(backup_file.resolve())), None),
         (
             "Tracks Restored",
             str(restored_count),
@@ -690,7 +690,7 @@ def normalize(
         )
 
     summary_rows = [
-        ("Target Directory", str(path.resolve()), None),
+        ("Target Directory", escape(str(path.resolve())), None),
         ("Tracks Scanned", str(total_scanned), "cyan" if total_scanned else "white"),
         (
             "Tracks Would Update" if dry_run else "Tracks Modified",

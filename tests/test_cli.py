@@ -39,7 +39,7 @@ from sonora.core.config import (
     get_config,
 )
 from sonora.core.constants import USER_AGENT
-from sonora.core.http import SESSION
+from sonora.core.http import SESSION, download_image_bytes
 from sonora.core.models import (
     CheckReport,
     MetadataSource,
@@ -104,7 +104,6 @@ from sonora.services.musicbrainz import (
     fetch_track_mbid,
 )
 from sonora.services.theaudiodb import (
-    _download_artwork_bytes,
     fetch_artist_images,
     fetch_theaudiodb_track_details,
 )
@@ -1171,6 +1170,92 @@ class TestAudioCommandFailureContracts(IsolatedTestCase):
                 audio._process_key_file(path, True, True), (path, None, False)
             )
 
+    def test_process_bpm_file_returns_false_when_bpm_is_none(self) -> None:
+        path = self.test_directory / "recording.flac"
+        with (
+            patch.object(audio, "read_track_metadata", return_value=TrackInfo(path)),
+            patch.object(audio, "calculate_bpm", return_value=None),
+        ):
+            self.assertEqual(
+                audio._process_bpm_file(path, True, True), (path, None, False)
+            )
+
+    def test_bpm_and_key_report_oserror_as_failed_and_return_nonzero(self) -> None:
+        from sonora.core.logger import LOG
+
+        song = self.test_directory / "broken.flac"
+        song.write_bytes(b"broken")
+        bpm_report = self.test_directory / "bpm.json"
+        key_report = self.test_directory / "key.json"
+        with (
+            patch.object(
+                audio, "read_track_metadata", side_effect=OSError("unreadable")
+            ),
+            patch.object(LOG, "warning") as warning,
+        ):
+            bpm_exit = audio.bpm(self.test_directory, threads=1, json_report=bpm_report)
+            key_exit = audio.key(self.test_directory, threads=1, json_report=key_report)
+        self.assertEqual(bpm_exit, 1)
+        self.assertEqual(key_exit, 1)
+        self.assertEqual(warning.call_count, 2)
+        bpm_payload = json.loads(bpm_report.read_text(encoding="utf-8"))
+        key_payload = json.loads(key_report.read_text(encoding="utf-8"))
+        self.assertEqual(bpm_payload["summary"]["failed"], 1)
+        self.assertEqual(bpm_payload["summary"]["skipped"], 0)
+        self.assertTrue(bpm_payload["details"][0]["failed"])
+        self.assertEqual(key_payload["summary"]["failed"], 1)
+        self.assertEqual(key_payload["summary"]["skipped"], 0)
+        self.assertTrue(key_payload["details"][0]["failed"])
+
+    def test_cli_summary_tables_escape_rich_markup_in_paths(self) -> None:
+        from rich.markup import escape as rich_escape
+
+        from sonora.cli import library as cli_library
+        from sonora.core.logger import LOG
+
+        tricky_dir = self.test_directory / "Album [bold red]"
+        tricky_dir.mkdir()
+        backup_file = tricky_dir / "tags [cyan].json"
+        backup_file.write_text("{}", encoding="utf-8")
+
+        with (
+            patch.object(cli_library, "organize_library_singles", return_value=0),
+            patch.object(LOG, "summary_table") as summary_table,
+        ):
+            self.assertEqual(cli_library.organize(tricky_dir, dry_run=True), 0)
+        rows = summary_table.call_args.args[1]
+        self.assertEqual(rows[0][1], rich_escape(str(tricky_dir.resolve())))
+        self.assertEqual(
+            rows[2][1], rich_escape(str((tricky_dir / "Singles").resolve()))
+        )
+
+        with (
+            patch.object(cli_library, "backup_library_tags", return_value=backup_file),
+            patch.object(LOG, "summary_table") as summary_table,
+        ):
+            self.assertEqual(cli_library.backup(tricky_dir), 0)
+        rows = summary_table.call_args.args[1]
+        self.assertEqual(rows[0][1], rich_escape(str(tricky_dir.resolve())))
+        self.assertEqual(rows[1][1], rich_escape(str(backup_file)))
+
+        with (
+            patch.object(cli_library, "restore_library_tags", return_value=0),
+            patch.object(LOG, "summary_table") as summary_table,
+        ):
+            self.assertEqual(cli_library.restore(backup_file), 0)
+        rows = summary_table.call_args.args[1]
+        self.assertEqual(rows[0][1], rich_escape(str(backup_file.resolve())))
+
+        with (
+            patch.object(
+                cli_library, "normalize_library", return_value=NormalizeReport()
+            ),
+            patch.object(LOG, "summary_table") as summary_table,
+        ):
+            self.assertEqual(cli_library.normalize(tricky_dir, no_dsp=True), 0)
+        rows = summary_table.call_args.args[1]
+        self.assertEqual(rows[0][1], rich_escape(str(tricky_dir.resolve())))
+
     def test_parallel_programming_failure_is_not_masked(self) -> None:
         path = self.test_directory / "recording.flac"
         path.write_bytes(b"audio fixture")
@@ -2137,8 +2222,8 @@ class TestNetwork(IsolatedTestCase):
             fetch_theaudiodb_track_details("Artist", "Title")
 
     def test_download_artwork_bytes_empty_url(self) -> None:
-        self.assertIsNone(_download_artwork_bytes(None))
-        self.assertIsNone(_download_artwork_bytes(""))
+        self.assertIsNone(download_image_bytes(None))
+        self.assertIsNone(download_image_bytes(""))
 
     @patch("sonora.services.musicbrainz.musicbrainzngs")
     def test_musicbrainz_recording_lookup_network_errors(

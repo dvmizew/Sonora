@@ -1,10 +1,12 @@
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from enum import Enum, auto
 from itertools import pairwise
 from pathlib import Path
+from typing import TypeVar
 
 import orjson
 from mutagen import MutagenError
@@ -27,7 +29,6 @@ from sonora.core.cache import api_cache_session, get_cached_api
 from sonora.core.cancellation import InterruptedOperationError, is_interruption
 from sonora.core.config import get_config
 from sonora.core.constants import (
-    FEAT_KEYWORDS,
     MIN_COVER_ART_DIMENSION,
     SUPPORTED_EXTS,
 )
@@ -41,6 +42,7 @@ from sonora.core.logger import (
 )
 from sonora.core.models import CheckReport, TrackInfo
 from sonora.core.sidecars import (
+    INSTRUMENTAL_PATTERN,
     are_lyrics_timestamps_monotonic,
     find_companion_lyrics,
     is_lyrics_duration_valid,
@@ -58,7 +60,7 @@ from sonora.core.titles import (
 )
 from sonora.modules.matching import _is_generic
 
-FEAT_PATTERN = re.compile(FEAT_KEYWORDS, re.IGNORECASE)
+T = TypeVar("T")
 
 
 class _IssueCategory(Enum):
@@ -102,179 +104,121 @@ def _artists_agree(a1: str | None, a2: str | None) -> bool:
     return bool(fuzz.ratio(n1, n2) >= 80)
 
 
-def check_file(
+def _check_flac_integrity(
     file_path: Path,
-    check_spectral: bool = False,
-    track_metadata: TrackInfo | None = None,
-    *,
-    categories: set[_IssueCategory] | None = None,
-) -> list[str]:
-    if categories is None:
-        categories = set()
-    issues: list[str] = []
-    track: TrackInfo | None = track_metadata
-    if not file_path.exists():
-        return [f"File not found: {file_path}"]
-
-    if file_path.suffix.lower() not in SUPPORTED_EXTS:
-        return []
-
-    if file_path.suffix.lower() == ".flac":
-        try:
-            if not verify_flac_checksum(file_path):
-                categories.add(_IssueCategory.CORRUPT)
-                issues.append(
-                    "FLAC audio stream MD5 checksum verification failed (corrupted FLAC)."
-                )
-        except OSError as error:
+    issues: list[str],
+    categories: set[_IssueCategory],
+) -> None:
+    try:
+        if not verify_flac_checksum(file_path):
             categories.add(_IssueCategory.CORRUPT)
-            issues.append(f"Checksum check failed: {error}")
-
-        try:
-            audio_flac = FLAC(str(file_path))
-            raw_tags = getattr(audio_flac, "tags", None) or {}
-            for canonical, alias in (
-                ("date", "year"),
-                ("originaldate", "originalyear"),
-            ):
-                date_value = str((raw_tags.get(canonical) or [""])[0])
-                year_value = str((raw_tags.get(alias) or [""])[0])
-                if (
-                    re.fullmatch(r"\d{4}", date_value[:4])
-                    and re.fullmatch(r"\d{4}", year_value[:4])
-                    and date_value[:4] != year_value[:4]
-                ):
-                    issues.append(
-                        f"Conflicting date aliases: {canonical.upper()}={date_value} and "
-                        f"{alias.upper()}={year_value}; verify the release date."
-                    )
-            for snapshot in raw_tags.get("tidal_data", []):
-                try:
-                    payload = orjson.loads(snapshot)
-                except orjson.JSONDecodeError:
-                    issues.append(
-                        "Embedded TIDAL_DATA contains invalid JSON; provider snapshot requires review."
-                    )
-                    continue
-                expected_duration = (
-                    safe_float(payload.get("duration"))
-                    if isinstance(payload, dict)
-                    else None
-                )
-                if (
-                    expected_duration is not None
-                    and expected_duration > 0
-                    and (
-                        abs(expected_duration - audio_flac.info.length)
-                        > max(8.0, get_config().single_duration_tolerance_seconds)
-                    )
-                ):
-                    issues.append(
-                        f"Embedded TIDAL_DATA duration {expected_duration:g}s conflicts with "
-                        f"audio duration {audio_flac.info.length:.3f}s; provider snapshot may describe another recording."
-                    )
-            for index, picture in enumerate(audio_flac.pictures):
-                if len(picture.data) == 0:
-                    issues.append(f"Corrupt 0-byte picture block at index {index}.")
-        except (MutagenError, OSError) as error:
-            LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
-
-    if (
-        check_spectral
-        and file_path.suffix.lower() not in {".mp3", ".ogg", ".opus", ".mpc", ".wma"}
-        and (track_metadata is None or track_metadata.is_lossless)
-    ):
-        is_skit_or_memo = False
-        if track_metadata is not None:
-            dur = track_metadata.duration
-            t_str = f"{track_metadata.title or ''} {track_metadata.album or ''}"
-            if (dur is not None and dur < 45.0) or re.search(
-                r"[\[(]\s*(?:intro|outro|interlude|skit|memo)\s*[\])]|\b(?:skit|interlude|memo)\b",
-                t_str,
-                re.IGNORECASE,
-            ):
-                is_skit_or_memo = True
-
-        if not is_skit_or_memo:
-            try:
-                is_fake, _, description = detect_fake_lossless(file_path)
-                if is_fake:
-                    issues.append(
-                        description
-                        or "Spectral cutoff below 16 kHz; source quality requires review."
-                    )
-            except OSError as error:
-                LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
+            issues.append(
+                "FLAC audio stream MD5 checksum verification failed (corrupted FLAC)."
+            )
+    except OSError as error:
+        categories.add(_IssueCategory.CORRUPT)
+        issues.append(f"Checksum check failed: {error}")
 
     try:
-        track = track_metadata or read_track_metadata(file_path)
-        issues.extend(check_brackets_corruption(track.artist))
-        issues.extend(check_brackets_corruption(track.title))
-
-        if track.genre and not normalize_genre(track.genre):
-            issues.append(f"Blacklisted genre tag: '{track.genre}'")
-        missing_checks = [
-            (track.artist == "Unknown Artist", "Missing ARTIST tag."),
-            (track.title == "Unknown Title", "Missing TITLE tag."),
-            (track.album == "Unknown Album", "Missing ALBUM tag."),
-            (not track.album_artist, "Missing ALBUMARTIST tag (Risk of Split Album)."),
-            (track.track_number is None, "Missing TRACKNUMBER tag."),
-            (not track.date, "Missing DATE (Year) tag."),
-            (track.bpm is None, "Missing BPM tag."),
-            (track.replaygain_track_gain is None, "Missing REPLAYGAIN_TRACK_GAIN tag."),
-            (track.replaygain_track_peak is None, "Missing REPLAYGAIN_TRACK_PEAK tag."),
-        ]
-        for condition, msg in missing_checks:
-            if condition:
-                categories.add(_IssueCategory.MISSING_METADATA)
-                issues.append(msg)
-
-        for position, total, position_label, total_label in (
-            (track.track_number, track.total_tracks, "TRACKNUMBER", "TRACKTOTAL"),
-            (track.disc_number, track.total_discs, "DISCNUMBER", "DISCTOTAL"),
+        audio_flac = FLAC(str(file_path))
+        raw_tags = getattr(audio_flac, "tags", None) or {}
+        for canonical, alias in (
+            ("date", "year"),
+            ("originaldate", "originalyear"),
         ):
-            if position is not None and position <= 0:
+            date_value = str((raw_tags.get(canonical) or [""])[0])
+            year_value = str((raw_tags.get(alias) or [""])[0])
+            if (
+                re.fullmatch(r"\d{4}", date_value[:4])
+                and re.fullmatch(r"\d{4}", year_value[:4])
+                and date_value[:4] != year_value[:4]
+            ):
                 issues.append(
-                    f"Invalid {position_label} {position}; positions start at 1."
+                    f"Conflicting date aliases: {canonical.upper()}={date_value} and "
+                    f"{alias.upper()}={year_value}; verify the release date."
                 )
-            if total is not None and total <= 0:
+        for snapshot in raw_tags.get("tidal_data", []):
+            try:
+                payload = orjson.loads(snapshot)
+            except orjson.JSONDecodeError:
                 issues.append(
-                    f"Invalid {total_label} {total}; totals must be positive."
+                    "Embedded TIDAL_DATA contains invalid JSON; provider snapshot requires review."
                 )
-            elif position is not None and total is not None and position > total:
+                continue
+            expected_duration = (
+                safe_float(payload.get("duration"))
+                if isinstance(payload, dict)
+                else None
+            )
+            if (
+                expected_duration is not None
+                and expected_duration > 0
+                and (
+                    abs(expected_duration - audio_flac.info.length)
+                    > max(8.0, get_config().single_duration_tolerance_seconds)
+                )
+            ):
                 issues.append(
-                    f"{position_label} {position} exceeds {total_label} {total}; verify the release edition."
+                    f"Embedded TIDAL_DATA duration {expected_duration:g}s conflicts with "
+                    f"audio duration {audio_flac.info.length:.3f}s; provider snapshot may describe another recording."
                 )
+        for index, picture in enumerate(audio_flac.pictures):
+            if len(picture.data) == 0:
+                issues.append(f"Corrupt 0-byte picture block at index {index}.")
+    except (MutagenError, OSError) as error:
+        LOG.debug(f"Mutagen picture check skipped for {file_path}: {error}")
 
-        with api_cache_session():
-            itunes_duration_verified = False
-            if track.itunes_trackid and track.duration is not None:
-                cached_itunes = get_cached_api(
-                    f"itunes_lookup:v1:{track.itunes_trackid}"
-                )
-                if isinstance(cached_itunes, dict):
-                    itunes_results = cached_itunes.get("results")
-                    if isinstance(itunes_results, list):
-                        for res in itunes_results:
-                            if isinstance(res, dict) and str(res.get("trackId")) == str(
-                                track.itunes_trackid
+
+def _check_cached_provider_identities(
+    track: TrackInfo,
+    issues: list[str],
+) -> None:
+    with api_cache_session():
+        itunes_duration_verified = False
+        itunes_candidate: dict[str, object] | None = None
+        if track.itunes_trackid:
+            cached_itunes = get_cached_api(f"itunes_lookup:v1:{track.itunes_trackid}")
+            if isinstance(cached_itunes, dict):
+                itunes_results = cached_itunes.get("results")
+                if isinstance(itunes_results, list):
+                    itunes_matches = [
+                        res
+                        for res in itunes_results
+                        if isinstance(res, dict)
+                        and str(res.get("trackId")) == str(track.itunes_trackid)
+                    ]
+                    if itunes_matches and track.duration is not None:
+                        itunes_ms = safe_float(itunes_matches[0].get("trackTimeMillis"))
+                        if itunes_ms is not None and itunes_ms > 0:
+                            itunes_dur = itunes_ms / 1000.0
+                            if abs(track.duration - itunes_dur) <= max(
+                                2.0,
+                                get_config().single_duration_tolerance_seconds,
                             ):
-                                itunes_ms = safe_float(res.get("trackTimeMillis"))
-                                if itunes_ms is not None and itunes_ms > 0:
-                                    itunes_dur = itunes_ms / 1000.0
-                                    if abs(track.duration - itunes_dur) <= max(
-                                        2.0,
-                                        get_config().single_duration_tolerance_seconds,
-                                    ):
-                                        itunes_duration_verified = True
-                                break
+                                itunes_duration_verified = True
+                    if len(itunes_matches) == 1:
+                        result = itunes_matches[0]
+                        duration_ms = safe_float(result.get("trackTimeMillis"))
+                        itunes_candidate = {
+                            "artist": result.get("artistName"),
+                            "title": result.get("trackName"),
+                            "duration": duration_ms / 1000
+                            if duration_ms is not None and duration_ms > 0
+                            else None,
+                            "album": result.get("collectionName"),
+                            "track_position": result.get("trackNumber"),
+                            "disk_number": result.get("discNumber"),
+                        }
 
-            isrc_duration_verified = False
-            if track.isrc and track.duration is not None:
-                cached_deezer = get_cached_api(
-                    f"deezer_isrc:v2:{(track.isrc or '').strip().upper()}"
-                )
-                if isinstance(cached_deezer, dict):
+        isrc_duration_verified = False
+        deezer_candidate: dict[str, object] | None = None
+        if track.isrc:
+            cached_deezer = get_cached_api(
+                f"deezer_isrc:v2:{track.isrc.strip().upper()}"
+            )
+            if isinstance(cached_deezer, dict):
+                deezer_candidate = cached_deezer
+                if track.duration is not None:
                     deezer_dur = safe_float(cached_deezer.get("duration"))
                     if (
                         deezer_dur is not None
@@ -284,328 +228,327 @@ def check_file(
                     ):
                         isrc_duration_verified = True
 
-            for provider, identifier, cache_key in (
-                (
-                    "MusicBrainz",
-                    track.musicbrainz_trackid,
-                    f"mb_rec_details:v2:{track.musicbrainz_trackid}",
-                ),
-                (
-                    "Deezer ISRC",
-                    track.isrc,
-                    f"deezer_isrc:v2:{(track.isrc or '').strip().upper()}",
-                ),
-                (
-                    "iTunes",
-                    track.itunes_trackid,
-                    f"itunes_lookup:v1:{track.itunes_trackid}",
-                ),
-            ):
-                if not identifier:
-                    continue
-                candidate = get_cached_api(cache_key)
-                if not isinstance(candidate, dict):
-                    continue
-                if provider == "iTunes":
-                    results = candidate.get("results")
-                    if not isinstance(results, list):
-                        continue
-                    matches = [
-                        result
-                        for result in results
-                        if isinstance(result, dict)
-                        and str(result.get("trackId")) == str(identifier)
-                    ]
-                    if len(matches) != 1:
-                        continue
-                    result = matches[0]
-                    duration_ms = safe_float(result.get("trackTimeMillis"))
-                    candidate = {
-                        "artist": result.get("artistName"),
-                        "title": result.get("trackName"),
-                        "duration": duration_ms / 1000
-                        if duration_ms is not None and duration_ms > 0
-                        else None,
-                        "album": result.get("collectionName"),
-                        "track_position": result.get("trackNumber"),
-                        "disk_number": result.get("discNumber"),
-                    }
-                artist = str(candidate.get("artist") or "")
-                title = str(candidate.get("title") or "")
-                if not artist or not title:
-                    continue
-                expected_artist = normalize_artist_name(track.artist)
-                cand_artist = normalize_artist_name(artist)
-                if not recording_identity_matches(
-                    expected_artist, track.title, cand_artist, title
-                ):
-                    expected_alias = get_cached_api(
-                        f"canonical_artist:v2:{normalize_str(expected_artist)}"
-                    )
-                    candidate_alias = get_cached_api(
-                        f"canonical_artist:v2:{normalize_str(cand_artist)}"
-                    )
-                    if isinstance(expected_alias, str) and expected_alias.strip():
-                        expected_artist = expected_alias
-                    if isinstance(candidate_alias, str) and candidate_alias.strip():
-                        cand_artist = candidate_alias
-                artist = cand_artist
-                if (
-                    not recording_identity_matches(
-                        expected_artist, track.title, artist, title
-                    )
-                    and track.album_artist
-                    and track.album_artist != track.artist
-                    and recording_identity_matches(
-                        track.album_artist, track.title, artist, title
-                    )
-                ):
-                    expected_artist = track.album_artist
+        mb_candidate: dict[str, object] | None = None
+        if track.musicbrainz_trackid:
+            cached_mb = get_cached_api(f"mb_rec_details:v2:{track.musicbrainz_trackid}")
+            if isinstance(cached_mb, dict):
+                mb_candidate = cached_mb
 
-                matches_identity = recording_identity_matches(
+        for provider, identifier, candidate in (
+            ("MusicBrainz", track.musicbrainz_trackid, mb_candidate),
+            ("Deezer ISRC", track.isrc, deezer_candidate),
+            ("iTunes", track.itunes_trackid, itunes_candidate),
+        ):
+            if not identifier or candidate is None:
+                continue
+            artist = str(candidate.get("artist") or "")
+            title = str(candidate.get("title") or "")
+            if not artist or not title:
+                continue
+            expected_artist = normalize_artist_name(track.artist)
+            cand_artist = normalize_artist_name(artist)
+            if not recording_identity_matches(
+                expected_artist, track.title, cand_artist, title
+            ):
+                expected_alias = get_cached_api(
+                    f"canonical_artist:v2:{normalize_str(expected_artist)}"
+                )
+                candidate_alias = get_cached_api(
+                    f"canonical_artist:v2:{normalize_str(cand_artist)}"
+                )
+                if isinstance(expected_alias, str) and expected_alias.strip():
+                    expected_artist = expected_alias
+                if isinstance(candidate_alias, str) and candidate_alias.strip():
+                    cand_artist = candidate_alias
+            artist = cand_artist
+            if (
+                not recording_identity_matches(
                     expected_artist, track.title, artist, title
                 )
-                if not matches_identity and ("*" in str(track.title) or "*" in title):
-                    unmasked_track_title, unmasked_cand_title = _unmask_censored_title(
-                        track.title or "", title
-                    )
-                    if (
-                        unmasked_track_title != track.title
-                        or unmasked_cand_title != title
-                    ) and recording_identity_matches(
-                        expected_artist,
-                        unmasked_track_title,
-                        artist,
-                        unmasked_cand_title,
-                    ):
-                        matches_identity = True
+                and track.album_artist
+                and track.album_artist != track.artist
+                and recording_identity_matches(
+                    track.album_artist, track.title, artist, title
+                )
+            ):
+                expected_artist = track.album_artist
 
-                if not matches_identity:
-                    cand_album = candidate.get("album")
-                    cand_pos = candidate.get("track_position")
-                    cand_dur = safe_float(candidate.get("duration"))
-                    if _artists_agree(track.artist, artist) or _artists_agree(
-                        expected_artist, artist
-                    ):
-                        q_base = _strip_title_variants(track.title or "")
-                        c_base = _strip_title_variants(title)
-                        titles_agree = bool(
-                            q_base
-                            and c_base
-                            and (
-                                q_base == c_base
-                                or re.sub(r"\s+\d+$", "", q_base)
-                                == re.sub(r"\s+\d+$", "", c_base)
-                                or (
-                                    len(min(q_base, c_base)) >= 6
-                                    and (
-                                        q_base.startswith(c_base)
-                                        or c_base.startswith(q_base)
-                                    )
+            matches_identity = recording_identity_matches(
+                expected_artist, track.title, artist, title
+            )
+            if not matches_identity and ("*" in str(track.title) or "*" in title):
+                unmasked_track_title, unmasked_cand_title = _unmask_censored_title(
+                    track.title or "", title
+                )
+                if (
+                    unmasked_track_title != track.title or unmasked_cand_title != title
+                ) and recording_identity_matches(
+                    expected_artist,
+                    unmasked_track_title,
+                    artist,
+                    unmasked_cand_title,
+                ):
+                    matches_identity = True
+
+            if not matches_identity:
+                cand_album = candidate.get("album")
+                cand_pos = candidate.get("track_position")
+                cand_dur = safe_float(candidate.get("duration"))
+                if _artists_agree(track.artist, artist) or _artists_agree(
+                    expected_artist, artist
+                ):
+                    q_base = _strip_title_variants(track.title or "")
+                    c_base = _strip_title_variants(title)
+                    titles_agree = bool(
+                        q_base
+                        and c_base
+                        and (
+                            q_base == c_base
+                            or re.sub(r"\s+\d+$", "", q_base)
+                            == re.sub(r"\s+\d+$", "", c_base)
+                            or (
+                                len(min(q_base, c_base)) >= 6
+                                and (
+                                    q_base.startswith(c_base)
+                                    or c_base.startswith(q_base)
                                 )
                             )
                         )
-                        if titles_agree:
-                            max_dur_tol = max(
-                                8.0, get_config().single_duration_tolerance_seconds
-                            )
-                            if (
-                                (
-                                    track.duration is not None
-                                    and cand_dur is not None
-                                    and abs(track.duration - cand_dur) <= max_dur_tol
-                                )
-                                or (
-                                    track.album
-                                    and cand_album
-                                    and (
-                                        normalize_str(track.album)
-                                        == normalize_str(cand_album)
-                                        or _strip_title_variants(track.album)
-                                        == _strip_title_variants(cand_album)
-                                    )
-                                    and track.track_number is not None
-                                    and cand_pos == track.track_number
-                                )
-                                or (
-                                    cand_dur is None
-                                    and cand_album is None
-                                    and q_base == c_base
-                                )
-                            ):
-                                matches_identity = True
-
-                if not matches_identity:
-                    issues.append(
-                        f"Cached {provider} identifier {identifier} resolves to '{artist} - {title}', conflicting with ARTIST or TITLE; verify recording identity."
                     )
-                else:
-                    if (
-                        provider in ("Deezer ISRC", "MusicBrainz")
-                        and itunes_duration_verified
-                    ):
-                        continue
-                    if provider == "MusicBrainz" and isrc_duration_verified:
-                        continue
-                    cand_dur = safe_float(candidate.get("duration"))
-                    if track.duration is not None and cand_dur is not None:
-                        provider_tolerance = (
-                            max(8.0, get_config().single_duration_tolerance_seconds)
-                            if provider in ("Deezer ISRC", "MusicBrainz", "iTunes")
-                            else max(
-                                5.0, get_config().single_duration_tolerance_seconds
-                            )
-                        )
-                        cand_album = candidate.get("album")
-                        cand_pos = candidate.get("track_position")
-                        is_combined_album_track = bool(
-                            track.album
-                            and cand_album
-                            and (
-                                normalize_str(track.album) == normalize_str(cand_album)
-                                or _strip_title_variants(track.album)
-                                == _strip_title_variants(cand_album)
-                            )
-                            and track.track_number is not None
-                            and cand_pos == track.track_number
-                            and ("/" in str(track.title) or "_" in str(track.title))
-                            and track.duration > cand_dur
+                    if titles_agree:
+                        max_dur_tol = max(
+                            8.0, get_config().single_duration_tolerance_seconds
                         )
                         if (
-                            not is_combined_album_track
-                            and abs(track.duration - cand_dur) > provider_tolerance
-                        ):
-                            issues.append(
-                                f"Audio duration {track.duration}s conflicts with cached {provider} duration {candidate.get('duration')}s for identifier {identifier}; verify recording version or incomplete audio."
+                            (
+                                track.duration is not None
+                                and cand_dur is not None
+                                and abs(track.duration - cand_dur) <= max_dur_tol
                             )
+                            or (
+                                track.album
+                                and isinstance(cand_album, str)
+                                and cand_album
+                                and (
+                                    normalize_str(track.album)
+                                    == normalize_str(cand_album)
+                                    or _strip_title_variants(track.album)
+                                    == _strip_title_variants(cand_album)
+                                )
+                                and track.track_number is not None
+                                and cand_pos == track.track_number
+                            )
+                            or (
+                                cand_dur is None
+                                and cand_album is None
+                                and q_base == c_base
+                            )
+                        ):
+                            matches_identity = True
 
-        if track.initial_key and key_to_camelot(track.initial_key) is None:
-            issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
-
-        for lyric_text in (track.lyrics, track.synced_lyrics):
-            if not lyric_text:
-                continue
-            if not lyrics_identity_matches(lyric_text, track.artist, track.title):
+            if not matches_identity:
                 issues.append(
-                    "Embedded lyrics headers conflict with ARTIST or TITLE; verify recording identity."
+                    f"Cached {provider} identifier {identifier} resolves to '{artist} - {title}', conflicting with ARTIST or TITLE; verify recording identity."
                 )
-                break
-            if not is_script_concordant(
-                f"{track.artist or ''} {track.album or ''} {track.title or ''} {track.label or ''}",
-                lyric_text,
-                title=track.title,
-            ):
-                issues.append(
-                    "Embedded lyrics language or script appears discordant with track metadata; verify recording identity."
-                )
-                break
-            if not is_lyrics_duration_valid(lyric_text, track.duration):
-                issues.append("Embedded lyrics timestamps exceed audio duration.")
-                break
-
-        for field_name, tag_label, required in [
-            ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID", False),
-            ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID", False),
-            ("musicbrainz_artistid", "MUSICBRAINZ_ARTISTID", False),
-            ("musicbrainz_albumartistid", "MUSICBRAINZ_ALBUMARTISTID", False),
-            ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID", False),
-            ("musicbrainz_workid", "MUSICBRAINZ_WORKID", False),
-        ]:
-            tag_value = getattr(track, field_name)
-            if not tag_value and required:
-                categories.add(_IssueCategory.MISSING_METADATA)
-                issues.append(f"Missing {tag_label} tag.")
-            elif tag_value and not is_valid_uuid(tag_value, allow_multivalue=True):
-                issues.append(f"Invalid UUID format in {tag_label}: '{tag_value}'")
-
-        if track.art_width and (
-            track.art_width < MIN_COVER_ART_DIMENSION
-            or (track.art_height and track.art_height < MIN_COVER_ART_DIMENSION)
-        ):
-            issues.append(
-                f"Low resolution cover art: {track.art_width}x{track.art_height}"
-            )
-
-        _, filename_track_num, _ = parse_track_filename(file_path.name)
-        if filename_track_num is None:
-            issues.append(
-                f"Filename does not start with track number: '{file_path.name}'"
-            )
-        elif (
-            track.track_number is not None
-            and filename_track_num != track.track_number
-            and not (
-                filename_track_num == 1
-                and is_in_singles_hierarchy(file_path)
-                and len(find_audio_files(file_path.parent, recursive=False)) <= 1
-            )
-        ):
-            issues.append(
-                f"Filename track number {filename_track_num} differs from TRACKNUMBER {track.track_number}."
-            )
-
-        _, artist_feats = extract_artist_features(track.artist)
-        if artist_feats:
-            issues.append(
-                f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: clean artist, use FEATURED_ARTISTS tag)"
-            )
-
-        delimiters = [
-            (" \u00d7 ", "\u00d7"),
-            (" / ", "/"),
-            (" + ", "+"),
-            ("; ", ";"),
-            (" ; ", ";"),
-        ]
-        norm_album_artist = (
-            normalize_str(track.album_artist) if track.album_artist else ""
-        )
-        norm_artist = normalize_str(track.artist)
-        is_album_level_collab = bool(
-            norm_album_artist
-            and (
-                norm_artist == norm_album_artist
-                or any(
-                    normalize_str(part) in norm_album_artist
-                    or norm_album_artist in normalize_str(part)
-                    for part in re.split(r"[,/&×+;]", track.artist)
-                    if part.strip()
-                )
-            )
-        )
-        if (
-            not is_album_level_collab
-            and not artist_feats
-            and not is_single_group_artist(track.artist)
-        ):
-            for delimiter_pattern, delimiter_name in delimiters:
-                if delimiter_pattern in f" {track.artist} ":
-                    issues.append(
-                        f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{delimiter_name}')"
+            else:
+                if (
+                    provider in ("Deezer ISRC", "MusicBrainz")
+                    and itunes_duration_verified
+                ):
+                    continue
+                if provider == "MusicBrainz" and isrc_duration_verified:
+                    continue
+                cand_dur = safe_float(candidate.get("duration"))
+                if track.duration is not None and cand_dur is not None:
+                    provider_tolerance = max(
+                        8.0, get_config().single_duration_tolerance_seconds
                     )
+                    cand_album = candidate.get("album")
+                    cand_pos = candidate.get("track_position")
+                    is_combined_album_track = bool(
+                        track.album
+                        and isinstance(cand_album, str)
+                        and cand_album
+                        and (
+                            normalize_str(track.album) == normalize_str(cand_album)
+                            or _strip_title_variants(track.album)
+                            == _strip_title_variants(cand_album)
+                        )
+                        and track.track_number is not None
+                        and cand_pos == track.track_number
+                        and ("/" in str(track.title) or "_" in str(track.title))
+                        and track.duration > cand_dur
+                    )
+                    if (
+                        not is_combined_album_track
+                        and abs(track.duration - cand_dur) > provider_tolerance
+                    ):
+                        issues.append(
+                            f"Audio duration {track.duration}s conflicts with cached {provider} duration {candidate.get('duration')}s for identifier {identifier}; verify recording version or incomplete audio."
+                        )
 
-        _, title_features = extract_title_features(track.title)
-        if title_features:
+
+def _check_tag_and_filename_hygiene(
+    file_path: Path,
+    track: TrackInfo,
+    issues: list[str],
+    categories: set[_IssueCategory],
+) -> None:
+    issues.extend(check_brackets_corruption(track.artist))
+    issues.extend(check_brackets_corruption(track.title))
+
+    if track.genre and not normalize_genre(track.genre):
+        issues.append(f"Blacklisted genre tag: '{track.genre}'")
+    missing_checks = [
+        (track.artist == "Unknown Artist", "Missing ARTIST tag."),
+        (track.title == "Unknown Title", "Missing TITLE tag."),
+        (track.album == "Unknown Album", "Missing ALBUM tag."),
+        (not track.album_artist, "Missing ALBUMARTIST tag (Risk of Split Album)."),
+        (track.track_number is None, "Missing TRACKNUMBER tag."),
+        (not track.date, "Missing DATE (Year) tag."),
+        (track.bpm is None, "Missing BPM tag."),
+        (track.replaygain_track_gain is None, "Missing REPLAYGAIN_TRACK_GAIN tag."),
+        (track.replaygain_track_peak is None, "Missing REPLAYGAIN_TRACK_PEAK tag."),
+    ]
+    for condition, msg in missing_checks:
+        if condition:
+            categories.add(_IssueCategory.MISSING_METADATA)
+            issues.append(msg)
+
+    for position, total, position_label, total_label in (
+        (track.track_number, track.total_tracks, "TRACKNUMBER", "TRACKTOTAL"),
+        (track.disc_number, track.total_discs, "DISCNUMBER", "DISCTOTAL"),
+    ):
+        if position is not None and position <= 0:
+            issues.append(f"Invalid {position_label} {position}; positions start at 1.")
+        if total is not None and total <= 0:
+            issues.append(f"Invalid {total_label} {total}; totals must be positive.")
+        elif position is not None and total is not None and position > total:
             issues.append(
-                f"TITLE tag '{track.title}' contains 'feat' info (Rule: clean title, use FEATURED_ARTISTS tag)"
+                f"{position_label} {position} exceeds {total_label} {total}; verify the release edition."
             )
 
-        _, filename_features = extract_title_features(file_path.stem)
-        if filename_features:
+    if track.initial_key and key_to_camelot(track.initial_key) is None:
+        issues.append(f"Invalid INITIALKEY tag format: '{track.initial_key}'")
+
+    for lyric_text in (track.lyrics, track.synced_lyrics):
+        if not lyric_text:
+            continue
+        if not lyrics_identity_matches(lyric_text, track.artist, track.title):
             issues.append(
-                f"Filename contains 'feat' info: '{file_path.name}' (Rule: clean filename)"
+                "Embedded lyrics headers conflict with ARTIST or TITLE; verify recording identity."
             )
-
-        if track.sample_rate and track.sample_rate < 44100:
-            issues.append(f"Sub-standard sample rate: {track.sample_rate}Hz")
-        if track.bitrate and track.bitrate < 320 and not track.is_lossless:
+            break
+        if not is_script_concordant(
+            f"{track.artist or ''} {track.album or ''} {track.title or ''} {track.label or ''}",
+            lyric_text,
+            title=track.title,
+        ):
             issues.append(
-                f"Sub-standard lossy bitrate: {track.bitrate} kbps (Recommended: 320 kbps)"
+                "Embedded lyrics language or script appears discordant with track metadata; verify recording identity."
             )
+            break
+        if not is_lyrics_duration_valid(lyric_text, track.duration):
+            issues.append("Embedded lyrics timestamps exceed audio duration.")
+            break
 
-    except OSError as error:
-        issues.append(f"Metadata read error: {error}")
+    for field_name, tag_label in (
+        ("musicbrainz_trackid", "MUSICBRAINZ_TRACKID"),
+        ("musicbrainz_albumid", "MUSICBRAINZ_ALBUMID"),
+        ("musicbrainz_artistid", "MUSICBRAINZ_ARTISTID"),
+        ("musicbrainz_albumartistid", "MUSICBRAINZ_ALBUMARTISTID"),
+        ("musicbrainz_releasegroupid", "MUSICBRAINZ_RELEASEGROUPID"),
+        ("musicbrainz_workid", "MUSICBRAINZ_WORKID"),
+    ):
+        tag_value = getattr(track, field_name)
+        if tag_value and not is_valid_uuid(tag_value, allow_multivalue=True):
+            issues.append(f"Invalid UUID format in {tag_label}: '{tag_value}'")
 
+    if track.art_width and (
+        track.art_width < MIN_COVER_ART_DIMENSION
+        or (track.art_height and track.art_height < MIN_COVER_ART_DIMENSION)
+    ):
+        issues.append(f"Low resolution cover art: {track.art_width}x{track.art_height}")
+
+    _, filename_track_num, _ = parse_track_filename(file_path.name)
+    if filename_track_num is None:
+        issues.append(f"Filename does not start with track number: '{file_path.name}'")
+    elif (
+        track.track_number is not None
+        and filename_track_num != track.track_number
+        and not (
+            filename_track_num == 1
+            and is_in_singles_hierarchy(file_path)
+            and len(find_audio_files(file_path.parent, recursive=False)) <= 1
+        )
+    ):
+        issues.append(
+            f"Filename track number {filename_track_num} differs from TRACKNUMBER {track.track_number}."
+        )
+
+    _, artist_feats = extract_artist_features(track.artist)
+    if artist_feats:
+        issues.append(
+            f"ARTIST entry '{track.artist}' contains 'feat' info (Rule: clean artist, use FEATURED_ARTISTS tag)"
+        )
+
+    delimiters = [
+        (" \u00d7 ", "\u00d7"),
+        (" / ", "/"),
+        (" + ", "+"),
+        ("; ", ";"),
+    ]
+    norm_album_artist = normalize_str(track.album_artist) if track.album_artist else ""
+    norm_artist = normalize_str(track.artist)
+    is_album_level_collab = bool(
+        norm_album_artist
+        and (
+            norm_artist == norm_album_artist
+            or any(
+                normalize_str(part) in norm_album_artist
+                or norm_album_artist in normalize_str(part)
+                for part in re.split(r"[,/&×+;]", track.artist)
+                if part.strip()
+            )
+        )
+    )
+    if (
+        not is_album_level_collab
+        and not artist_feats
+        and not is_single_group_artist(track.artist)
+    ):
+        for delimiter_pattern, delimiter_name in delimiters:
+            if delimiter_pattern in f" {track.artist} ":
+                issues.append(
+                    f"ARTIST tag seems unsplit: '{track.artist}' (Contains delimiter '{delimiter_name}')"
+                )
+
+    _, title_features = extract_title_features(track.title)
+    if title_features:
+        issues.append(
+            f"TITLE tag '{track.title}' contains 'feat' info (Rule: clean title, use FEATURED_ARTISTS tag)"
+        )
+
+    _, filename_features = extract_title_features(file_path.stem)
+    if filename_features:
+        issues.append(
+            f"Filename contains 'feat' info: '{file_path.name}' (Rule: clean filename)"
+        )
+
+    if track.sample_rate and track.sample_rate < 44100:
+        issues.append(f"Sub-standard sample rate: {track.sample_rate}Hz")
+    if track.bitrate and track.bitrate < 320 and not track.is_lossless:
+        issues.append(
+            f"Sub-standard lossy bitrate: {track.bitrate} kbps (Recommended: 320 kbps)"
+        )
+
+
+def _check_companion_lyrics(
+    file_path: Path,
+    track: TrackInfo | None,
+    issues: list[str],
+    categories: set[_IssueCategory],
+) -> None:
     companion_lrcs = find_companion_lyrics(
         file_path,
         track_number=track.track_number if track is not None else None,
@@ -613,12 +556,7 @@ def check_file(
     if not companion_lrcs and not (
         track is not None
         and any(
-            re.search(
-                r"[\[(]\s*instrumental\s*[\])]|\binstrumentals\s*$",
-                value,
-                re.IGNORECASE,
-            )
-            for value in (track.title, track.album)
+            INSTRUMENTAL_PATTERN.search(value) for value in (track.title, track.album)
         )
     ):
         categories.add(_IssueCategory.MISSING_LYRICS)
@@ -656,6 +594,65 @@ def check_file(
                     f"Non-chronological timestamps in synchronized lyrics: '{lrc_path.name}'."
                 )
 
+
+def check_file(
+    file_path: Path,
+    check_spectral: bool = False,
+    track_metadata: TrackInfo | None = None,
+    *,
+    categories: set[_IssueCategory] | None = None,
+) -> list[str]:
+    if categories is None:
+        categories = set()
+    issues: list[str] = []
+    if not file_path.exists():
+        return [f"File not found: {file_path}"]
+
+    if file_path.suffix.lower() not in SUPPORTED_EXTS:
+        return []
+
+    if file_path.suffix.lower() == ".flac":
+        _check_flac_integrity(file_path, issues, categories)
+
+    track: TrackInfo | None = track_metadata
+    if track is None:
+        try:
+            track = read_track_metadata(file_path)
+        except OSError as error:
+            issues.append(f"Metadata read error: {error}")
+
+    if (
+        check_spectral
+        and file_path.suffix.lower() not in {".mp3", ".ogg", ".opus", ".mpc", ".wma"}
+        and (track is None or track.is_lossless)
+    ):
+        is_skit_or_memo = False
+        if track is not None:
+            dur = track.duration
+            t_str = f"{track.title or ''} {track.album or ''}"
+            if (dur is not None and dur < 45.0) or re.search(
+                r"[\[(]\s*(?:intro|outro|interlude|skit|memo)\s*[\])]|\b(?:skit|interlude|memo)\b",
+                t_str,
+                re.IGNORECASE,
+            ):
+                is_skit_or_memo = True
+
+        if not is_skit_or_memo:
+            try:
+                is_fake, _, description = detect_fake_lossless(file_path)
+                if is_fake:
+                    issues.append(
+                        description
+                        or "Spectral cutoff below 16 kHz; source quality requires review."
+                    )
+            except OSError as error:
+                LOG.debug(f"Spectral analysis failed for {file_path}: {error}")
+
+    if track is not None:
+        _check_tag_and_filename_hygiene(file_path, track, issues, categories)
+        _check_cached_provider_identities(track, issues)
+
+    _check_companion_lyrics(file_path, track, issues, categories)
     return issues
 
 
@@ -721,6 +718,64 @@ def write_check_report_json(
     )
 
 
+def _record_folder_file_issue(
+    file_path: Path,
+    issue: str,
+    folder_path: Path,
+    report: CheckReport,
+    metadata_issue_paths: set[Path] | None = None,
+) -> None:
+    report.issues.setdefault(str(file_path), []).append(issue)
+    if metadata_issue_paths is not None:
+        metadata_issue_paths.add(file_path)
+    try:
+        display_name = str(file_path.relative_to(folder_path))
+    except ValueError:
+        display_name = file_path.name
+    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
+    LOG.detail(f"   ∟ {escape(issue)}")
+
+
+def _check_consistent_album_field(
+    tracks_in_folder: list[tuple[Path, TrackInfo]],
+    extract: Callable[[TrackInfo], T | None],
+    *,
+    folder_label: str,
+    field_label: str,
+    dominant_label: str,
+    folder_path: Path,
+    report: CheckReport,
+    folder_issues: list[str],
+    metadata_issue_paths: set[Path],
+    normalize: Callable[[T], object] | None = None,
+) -> tuple[T | None, int, Counter[T]]:
+    counts: Counter[T] = Counter()
+    extracted: list[tuple[Path, T]] = []
+    for file_path, track_metadata in tracks_in_folder:
+        value = extract(track_metadata)
+        if value is not None:
+            counts[value] += 1
+            extracted.append((file_path, value))
+    if not counts:
+        return None, 0, counts
+
+    dominant, dominant_count = counts.most_common(1)[0]
+    if len(counts) > 1:
+        folder_issues.append(f"Inconsistent {folder_label}: {set(counts.keys())}")
+        dominant_key = normalize(dominant) if normalize else dominant
+        for file_path, value in extracted:
+            value_key = normalize(value) if normalize else value
+            if value_key != dominant_key:
+                _record_folder_file_issue(
+                    file_path,
+                    f"Mismatched {field_label} '{value}' (most common {dominant_label}: '{dominant}')",
+                    folder_path,
+                    report,
+                    metadata_issue_paths,
+                )
+    return dominant, dominant_count, counts
+
+
 def _check_folder_album_consistency(
     folder: Path,
     tracks_in_folder: list[tuple[Path, TrackInfo]],
@@ -778,232 +833,128 @@ def _check_folder_album_consistency(
                     ):
                         continue
                     if normalize_str(track_metadata.album) != norm_dominant:
-                        mismatch_issue = (
+                        _record_folder_file_issue(
+                            file_path,
                             f"Mismatched ALBUM tag '{track_metadata.album}' "
-                            f"(most common folder album: '{dominant_album}')"
+                            f"(most common folder album: '{dominant_album}')",
+                            folder_path,
+                            report,
+                            metadata_issue_paths,
                         )
-                        report.issues.setdefault(str(file_path), []).append(
-                            mismatch_issue
-                        )
-                        metadata_issue_paths.add(file_path)
-                        try:
-                            display_name = str(file_path.relative_to(folder_path))
-                        except ValueError:
-                            display_name = file_path.name
-                        LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                        LOG.detail(f"   ∟ {escape(mismatch_issue)}")
 
-    album_artist_counts: Counter[str] = Counter()
-    artist_counts: Counter[str] = Counter()
-    for _, track_metadata in tracks_in_folder:
-        if track_metadata.album_artist:
-            album_artist_counts[track_metadata.album_artist] += 1
-        primary_artist = get_primary_artist(track_metadata.artist)
-        if not _is_generic(primary_artist, "artist"):
-            artist_counts[primary_artist] += 1
+    dominant_artist, _, _ = _check_consistent_album_field(
+        tracks_in_folder,
+        lambda t: t.album_artist or None,
+        folder_label="ALBUMARTIST in folder",
+        field_label="ALBUMARTIST tag",
+        dominant_label="folder artist",
+        folder_path=folder_path,
+        report=report,
+        folder_issues=folder_issues,
+        metadata_issue_paths=metadata_issue_paths,
+        normalize=normalize_str,
+    )
+    if dominant_artist is None:
+        artist_counts: Counter[str] = Counter()
+        for _, track_metadata in tracks_in_folder:
+            primary_artist = get_primary_artist(track_metadata.artist)
+            if not _is_generic(primary_artist, "artist"):
+                artist_counts[primary_artist] += 1
+        if artist_counts:
+            dominant_artist, _ = artist_counts.most_common(1)[0]
 
-    dominant_artist: str | None = None
-    if album_artist_counts:
-        dominant_artist, _ = album_artist_counts.most_common(1)[0]
-        if len(album_artist_counts) > 1:
-            folder_issues.append(
-                f"Inconsistent ALBUMARTIST in folder: {set(album_artist_counts.keys())}"
-            )
-            norm_dom_aa = normalize_str(dominant_artist)
-            for file_path, track_metadata in tracks_in_folder:
-                if not track_metadata.album_artist:
-                    continue
-                if normalize_str(track_metadata.album_artist) != norm_dom_aa:
-                    aa_issue = (
-                        f"Mismatched ALBUMARTIST tag '{track_metadata.album_artist}' "
-                        f"(most common folder artist: '{dominant_artist}')"
-                    )
-                    report.issues.setdefault(str(file_path), []).append(aa_issue)
-                    metadata_issue_paths.add(file_path)
-                    try:
-                        display_name = str(file_path.relative_to(folder_path))
-                    except ValueError:
-                        display_name = file_path.name
-                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.detail(f"   ∟ {escape(aa_issue)}")
-    elif artist_counts:
-        dominant_artist, _ = artist_counts.most_common(1)[0]
-
-    mb_album_counts: Counter[str] = Counter()
-    total_discs_counts: Counter[int] = Counter()
-    for _, track_metadata in tracks_in_folder:
-        if track_metadata.musicbrainz_albumid and is_valid_uuid(
-            track_metadata.musicbrainz_albumid
-        ):
-            mb_album_counts[track_metadata.musicbrainz_albumid] += 1
-        if track_metadata.total_discs is not None:
-            total_discs_counts[track_metadata.total_discs] += 1
-
-    if mb_album_counts:
-        dominant_mbid, dominant_mbid_count = mb_album_counts.most_common(1)[0]
-        if len(mb_album_counts) > 1:
-            folder_issues.append(
-                f"Inconsistent MUSICBRAINZ_ALBUMID in album folder: {set(mb_album_counts.keys())}"
-            )
-            for file_path, track_metadata in tracks_in_folder:
-                if (
-                    track_metadata.musicbrainz_albumid
-                    and track_metadata.musicbrainz_albumid != dominant_mbid
-                ):
-                    mb_issue = (
-                        f"Mismatched MUSICBRAINZ_ALBUMID '{track_metadata.musicbrainz_albumid}' "
-                        f"(most common folder album ID: '{dominant_mbid}')"
-                    )
-                    report.issues.setdefault(str(file_path), []).append(mb_issue)
-                    metadata_issue_paths.add(file_path)
-                    try:
-                        display_name = str(file_path.relative_to(folder_path))
-                    except ValueError:
-                        display_name = file_path.name
-                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.detail(f"   ∟ {escape(mb_issue)}")
-        elif (
-            dominant_mbid_count >= max(2, int(total_tracks * 0.5))
-            and dominant_mbid_count < total_tracks
-        ):
-            missing_tracks = [
-                (file_path, track_metadata)
-                for file_path, track_metadata in tracks_in_folder
-                if not track_metadata.musicbrainz_albumid
-            ]
-            if missing_tracks:
-                folder_issues.append(
-                    f"Inconsistent MUSICBRAINZ_ALBUMID in album folder: present on {dominant_mbid_count}/{total_tracks} tracks"
-                )
-                for file_path, _ in missing_tracks:
-                    missing_mb_issue = f"Missing MUSICBRAINZ_ALBUMID (dominant folder album ID: '{dominant_mbid}')"
-                    report.issues.setdefault(str(file_path), []).append(
-                        missing_mb_issue
-                    )
-                    metadata_issue_paths.add(file_path)
-                    try:
-                        display_name = str(file_path.relative_to(folder_path))
-                    except ValueError:
-                        display_name = file_path.name
-                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.detail(f"   ∟ {escape(missing_mb_issue)}")
-
-    if len(total_discs_counts) > 1:
-        dominant_discs, _ = total_discs_counts.most_common(1)[0]
-        folder_issues.append(
-            f"Inconsistent TOTALDISCS in album folder: {set(total_discs_counts.keys())}"
-        )
-        for file_path, track_metadata in tracks_in_folder:
-            if (
-                track_metadata.total_discs is not None
-                and track_metadata.total_discs != dominant_discs
-            ):
-                td_issue = (
-                    f"Mismatched TOTALDISCS '{track_metadata.total_discs}' "
-                    f"(most common folder total discs: '{dominant_discs}')"
-                )
-                report.issues.setdefault(str(file_path), []).append(td_issue)
-                metadata_issue_paths.add(file_path)
-                try:
-                    display_name = str(file_path.relative_to(folder_path))
-                except ValueError:
-                    display_name = file_path.name
-                LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                LOG.detail(f"   ∟ {escape(td_issue)}")
-
-    year_counts: Counter[str] = Counter()
-    for _, track_metadata in tracks_in_folder:
-        raw_year = (
-            track_metadata.date[:4]
-            if track_metadata.date and re.match(r"^\d{4}", track_metadata.date)
+    dominant_mbid, dominant_mbid_count, mb_album_counts = _check_consistent_album_field(
+        tracks_in_folder,
+        lambda t: (
+            t.musicbrainz_albumid
+            if t.musicbrainz_albumid and is_valid_uuid(t.musicbrainz_albumid)
             else None
-        )
-        if raw_year:
-            year_counts[raw_year] += 1
-
-    if len(year_counts) > 1:
-        dominant_year, _ = year_counts.most_common(1)[0]
-        folder_issues.append(
-            f"Inconsistent release year in album folder: {set(year_counts.keys())}"
-        )
-        for file_path, track_metadata in tracks_in_folder:
-            raw_year = (
-                track_metadata.date[:4]
-                if track_metadata.date and re.match(r"^\d{4}", track_metadata.date)
-                else None
-            )
-            if raw_year and raw_year != dominant_year:
-                yr_issue = (
-                    f"Mismatched release year '{raw_year}' "
-                    f"(most common folder year: '{dominant_year}')"
-                )
-                report.issues.setdefault(str(file_path), []).append(yr_issue)
-                metadata_issue_paths.add(file_path)
-                try:
-                    display_name = str(file_path.relative_to(folder_path))
-                except ValueError:
-                    display_name = file_path.name
-                LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                LOG.detail(f"   ∟ {escape(yr_issue)}")
-
-    itunes_col_counts: Counter[str] = Counter()
-    for _, track_metadata in tracks_in_folder:
-        if track_metadata.itunes_collectionid:
-            itunes_col_counts[str(track_metadata.itunes_collectionid)] += 1
-
-    if len(itunes_col_counts) > 1:
-        dominant_cid, _ = itunes_col_counts.most_common(1)[0]
-        folder_issues.append(
-            f"Inconsistent ITUNESCOLLECTIONID in album folder: {set(itunes_col_counts.keys())}"
-        )
-        for file_path, track_metadata in tracks_in_folder:
-            if (
-                track_metadata.itunes_collectionid
-                and str(track_metadata.itunes_collectionid) != dominant_cid
-            ):
-                cid_issue = (
-                    f"Mismatched ITUNESCOLLECTIONID '{track_metadata.itunes_collectionid}' "
-                    f"(most common folder collection ID: '{dominant_cid}')"
-                )
-                report.issues.setdefault(str(file_path), []).append(cid_issue)
-                metadata_issue_paths.add(file_path)
-                try:
-                    display_name = str(file_path.relative_to(folder_path))
-                except ValueError:
-                    display_name = file_path.name
-                LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                LOG.detail(f"   ∟ {escape(cid_issue)}")
-
-    disc_totals: dict[int, Counter[int]] = defaultdict(Counter)
-    for _, track_metadata in tracks_in_folder:
-        if track_metadata.total_tracks is not None and track_metadata.total_tracks > 0:
-            disc_idx = track_metadata.disc_number or 1
-            disc_totals[disc_idx][track_metadata.total_tracks] += 1
-
-    for disc_idx, total_counts in disc_totals.items():
-        if len(total_counts) > 1:
-            dominant_total, _ = total_counts.most_common(1)[0]
+        ),
+        folder_label="MUSICBRAINZ_ALBUMID in album folder",
+        field_label="MUSICBRAINZ_ALBUMID",
+        dominant_label="folder album ID",
+        folder_path=folder_path,
+        report=report,
+        folder_issues=folder_issues,
+        metadata_issue_paths=metadata_issue_paths,
+    )
+    if (
+        len(mb_album_counts) == 1
+        and dominant_mbid is not None
+        and dominant_mbid_count >= max(2, int(total_tracks * 0.5))
+        and dominant_mbid_count < total_tracks
+    ):
+        missing_tracks = [
+            file_path
+            for file_path, track_metadata in tracks_in_folder
+            if not track_metadata.musicbrainz_albumid
+        ]
+        if missing_tracks:
             folder_issues.append(
-                f"Inconsistent TOTALTRACKS for Disc {disc_idx} in album folder: {set(total_counts.keys())}"
+                f"Inconsistent MUSICBRAINZ_ALBUMID in album folder: present on {dominant_mbid_count}/{total_tracks} tracks"
             )
-            for file_path, track_metadata in tracks_in_folder:
-                if (
-                    (track_metadata.disc_number or 1) == disc_idx
-                    and track_metadata.total_tracks is not None
-                    and track_metadata.total_tracks != dominant_total
-                ):
-                    tt_issue = (
-                        f"Mismatched TOTALTRACKS '{track_metadata.total_tracks}' "
-                        f"(most common Disc {disc_idx} total: '{dominant_total}')"
-                    )
-                    report.issues.setdefault(str(file_path), []).append(tt_issue)
-                    metadata_issue_paths.add(file_path)
-                    try:
-                        display_name = str(file_path.relative_to(folder_path))
-                    except ValueError:
-                        display_name = file_path.name
-                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.detail(f"   ∟ {escape(tt_issue)}")
+            for file_path in missing_tracks:
+                _record_folder_file_issue(
+                    file_path,
+                    f"Missing MUSICBRAINZ_ALBUMID (dominant folder album ID: '{dominant_mbid}')",
+                    folder_path,
+                    report,
+                    metadata_issue_paths,
+                )
+
+    _check_consistent_album_field(
+        tracks_in_folder,
+        lambda t: t.total_discs,
+        folder_label="TOTALDISCS in album folder",
+        field_label="TOTALDISCS",
+        dominant_label="folder total discs",
+        folder_path=folder_path,
+        report=report,
+        folder_issues=folder_issues,
+        metadata_issue_paths=metadata_issue_paths,
+    )
+    _check_consistent_album_field(
+        tracks_in_folder,
+        lambda t: t.date[:4] if t.date and re.match(r"^\d{4}", t.date) else None,
+        folder_label="release year in album folder",
+        field_label="release year",
+        dominant_label="folder year",
+        folder_path=folder_path,
+        report=report,
+        folder_issues=folder_issues,
+        metadata_issue_paths=metadata_issue_paths,
+    )
+    _check_consistent_album_field(
+        tracks_in_folder,
+        lambda t: str(t.itunes_collectionid) if t.itunes_collectionid else None,
+        folder_label="ITUNESCOLLECTIONID in album folder",
+        field_label="ITUNESCOLLECTIONID",
+        dominant_label="folder collection ID",
+        folder_path=folder_path,
+        report=report,
+        folder_issues=folder_issues,
+        metadata_issue_paths=metadata_issue_paths,
+    )
+
+    tracks_by_disc: dict[int, list[tuple[Path, TrackInfo]]] = defaultdict(list)
+    for item in tracks_in_folder:
+        tracks_by_disc[item[1].disc_number or 1].append(item)
+    for disc_idx, disc_tracks in tracks_by_disc.items():
+        _check_consistent_album_field(
+            disc_tracks,
+            lambda t: (
+                t.total_tracks
+                if t.total_tracks is not None and t.total_tracks > 0
+                else None
+            ),
+            folder_label=f"TOTALTRACKS for Disc {disc_idx} in album folder",
+            field_label="TOTALTRACKS",
+            dominant_label=f"Disc {disc_idx} total",
+            folder_path=folder_path,
+            report=report,
+            folder_issues=folder_issues,
+            metadata_issue_paths=metadata_issue_paths,
+        )
 
     return dominant_album, dominant_artist
 
@@ -1127,7 +1078,6 @@ def _check_folder_alien_tracks(
 
 
 def _check_folder_audio_quality_consistency(
-    folder: Path,
     tracks_in_folder: list[tuple[Path, TrackInfo]],
     folder_path: Path,
     report: CheckReport,
@@ -1196,17 +1146,13 @@ def _check_folder_audio_quality_consistency(
                     track_desc = (
                         " / ".join(track_desc_parts) if track_desc_parts else "unknown"
                     )
-                    track_issue = (
+                    _record_folder_file_issue(
+                        file_path,
                         f"Inconsistent audio quality: {track_desc} "
-                        f"(album majority is {dom_desc})"
+                        f"(album majority is {dom_desc})",
+                        folder_path,
+                        report,
                     )
-                    report.issues.setdefault(str(file_path), []).append(track_issue)
-                    try:
-                        display_name = str(file_path.relative_to(folder_path))
-                    except ValueError:
-                        display_name = file_path.name
-                    LOG.detail(f"🔍 [bold]{escape(display_name)}[/bold]")
-                    LOG.detail(f"   ∟ {escape(track_issue)}")
 
 
 def _check_identifier_conflicts(
@@ -1380,7 +1326,6 @@ def check_library(
                 metadata_issue_paths=metadata_issue_paths,
             )
             _check_folder_audio_quality_consistency(
-                folder=folder,
                 tracks_in_folder=tracks_in_folder,
                 folder_path=folder_path,
                 report=report,

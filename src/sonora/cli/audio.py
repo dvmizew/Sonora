@@ -2,7 +2,7 @@ import dataclasses
 import functools
 import threading
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -97,16 +97,19 @@ def _report_audio_measurements(
     metric: Literal["bpm", "key"],
     dry_run: bool,
     json_report: Path | None,
+    errors: Mapping[Path, str] | None = None,
 ) -> None:
     title, action, report_label = (
         ("BPM", "calculated", "bpm")
         if metric == "bpm"
         else ("Musical Key", "detected", "musical key")
     )
+    error_map = errors or {}
     computed = sum(
         1 for _, value, measured in results if measured and value is not None
     )
-    skipped = len(results) - computed
+    failed = sum(1 for audio_path, _, _ in results if audio_path in error_map)
+    skipped = len(results) - computed - failed
     label = "BPM Calculated" if metric == "bpm" else "Key Detected"
     LOG.summary_table(
         f"{title} Summary",
@@ -118,9 +121,22 @@ def _report_audio_measurements(
                 "green" if computed else "white",
             ),
             ("Already Tagged / Skipped", str(skipped), None),
+            ("Failed Files", str(failed), "red" if failed else None),
         ],
     )
     if json_report:
+        details: list[dict[str, Any]] = []
+        for audio_path, value, measured in results:
+            entry: dict[str, Any] = {
+                "file": str(audio_path),
+                metric: value,
+                action: measured,
+                "modified": measured and value is not None and not dry_run,
+            }
+            if audio_path in error_map:
+                entry["failed"] = True
+                entry["error"] = error_map[audio_path]
+            details.append(entry)
         report_data = {
             "summary": {
                 "target_directory": str(path.resolve()),
@@ -129,22 +145,18 @@ def _report_audio_measurements(
                 f"{metric}_{action}": computed,
                 f"{metric}_tagged": 0 if dry_run else computed,
                 "skipped": skipped,
+                "failed": failed,
             },
-            "details": [
-                {
-                    "file": str(audio_path),
-                    metric: value,
-                    action: measured,
-                    "modified": measured and value is not None and not dry_run,
-                }
-                for audio_path, value, measured in results
-            ],
+            "details": details,
         }
         _write_json_report(json_report, report_data, report_label)
 
 
 def _process_bpm_file(
-    audio_path: Path, force: bool, dry_run: bool
+    audio_path: Path,
+    force: bool,
+    dry_run: bool,
+    errors: dict[Path, str] | None = None,
 ) -> tuple[Path, float | None, bool]:
     wait_if_paused()
     try:
@@ -152,12 +164,16 @@ def _process_bpm_file(
         if not force and track_info.bpm is not None:
             return audio_path, track_info.bpm, False
         bpm_value = calculate_bpm(audio_path)
-        if bpm_value is not None and not dry_run:
+        if bpm_value is None:
+            return audio_path, None, False
+        if not dry_run:
             updated = dataclasses.replace(track_info, bpm=bpm_value)
             write_track_metadata(updated)
         return audio_path, bpm_value, True
     except OSError as error:
-        LOG.debug(f"BPM error for {audio_path}: {error}")
+        LOG.warning(f"BPM error for {escape(str(audio_path))}: {escape(str(error))}")
+        if errors is not None:
+            errors[audio_path] = str(error)
         return audio_path, None, False
 
 
@@ -171,19 +187,27 @@ def bpm(
     """
     Calculate and embed audio tempo (BPM) tags locally.
     """
-    worker = functools.partial(_process_bpm_file, force=force, dry_run=dry_run)
+    errors: dict[Path, str] = {}
+    worker = functools.partial(
+        _process_bpm_file, force=force, dry_run=dry_run, errors=errors
+    )
     results, interrupted = _run_parallel_audio_task(
         path, "Calculating BPM", worker, threads
     )
     if not results and not interrupted:
         return 0
 
-    _report_audio_measurements(path, results, "bpm", dry_run, json_report)
-    return 130 if interrupted else 0
+    _report_audio_measurements(
+        path, results, "bpm", dry_run, json_report, errors=errors
+    )
+    return 130 if interrupted else (1 if errors else 0)
 
 
 def _process_key_file(
-    audio_path: Path, force: bool, dry_run: bool
+    audio_path: Path,
+    force: bool,
+    dry_run: bool,
+    errors: dict[Path, str] | None = None,
 ) -> tuple[Path, str | None, bool]:
     wait_if_paused()
     try:
@@ -202,7 +226,11 @@ def _process_key_file(
             return audio_path, f"{musical_key} ({camelot})", True
         return audio_path, None, False
     except OSError as error:
-        LOG.debug(f"Key detection error for {audio_path}: {error}")
+        LOG.warning(
+            f"Key detection error for {escape(str(audio_path))}: {escape(str(error))}"
+        )
+        if errors is not None:
+            errors[audio_path] = str(error)
         return audio_path, None, False
 
 
@@ -216,15 +244,20 @@ def key(
     """
     Detect and embed musical key (INITIALKEY) and Camelot wheel tags locally.
     """
-    worker = functools.partial(_process_key_file, force=force, dry_run=dry_run)
+    errors: dict[Path, str] = {}
+    worker = functools.partial(
+        _process_key_file, force=force, dry_run=dry_run, errors=errors
+    )
     results, interrupted = _run_parallel_audio_task(
         path, "Detecting musical key", worker, threads
     )
     if not results and not interrupted:
         return 0
 
-    _report_audio_measurements(path, results, "key", dry_run, json_report)
-    return 130 if interrupted else 0
+    _report_audio_measurements(
+        path, results, "key", dry_run, json_report, errors=errors
+    )
+    return 130 if interrupted else (1 if errors else 0)
 
 
 def replaygain(

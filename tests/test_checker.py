@@ -1028,7 +1028,6 @@ class TestCheckerIssueCategories(IsolatedTestCase):
         ]
 
         checker._check_folder_audio_quality_consistency(
-            folder=folder,
             tracks_in_folder=tracks_in_folder,
             folder_path=self.test_directory,
             report=report,
@@ -1752,3 +1751,113 @@ class TestCheckingWorkflows(ModuleTestCase):
                 for issue in issues
             )
         )
+
+    def test_check_file_skips_spectral_for_lossy_m4a_and_short_tracks_without_preloaded_metadata(
+        self,
+    ) -> None:
+        m4a_path = self.tmp_path / "01 - Track.m4a"
+        m4a_path.write_bytes(b"m4a")
+        lossy_meta = TrackInfo(
+            file_path=m4a_path,
+            artist="Artist",
+            title="Track",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            date="2024",
+            bpm=120.0,
+            replaygain_track_gain=-5.0,
+            replaygain_track_peak=0.9,
+            is_lossless=False,
+            duration=200.0,
+        )
+        with (
+            patch.object(checker, "read_track_metadata", return_value=lossy_meta),
+            patch.object(checker, "detect_fake_lossless") as mock_spectral,
+        ):
+            check_file(m4a_path, check_spectral=True, track_metadata=None)
+        mock_spectral.assert_not_called()
+
+        wav_path = self.tmp_path / "01 - Intro (Skit).wav"
+        write_silent_wav(wav_path)
+        short_meta = dataclasses.replace(
+            lossy_meta,
+            file_path=wav_path,
+            title="Intro (Skit)",
+            is_lossless=True,
+            duration=25.0,
+        )
+        with (
+            patch.object(checker, "read_track_metadata", return_value=short_meta),
+            patch.object(checker, "detect_fake_lossless") as mock_spectral,
+        ):
+            check_file(wav_path, check_spectral=True, track_metadata=None)
+        mock_spectral.assert_not_called()
+
+    def test_check_file_deduplicates_unsplit_artist_semicolon_warning(self) -> None:
+        wav_path = self.tmp_path / "01 - Track.wav"
+        write_silent_wav(wav_path)
+        track = TrackInfo(
+            file_path=wav_path,
+            artist="Alpha ; Beta",
+            title="Track",
+            album="Album",
+            album_artist="Various Artists",
+            track_number=1,
+            date="2024",
+            bpm=120.0,
+            replaygain_track_gain=-5.0,
+            replaygain_track_peak=0.9,
+        )
+        issues = check_file(wav_path, track_metadata=track)
+        unsplit = [issue for issue in issues if "ARTIST tag seems unsplit" in issue]
+        self.assertEqual(len(unsplit), 1)
+
+    def test_check_file_reads_cached_provider_keys_once(self) -> None:
+        wav_path = self.tmp_path / "01 - Track.wav"
+        write_silent_wav(wav_path)
+        track = TrackInfo(
+            file_path=wav_path,
+            artist="Artist",
+            title="Track",
+            album="Album",
+            album_artist="Artist",
+            track_number=1,
+            date="2024",
+            bpm=120.0,
+            replaygain_track_gain=-5.0,
+            replaygain_track_peak=0.9,
+            duration=200.0,
+            isrc="USRC17607839",
+            itunes_trackid="123456",
+        )
+        cache_data: dict[str, object] = {
+            "itunes_lookup:v1:123456": {
+                "results": [
+                    {
+                        "trackId": 123456,
+                        "artistName": "Artist",
+                        "trackName": "Track",
+                        "trackTimeMillis": 200000,
+                        "collectionName": "Album",
+                        "trackNumber": 1,
+                        "discNumber": 1,
+                    }
+                ]
+            },
+            "deezer_isrc:v2:USRC17607839": {
+                "artist": "Artist",
+                "title": "Track",
+                "duration": 200,
+                "album": "Album",
+                "track_position": 1,
+            },
+        }
+        with patch.object(
+            checker, "get_cached_api", side_effect=cache_data.get
+        ) as mock_cache:
+            issues = check_file(wav_path, track_metadata=track)
+        self.assertFalse(any("conflicts" in issue for issue in issues))
+        keys_read = [call.args[0] for call in mock_cache.call_args_list]
+        self.assertEqual(keys_read.count("itunes_lookup:v1:123456"), 1)
+        self.assertEqual(keys_read.count("deezer_isrc:v2:USRC17607839"), 1)

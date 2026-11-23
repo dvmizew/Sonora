@@ -239,6 +239,33 @@ def rename_track_file(
     return new_path
 
 
+def _apply_folder_rename(
+    folder_path: Path, expected_name: str, *, kind: str, dry_run: bool
+) -> Path:
+    current_folder_name = folder_path.name
+    new_folder = folder_path.with_name(expected_name)
+    if new_folder.exists() and not folder_path.samefile(new_folder):
+        return folder_path
+
+    if not dry_run:
+        try:
+            safe_case_rename(folder_path, new_folder)
+            LOG.detail(
+                f"   ∟ {kind.capitalize()} folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
+            )
+            return new_folder
+        except OSError as error:
+            LOG.warning(
+                f"Failed to rename {kind} folder {escape(current_folder_name)}: {escape(str(error))}"
+            )
+            return folder_path
+
+    LOG.detail(
+        f"[DRY-RUN] Would rename {kind} folder {escape(current_folder_name)} -> {escape(expected_name)}"
+    )
+    return new_folder
+
+
 def rename_single_folder(
     folder_path: Path, track_info: TrackInfo, dry_run: bool = False
 ) -> Path:
@@ -276,31 +303,9 @@ def rename_single_folder(
         return folder_path
 
     expected_name = canonical_with_feat or canonical_without_feat
-    new_folder = folder_path.with_name(expected_name)
-    if (
-        new_folder.exists()
-        and folder_path.resolve() != new_folder.resolve()
-        and folder_path.name.lower() != new_folder.name.lower()
-    ):
-        return folder_path
-
-    if not dry_run:
-        try:
-            safe_case_rename(folder_path, new_folder)
-            LOG.detail(
-                f"   ∟ Single folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
-            )
-            return new_folder
-        except OSError as error:
-            LOG.warning(
-                f"Failed to rename single folder {escape(current_folder_name)}: {escape(str(error))}"
-            )
-            return folder_path
-    else:
-        LOG.detail(
-            f"[DRY-RUN] Would rename single folder {escape(current_folder_name)} -> {escape(expected_name)}"
-        )
-        return new_folder
+    return _apply_folder_rename(
+        folder_path, expected_name, kind="single", dry_run=dry_run
+    )
 
 
 def rename_album_folder(
@@ -333,34 +338,11 @@ def rename_album_folder(
         return folder_path
 
     expected_name = sanitize_name(f"{artist} - {album}")
-
-    if current_folder_name != expected_name:
-        new_folder = folder_path.with_name(expected_name)
-        if (
-            new_folder.exists()
-            and folder_path.resolve() != new_folder.resolve()
-            and folder_path.name.lower() != new_folder.name.lower()
-        ):
-            return folder_path
-
-        if not dry_run:
-            try:
-                safe_case_rename(folder_path, new_folder)
-                LOG.detail(
-                    f"   ∟ Album folder renamed: [dim]{escape(current_folder_name)}[/] -> [cyan]{escape(expected_name)}[/]"
-                )
-                return new_folder
-            except OSError as error:
-                LOG.warning(
-                    f"Failed to rename folder {escape(current_folder_name)}: {escape(str(error))}"
-                )
-                return folder_path
-        else:
-            LOG.detail(
-                f"[DRY-RUN] Would rename album folder {escape(current_folder_name)} -> {escape(expected_name)}"
-            )
-            return new_folder
-    return folder_path
+    if current_folder_name == expected_name:
+        return folder_path
+    return _apply_folder_rename(
+        folder_path, expected_name, kind="album", dry_run=dry_run
+    )
 
 
 def _rename_single_worker(
@@ -461,15 +443,6 @@ def rename_directory_files(
                             report.failed_files += 1
                         progress.advance(task)
 
-                    for playlist_folder in {folder, *(path.parent for path in files)}:
-                        report.playlists_updated += len(
-                            update_local_playlists(
-                                playlist_folder,
-                                playlist_renames,
-                                folder_track_infos,
-                                dry_run=dry_run,
-                            )
-                        )
                     final_folder = folder
                     if is_in_singles_hierarchy(folder, root_dir=dir_path):
                         if folder_track_infos:
@@ -499,6 +472,41 @@ def rename_directory_files(
                             )
                             if final_folder != folder:
                                 report.folders_renamed += 1
+
+                    if final_folder != folder:
+                        playlist_renames = {
+                            src: final_folder / dst.relative_to(folder)
+                            for src, dst in playlist_renames.items()
+                        }
+                    source_playlist_folders = {folder, *(path.parent for path in files)}
+                    for source_playlist_folder in source_playlist_folders:
+                        target_playlist_folder = (
+                            final_folder / source_playlist_folder.relative_to(folder)
+                            if final_folder != folder
+                            else source_playlist_folder
+                        )
+                        scan_playlist_folder = (
+                            source_playlist_folder
+                            if dry_run
+                            else target_playlist_folder
+                        )
+                        if final_folder != folder and scan_playlist_folder.is_dir():
+                            for entry in scan_playlist_folder.iterdir():
+                                if (
+                                    entry.suffix.casefold() in {".m3u", ".m3u8"}
+                                    and entry.is_file()
+                                ):
+                                    playlist_renames[
+                                        source_playlist_folder / entry.name
+                                    ] = target_playlist_folder / entry.name
+                        report.playlists_updated += len(
+                            update_local_playlists(
+                                scan_playlist_folder,
+                                playlist_renames,
+                                folder_track_infos,
+                                dry_run=dry_run,
+                            )
+                        )
 
                     renamed.extend(
                         (

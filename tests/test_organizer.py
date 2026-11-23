@@ -2944,3 +2944,176 @@ class TestOrganizationContracts(IsolatedTestCase):
             ),
             0,
         )
+
+    def test_normalize_track_metadata_preserves_track_number_above_one_when_total_tracks_none(
+        self,
+    ) -> None:
+        downloads_track = TrackInfo(
+            file_path=self.test_directory / "Downloads" / "05 - Song.flac",
+            artist="Artist",
+            title="Song",
+            track_number=5,
+            total_tracks=None,
+            release_type="single",
+        )
+        normalized = normalize_track_metadata(downloads_track)
+        self.assertEqual(normalized.track_number, 5)
+        self.assertIsNone(normalized.total_tracks)
+
+        singles_track = TrackInfo(
+            file_path=self.test_directory
+            / "Singles"
+            / "Artist - Song"
+            / "01 - Song.flac",
+            artist="Artist",
+            title="Song",
+            track_number=1,
+            total_tracks=None,
+        )
+        normalized_single = normalize_track_metadata(singles_track)
+        self.assertEqual(normalized_single.track_number, 1)
+        self.assertEqual(normalized_single.total_tracks, 1)
+
+    def test_normalize_track_metadata_merges_featured_artists_from_title_and_artist(
+        self,
+    ) -> None:
+        track = TrackInfo(
+            file_path=self.test_directory / "01 - Song.flac",
+            artist="Main Artist feat. Guest C, Guest A",
+            title="Song (feat. Guest B) cu Guest A",
+            featured_artists="Guest A",
+        )
+        normalized = normalize_track_metadata(track)
+        self.assertEqual(normalized.artist, "Main Artist")
+        self.assertEqual(normalized.title, "Song")
+        self.assertEqual(normalized.featured_artists, "Guest A, Guest B, Guest C")
+
+    def test_organize_quarantines_lower_quality_duplicate_already_at_target_path(
+        self,
+    ) -> None:
+        singles_dir = self.test_directory / "Singles"
+        target_folder = singles_dir / "Artist - Song"
+        target_folder.mkdir(parents=True)
+        existing_mp3 = target_folder / "01 - Song.mp3"
+        existing_mp3.write_bytes(b"mp3")
+
+        inbox_dir = self.test_directory / "Inbox"
+        inbox_dir.mkdir()
+        incoming_flac = inbox_dir / "Song.flac"
+        incoming_flac.write_bytes(b"flac")
+
+        solo_folder = singles_dir / "Solo - Track"
+        solo_folder.mkdir(parents=True)
+        solo_flac = solo_folder / "01 - Track.flac"
+        solo_flac.write_bytes(b"solo")
+
+        tracks = {
+            incoming_flac: TrackInfo(
+                file_path=incoming_flac,
+                artist="Artist",
+                title="Song",
+                album="Song",
+                track_number=1,
+                total_tracks=1,
+                is_lossless=True,
+                bits_per_sample=24,
+                sample_rate=48000,
+            ),
+            existing_mp3: TrackInfo(
+                file_path=existing_mp3,
+                artist="Artist",
+                title="Song",
+                album="Song",
+                track_number=1,
+                total_tracks=1,
+                is_lossless=False,
+                bitrate=192,
+            ),
+            solo_flac: TrackInfo(
+                file_path=solo_flac,
+                artist="Solo",
+                title="Track",
+                album="Track",
+                track_number=1,
+                total_tracks=1,
+                is_lossless=True,
+                bits_per_sample=16,
+                sample_rate=44100,
+            ),
+        }
+        with patch.object(
+            organizer,
+            "read_track_metadata",
+            side_effect=tracks.__getitem__,
+        ):
+            moved = organizer.organize_library_singles(
+                self.test_directory, singles_dir, dry_run=False, max_threads=1
+            )
+
+        self.assertEqual(moved, 1)
+        self.assertTrue((target_folder / "01 - Song.flac").exists())
+        self.assertFalse(existing_mp3.exists())
+        self.assertTrue(any((singles_dir / ".duplicates").rglob("*.mp3")))
+        self.assertTrue(solo_flac.exists())
+
+    def test_rename_directory_files_updates_absolute_playlist_paths_after_folder_rename(
+        self,
+    ) -> None:
+        raw_folder = self.test_directory / "Raw Album"
+        raw_folder.mkdir()
+        audio_file = raw_folder / "track.flac"
+        audio_file.write_bytes(b"flac")
+        playlist = raw_folder / "album.m3u8"
+        playlist.write_text(f"{audio_file.resolve()}\ntrack.flac\n", encoding="utf-8")
+
+        track_meta = TrackInfo(
+            file_path=audio_file,
+            artist="Artist",
+            album_artist="Artist",
+            album="Album",
+            title="Song",
+            track_number=1,
+        )
+        with patch.object(renamer, "read_track_metadata", return_value=track_meta):
+            dry_report = RenameReport()
+            renamer.rename_directory_files(
+                self.test_directory, dry_run=True, max_threads=1, report=dry_report
+            )
+            self.assertEqual(dry_report.folders_renamed, 1)
+            self.assertEqual(dry_report.playlists_updated, 1)
+
+            real_report = RenameReport()
+            renamer.rename_directory_files(
+                self.test_directory, dry_run=False, max_threads=1, report=real_report
+            )
+
+        new_folder = self.test_directory / "Artist - Album"
+        new_audio = new_folder / "01 - Song.flac"
+        new_playlist = new_folder / "album.m3u8"
+        self.assertEqual(real_report.folders_renamed, 1)
+        self.assertEqual(real_report.playlists_updated, 1)
+        self.assertTrue(new_audio.exists())
+        self.assertEqual(
+            new_playlist.read_text(encoding="utf-8").splitlines(),
+            [str(new_audio.resolve()), "01 - Song.flac"],
+        )
+
+    def test_rename_folder_case_variant_collision_dry_run_parity(self) -> None:
+        lower_folder = self.test_directory / "artist - album"
+        upper_folder = self.test_directory / "Artist - Album"
+        lower_folder.mkdir()
+        try:
+            upper_folder.mkdir()
+        except FileExistsError:
+            self.skipTest("Case-insensitive filesystem")
+        if lower_folder.samefile(upper_folder):
+            self.skipTest("Case-insensitive filesystem")
+
+        self.assertEqual(
+            renamer.rename_album_folder(lower_folder, "Artist", "Album", dry_run=True),
+            lower_folder,
+        )
+        self.assertEqual(
+            renamer.rename_album_folder(lower_folder, "Artist", "Album", dry_run=False),
+            lower_folder,
+        )
