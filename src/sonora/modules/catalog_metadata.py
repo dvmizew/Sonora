@@ -16,6 +16,7 @@ from sonora.core.models import TrackInfo
 from sonora.core.text import (
     clean_unicode_punct,
     is_valid_uuid,
+    normalize_date,
     normalize_genre,
     normalize_str,
     preserve_unicode_repertoire,
@@ -336,17 +337,23 @@ def _update_itunes(
                     "Explicit" if api_payload["explicitness"] == "explicit" else None
                 )
                 track_info.metadata_sources["advisory"] = "iTunes"
+            compatible_album = _compatible_release_layout(
+                track_info, album_itunes_details
+            )
+            is_compatible_album_match = is_album_match and compatible_album is not None
             itunes_map = {"genre": "genre", "advisory": "advisory"}
-            if is_album_match or not track_info.copyright:
+            if is_compatible_album_match or not track_info.copyright:
                 itunes_map["copyright"] = "copyright"
-            if is_album_match and not is_valid_uuid(track_info.musicbrainz_albumid):
+            if is_compatible_album_match and not is_valid_uuid(
+                track_info.musicbrainz_albumid
+            ):
                 if not track_info.disc_number:
                     itunes_map["disc_number"] = "disc_number"
                 if not track_info.total_discs:
                     itunes_map["total_discs"] = "total_discs"
             if not track_info.date or (
                 force
-                and is_album_match
+                and is_compatible_album_match
                 and not is_valid_uuid(track_info.musicbrainz_albumid)
             ):
                 itunes_map["date"] = "date"
@@ -522,8 +529,10 @@ def _update_discogs(
             if not track_info.date or (
                 force and not is_valid_uuid(track_info.musicbrainz_albumid)
             ):
-                discogs_rel_map["released"] = "date"
-                discogs_rel_map["year"] = "date"
+                if normalize_date(str(release.get("released") or "")):
+                    discogs_rel_map["released"] = "date"
+                else:
+                    discogs_rel_map["year"] = "date"
         elif comparisons and (
             not all(comparisons)
             or (
@@ -585,9 +594,7 @@ def _update_discogs(
                     "remixer": "remixer",
                     "composer": "composer",
                 }
-                if (
-                    not track_info.title or track_info.title == "Untitled"
-                ) and specific.get("title"):
+                if _is_generic_title(track_info.title) and specific.get("title"):
                     discogs_track_map["title"] = "title"
                 apply_metadata_mapping(
                     track_info,
@@ -661,10 +668,6 @@ def _update_deezer(
             )
             if same_album:
                 deezer_album_map["label"] = "label"
-                if not track_info.date or (
-                    force and not is_valid_uuid(track_info.musicbrainz_albumid)
-                ):
-                    deezer_album_map["release_date"] = "date"
             if track_info.barcode and str(album.get("barcode") or "").lstrip(
                 "0"
             ) == track_info.barcode.lstrip("0"):
@@ -676,6 +679,17 @@ def _update_deezer(
                 force=False,
                 source="Deezer",
             )
+            if same_album and (
+                not track_info.date
+                or (force and not is_valid_uuid(track_info.musicbrainz_albumid))
+            ):
+                apply_metadata_mapping(
+                    track_info,
+                    album,
+                    {"release_date": "date"},
+                    force=force and not is_valid_uuid(track_info.musicbrainz_albumid),
+                    source="Deezer",
+                )
             if (
                 album_deezer_details is not None
                 and not is_valid_uuid(track_info.musicbrainz_albumid)
@@ -799,9 +813,7 @@ def _update_deezer(
         }
         if not track_info.date:
             deezer_track_map["release_date"] = "date"
-        if (not track_info.title or track_info.title == "Untitled") and track.get(
-            "title"
-        ):
+        if _is_generic_title(track_info.title) and track.get("title"):
             deezer_track_map["title"] = "title"
         if not track_info.bpm and track.get("bpm"):
             safe_bpm_val = safe_float(track.get("bpm"))

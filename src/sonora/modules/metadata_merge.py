@@ -83,16 +83,19 @@ def build_provider_proposal(
                 )
             },
         )
-    return MetadataProposal(
-        {
-            name: (getattr(candidate, name), candidate.metadata_sources.get(name))
-            for name in _PROVIDER_FIELDS
-            if getattr(candidate, name) != getattr(recording, name)
-            or candidate.metadata_sources.get(name)
-            != recording.metadata_sources.get(name)
-        },
-        dict(candidate.metadata_conflicts),
-    )
+    changes = {
+        name: (getattr(candidate, name), candidate.metadata_sources.get(name))
+        for name in _PROVIDER_FIELDS
+        if getattr(candidate, name) != getattr(recording, name)
+        or candidate.metadata_sources.get(name) != recording.metadata_sources.get(name)
+    }
+    if (
+        _is_generic_title(recording.title)
+        and not _is_generic_title(candidate.title)
+        and candidate.title != recording.title
+    ):
+        changes["title"] = (candidate.title, candidate.metadata_sources.get("title"))
+    return MetadataProposal(changes, dict(candidate.metadata_conflicts))
 
 
 def merge_provider_proposals(
@@ -172,8 +175,8 @@ def _merge_provider_field(
                 (normalize_date(str(value)), source) for value, source in candidates
             ]
             if all(value for value, _ in dates):
-                shortest = min((value for value, _ in dates if value), key=len)
-                if all(value.startswith(shortest) for value, _ in dates if value):
+                longest = max((value for value, _ in dates if value), key=len)
+                if all(longest.startswith(value) for value, _ in dates if value):
                     value, source = max(dates, key=lambda item: len(item[0] or ""))
                     setattr(recording, field_name, value)
                     if source is not None:

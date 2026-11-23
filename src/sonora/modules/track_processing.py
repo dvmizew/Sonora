@@ -1,7 +1,7 @@
 import dataclasses
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from pathlib import Path
@@ -36,6 +36,7 @@ from sonora.core.logger import (
 )
 from sonora.core.models import NormalizeReport, TrackInfo
 from sonora.core.sidecars import (
+    INSTRUMENTAL_PATTERN,
     clean_lyrics_text,
     evaluate_lyrics_quality,
     extract_max_timestamp,
@@ -222,9 +223,8 @@ def _update_lyrics(
                 LOG.info(
                     f"   ∟ [yellow]Removed corrupt mismatched lyrics for {escape(file_path.name)}[/]"
                 )
-        elif lyrics_text and tag_type:
+        elif lyrics_text and tag_type and "lyrics" not in track_info.metadata_conflicts:
             track_info.lyrics = lyrics_text
-            track_info.metadata_conflicts.pop("lyrics", None)
             if not had_lrc:
                 LOG.detail(
                     f"   ∟ [green]Saved {tag_type} lyrics for {escape(file_path.name)}[/]"
@@ -583,79 +583,83 @@ def _record_persisted_album(
     return persisted_tracks
 
 
-def process_track_lyrics(
+_LYRICS_VERSION_PATTERN = (
+    r"\s*[\(\[][^\)\]]*\b(?:remix|mix|edit|live|acoustic|instrumental|"
+    r"up[\s-]?tempo|extended|version|sped up|slowed|reverb)\b[^\)\]]*[\)\]]"
+    r"|\s+[-–—]\s+(?:sped up|slowed(?:\s*\+?\s*reverb)?)\s*$"
+)
+
+
+@dataclasses.dataclass
+class _LocalLyricsState:
+    content: str | None = None
+    quality: int = 0
+    source: str = "sidecar"
+    raw_sidecar: str | None = None
+    raw_embedded: str | None = None
+    cleaned_embedded: str | None = None
+    embedded_quality: int = 0
+    rejected_content: str | None = None
+    review_required: bool = False
+    source_disagreement: bool = False
+    lookup_failed: bool = False
+    encoding_error: bool = False
+
+
+def _load_local_lyrics(
     file_path: Path,
+    lrc_path: Path,
     artist: str,
     title: str,
-    force: bool = False,
-    dry_run: bool = False,
-    isrc: str | None = None,
-    album_name: str | None = None,
-    duration: float | None = None,
-    existing_lyrics: str | None = None,
-    musixmatch_token: str | None = None,
-    conflicts: dict[str, str] | None = None,
-    details: dict[str, Any] | None = None,
-    lookup_state: dict[str, Any] | None = None,
-    sibling_metadata: Mapping[Path, TrackInfo] | None = None,
-    label: str | None = None,
-) -> tuple[str | None, str | None]:
-    """Validate and upgrade sidecar/embedded lyrics without lowering sync quality.
-
-    Existing text is cleaned before reuse; conflicting words require review.
-    Return (text, status). Missing results do not erase existing lyric files.
-    """
-    lrc_path = file_path.with_suffix(".lrc")
-    resolved_duration = (
-        duration
-        if duration is not None
-        else metadata_module.get_audio_duration(file_path)
+    *,
+    album_name: str | None,
+    label: str | None,
+    resolved_duration: float | None,
+    existing_lyrics: str | None,
+    force: bool,
+    conflicts: dict[str, str] | None,
+    details: dict[str, Any] | None,
+) -> _LocalLyricsState:
+    cleaned_embedded = clean_lyrics_text(existing_lyrics)
+    state = _LocalLyricsState(
+        raw_embedded=existing_lyrics,
+        cleaned_embedded=cleaned_embedded,
+        review_required=bool(existing_lyrics and not cleaned_embedded),
     )
-    current_quality = 0
-    existing_content: str | None = None
-    rejected_content: str | None = None
-    raw_sidecar: str | None = None
-    raw_embedded = existing_lyrics
-    existing_lyrics = clean_lyrics_text(existing_lyrics)
-    review_required = bool(raw_embedded and not existing_lyrics)
-    lookup_failed = False
-    existing_source = "sidecar"
-    source_disagreement = False
 
     if lrc_path.exists() and lrc_path.stat().st_size > 0:
         try:
-            raw_sidecar = lrc_path.read_text(encoding="utf-8-sig").strip()
-            existing_content = clean_lyrics_text(raw_sidecar)
-            review_required |= bool(raw_sidecar and not existing_content)
+            state.raw_sidecar = lrc_path.read_text(encoding="utf-8-sig").strip()
+            state.content = clean_lyrics_text(state.raw_sidecar)
+            state.review_required |= bool(state.raw_sidecar and not state.content)
         except UnicodeDecodeError:
-            existing_content = None
-            current_quality = 0
             reason = "Local lyric file is not valid UTF-8; review its encoding before replacing it."
             if conflicts is not None:
                 conflicts["lyrics"] = reason
             if details is not None:
                 details.update(action="review", source="sidecar", reason=reason)
             if not force:
-                return None, "review"
+                state.encoding_error = True
+                return state
         except OSError as error:
             LOG.warning(
                 f"Cannot read lyrics for {escape(file_path.name)}: {escape(str(error))}"
             )
-            lookup_failed = True
+            state.lookup_failed = True
             if conflicts is not None:
                 conflicts["lyrics"] = (
                     "Existing lyrics cannot be read; review the file before reuse."
                 )
 
-    sidecar_duration_valid = existing_content is not None and is_lyrics_duration_valid(
-        existing_content, resolved_duration
+    sidecar_duration_valid = state.content is not None and is_lyrics_duration_valid(
+        state.content, resolved_duration
     )
     if sidecar_duration_valid:
-        current_quality = get_lyrics_quality(existing_content)
+        state.quality = get_lyrics_quality(state.content)
 
-    if existing_content and (
+    if state.content and (
         evaluate_lyrics_quality(
-            existing_content,
+            state.content,
             artist,
             title,
             resolved_duration,
@@ -669,19 +673,19 @@ def process_track_lyrics(
             f"Local lyrics require review for {escape(file_path.name)}: "
             "headers, script, or timestamps conflict with the requested recording; reuse withheld."
         )
-        rejected_content = existing_content
-        existing_content = None
-        current_quality = 0
-        review_required = True
+        state.rejected_content = state.content
+        state.content = None
+        state.quality = 0
+        state.review_required = True
         if details is not None:
             details["reason"] = (
                 "Local lyric headers, script, or timestamps conflict with the recording."
             )
 
-    embedded_quality = get_lyrics_quality(existing_lyrics)
-    if existing_lyrics and (
+    state.embedded_quality = get_lyrics_quality(cleaned_embedded)
+    if cleaned_embedded and (
         evaluate_lyrics_quality(
-            existing_lyrics,
+            cleaned_embedded,
             artist,
             title,
             resolved_duration,
@@ -690,9 +694,9 @@ def process_track_lyrics(
         )
         <= 0
         or (
-            rejected_content is not None
-            and strip_lyrics_headers(existing_lyrics)
-            == strip_lyrics_headers(rejected_content)
+            state.rejected_content is not None
+            and strip_lyrics_headers(cleaned_embedded)
+            == strip_lyrics_headers(state.rejected_content)
         )
     ):
         LOG.warning(
@@ -700,189 +704,190 @@ def process_track_lyrics(
             "headers, timestamps, script, or recording identity conflict with local evidence; "
             "reuse withheld."
         )
-        embedded_quality = 0
-        review_required = True
-    embedded_valid = embedded_quality > 0 and is_lyrics_duration_valid(
-        existing_lyrics, resolved_duration
+        state.embedded_quality = 0
+        state.review_required = True
+
+    embedded_valid = state.embedded_quality > 0 and is_lyrics_duration_valid(
+        cleaned_embedded, resolved_duration
     )
-    if embedded_quality > 0 and not embedded_valid:
-        review_required = True
+    if state.embedded_quality > 0 and not embedded_valid:
+        state.review_required = True
         if details is not None:
             details["reason"] = "Embedded lyric timestamps conflict with the recording."
+
     if (
-        existing_content
+        state.content
         and embedded_valid
-        and lyrics_word_body(existing_content)
-        != lyrics_word_body(existing_lyrics or "")
+        and lyrics_word_body(state.content) != lyrics_word_body(cleaned_embedded or "")
     ):
-        source_disagreement = True
-        review_required = True
+        state.source_disagreement = True
+        state.review_required = True
         if conflicts is not None:
             conflicts["lyrics"] = (
                 "Sidecar and embedded lyric words disagree; review required."
             )
         if details is not None:
             details["reason"] = "Sidecar and embedded lyric words disagree."
-        embedded_valid = False
-    if embedded_quality > current_quality and embedded_valid:
-        current_quality = embedded_quality
-        existing_content = existing_lyrics
-        existing_source = "embedded"
 
-    if any(
-        re.search(
-            r"[\[(]\s*instrumental\s*[\])]|\binstrumentals\s*$",
-            value,
-            re.IGNORECASE,
-        )
-        for value in (title, album_name or "")
+    if (
+        not state.source_disagreement
+        and state.embedded_quality > state.quality
+        and embedded_valid
     ):
-        if details is not None:
-            details.update(lookup_status="not_needed", action="unchanged")
-        if current_quality > 0 or review_required:
-            reason = "Lyrics are present on an instrumental recording; review required."
-            if conflicts is not None:
-                conflicts["lyrics"] = reason
-            if details is not None:
-                details.update(action="review", reason=reason)
-            LOG.warning(f"{escape(file_path.name)}: {reason}")
-            return None, "review"
-        return None, None
+        state.quality = state.embedded_quality
+        state.content = cleaned_embedded
+        state.source = "embedded"
 
-    other_song_bodies: list[str] | None = None
+    return state
 
-    def get_sibling_metadata() -> Mapping[Path, TrackInfo] | None:
-        if sibling_metadata is not None or lookup_state is None:
-            return sibling_metadata
-        with lookup_state["lock"]:
-            albums: dict[Path, Mapping[Path, TrackInfo]] = lookup_state.setdefault(
-                "sibling_metadata", {}
-            )
-            locks = lookup_state.setdefault("sibling_metadata_locks", {})
-            lock = locks.setdefault(file_path.parent, threading.Lock())
-        with lock:
-            if file_path.parent not in albums:
-                album: dict[Path, TrackInfo] = {}
-                for sibling in find_audio_files(file_path.parent, recursive=False):
-                    try:
-                        album[sibling] = metadata_module.read_track_metadata(sibling)
-                    except (OSError, ValueError, MutagenError):
-                        continue
-                albums[file_path.parent] = album
-            return albums[file_path.parent]
 
-    def get_other_song_bodies() -> list[str]:
-        nonlocal other_song_bodies
-        if other_song_bodies is None:
-            other_song_bodies = []
-            version_pattern = (
-                r"\s*[\(\[][^\)\]]*\b(?:remix|mix|edit|live|acoustic|instrumental|"
-                r"up[\s-]?tempo|extended|version|sped up|slowed|reverb)\b[^\)\]]*[\)\]]"
-                r"|\s+[-–—]\s+(?:sped up|slowed(?:\s*\+?\s*reverb)?)\s*$"
-            )
-            cached_metadata = get_sibling_metadata()
-            siblings = (
-                cached_metadata.items()
-                if cached_metadata is not None
-                else (
-                    (sibling, None)
-                    for sibling in find_audio_files(file_path.parent, recursive=False)
-                )
-            )
-            current_title = normalize_str(
-                clean_title(re.sub(version_pattern, "", title, flags=re.IGNORECASE))
-            )
-            for sibling, original in siblings:
-                if sibling == file_path:
-                    continue
-                if original is None:
-                    try:
-                        original = metadata_module.read_track_metadata(sibling)
-                    except (OSError, ValueError, MutagenError):
-                        continue
-                sibling_title = normalize_str(
-                    clean_title(
-                        re.sub(
-                            version_pattern,
-                            "",
-                            original.title or "",
-                            flags=re.IGNORECASE,
-                        )
-                    )
-                )
-                different_song = current_title != sibling_title
-                different_remix_credit = (
-                    "remix" in title.casefold()
-                    and any(
-                        token in artist.casefold()
-                        for token in (" & ", " feat", " ft.", ";")
-                    )
-                    and normalize_str(original.artist) != normalize_str(artist)
-                )
-                if different_song or different_remix_credit:
-                    body = lyrics_word_body(
-                        clean_lyrics_text(original.lyrics or original.synced_lyrics)
-                        or ""
-                    )
-                    if len(body) >= 200:
-                        other_song_bodies.append(body)
-        return other_song_bodies
-
-    if existing_content and any(
-        fuzz.ratio(lyrics_word_body(existing_content), body, score_cutoff=98) >= 98
-        for body in get_other_song_bodies()
-    ):
-        LOG.warning(
-            f"Existing lyrics for {escape(file_path.name)} match another recording; reuse withheld."
+def _get_sibling_metadata(
+    file_path: Path,
+    sibling_metadata: Mapping[Path, TrackInfo] | None,
+    lookup_state: dict[str, Any] | None,
+) -> Mapping[Path, TrackInfo] | None:
+    if sibling_metadata is not None or lookup_state is None:
+        return sibling_metadata
+    with lookup_state["lock"]:
+        albums: dict[Path, Mapping[Path, TrackInfo]] = lookup_state.setdefault(
+            "sibling_metadata", {}
         )
-        if conflicts is not None:
-            conflicts["lyrics"] = "Lyrics match another recording; review required."
-        existing_content = None
-        current_quality = 0
-        review_required = True
-        if details is not None:
-            details["reason"] = "Existing lyric words match another recording."
-
-    def keep_existing() -> tuple[str | None, str | None]:
-        if review_required and conflicts is not None:
-            conflicts.setdefault(
-                "lyrics", "Existing or returned lyrics require recording verification."
-            )
-        if details is not None:
-            details["previous_quality"] = current_quality
-            details["source"] = existing_source if existing_content else None
-            details["action"] = "review" if review_required else "unchanged"
-        if existing_content and current_quality > 0:
-            original_content = raw_sidecar if raw_sidecar is not None else raw_embedded
-            status = "cleaned" if existing_content != original_content else "existing"
-            if details is not None and not review_required:
-                if raw_sidecar is None:
-                    details["action"] = "restore"
-                elif status == "cleaned":
-                    details["action"] = "cleanup"
-            if existing_content != raw_sidecar and not dry_run:
-                atomic_write_bytes(lrc_path, existing_content.encode("utf-8"))
-            return existing_content, status
-        if force and (
-            rejected_content is not None or (raw_embedded and embedded_quality == 0)
-        ):
-            if conflicts is not None:
-                conflicts.pop("lyrics", None)
-            if lrc_path.exists() and not dry_run:
+        locks = lookup_state.setdefault("sibling_metadata_locks", {})
+        lock = locks.setdefault(file_path.parent, threading.Lock())
+    with lock:
+        if file_path.parent not in albums:
+            album: dict[Path, TrackInfo] = {}
+            for sibling in find_audio_files(file_path.parent, recursive=False):
                 try:
-                    lrc_path.unlink()
-                except OSError as error:
-                    LOG.warning(
-                        f"Cannot remove corrupt lyrics file {escape(lrc_path.name)}: {error}"
-                    )
-            return "", "purged"
-        return None, "failed" if lookup_failed else None
+                    album[sibling] = metadata_module.read_track_metadata(sibling)
+                except (OSError, ValueError, MutagenError):
+                    continue
+            albums[file_path.parent] = album
+        return albums[file_path.parent]
 
-    if not force and (
-        source_disagreement or (current_quality >= 2 and existing_content)
+
+def _collect_sibling_lyric_bodies(
+    file_path: Path,
+    artist: str,
+    title: str,
+    sibling_metadata: Mapping[Path, TrackInfo] | None,
+    lookup_state: dict[str, Any] | None,
+) -> list[str]:
+    other_song_bodies: list[str] = []
+    cached_metadata = _get_sibling_metadata(file_path, sibling_metadata, lookup_state)
+    siblings = (
+        cached_metadata.items()
+        if cached_metadata is not None
+        else (
+            (sibling, None)
+            for sibling in find_audio_files(file_path.parent, recursive=False)
+        )
+    )
+    current_title = normalize_str(
+        clean_title(re.sub(_LYRICS_VERSION_PATTERN, "", title, flags=re.IGNORECASE))
+    )
+    for sibling, original in siblings:
+        if sibling == file_path:
+            continue
+        if original is None:
+            try:
+                original = metadata_module.read_track_metadata(sibling)
+            except (OSError, ValueError, MutagenError):
+                continue
+        sibling_title = normalize_str(
+            clean_title(
+                re.sub(
+                    _LYRICS_VERSION_PATTERN,
+                    "",
+                    original.title or "",
+                    flags=re.IGNORECASE,
+                )
+            )
+        )
+        different_song = current_title != sibling_title
+        different_remix_credit = (
+            "remix" in title.casefold()
+            and any(
+                token in artist.casefold() for token in (" & ", " feat", " ft.", ";")
+            )
+            and normalize_str(original.artist) != normalize_str(artist)
+        )
+        if different_song or different_remix_credit:
+            body = lyrics_word_body(
+                clean_lyrics_text(original.lyrics or original.synced_lyrics) or ""
+            )
+            if len(body) >= 200:
+                other_song_bodies.append(body)
+    return other_song_bodies
+
+
+def _keep_existing_lyrics(
+    lrc_path: Path,
+    state: _LocalLyricsState,
+    *,
+    force: bool,
+    dry_run: bool,
+    conflicts: dict[str, str] | None,
+    details: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    if state.review_required and conflicts is not None:
+        conflicts.setdefault(
+            "lyrics", "Existing or returned lyrics require recording verification."
+        )
+    if details is not None:
+        details["previous_quality"] = state.quality
+        details["source"] = state.source if state.content else None
+        details["action"] = "review" if state.review_required else "unchanged"
+    if state.content and state.quality > 0:
+        original_content = (
+            state.raw_sidecar if state.raw_sidecar is not None else state.raw_embedded
+        )
+        status = "cleaned" if state.content != original_content else "existing"
+        if details is not None and not state.review_required:
+            if state.raw_sidecar is None:
+                details["action"] = "restore"
+            elif status == "cleaned":
+                details["action"] = "cleanup"
+        if (
+            not state.source_disagreement
+            and state.content != state.raw_sidecar
+            and not dry_run
+        ):
+            atomic_write_bytes(lrc_path, state.content.encode("utf-8"))
+        return state.content, status
+    if force and (
+        state.rejected_content is not None
+        or (state.raw_embedded and state.embedded_quality == 0)
     ):
-        return keep_existing()
+        if conflicts is not None:
+            conflicts.pop("lyrics", None)
+        if lrc_path.exists() and not dry_run:
+            try:
+                lrc_path.unlink()
+            except OSError as error:
+                LOG.warning(
+                    f"Cannot remove corrupt lyrics file {escape(lrc_path.name)}: {error}"
+                )
+        return "", "purged"
+    return None, "failed" if state.lookup_failed else None
 
+
+def _fetch_and_validate_lyrics(
+    file_path: Path,
+    artist: str,
+    title: str,
+    *,
+    isrc: str | None,
+    album_name: str | None,
+    resolved_duration: float | None,
+    musixmatch_token: str | None,
+    lookup_state: dict[str, Any] | None,
+    conflicts: dict[str, str] | None,
+    details: dict[str, Any] | None,
+    get_other_song_bodies: Callable[[], list[str]],
+) -> tuple[str | None, bool, bool]:
+    review_required = False
+    lookup_failed = False
     try:
         lookup_options: dict[str, Any] = {}
         if details is not None:
@@ -983,42 +988,184 @@ def process_track_lyrics(
         if details is not None:
             details["reason"] = "Returned lyric words match another recording."
 
-    if not lyrics_text:
-        return keep_existing()
+    return lyrics_text, review_required, lookup_failed
 
-    new_quality = get_lyrics_quality(lyrics_text)
-    if new_quality == 0:
-        review_required = True
-        if details is not None:
-            details["reason"] = "Returned lyrics contain no usable lyric words."
-        return keep_existing()
 
+def _repair_rejected_lyrics_headers(
+    lyrics_text: str,
+    new_quality: int,
+    state: _LocalLyricsState,
+    artist: str,
+    title: str,
+    resolved_duration: float | None,
+) -> tuple[str, int]:
     # Only the strict provider path establishes identity independently of local headers.
     if (
-        not get_config().allow_unverified_lyrics
-        and resolved_duration is not None
-        and resolved_duration > 0
-        and not any(
+        get_config().allow_unverified_lyrics
+        or resolved_duration is None
+        or resolved_duration <= 0
+        or any(
             delimiter in artist or delimiter in title for delimiter in ("]", "\r", "\n")
         )
     ):
-        verified_body = lyrics_word_body(lyrics_text)
-        for rejected_lyrics in (rejected_content, existing_lyrics):
-            if (
-                rejected_lyrics
-                and verified_body
-                and not lyrics_identity_matches(rejected_lyrics, artist, title)
-                and is_lyrics_duration_valid(rejected_lyrics, resolved_duration)
-                and lyrics_word_body(rejected_lyrics) == verified_body
-                and get_lyrics_quality(rejected_lyrics) >= new_quality
-            ):
-                repaired_lyrics = repair_lyrics_headers(rejected_lyrics, artist, title)
-                if lyrics_identity_matches(repaired_lyrics, artist, title):
-                    lyrics_text = repaired_lyrics
-                    new_quality = get_lyrics_quality(lyrics_text)
+        return lyrics_text, new_quality
+    verified_body = lyrics_word_body(lyrics_text)
+    for rejected_lyrics in (state.rejected_content, state.cleaned_embedded):
+        if (
+            rejected_lyrics
+            and verified_body
+            and not lyrics_identity_matches(rejected_lyrics, artist, title)
+            and is_lyrics_duration_valid(rejected_lyrics, resolved_duration)
+            and lyrics_word_body(rejected_lyrics) == verified_body
+            and get_lyrics_quality(rejected_lyrics) >= new_quality
+        ):
+            repaired_lyrics = repair_lyrics_headers(rejected_lyrics, artist, title)
+            if lyrics_identity_matches(repaired_lyrics, artist, title):
+                lyrics_text = repaired_lyrics
+                new_quality = get_lyrics_quality(lyrics_text)
+    return lyrics_text, new_quality
 
-    if existing_content and (not force or new_quality < current_quality):
-        old_body = lyrics_word_body(existing_content)
+
+def process_track_lyrics(
+    file_path: Path,
+    artist: str,
+    title: str,
+    force: bool = False,
+    dry_run: bool = False,
+    isrc: str | None = None,
+    album_name: str | None = None,
+    duration: float | None = None,
+    existing_lyrics: str | None = None,
+    musixmatch_token: str | None = None,
+    conflicts: dict[str, str] | None = None,
+    details: dict[str, Any] | None = None,
+    lookup_state: dict[str, Any] | None = None,
+    sibling_metadata: Mapping[Path, TrackInfo] | None = None,
+    label: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Validate and upgrade sidecar/embedded lyrics without lowering sync quality.
+
+    Existing text is cleaned before reuse; conflicting words require review.
+    Return (text, status). Missing results do not erase existing lyric files.
+    """
+    lrc_path = file_path.with_suffix(".lrc")
+    resolved_duration = (
+        duration
+        if duration is not None
+        else metadata_module.get_audio_duration(file_path)
+    )
+    state = _load_local_lyrics(
+        file_path,
+        lrc_path,
+        artist,
+        title,
+        album_name=album_name,
+        label=label,
+        resolved_duration=resolved_duration,
+        existing_lyrics=existing_lyrics,
+        force=force,
+        conflicts=conflicts,
+        details=details,
+    )
+    if state.encoding_error:
+        return None, "review"
+
+    if any(INSTRUMENTAL_PATTERN.search(value) for value in (title, album_name or "")):
+        if details is not None:
+            details.update(lookup_status="not_needed", action="unchanged")
+        if state.quality > 0 or state.review_required:
+            reason = "Lyrics are present on an instrumental recording; review required."
+            if conflicts is not None:
+                conflicts["lyrics"] = reason
+            if details is not None:
+                details.update(action="review", reason=reason)
+            LOG.warning(f"{escape(file_path.name)}: {reason}")
+            return None, "review"
+        return None, None
+
+    other_song_bodies: list[str] | None = None
+
+    def get_other_song_bodies() -> list[str]:
+        nonlocal other_song_bodies
+        if other_song_bodies is None:
+            other_song_bodies = _collect_sibling_lyric_bodies(
+                file_path, artist, title, sibling_metadata, lookup_state
+            )
+        return other_song_bodies
+
+    if state.content and any(
+        fuzz.ratio(lyrics_word_body(state.content), body, score_cutoff=98) >= 98
+        for body in get_other_song_bodies()
+    ):
+        LOG.warning(
+            f"Existing lyrics for {escape(file_path.name)} match another recording; reuse withheld."
+        )
+        if conflicts is not None:
+            conflicts["lyrics"] = "Lyrics match another recording; review required."
+        state.content = None
+        state.quality = 0
+        state.review_required = True
+        if details is not None:
+            details["reason"] = "Existing lyric words match another recording."
+
+    if not force and (
+        state.source_disagreement or (state.quality >= 2 and state.content)
+    ):
+        return _keep_existing_lyrics(
+            lrc_path,
+            state,
+            force=force,
+            dry_run=dry_run,
+            conflicts=conflicts,
+            details=details,
+        )
+
+    lyrics_text, fetch_review_required, fetch_failed = _fetch_and_validate_lyrics(
+        file_path,
+        artist,
+        title,
+        isrc=isrc,
+        album_name=album_name,
+        resolved_duration=resolved_duration,
+        musixmatch_token=musixmatch_token,
+        lookup_state=lookup_state,
+        conflicts=conflicts,
+        details=details,
+        get_other_song_bodies=get_other_song_bodies,
+    )
+    state.review_required |= fetch_review_required
+    state.lookup_failed |= fetch_failed
+
+    if not lyrics_text:
+        return _keep_existing_lyrics(
+            lrc_path,
+            state,
+            force=force,
+            dry_run=dry_run,
+            conflicts=conflicts,
+            details=details,
+        )
+
+    new_quality = get_lyrics_quality(lyrics_text)
+    if new_quality == 0:
+        state.review_required = True
+        if details is not None:
+            details["reason"] = "Returned lyrics contain no usable lyric words."
+        return _keep_existing_lyrics(
+            lrc_path,
+            state,
+            force=force,
+            dry_run=dry_run,
+            conflicts=conflicts,
+            details=details,
+        )
+
+    lyrics_text, new_quality = _repair_rejected_lyrics_headers(
+        lyrics_text, new_quality, state, artist, title, resolved_duration
+    )
+
+    if state.content and (not force or new_quality < state.quality):
+        old_body = lyrics_word_body(state.content)
         new_body = lyrics_word_body(lyrics_text)
         if old_body and old_body != new_body:
             LOG.warning(
@@ -1028,18 +1175,39 @@ def process_track_lyrics(
                 conflicts["lyrics"] = (
                     "Existing and returned lyric words disagree; replacement requires review."
                 )
-            review_required = True
+            state.review_required = True
             if details is not None:
                 details["reason"] = "Existing and returned lyric words disagree."
                 details["returned_quality"] = new_quality
-            return keep_existing()
+            return _keep_existing_lyrics(
+                lrc_path,
+                state,
+                force=force,
+                dry_run=dry_run,
+                conflicts=conflicts,
+                details=details,
+            )
 
     # A forced lookup must not replace synchronized lyrics with a lower timing tier.
-    if current_quality >= 2 and new_quality < current_quality:
-        return keep_existing()
+    if state.quality >= 2 and new_quality < state.quality:
+        return _keep_existing_lyrics(
+            lrc_path,
+            state,
+            force=force,
+            dry_run=dry_run,
+            conflicts=conflicts,
+            details=details,
+        )
 
-    if not force and current_quality > 0 and new_quality <= current_quality:
-        return keep_existing()
+    if not force and state.quality > 0 and new_quality <= state.quality:
+        return _keep_existing_lyrics(
+            lrc_path,
+            state,
+            force=force,
+            dry_run=dry_run,
+            conflicts=conflicts,
+            details=details,
+        )
 
     if conflicts is not None:
         conflicts.pop("lyrics", None)
@@ -1050,7 +1218,7 @@ def process_track_lyrics(
         "enhanced" if new_quality == 3 else ("synced" if new_quality == 2 else "plain")
     )
     if details is not None:
-        details["previous_quality"] = current_quality
+        details["previous_quality"] = state.quality
         details["returned_quality"] = new_quality
-        details["action"] = "timing_upgrade" if current_quality > 0 else "download"
+        details["action"] = "timing_upgrade" if state.quality > 0 else "download"
     return lyrics_text, tag_type

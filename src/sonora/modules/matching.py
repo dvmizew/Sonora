@@ -172,11 +172,26 @@ def _pos_in_album(
     return recording is not None
 
 
+def _can_update_disc_number(
+    track_info: TrackInfo, matched_position: int, *, force: bool
+) -> bool:
+    return (
+        force
+        or track_info.track_number is None
+        or (
+            track_info.track_number == matched_position
+            and track_info.disc_number is None
+        )
+    )
+
+
 def _match_position_by_mbid(
     track_info: TrackInfo,
     clean_mbid: str,
     album_track_mbids: dict[tuple[int, int], str] | None,
     album_mb_release_details: dict[str, Any] | None,
+    *,
+    force: bool = False,
 ) -> int | None:
     """Resolve a recording only when its compatible release position is unique."""
     if not album_mb_release_details:
@@ -218,7 +233,8 @@ def _match_position_by_mbid(
     if not compatible_positions:
         return None
     matched_disc, matched_position = compatible_positions.pop()
-    track_info.disc_number = matched_disc
+    if _can_update_disc_number(track_info, matched_position, force=force):
+        track_info.disc_number = matched_disc
     return matched_position
 
 
@@ -238,6 +254,8 @@ def _match_position_by_authoritative_id(
     id_field: str,
     id_value: str,
     release_dicts: list[dict[str, Any] | None],
+    *,
+    force: bool = False,
 ) -> int | None:
     """A matching recording identifier can resolve a missing title or track position."""
     matches: set[tuple[int, int]] = set()
@@ -284,7 +302,8 @@ def _match_position_by_authoritative_id(
         matches = current_matches
     if matches:
         matched_disc, matched_position = matches.pop()
-        track_info.disc_number = matched_disc
+        if _can_update_disc_number(track_info, matched_position, force=force):
+            track_info.disc_number = matched_disc
         return matched_position
     return None
 
@@ -332,6 +351,8 @@ def _search_release_positions_by_title(
     album_mb_release_details: dict[str, Any] | None,
     album_deezer_details: dict[str, Any] | None,
     album_itunes_details: dict[str, Any] | None,
+    *,
+    force: bool = False,
 ) -> int | None:
     """Searches across candidate album track titles for fuzzy or exact title matches."""
     position_scores: dict[tuple[int, int], float] = {}
@@ -369,7 +390,8 @@ def _search_release_positions_by_title(
     ):
         return None
     matched_disc, matched_position = ranked_positions[0]
-    track_info.disc_number = matched_disc
+    if _can_update_disc_number(track_info, matched_position, force=force):
+        track_info.disc_number = matched_disc
     return matched_position
 
 
@@ -410,6 +432,8 @@ def _resolve_album_track_position(
     album_deezer_details: dict[str, Any] | None = None,
     album_itunes_details: dict[str, Any] | None = None,
     album_track_mbids: dict[tuple[int, int], str] | None = None,
+    *,
+    force: bool = False,
 ) -> int | None:
     """
     Resolve the legitimate track position (1-indexed) of an audio file within an album release.
@@ -432,7 +456,11 @@ def _resolve_album_track_position(
     if is_valid_uuid(track_info.musicbrainz_trackid):
         clean_mbid = str(track_info.musicbrainz_trackid).strip().lower()
         pos = _match_position_by_mbid(
-            track_info, clean_mbid, album_track_mbids, album_mb_release_details
+            track_info,
+            clean_mbid,
+            album_track_mbids,
+            album_mb_release_details,
+            force=force,
         )
         if pos is not None:
             return pos
@@ -471,6 +499,7 @@ def _resolve_album_track_position(
             "isrc",
             clean_isrc,
             [album_deezer_details, album_mb_release_details],
+            force=force,
         )
         if matched is not None:
             return matched
@@ -488,6 +517,7 @@ def _resolve_album_track_position(
             "itunes_trackid",
             clean_itunes_id,
             [album_itunes_details],
+            force=force,
         )
         if matched is not None:
             return matched
@@ -535,6 +565,7 @@ def _resolve_album_track_position(
         album_mb_release_details,
         album_deezer_details,
         album_itunes_details,
+        force=force,
     )
 
 
@@ -959,10 +990,34 @@ def _find_track_in_album_mapping(
 
 def provider_identity_matches(recording: TrackInfo, candidate: TrackInfo) -> bool:
     """A metadata provider may verify identity but cannot replace it."""
-    return (
-        (recording.artist, recording.title, recording.duration)
-        == (candidate.artist, candidate.title, candidate.duration)
-    ) or recording_identity_matches(
+    if (recording.artist, recording.title, recording.duration) == (
+        candidate.artist,
+        candidate.title,
+        candidate.duration,
+    ):
+        return True
+    if _is_generic_title(recording.title) and not _is_generic_title(candidate.title):
+        authoritative_match = (
+            bool(recording.isrc)
+            and bool(candidate.isrc)
+            and normalize_str(recording.isrc) == normalize_str(candidate.isrc)
+        ) or (
+            bool(recording.itunes_trackid)
+            and bool(candidate.itunes_trackid)
+            and str(recording.itunes_trackid).strip()
+            == str(candidate.itunes_trackid).strip()
+        )
+        if authoritative_match:
+            artist_generic = _is_generic(recording.artist, "artist")
+            return recording_identity_matches(
+                None if artist_generic else recording.artist,
+                candidate.title,
+                None if artist_generic else candidate.artist,
+                candidate.title,
+                expected_duration=recording.duration,
+                candidate_duration=candidate.duration,
+            )
+    return recording_identity_matches(
         recording.artist,
         recording.title,
         candidate.artist,

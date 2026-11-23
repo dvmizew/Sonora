@@ -110,13 +110,17 @@ def _apply_album_metadata(
     album_context: _AlbumMetadataContext,
 ) -> None:
     """Apply album metadata while preserving existing track identity and numbering."""
+    verified_itunes_details = (
+        album_context.itunes_details if album_context.itunes_layout_verified else None
+    )
     resolved_pos = _resolve_album_track_position(
         track_info=track_info,
         file_path=file_path,
         album_mb_release_details=album_context.mb_release_details,
         album_deezer_details=album_context.deezer_details,
-        album_itunes_details=album_context.itunes_details,
+        album_itunes_details=verified_itunes_details,
         album_track_mbids=album_context.track_mbids,
+        force=force,
     )
     if resolved_pos is not None and (force or track_info.track_number is None):
         track_info.track_number = resolved_pos
@@ -232,10 +236,13 @@ def _update_metadata(
             target_album_artist=album_context.sample_artist,
             force=force,
         )
+    verified_itunes_details = (
+        album_context.itunes_details if album_context.itunes_layout_verified else None
+    )
     providers = [
         partial(
             _update_itunes,
-            album_itunes_details=album_context.itunes_details,
+            album_itunes_details=verified_itunes_details,
             force=force,
         ),
         partial(_update_lastfm, lastfm_api_key=lastfm_api_key),
@@ -781,10 +788,16 @@ def _harmonize_album_genres(
         if (
             not track.genre or is_noise_genre(track.genre)
         ) and track.genre != dominant_genre:
+            old_genre = track.genre
             LOG.detail(
-                f"   ∟ Updating genre '[bold red]{escape(str(track.genre))}[/]' -> '[bold green]{escape(dominant_genre)}[/]' on '{escape(track.file_path.name)}'"
+                f"   ∟ Updating genre '[bold red]{escape(str(old_genre))}[/]' -> '[bold green]{escape(dominant_genre)}[/]' on '{escape(track.file_path.name)}'"
             )
             track.genre = dominant_genre
+            track._diff_descriptions.append(
+                f"genre: added {dominant_genre!r}"
+                if not old_genre
+                else f"genre: {old_genre!r} -> {dominant_genre!r}"
+            )
             if not dry_run:
                 try:
                     metadata_module.write_track_metadata(track)
@@ -793,7 +806,9 @@ def _harmonize_album_genres(
 
 
 def _preferred_artist_casing(casing_votes: Mapping[str, int]) -> str:
-    preferred_casing = max(casing_votes, key=lambda artist: casing_votes[artist])
+    preferred_casing = min(
+        casing_votes, key=lambda artist: (-casing_votes[artist], artist)
+    )
     resolved_artist = artists_module.normalize_artist_name(preferred_casing)
     # Casing harmonization must not replace a compilation artist with an alias.
     return (
@@ -810,9 +825,11 @@ def _harmonize_album_artists(
     if len(valid_tracks) < 2:
         return
 
+    ordered_tracks = sorted(valid_tracks, key=lambda track: str(track.file_path))
+
     album_artist_counts = Counter(
         track.album_artist.strip()
-        for track in valid_tracks
+        for track in ordered_tracks
         if track.album_artist and track.album_artist.strip()
     )
 
@@ -822,13 +839,17 @@ def _harmonize_album_artists(
         for artist_candidate, count in album_artist_counts.items():
             normalized_artist = normalize_str(artist_candidate)
             groups.setdefault(normalized_artist, {})[artist_candidate] = count
-        dominant_artist_votes = max(
-            groups.values(), key=lambda casing_votes: sum(casing_votes.values())
+        dominant_artist_votes = min(
+            groups.values(),
+            key=lambda casing_votes: (
+                -sum(casing_votes.values()),
+                min(casing_votes),
+            ),
         )
         dominant_album_artist = _preferred_artist_casing(dominant_artist_votes)
 
     track_artist_counts: dict[str, Counter[str]] = {}
-    for track in valid_tracks:
+    for track in ordered_tracks:
         if track.artist and track.artist.strip():
             track_artist = track.artist.strip()
             normalized_artist = normalize_str(track_artist)
@@ -853,7 +874,7 @@ def _harmonize_album_artists(
         else:
             canonical_track_artists[normalized_album_artist] = dominant_album_artist
 
-    for track in valid_tracks:
+    for track in ordered_tracks:
         modified = False
         if (
             dominant_album_artist
@@ -862,10 +883,14 @@ def _harmonize_album_artists(
             == normalize_str(dominant_album_artist)
             and track.album_artist != dominant_album_artist
         ):
+            old_album_artist = track.album_artist
             LOG.detail(
-                f"   ∟ Updating album artist casing '[bold red]{escape(track.album_artist)}[/]' -> '[bold green]{escape(dominant_album_artist)}[/]' on '{escape(track.file_path.name)}'"
+                f"   ∟ Updating album artist casing '[bold red]{escape(old_album_artist)}[/]' -> '[bold green]{escape(dominant_album_artist)}[/]' on '{escape(track.file_path.name)}'"
             )
             track.album_artist = dominant_album_artist
+            track._diff_descriptions.append(
+                f"album_artist: {old_album_artist!r} -> {dominant_album_artist!r}"
+            )
             modified = True
 
         if track.artist:
@@ -873,10 +898,14 @@ def _harmonize_album_artists(
             if normalized_track_artist in canonical_track_artists:
                 canonical_name = canonical_track_artists[normalized_track_artist]
                 if track.artist != canonical_name:
+                    old_artist = track.artist
                     LOG.detail(
-                        f"   ∟ Updating track artist casing '[bold red]{escape(track.artist)}[/]' -> '[bold green]{escape(canonical_name)}[/]' on '{escape(track.file_path.name)}'"
+                        f"   ∟ Updating track artist casing '[bold red]{escape(old_artist)}[/]' -> '[bold green]{escape(canonical_name)}[/]' on '{escape(track.file_path.name)}'"
                     )
                     track.artist = canonical_name
+                    track._diff_descriptions.append(
+                        f"artist: {old_artist!r} -> {canonical_name!r}"
+                    )
                     modified = True
 
         if (
@@ -886,8 +915,16 @@ def _harmonize_album_artists(
             and track.album_artist != track.artist
         ):
             target = harmonize_artist_casing(track.artist, track.album_artist)
-            track.album_artist = target
-            track.artist = target
+            if track.album_artist != target:
+                track._diff_descriptions.append(
+                    f"album_artist: {track.album_artist!r} -> {target!r}"
+                )
+                track.album_artist = target
+            if track.artist != target:
+                track._diff_descriptions.append(
+                    f"artist: {track.artist!r} -> {target!r}"
+                )
+                track.artist = target
             modified = True
 
         if modified and not dry_run:

@@ -7,6 +7,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -1452,6 +1453,13 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
     def test_identifier_updates_corrupt_title_and_position(self) -> None:
         for id_field in ("isrc", "itunes_trackid"):
             with self.subTest(id_field=id_field):
+                release: list[dict[str, Any] | None] = [
+                    {
+                        "tracks_by_disc_and_position": {
+                            (2, 4): {id_field: "known123", "title": "Original"}
+                        }
+                    }
+                ]
                 track = TrackInfo(
                     self.root / "99 - Corrupt.flac", title="Untitled", track_number=99
                 )
@@ -1460,15 +1468,20 @@ class TestMetadataIdentityRegressions(AudioRegressionTestCase):
                     99,
                     id_field,
                     "KNOWN123",
-                    [
-                        {
-                            "tracks_by_disc_and_position": {
-                                (2, 4): {id_field: "known123", "title": "Original"}
-                            }
-                        }
-                    ],
+                    release,
                 )
                 self.assertEqual(position, 4)
+                self.assertEqual(track.disc_number, 1)
+
+                forced_position = matching._match_position_by_authoritative_id(
+                    track,
+                    99,
+                    id_field,
+                    "KNOWN123",
+                    release,
+                    force=True,
+                )
+                self.assertEqual(forced_position, 4)
                 self.assertEqual(track.disc_number, 2)
 
     def test_repeated_identifier_requires_unique_position(self) -> None:
@@ -3382,6 +3395,131 @@ class TestTrackProcessingContracts(IsolatedTestCase):
         ):
             track_processing._update_lyrics(self.recording, self.path, True)
         self.assertEqual(self.recording.lyrics, "[00:01] Lyrics")
+
+    def test_update_lyrics_preserves_conflicts_and_synced_embedded_lyrics(self) -> None:
+        synced_embedded = "[00:01.00] Real chorus words\n[00:05.00] Second line"
+        plain_sidecar = "Completely different plain text"
+        lrc_path = self.path.with_suffix(".lrc")
+        lrc_path.write_text(plain_sidecar, encoding="utf-8")
+        track = TrackInfo(
+            self.path,
+            artist="Artist",
+            title="Song",
+            duration=180.0,
+            lyrics=synced_embedded,
+        )
+        with patch("sonora.services.lyrics.fetch_synced_lyrics") as mock_fetch:
+            track_processing._update_lyrics(track, self.path, True, force=False)
+        mock_fetch.assert_not_called()
+        self.assertEqual(track.lyrics, synced_embedded)
+        self.assertIn("lyrics", track.metadata_conflicts)
+        self.assertEqual(lrc_path.read_text(encoding="utf-8"), plain_sidecar)
+
+        lrc_path.write_text("Original plain words", encoding="utf-8")
+        plain_track = TrackInfo(
+            self.path,
+            artist="Artist",
+            title="Song",
+            duration=180.0,
+            lyrics="Original plain words",
+        )
+        with patch(
+            "sonora.services.lyrics.fetch_synced_lyrics",
+            return_value="[00:01.00] Fetched different words",
+        ):
+            track_processing._update_lyrics(plain_track, self.path, True, force=False)
+        self.assertIn("lyrics", plain_track.metadata_conflicts)
+        self.assertEqual(plain_track.lyrics, "Original plain words")
+
+    def test_unverified_itunes_album_details_are_gated_in_album_and_metadata_updates(
+        self,
+    ) -> None:
+        unverified_context = tagger._AlbumMetadataContext(
+            itunes_details={
+                "album_artist": "Wrong Artist",
+                "tracks_by_disc_and_position": {(1, 1): {"title": "Song"}},
+            },
+            itunes_layout_verified=False,
+        )
+        track = TrackInfo(self.path, artist="Artist", title="Song")
+        with patch.object(
+            tagger, "_resolve_album_track_position", return_value=None
+        ) as resolve_pos:
+            tagger._apply_album_metadata(
+                track, self.path, force=False, album_context=unverified_context
+            )
+        self.assertIsNone(resolve_pos.call_args.kwargs["album_itunes_details"])
+
+        with (
+            patch.object(tagger, "_update_musicbrainz"),
+            patch.object(tagger, "_update_shazam"),
+            patch.object(tagger, "_update_acoustid"),
+            patch.object(tagger, "_update_itunes") as update_itunes,
+            patch.object(tagger, "_update_lastfm"),
+            patch.object(tagger, "_update_discogs"),
+            patch.object(tagger, "_update_deezer"),
+            patch.object(tagger, "_update_genius"),
+            patch.object(tagger, "_update_theaudiodb"),
+        ):
+            tagger._update_metadata(
+                track,
+                self.path,
+                None,
+                None,
+                None,
+                None,
+                force=False,
+                album_context=unverified_context,
+            )
+        self.assertIsNone(update_itunes.call_args.kwargs["album_itunes_details"])
+
+    def test_album_harmonization_records_diff_descriptions_and_breaks_ties_deterministically(
+        self,
+    ) -> None:
+        genre_tracks = [
+            TrackInfo(self.test_directory / "01.flac", genre="Rock"),
+            TrackInfo(self.test_directory / "02.flac", genre="Rock"),
+            TrackInfo(self.test_directory / "03.flac", genre=None),
+        ]
+        tagger._harmonize_album_genres(genre_tracks, None, None, dry_run=True)
+        self.assertEqual(genre_tracks[2].genre, "Rock")
+        self.assertIn("genre: added 'Rock'", genre_tracks[2]._diff_descriptions)
+
+        first_order = [
+            TrackInfo(
+                self.test_directory / "01.flac",
+                artist="Artist",
+                album_artist="Artist",
+            ),
+            TrackInfo(
+                self.test_directory / "02.flac",
+                artist="ARTIST",
+                album_artist="ARTIST",
+            ),
+        ]
+        second_order = [
+            TrackInfo(
+                self.test_directory / "02.flac",
+                artist="ARTIST",
+                album_artist="ARTIST",
+            ),
+            TrackInfo(
+                self.test_directory / "01.flac",
+                artist="Artist",
+                album_artist="Artist",
+            ),
+        ]
+        tagger._harmonize_album_artists(first_order, dry_run=True)
+        tagger._harmonize_album_artists(second_order, dry_run=True)
+        self.assertEqual(first_order[0].artist, second_order[0].artist)
+        self.assertEqual(first_order[0].album_artist, second_order[0].album_artist)
+        changed_track = next(t for t in first_order if t._diff_descriptions)
+        self.assertTrue(
+            any("album_artist:" in line for line in changed_track._diff_descriptions)
+        )
+        self.assertTrue(
+            any("artist:" in line for line in changed_track._diff_descriptions)
+        )
 
     def test_normalization_read_failure_and_failed_write_produce_no_success(
         self,

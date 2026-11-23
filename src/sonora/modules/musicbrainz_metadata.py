@@ -674,11 +674,22 @@ def _release_edition_conflicts(
     return False
 
 
+def _is_earlier_or_more_specific_date(candidate: str, current: str) -> bool:
+    if candidate.startswith(current):
+        return len(candidate) > len(current)
+    if current.startswith(candidate):
+        return False
+    return candidate < current
+
+
 def _apply_mb_release_metadata(
     track_info: TrackInfo,
     album_mbid: str | None,
     album_mb_release_details: dict[str, Any] | None,
     force: bool = False,
+    *,
+    tentative_album_search: bool = False,
+    tentative_date: str | None = None,
 ) -> None:
     """Applies release-level metadata, validating album artist and album title."""
     if "musicbrainz_albumid" in track_info.metadata_conflicts:
@@ -687,6 +698,14 @@ def _apply_mb_release_metadata(
         return
     if not is_valid_uuid(track_info.musicbrainz_albumid):
         return
+
+    def _rollback_tentative_release() -> None:
+        if tentative_album_search:
+            track_info.musicbrainz_albumid = None
+            track_info.metadata_sources.pop("musicbrainz_albumid", None)
+        if tentative_date is not None and track_info.date == tentative_date:
+            track_info.date = None
+            track_info.metadata_sources.pop("date", None)
 
     mb_rel = (
         album_mb_release_details
@@ -703,8 +722,10 @@ def _apply_mb_release_metadata(
         return
 
     if _release_edition_conflicts(track_info, mb_rel):
+        _rollback_tentative_release()
         return
     if _compatible_release_layout(track_info, mb_rel) is None:
+        _rollback_tentative_release()
         return
 
     release_artist = str(mb_rel.get("album_artist") or mb_rel.get("artist") or "")
@@ -712,6 +733,7 @@ def _apply_mb_release_metadata(
     if not _validate_mb_release_artist(release_artist, expected_artist):
         track_info.musicbrainz_albumid = None
         track_info.musicbrainz_releasegroupid = None
+        _rollback_tentative_release()
         return
 
     release_title = str(mb_rel.get("title") or "").strip()
@@ -720,6 +742,7 @@ def _apply_mb_release_metadata(
     ):
         track_info.musicbrainz_albumid = None
         track_info.metadata_sources.pop("musicbrainz_albumid", None)
+        _rollback_tentative_release()
         track_info.metadata_conflicts["musicbrainz_albumid"] = (
             "MusicBrainz release title describes a different edition; "
             "release metadata withheld."
@@ -753,6 +776,7 @@ def _apply_mb_release_metadata(
     ):
         track_info.musicbrainz_albumid = None
         track_info.metadata_sources.pop("musicbrainz_albumid", None)
+        _rollback_tentative_release()
         track_info.metadata_conflicts["musicbrainz_albumid"] = (
             "MusicBrainz release does not contain the verified recording; "
             "release identifier removed and release metadata withheld."
@@ -779,10 +803,20 @@ def _apply_mb_release_metadata(
     if mb_rel.get("date") and (force or not track_info.date):
         mb_rel_map["date"] = "date"
     original_date = normalize_date(str(mb_rel.get("original_date") or ""))
+    current_original_date = normalize_date(str(track_info.original_date or ""))
     if original_date and (
-        not track_info.original_date or original_date <= track_info.original_date
+        not current_original_date
+        or (
+            original_date.startswith(current_original_date)
+            and len(original_date) > len(current_original_date)
+        )
+        or (
+            force
+            and _is_earlier_or_more_specific_date(original_date, current_original_date)
+        )
     ):
-        mb_rel_map["original_date"] = "original_date"
+        track_info.original_date = original_date
+        track_info.metadata_sources["original_date"] = "MusicBrainz"
 
     apply_metadata_mapping(
         track_info, mb_rel, mb_rel_map, force=force, source="MusicBrainz"
@@ -863,6 +897,8 @@ def _update_musicbrainz(
         title_updated = _fill_missing_title(track_info, candidate_rec)
 
         _resolve_musicbrainz_track_id(track_info, album_track_mbids, candidate_rec)
+        tentative_album_search = False
+        tentative_date: str | None = None
         if "musicbrainz_albumid" in track_info.metadata_conflicts:
             album_mbid = None
             album_mb_release_details = None
@@ -870,9 +906,15 @@ def _update_musicbrainz(
             track_info.musicbrainz_albumid = None
             track_info.metadata_sources.pop("musicbrainz_albumid", None)
         else:
+            prior_album_id = track_info.musicbrainz_albumid
+            prior_date = track_info.date
             _resolve_musicbrainz_album_id(
                 track_info, album_mbid, album_mb_release_details, force=force
             )
+            if album_mbid is None and track_info.musicbrainz_albumid != prior_album_id:
+                tentative_album_search = True
+                if prior_date is None and track_info.date is not None:
+                    tentative_date = track_info.date
 
         recording_details, is_album_rec = _fetch_or_extract_mb_recording(
             track_info, album_mb_release_details, candidate_rec, force=force
@@ -888,7 +930,12 @@ def _update_musicbrainz(
             )
 
         _apply_mb_release_metadata(
-            track_info, album_mbid, album_mb_release_details, force=force
+            track_info,
+            album_mbid,
+            album_mb_release_details,
+            force=force,
+            tentative_album_search=tentative_album_search,
+            tentative_date=tentative_date,
         )
     except _NETWORK_EXCEPTIONS as error:
         LOG.debug(f"MusicBrainz metadata update failed for {track_info.title}: {error}")

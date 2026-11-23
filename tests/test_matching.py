@@ -904,7 +904,9 @@ class TestArtistResolutionContracts(IsolatedTestCase):
         from sonora.core.state import get_library_state
 
         state_mgr = get_library_state()
-        state_mgr.record_artist_alias("k-dot", "Kendrick Lamar", source="musicbrainz")
+        state_mgr.record_artist_aliases(
+            [("k-dot", "Kendrick Lamar")], source="musicbrainz"
+        )
         artists.clear_artist_cache()
         self.assertEqual(artists.normalize_artist_name("K-Dot"), "Kendrick Lamar")
         alias_path = DIRS.user_config_path / "aliases.json"
@@ -3481,7 +3483,7 @@ class TestCatalogReview(ServiceResponseTestCase):
                 self.subTest(artist_name=artist_name, candidate_mbid=candidate_mbid),
                 patch.object(SESSION, "get", return_value=response) as request,
                 patch.object(
-                    theaudiodb, "_download_artwork_bytes", return_value=b"portrait"
+                    theaudiodb, "download_image_bytes", return_value=b"portrait"
                 ),
             ):
                 self.assertEqual(
@@ -3494,7 +3496,7 @@ class TestCatalogReview(ServiceResponseTestCase):
         }
         with (
             patch.object(SESSION, "get", return_value=response),
-            patch.object(theaudiodb, "_download_artwork_bytes") as download,
+            patch.object(theaudiodb, "download_image_bytes") as download,
         ):
             self.assertEqual(theaudiodb.fetch_artist_images("Primary"), (None, None))
         download.assert_not_called()
@@ -5644,3 +5646,308 @@ class TestRecordingIdentifierValidation(IsolatedTestCase):
         )
         self.assertEqual(track.track_number, 0)
         self.assertFalse(track.metadata_conflicts)
+
+    def test_generic_title_fill_matches_provider_identity_and_preserves_non_generic_titles(
+        self,
+    ) -> None:
+        for id_field, id_value in (
+            ("isrc", "USRC17607839"),
+            ("itunes_trackid", "987654"),
+        ):
+            with self.subTest(id_field=id_field):
+                recording = TrackInfo(
+                    Path("01 - Track 01.flac"),
+                    artist="Artist",
+                    title="Track 01",
+                    duration=200.0,
+                )
+                setattr(recording, id_field, id_value)
+                candidate = recording.copy()
+                candidate.title = "Real Song"
+                candidate.metadata_sources["title"] = "iTunes"
+                self.assertTrue(
+                    matching.provider_identity_matches(recording, candidate)
+                )
+                proposal = metadata_merge.build_provider_proposal(recording, candidate)
+                self.assertNotIn("identity", proposal.conflicts)
+                self.assertEqual(proposal.changes.get("title"), ("Real Song", "iTunes"))
+                metadata_merge.merge_provider_proposals(recording, [proposal])
+                self.assertEqual(recording.title, "Real Song")
+
+        non_generic = TrackInfo(
+            Path("song.flac"),
+            artist="Artist",
+            title="Original Song",
+            isrc="USRC17607839",
+            duration=200.0,
+        )
+        conflicting = non_generic.copy()
+        conflicting.title = "Different Song"
+        self.assertFalse(matching.provider_identity_matches(non_generic, conflicting))
+        proposal = metadata_merge.build_provider_proposal(non_generic, conflicting)
+        self.assertIn("identity", proposal.conflicts)
+        self.assertNotIn("title", proposal.changes)
+
+    def test_resolve_album_track_position_does_not_mutate_disc_number_without_force(
+        self,
+    ) -> None:
+        release = {
+            "tracks_by_disc_and_position": {
+                (2, 3): {"title": "Song", "artist": "Artist", "isrc": "US123"}
+            }
+        }
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Artist",
+            title="Song",
+            isrc="US123",
+            disc_number=1,
+            track_number=5,
+        )
+        self.assertEqual(
+            matching._resolve_album_track_position(
+                track, track.file_path, album_mb_release_details=release, force=False
+            ),
+            3,
+        )
+        self.assertEqual(track.disc_number, 1)
+        self.assertEqual(
+            matching._resolve_album_track_position(
+                track, track.file_path, album_mb_release_details=release, force=True
+            ),
+            3,
+        )
+        self.assertEqual(track.disc_number, 2)
+
+    def test_update_itunes_rejects_incompatible_release_layout_for_edition_fields(
+        self,
+    ) -> None:
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Artist",
+            title="Song",
+            disc_number=1,
+            total_discs=2,
+            date="2020-01-01",
+            copyright="Original Copyright",
+            duration=200.0,
+        )
+        incompatible_album = {
+            "total_discs": 1,
+            "tracks_by_title": {
+                "song": {
+                    "title": "Song",
+                    "artist": "Artist",
+                    "duration": 200.0,
+                    "itunes_trackid": "123",
+                    "date": "2021-05-05",
+                    "copyright": "Wrong Edition Copyright",
+                }
+            },
+            "tracks_by_disc_and_position": {},
+        }
+        with patch.object(itunes, "fetch_itunes_track_metadata", return_value=None):
+            catalog_metadata._update_itunes(
+                track, album_itunes_details=incompatible_album, force=True
+            )
+        self.assertIn("album_sequence", track.metadata_conflicts)
+        self.assertEqual(track.date, "2020-01-01")
+        self.assertEqual(track.copyright, "Original Copyright")
+
+    def test_merge_provider_proposals_flags_conflicting_full_dates_with_year_prefix(
+        self,
+    ) -> None:
+        recording = TrackInfo(
+            Path("song.flac"), artist="Artist", title="Song", date="2019"
+        )
+        conflicting_proposals = [
+            metadata_merge.MetadataProposal({"date": ("2020-01-15", "iTunes")}, {}),
+            metadata_merge.MetadataProposal({"date": ("2020-02-20", "Deezer")}, {}),
+            metadata_merge.MetadataProposal({"date": ("2020", "Discogs")}, {}),
+        ]
+        metadata_merge.merge_provider_proposals(recording, conflicting_proposals)
+        self.assertIn("date", recording.metadata_conflicts)
+        self.assertEqual(recording.date, "2019")
+
+        agreeing = TrackInfo(Path("song.flac"), artist="Artist", title="Song")
+        agreeing_proposals = [
+            metadata_merge.MetadataProposal({"date": ("2020-01-15", "iTunes")}, {}),
+            metadata_merge.MetadataProposal({"date": ("2020-01", "Deezer")}, {}),
+            metadata_merge.MetadataProposal({"date": ("2020", "Discogs")}, {}),
+        ]
+        metadata_merge.merge_provider_proposals(agreeing, agreeing_proposals)
+        self.assertNotIn("date", agreeing.metadata_conflicts)
+        self.assertEqual(agreeing.date, "2020-01-15")
+
+    def test_rejected_standalone_mb_release_rolls_back_date_and_album_id(self) -> None:
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Artist",
+            title="Song",
+            album="Album",
+            disc_number=1,
+            total_discs=2,
+        )
+        with (
+            patch.object(musicbrainz, "fetch_track_mbid", return_value=None),
+            patch.object(
+                musicbrainz,
+                "search_musicbrainz_release",
+                return_value={
+                    "id": MBID,
+                    "title": "Album",
+                    "date": "2020-05-01",
+                },
+            ),
+            patch.object(
+                musicbrainz,
+                "fetch_musicbrainz_release_details",
+                return_value={
+                    "title": "Album",
+                    "album_artist": "Artist",
+                    "total_discs": 1,
+                    "date": "2020-05-01",
+                },
+            ),
+        ):
+            musicbrainz_metadata._update_musicbrainz(track, None, None, None)
+        self.assertIsNone(track.musicbrainz_albumid)
+        self.assertIsNone(track.date)
+
+    def test_update_discogs_prefers_full_released_date_over_year_when_forced(
+        self,
+    ) -> None:
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Artist",
+            title="Song",
+            album="Album",
+            barcode="1234567890",
+            date="2019",
+        )
+        release = {
+            "id": "42",
+            "title": "Album",
+            "artist": "Artist",
+            "barcode": "1234567890",
+            "released": "2020-05-14",
+            "year": 2020,
+        }
+        catalog_metadata._update_discogs(
+            track,
+            discogs_user_token="token",
+            album_discogs_release=release,
+            has_album_context=True,
+            force=True,
+        )
+        self.assertEqual(track.date, "2020-05-14")
+
+        fallback_track = TrackInfo(
+            Path("song.flac"),
+            artist="Artist",
+            title="Song",
+            album="Album",
+            barcode="1234567890",
+        )
+        catalog_metadata._update_discogs(
+            fallback_track,
+            discogs_user_token="token",
+            album_discogs_release={**release, "released": ""},
+            has_album_context=True,
+            force=True,
+        )
+        self.assertEqual(fallback_track.date, "2020")
+
+    def test_apply_mb_release_metadata_original_date_precision_and_ordering(
+        self,
+    ) -> None:
+        base_release = {
+            "title": "Album",
+            "album_artist": "Artist",
+            "tracks_by_mbid": {},
+        }
+        with patch(
+            "sonora.services.artist_resolution.resolve_artist_name",
+            side_effect=lambda name: name,
+        ):
+            track_precise = TrackInfo(
+                Path("song.flac"),
+                artist="Artist",
+                album_artist="Artist",
+                title="Song",
+                album="Album",
+                musicbrainz_albumid=MBID,
+                original_date="1994-04-19",
+            )
+            musicbrainz_metadata._apply_mb_release_metadata(
+                track_precise,
+                MBID,
+                {**base_release, "original_date": "1994"},
+                force=True,
+            )
+            self.assertEqual(track_precise.original_date, "1994-04-19")
+
+            track_year = TrackInfo(
+                Path("song.flac"),
+                artist="Artist",
+                album_artist="Artist",
+                title="Song",
+                album="Album",
+                musicbrainz_albumid=MBID,
+                original_date="1994",
+            )
+            musicbrainz_metadata._apply_mb_release_metadata(
+                track_year,
+                MBID,
+                {**base_release, "original_date": "1994-04-19"},
+                force=False,
+            )
+            self.assertEqual(track_year.original_date, "1994-04-19")
+
+            musicbrainz_metadata._apply_mb_release_metadata(
+                track_year,
+                MBID,
+                {**base_release, "original_date": "1993-02-01"},
+                force=True,
+            )
+            self.assertEqual(track_year.original_date, "1993-02-01")
+
+    def test_update_deezer_force_updates_date_without_forcing_genre_or_label(
+        self,
+    ) -> None:
+        album = {
+            "title": "Album",
+            "genre": "Rock",
+            "label": "New Label",
+            "release_date": "2020-05-14",
+            "tracks_by_title": {},
+            "tracks_by_disc_and_position": {},
+        }
+        track = TrackInfo(
+            Path("song.flac"),
+            artist="Artist",
+            title="Song",
+            album="Album",
+            genre="Pop",
+            label="Old Label",
+            date="2019-01-01",
+        )
+        with patch.object(deezer, "fetch_deezer_track_details", return_value=None):
+            catalog_metadata._update_deezer(
+                track, album_deezer_details=album, has_album_context=True, force=True
+            )
+        self.assertEqual(track.date, "2020-05-14")
+        self.assertEqual(track.genre, "Pop")
+        self.assertEqual(track.label, "Old Label")
+
+        mb_track = track.copy()
+        mb_track.date = "2019-01-01"
+        mb_track.musicbrainz_albumid = MBID
+        with patch.object(deezer, "fetch_deezer_track_details", return_value=None):
+            catalog_metadata._update_deezer(
+                mb_track,
+                album_deezer_details=album,
+                has_album_context=True,
+                force=True,
+            )
+        self.assertEqual(mb_track.date, "2019-01-01")
